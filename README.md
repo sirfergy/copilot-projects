@@ -1,4 +1,4 @@
-# Copilot Projects
+# Copilot Projects 
 
 A deliberately small macOS terminal app that organizes CLI sessions by **project**.
 Projects are listed vertically in a sidebar; each project's terminal sessions are laid
