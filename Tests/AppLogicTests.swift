@@ -791,6 +791,9 @@ final class AppLogicTests: XCTestCase {
             selectedSessionId: "session",
             sessionId: "session"
         ))
+        XCTAssertFalse(AppModel.canPostCompletion(status: .running, activity: .idle))
+        XCTAssertFalse(AppModel.canPostCompletion(status: .idle, activity: .working))
+        XCTAssertTrue(AppModel.canPostCompletion(status: .idle, activity: .idle))
     }
 
     func testScrollbarGutterStrippingKeepsAdjacentContent() {

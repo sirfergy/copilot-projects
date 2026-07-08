@@ -859,6 +859,10 @@ final class AppModel: ObservableObject {
                 let status = projects[pi].sessions[si].status
                 let sid = projects[pi].sessions[si].id
                 guard let controller = controllers[sid] else { continue }
+                let activity = controller.agentActivity
+                if status == .idle, activity == .idle {
+                    postCompletionIfReady(sessionId: sid)
+                }
                 if status == .idle {
                     guard ActivityTracker.canPromoteIdleFromFooter(
                         backgroundAgentsActive: projects[pi].sessions[si].backgroundAgentsActive,
@@ -871,7 +875,7 @@ final class AppModel: ObservableObject {
                     if activityTracker.shouldPromoteFromFooter(
                         sessionId: sid,
                         currentStatus: status,
-                        activity: controller.agentActivity
+                        activity: activity
                     ) {
                         setStatus(
                             sessionId: sid,
@@ -892,7 +896,7 @@ final class AppModel: ObservableObject {
                 if activityTracker.observeFooter(
                     sessionId: sid,
                     currentStatus: status,
-                    activity: controller.agentActivity
+                    activity: activity
                 ) {
                     clearStatusToIdle(pi: pi, si: si, markFinished: true)
                 }
@@ -993,6 +997,11 @@ final class AppModel: ObservableObject {
             completionPending.remove(sessionId)
             return
         }
+        let activity = controllers[sessionId]?.agentActivity
+        guard Self.canPostCompletion(
+            status: projects[loc.p].sessions[loc.s].status,
+            activity: activity
+        ) else { return }
         guard !projects[loc.p].sessions[loc.s].backgroundAgentsActive else { return }
         completionPending.remove(sessionId)
 
@@ -1035,6 +1044,13 @@ final class AppModel: ObservableObject {
         appIsActive
             && selectedProjectId == projectId
             && selectedSessionId == sessionId
+    }
+
+    nonisolated static func canPostCompletion(
+        status: SessionStatus,
+        activity: FooterActivity?
+    ) -> Bool {
+        status == .idle && activity != .working
     }
 
     func focus(projectId: String?, sessionId: String?) {
