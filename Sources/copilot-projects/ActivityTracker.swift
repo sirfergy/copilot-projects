@@ -87,9 +87,10 @@ struct ActivityTracker {
 
     static func canPromoteIdleFromFooter(
         backgroundAgentsActive: Bool,
-        hasLiveAgent: Bool
+        hasLiveAgent: Bool,
+        supportsSessionIdleHook: Bool
     ) -> Bool {
-        !backgroundAgentsActive && hasLiveAgent
+        !backgroundAgentsActive && hasLiveAgent && !supportsSessionIdleHook
     }
 }
 

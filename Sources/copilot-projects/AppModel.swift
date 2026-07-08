@@ -862,13 +862,17 @@ final class AppModel: ObservableObject {
                 let sid = projects[pi].sessions[si].id
                 guard let controller = controllers[sid] else { continue }
                 let activity = controller.agentActivity
+                let supportsSessionIdleHook = FileManager.default.fileExists(
+                    atPath: Paths.sessionIdleHookMarkerPath(sessionId: sid)
+                )
                 if status == .idle, activity == .idle {
                     postCompletionIfReady(sessionId: sid)
                 }
                 if status == .idle {
                     guard ActivityTracker.canPromoteIdleFromFooter(
                         backgroundAgentsActive: projects[pi].sessions[si].backgroundAgentsActive,
-                        hasLiveAgent: liveAgentSessions.contains(sid)
+                        hasLiveAgent: liveAgentSessions.contains(sid),
+                        supportsSessionIdleHook: supportsSessionIdleHook
                     ) else {
                         activityTracker.reset(sessionId: sid)
                         continue
@@ -888,9 +892,7 @@ final class AppModel: ObservableObject {
                     }
                     continue
                 }
-                if FileManager.default.fileExists(
-                    atPath: Paths.sessionIdleHookMarkerPath(sessionId: sid)
-                ) {
+                if supportsSessionIdleHook {
                     activityTracker.reset(sessionId: sid)
                     continue
                 }

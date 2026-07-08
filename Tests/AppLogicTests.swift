@@ -50,15 +50,23 @@ final class AppLogicTests: XCTestCase {
     func testFooterDoesNotPromoteWhileBackgroundAgentsAreActive() {
         XCTAssertFalse(ActivityTracker.canPromoteIdleFromFooter(
             backgroundAgentsActive: true,
-            hasLiveAgent: true
+            hasLiveAgent: true,
+            supportsSessionIdleHook: false
         ))
         XCTAssertTrue(ActivityTracker.canPromoteIdleFromFooter(
             backgroundAgentsActive: false,
-            hasLiveAgent: true
+            hasLiveAgent: true,
+            supportsSessionIdleHook: false
         ))
         XCTAssertFalse(ActivityTracker.canPromoteIdleFromFooter(
             backgroundAgentsActive: false,
-            hasLiveAgent: false
+            hasLiveAgent: false,
+            supportsSessionIdleHook: false
+        ))
+        XCTAssertFalse(ActivityTracker.canPromoteIdleFromFooter(
+            backgroundAgentsActive: false,
+            hasLiveAgent: true,
+            supportsSessionIdleHook: true
         ))
     }
 
