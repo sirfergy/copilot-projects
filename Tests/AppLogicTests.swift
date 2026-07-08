@@ -719,6 +719,20 @@ final class AppLogicTests: XCTestCase {
             AppModel.notificationSubtitle(projectName: "Checkout", sessionTitle: "Fix taxes"),
             "Checkout · Fix taxes"
         )
+        XCTAssertTrue(AppModel.isSessionVisible(
+            appIsActive: true,
+            selectedProjectId: "project",
+            projectId: "project",
+            selectedSessionId: "session",
+            sessionId: "session"
+        ))
+        XCTAssertFalse(AppModel.isSessionVisible(
+            appIsActive: false,
+            selectedProjectId: "project",
+            projectId: "project",
+            selectedSessionId: "session",
+            sessionId: "session"
+        ))
     }
 
     func testScrollbarGutterStrippingKeepsAdjacentContent() {

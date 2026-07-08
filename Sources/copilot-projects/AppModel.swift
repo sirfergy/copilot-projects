@@ -799,9 +799,13 @@ final class AppModel: ObservableObject {
     /// Whether a session is the one on screen right now (app active + its project and
     /// tab selected). Used to decide if a just-finished session needs an attention dot.
     private func isVisible(projectIndex pi: Int, sessionIndex si: Int) -> Bool {
-        NSApp.isActive
-            && selectedProjectId == projects[pi].id
-            && projects[pi].selectedSessionId == projects[pi].sessions[si].id
+        Self.isSessionVisible(
+            appIsActive: NSApp.isActive,
+            selectedProjectId: selectedProjectId,
+            projectId: projects[pi].id,
+            selectedSessionId: projects[pi].selectedSessionId,
+            sessionId: projects[pi].sessions[si].id
+        )
     }
 
     /// Backstop for flaky agent stop / sessionEnd hooks: a session can only stay
@@ -992,6 +996,7 @@ final class AppModel: ObservableObject {
         guard !projects[loc.p].sessions[loc.s].turnCompleted else { return }
         projects[loc.p].sessions[loc.s].turnCompleted = true
 
+        guard !isVisible(projectIndex: loc.p, sessionIndex: loc.s) else { return }
         postNotification(
             projectId: projects[loc.p].id,
             sessionId: sessionId,
@@ -1015,6 +1020,18 @@ final class AppModel: ObservableObject {
         sessionTitle: String
     ) -> String {
         "\(projectName) · \(sessionTitle)"
+    }
+
+    nonisolated static func isSessionVisible(
+        appIsActive: Bool,
+        selectedProjectId: String?,
+        projectId: String,
+        selectedSessionId: String?,
+        sessionId: String
+    ) -> Bool {
+        appIsActive
+            && selectedProjectId == projectId
+            && selectedSessionId == sessionId
     }
 
     func focus(projectId: String?, sessionId: String?) {
