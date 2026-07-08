@@ -155,13 +155,6 @@ and clicking it focuses the originating session. Repeated waiting events are sup
 completion alerts for aborted turns; completion waits for the authoritative `session_idle` event
 after background work drains.
 
-To mirror waiting and completed states to ntfy, install an executable helper at
-`~/.copilot/hooks/copilot-projects-ntfy.sh` or set `COPILOT_PROJECTS_NTFY_NOTIFIER` to another
-path. The hook invokes it asynchronously as `<helper> waiting|completed <session-id>`. Completed
-notifications require an active turn and are suppressed for aborted turns. The helper owns
-credentials and message content; use `copilot-projects://focus?session=<session-id>` as its click
-target. Native and ntfy notifications are independent, so configuring the helper enables both.
-
 **Status precedence.** Hook events are authoritative. Newer CLI versions emit `session_idle`
 only after the root turn and all background work drain, including `aborted: true` for Esc-cancel.
 After a session proves it supports that signal, Copilot Projects disables footer scraping for

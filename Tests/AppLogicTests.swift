@@ -211,7 +211,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: backgroundAgents.path))
     }
 
-    func testCopilotHookNotifiesNtfyForWaitingAndCompletedTurns() throws {
+    func testCopilotHookRoutesNativeNotificationsForWaitingAndCompletedTurns() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let bin = root.appendingPathComponent("bin", isDirectory: true)
@@ -230,14 +230,6 @@ final class AppLogicTests: XCTestCase {
         """.write(to: fakeCLI, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
 
-        let notifierCapture = root.appendingPathComponent("notifier-args.txt")
-        let notifier = root.appendingPathComponent("ntfy-notifier")
-        try """
-        #!/bin/sh
-        printf '%s\n' "$*" >> "$NOTIFIER_CAPTURE"
-        """.write(to: notifier, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: notifier.path)
-
         let tabId = UUID().uuidString
         try runHook(
             hookURL: hookURL,
@@ -246,9 +238,7 @@ final class AppLogicTests: XCTestCase {
             tabId: tabId,
             root: root,
             bin: bin,
-            capture: capture,
-            notifier: notifier,
-            notifierCapture: notifierCapture
+            capture: capture
         )
         try runHook(
             hookURL: hookURL,
@@ -257,11 +247,8 @@ final class AppLogicTests: XCTestCase {
             tabId: tabId,
             root: root,
             bin: bin,
-            capture: capture,
-            notifier: notifier,
-            notifierCapture: notifierCapture
+            capture: capture
         )
-        XCTAssertFalse(waitForFile(notifierCapture, toContain: tabId))
 
         try runHook(
             hookURL: hookURL,
@@ -270,11 +257,8 @@ final class AppLogicTests: XCTestCase {
             tabId: tabId,
             root: root,
             bin: bin,
-            capture: capture,
-            notifier: notifier,
-            notifierCapture: notifierCapture
+            capture: capture
         )
-        XCTAssertTrue(waitForFile(notifierCapture, toContain: "waiting \(tabId)"))
         var cliCalls = try String(contentsOf: capture, encoding: .utf8)
         XCTAssertTrue(cliCalls.contains(
             "set-status waiting --timestamp 120 --notification elicitation"
@@ -287,9 +271,7 @@ final class AppLogicTests: XCTestCase {
             tabId: tabId,
             root: root,
             bin: bin,
-            capture: capture,
-            notifier: notifier,
-            notifierCapture: notifierCapture
+            capture: capture
         )
         cliCalls = try String(contentsOf: capture, encoding: .utf8)
         XCTAssertFalse(cliCalls.contains("--notification permission"))
@@ -301,9 +283,7 @@ final class AppLogicTests: XCTestCase {
             tabId: tabId,
             root: root,
             bin: bin,
-            capture: capture,
-            notifier: notifier,
-            notifierCapture: notifierCapture
+            capture: capture
         )
         try runHook(
             hookURL: hookURL,
@@ -312,9 +292,7 @@ final class AppLogicTests: XCTestCase {
             tabId: tabId,
             root: root,
             bin: bin,
-            capture: capture,
-            notifier: notifier,
-            notifierCapture: notifierCapture
+            capture: capture
         )
         try runHook(
             hookURL: hookURL,
@@ -323,11 +301,8 @@ final class AppLogicTests: XCTestCase {
             tabId: tabId,
             root: root,
             bin: bin,
-            capture: capture,
-            notifier: notifier,
-            notifierCapture: notifierCapture
+            capture: capture
         )
-        XCTAssertTrue(waitForFile(notifierCapture, toContain: "completed \(tabId)"))
         cliCalls = try String(contentsOf: capture, encoding: .utf8)
         XCTAssertTrue(cliCalls.contains(
             "set-status idle --timestamp 140 --source session-idle --notification completed"
@@ -336,7 +311,6 @@ final class AppLogicTests: XCTestCase {
             separatedBy: "--notification completed"
         ).count - 1
 
-        let beforeAbort = try String(contentsOf: notifierCapture, encoding: .utf8)
         try runHook(
             hookURL: hookURL,
             action: "running",
@@ -344,9 +318,7 @@ final class AppLogicTests: XCTestCase {
             tabId: tabId,
             root: root,
             bin: bin,
-            capture: capture,
-            notifier: notifier,
-            notifierCapture: notifierCapture
+            capture: capture
         )
         try runHook(
             hookURL: hookURL,
@@ -355,11 +327,8 @@ final class AppLogicTests: XCTestCase {
             tabId: tabId,
             root: root,
             bin: bin,
-            capture: capture,
-            notifier: notifier,
-            notifierCapture: notifierCapture
+            capture: capture
         )
-        XCTAssertFalse(waitForFile(notifierCapture, toDifferFrom: beforeAbort))
         cliCalls = try String(contentsOf: capture, encoding: .utf8)
         XCTAssertEqual(
             cliCalls.components(separatedBy: "--notification completed").count - 1,
@@ -588,9 +557,7 @@ final class AppLogicTests: XCTestCase {
         tabId: String,
         root: URL,
         bin: URL,
-        capture: URL,
-        notifier: URL? = nil,
-        notifierCapture: URL? = nil
+        capture: URL
     ) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -599,12 +566,6 @@ final class AppLogicTests: XCTestCase {
         environment["COPILOT_PROJECTS_SESSION"] = tabId
         environment["COPILOT_PROJECTS_SOCKET"] = root.appendingPathComponent("control.sock").path
         environment["CAPTURE_FILE"] = capture.path
-        if let notifier {
-            environment["COPILOT_PROJECTS_NTFY_NOTIFIER"] = notifier.path
-        }
-        if let notifierCapture {
-            environment["NOTIFIER_CAPTURE"] = notifierCapture.path
-        }
         environment["PATH"] = "\(bin.path):/usr/bin:/bin"
         process.environment = environment
         let input = Pipe()
@@ -616,32 +577,6 @@ final class AppLogicTests: XCTestCase {
         try input.fileHandleForWriting.close()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 0)
-    }
-
-    private func waitForFile(_ url: URL, toContain expected: String) -> Bool {
-        let deadline = Date().addingTimeInterval(1)
-        repeat {
-            if let contents = try? String(contentsOf: url, encoding: .utf8),
-               contents.contains(expected)
-            {
-                return true
-            }
-            usleep(10_000)
-        } while Date() < deadline
-        return false
-    }
-
-    private func waitForFile(_ url: URL, toDifferFrom expected: String) -> Bool {
-        let deadline = Date().addingTimeInterval(1)
-        repeat {
-            if let contents = try? String(contentsOf: url, encoding: .utf8),
-               contents != expected
-            {
-                return true
-            }
-            usleep(10_000)
-        } while Date() < deadline
-        return false
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {

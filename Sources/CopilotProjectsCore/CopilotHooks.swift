@@ -60,7 +60,6 @@ public enum CopilotHooks {
     [ -z "$cli" ] && [ -x "$HOME/.local/bin/copilot-projects" ] && cli="$HOME/.local/bin/copilot-projects"
     [ -z "$cli" ] && cli="$(command -v copilot-mux 2>/dev/null || true)"
     [ -z "$cli" ] && [ -x "$HOME/.local/bin/copilot-mux" ] && cli="$HOME/.local/bin/copilot-mux"
-    ntfy_notifier="${COPILOT_PROJECTS_NTFY_NOTIFIER:-$HOME/.copilot/hooks/copilot-projects-ntfy.sh}"
 
     # Persist the status to a marker file (survives an app restart and stays
     # current even while the app isn't running) and notify the live app.
@@ -88,10 +87,6 @@ public enum CopilotHooks {
     mark_turn_active() {
       mkdir -p "$state_dir/sessions" 2>/dev/null || true
       : > "$state_dir/sessions/$session_id.active-turn"
-    }
-    notify_ntfy() {
-      [ -x "$ntfy_notifier" ] || return 0
-      /usr/bin/nohup "$ntfy_notifier" "$1" "$session_id" </dev/null >/dev/null 2>&1 &
     }
     payload_timestamp() {
       printf '%s' "$1" \
@@ -183,9 +178,6 @@ public enum CopilotHooks {
             notification="completed"
           fi
           status idle "$timestamp" session-idle "$notification"
-          if [ -n "$notification" ]; then
-            notify_ntfy completed
-          fi
         else
           notification="$(input_notification_kind "$payload")"
           [ -n "$notification" ] || { emit; exit 0; }
@@ -194,7 +186,6 @@ public enum CopilotHooks {
             status waiting "$timestamp"
           else
             status waiting "$timestamp" "" "$notification"
-            notify_ntfy waiting
           fi
         fi
         ;;
