@@ -28,52 +28,70 @@ APP_NAME="Copilot Projects"
 BUNDLE_ID="com.obvioussean.copilot-projects"
 EXE_NAME="copilot-projects"
 VERSION="${VERSION:-0.1.0}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
 # SwiftPM needs this when the user's global git sets safe.bareRepository=explicit.
-export GIT_CONFIG_COUNT="${GIT_CONFIG_COUNT:-1}"
-export GIT_CONFIG_KEY_0="${GIT_CONFIG_KEY_0:-safe.bareRepository}"
-export GIT_CONFIG_VALUE_0="${GIT_CONFIG_VALUE_0:-all}"
+GIT_CONFIG_INDEX="${GIT_CONFIG_COUNT:-0}"
+export "GIT_CONFIG_KEY_$GIT_CONFIG_INDEX=safe.bareRepository"
+export "GIT_CONFIG_VALUE_$GIT_CONFIG_INDEX=all"
+export GIT_CONFIG_COUNT="$((GIT_CONFIG_INDEX + 1))"
 
 echo "==> swift build -c $CONFIG"
 swift build -c "$CONFIG"
-
 BUILD_DIR="$(swift build -c "$CONFIG" --show-bin-path)"
+RESOURCE_BUILD_DIR="$BUILD_DIR"
 APP_DIR="$ROOT/dist/$APP_NAME.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RES="$CONTENTS/Resources"
+HELPER_APP="$CONTENTS/Helpers/Copilot Projects Link.app"
+HELPER_CONTENTS="$HELPER_APP/Contents"
+HELPER_MACOS="$HELPER_CONTENTS/MacOS"
 
 echo "==> assembling $APP_DIR"
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS" "$RES"
+mkdir -p "$MACOS" "$RES" "$HELPER_MACOS"
 
 cp "$BUILD_DIR/$EXE_NAME" "$MACOS/$EXE_NAME"
+cp "$BUILD_DIR/copilot-projects-link" "$HELPER_MACOS/copilot-projects-link"
 
 # App icon
 if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
   cp "$ROOT/Resources/AppIcon.icns" "$RES/AppIcon.icns"
 fi
 
-# Build + bundle the dtach helper (resumability backend) as a universal binary.
+# Build + bundle the dtach helper (resumability backend).
 DTACH_SRC="$ROOT/vendor/dtach"
 if [ -d "$DTACH_SRC" ]; then
-  echo "==> building dtach helper (universal)"
+  echo "==> building dtach helper (arm64)"
   ( cd "$DTACH_SRC"
     [ -f config.h ] || ./configure >/dev/null 2>&1
-    clang -O2 -arch arm64 -arch x86_64 -I. -o dtach-universal \
+    clang -O2 -arch arm64 -I. -o dtach-arm64 \
       main.c master.c attach.c )
-  if [ -f "$DTACH_SRC/dtach-universal" ]; then
+  if [ -f "$DTACH_SRC/dtach-arm64" ]; then
     mkdir -p "$CONTENTS/Helpers"
-    cp "$DTACH_SRC/dtach-universal" "$CONTENTS/Helpers/dtach"
+    cp "$DTACH_SRC/dtach-arm64" "$CONTENTS/Helpers/dtach"
     chmod +x "$CONTENTS/Helpers/dtach"
   else
     echo "warning: dtach build failed — resumability will fall back to plain shells"
   fi
 fi
 
-# SwiftTerm resource bundle (Metal shaders). Place where Bundle.module looks.
-if [ -d "$BUILD_DIR/SwiftTerm_SwiftTerm.bundle" ]; then
-  cp -R "$BUILD_DIR/SwiftTerm_SwiftTerm.bundle" "$RES/"
+# Keep the source resource bundle as a fallback, and compile a default Metal
+# library that Bundle.main can load without touching SwiftPM's developer-only
+# absolute Bundle.module fallback path.
+if [ -d "$RESOURCE_BUILD_DIR/SwiftTerm_SwiftTerm.bundle" ]; then
+  cp -R "$RESOURCE_BUILD_DIR/SwiftTerm_SwiftTerm.bundle" "$RES/"
+  SHADER_SOURCE="$RESOURCE_BUILD_DIR/SwiftTerm_SwiftTerm.bundle/Shaders.metal"
+  if [ -f "$SHADER_SOURCE" ]; then
+    echo "==> compiling SwiftTerm Metal shaders"
+    SHADER_TMP="$(mktemp -d -t copilot-projects-shaders)"
+    AIR_FILE="$SHADER_TMP/Shaders.air"
+    xcrun -sdk macosx metal -std=metal3.0 -mmacosx-version-min=26.0 \
+      -c "$SHADER_SOURCE" -o "$AIR_FILE"
+    xcrun -sdk macosx metallib "$AIR_FILE" -o "$RES/default.metallib"
+    rm -rf "$SHADER_TMP"
+  fi
 fi
 
 cat > "$CONTENTS/Info.plist" <<PLIST
@@ -88,7 +106,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -96,9 +114,45 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "==> ad-hoc signing"
-codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || \
-  echo "warning: codesign failed (notifications may be limited)"
+cat > "$HELPER_CONTENTS/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Copilot Projects Link</string>
+  <key>CFBundleExecutable</key><string>copilot-projects-link</string>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID.link</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>$BUNDLE_ID.link</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>copilot-projects</string></array>
+    </dict>
+  </array>
+</dict>
+</plist>
+PLIST
+
+if [ "$CODESIGN_IDENTITY" = "-" ]; then
+  echo "==> ad-hoc signing"
+  SIGN_ARGS=(--force --sign -)
+else
+  echo "==> signing with $CODESIGN_IDENTITY"
+  SIGN_ARGS=(--force --options runtime --timestamp --sign "$CODESIGN_IDENTITY")
+fi
+if [ -x "$CONTENTS/Helpers/dtach" ]; then
+  codesign "${SIGN_ARGS[@]}" "$CONTENTS/Helpers/dtach"
+fi
+codesign "${SIGN_ARGS[@]}" "$HELPER_APP"
+codesign "${SIGN_ARGS[@]}" "$APP_DIR"
+codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 echo "App path:"
 echo "  $APP_DIR"

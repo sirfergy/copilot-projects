@@ -60,6 +60,7 @@ public enum CopilotHooks {
     [ -z "$cli" ] && [ -x "$HOME/.local/bin/copilot-projects" ] && cli="$HOME/.local/bin/copilot-projects"
     [ -z "$cli" ] && cli="$(command -v copilot-mux 2>/dev/null || true)"
     [ -z "$cli" ] && [ -x "$HOME/.local/bin/copilot-mux" ] && cli="$HOME/.local/bin/copilot-mux"
+    ntfy_notifier="${COPILOT_PROJECTS_NTFY_NOTIFIER:-$HOME/.copilot/hooks/copilot-projects-ntfy.sh}"
 
     # Persist the status to a marker file (survives an app restart and stays
     # current even while the app isn't running) and notify the live app.
@@ -80,6 +81,17 @@ public enum CopilotHooks {
         "$cli" "${args[@]}" >/dev/null 2>&1 || true
       fi
     }
+    current_status() {
+      cat "$state_dir/sessions/$session_id.status" 2>/dev/null || true
+    }
+    mark_turn_active() {
+      mkdir -p "$state_dir/sessions" 2>/dev/null || true
+      : > "$state_dir/sessions/$session_id.active-turn"
+    }
+    notify_ntfy() {
+      [ -x "$ntfy_notifier" ] || return 0
+      /usr/bin/nohup "$ntfy_notifier" "$1" "$session_id" </dev/null >/dev/null 2>&1 &
+    }
     payload_timestamp() {
       printf '%s' "$1" \
         | grep -oE '"timestamp"[[:space:]]*:[[:space:]]*[0-9]+' \
@@ -94,6 +106,9 @@ public enum CopilotHooks {
     }
     is_session_idle() {
       printf '%s' "$1" | grep -qE '"notification_type"[[:space:]]*:[[:space:]]*"session_idle"'
+    }
+    is_aborted() {
+      printf '%s' "$1" | grep -qE '"aborted"[[:space:]]*:[[:space:]]*true'
     }
     # Record the Copilot CLI session id (carried by tool/notification payloads as
     # "sessionId") so the app can auto-resume THIS exact agent session after a
@@ -124,10 +139,13 @@ public enum CopilotHooks {
       start)
         payload="$(cat 2>/dev/null || true)"
         rm -f "$state_dir/sessions/$session_id.session-idle-hook" 2>/dev/null || true
+        rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
+        rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
         status idle "$(payload_timestamp "$payload")"
         ;;
       running)
         payload="$(cat 2>/dev/null || true)"
+        mark_turn_active
         status running "$(payload_timestamp "$payload")"
         ;;
       idle)
@@ -137,11 +155,13 @@ public enum CopilotHooks {
       pre)
         payload="$(cat 2>/dev/null || true)"
         record_cli_session "$payload"
+        mark_turn_active
         status running "$(payload_timestamp "$payload")"
         ;;
       post)
         payload="$(cat 2>/dev/null || true)"
         record_cli_session "$payload"
+        mark_turn_active
         status running "$(payload_timestamp "$payload")"
         ;;
       notify)
@@ -149,11 +169,21 @@ public enum CopilotHooks {
         record_cli_session "$payload"
         timestamp="$(payload_timestamp "$payload")"
         if is_session_idle "$payload"; then
+          active_turn="$state_dir/sessions/$session_id.active-turn"
           mkdir -p "$state_dir/sessions" 2>/dev/null || true
           : > "$state_dir/sessions/$session_id.session-idle-hook"
+          rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
+          had_active_turn=0
+          [ ! -f "$active_turn" ] || had_active_turn=1
+          rm -f "$active_turn" 2>/dev/null || true
           status idle "$timestamp" session-idle
+          if [ "$had_active_turn" -eq 1 ] && ! is_aborted "$payload"; then
+            notify_ntfy completed
+          fi
         elif is_input_wait "$payload"; then
+          previous_status="$(current_status)"
           status waiting "$timestamp"
+          [ "$previous_status" = "waiting" ] || notify_ntfy waiting
         fi
         ;;
       end)
@@ -165,6 +195,8 @@ public enum CopilotHooks {
         # never fires, so the marker survives and the session resumes — as intended.
         rm -f "$state_dir/sessions/$session_id.copilot-session" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.session-idle-hook" 2>/dev/null || true
+        rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
+        rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
         status idle "$(payload_timestamp "$payload")"
         ;;
     esac

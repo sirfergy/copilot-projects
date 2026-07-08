@@ -31,6 +31,21 @@ final class AppLogicTests: XCTestCase {
             sessionId: sessionId, currentStatus: .running, activity: .idle))
     }
 
+    func testActivityTrackerRequiresTwoWorkingTicksToPromoteIdleSession() {
+        let sessionId = UUID().uuidString
+        var tracker = ActivityTracker()
+        XCTAssertFalse(tracker.shouldPromoteFromFooter(
+            sessionId: sessionId, currentStatus: .idle, activity: .unknown))
+        XCTAssertFalse(tracker.shouldPromoteFromFooter(
+            sessionId: sessionId, currentStatus: .idle, activity: .working))
+        XCTAssertTrue(tracker.shouldPromoteFromFooter(
+            sessionId: sessionId, currentStatus: .idle, activity: .working))
+        XCTAssertFalse(tracker.observeFooter(
+            sessionId: sessionId, currentStatus: .running, activity: .idle))
+        XCTAssertTrue(tracker.observeFooter(
+            sessionId: sessionId, currentStatus: .running, activity: .idle))
+    }
+
     func testStatusEventClockRejectsLateHookEvents() {
         let sessionId = UUID().uuidString
         var clock = StatusEventClock()
@@ -38,6 +53,56 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(clock.shouldApply(sessionId: sessionId, timestamp: 100))
         XCTAssertTrue(clock.shouldApply(sessionId: sessionId, timestamp: 300))
         XCTAssertTrue(clock.shouldApply(sessionId: sessionId, timestamp: nil))
+    }
+
+    func testFocusDeepLinkParsing() throws {
+        XCTAssertEqual(
+            AppDeepLink(url: try XCTUnwrap(URL(
+                string: "copilot-projects://focus?project=project-1"
+            ))),
+            AppDeepLink(projectId: "project-1", sessionId: nil)
+        )
+        XCTAssertEqual(
+            AppDeepLink(url: try XCTUnwrap(URL(
+                string: "copilot-projects://focus?session=session%202"
+            ))),
+            AppDeepLink(projectId: nil, sessionId: "session 2")
+        )
+        XCTAssertEqual(
+            AppDeepLink(url: try XCTUnwrap(URL(
+                string: "copilot-projects://focus?project=&project=project-2&session=session-2"
+            ))),
+            AppDeepLink(projectId: "project-2", sessionId: "session-2")
+        )
+    }
+
+    func testFocusDeepLinkRejectsUnsupportedOrEmptyURLs() throws {
+        XCTAssertNil(AppDeepLink(url: try XCTUnwrap(URL(
+            string: "https://focus?session=session-1"
+        ))))
+        XCTAssertNil(AppDeepLink(url: try XCTUnwrap(URL(
+            string: "copilot-projects://notify?session=session-1"
+        ))))
+        XCTAssertNil(AppDeepLink(url: try XCTUnwrap(URL(
+            string: "copilot-projects://focus?project=&session=%20"
+        ))))
+    }
+
+    func testFocusDeepLinkBuildsRequestAndLocatesParentApplication() throws {
+        let deepLink = AppDeepLink(projectId: "project-1", sessionId: "session-1")
+        XCTAssertEqual(deepLink.focusRequest.command, "focus")
+        XCTAssertEqual(deepLink.focusRequest.projectId, "project-1")
+        XCTAssertEqual(deepLink.focusRequest.sessionId, "session-1")
+
+        let helperURL = URL(fileURLWithPath:
+            "/Applications/Copilot Projects.app/Contents/Helpers/Copilot Projects Link.app")
+        XCTAssertEqual(
+            AppDeepLink.parentApplicationURL(forHelperBundleURL: helperURL)?.path,
+            "/Applications/Copilot Projects.app"
+        )
+        XCTAssertNil(AppDeepLink.parentApplicationURL(
+            forHelperBundleURL: URL(fileURLWithPath: "/Applications/Other.app")
+        ))
     }
 
     func testCopilotHookHandlesSessionIdleAndCapabilityLifecycle() throws {
@@ -62,6 +127,9 @@ final class AppLogicTests: XCTestCase {
         let tabId = UUID().uuidString
         let sessions = root.appendingPathComponent("sessions", isDirectory: true)
         let capability = sessions.appendingPathComponent("\(tabId).session-idle-hook")
+        let backgroundAgents = sessions.appendingPathComponent("\(tabId).background-agents")
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        try Data().write(to: backgroundAgents)
 
         try runHook(
             hookURL: hookURL,
@@ -73,6 +141,7 @@ final class AppLogicTests: XCTestCase {
             capture: capture
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: capability.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backgroundAgents.path))
         XCTAssertEqual(
             try String(contentsOf: sessions.appendingPathComponent("\(tabId).status"), encoding: .utf8),
             "idle"
@@ -89,6 +158,7 @@ final class AppLogicTests: XCTestCase {
                 .contains("set-status idle --timestamp 200 --source session-idle")
         )
 
+        try Data().write(to: backgroundAgents)
         try runHook(
             hookURL: hookURL,
             action: "start",
@@ -99,6 +169,134 @@ final class AppLogicTests: XCTestCase {
             capture: capture
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: capability.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backgroundAgents.path))
+    }
+
+    func testCopilotHookNotifiesNtfyForWaitingAndCompletedTurns() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let bin = root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let hookURL = root.appendingPathComponent("copilot-projects-hook.sh")
+        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookURL.path)
+
+        let capture = root.appendingPathComponent("cli-args.txt")
+        let fakeCLI = bin.appendingPathComponent("copilot-projects")
+        try """
+        #!/bin/sh
+        printf '%s\n' "$*" >> "$CAPTURE_FILE"
+        """.write(to: fakeCLI, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
+
+        let notifierCapture = root.appendingPathComponent("notifier-args.txt")
+        let notifier = root.appendingPathComponent("ntfy-notifier")
+        try """
+        #!/bin/sh
+        printf '%s\n' "$*" >> "$NOTIFIER_CAPTURE"
+        """.write(to: notifier, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: notifier.path)
+
+        let tabId = UUID().uuidString
+        try runHook(
+            hookURL: hookURL,
+            action: "start",
+            payload: #"{"timestamp":100}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture,
+            notifier: notifier,
+            notifierCapture: notifierCapture
+        )
+        try runHook(
+            hookURL: hookURL,
+            action: "notify",
+            payload: #"{"timestamp":110,"notification_type":"session_idle","aborted":false}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture,
+            notifier: notifier,
+            notifierCapture: notifierCapture
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: notifierCapture.path))
+
+        try runHook(
+            hookURL: hookURL,
+            action: "notify",
+            payload: #"{"timestamp":120,"notification_type":"elicitation_dialog"}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture,
+            notifier: notifier,
+            notifierCapture: notifierCapture
+        )
+        XCTAssertTrue(waitForFile(notifierCapture, toContain: "waiting \(tabId)"))
+
+        try runHook(
+            hookURL: hookURL,
+            action: "running",
+            payload: #"{"timestamp":130}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture,
+            notifier: notifier,
+            notifierCapture: notifierCapture
+        )
+        try runHook(
+            hookURL: hookURL,
+            action: "idle",
+            payload: #"{"timestamp":135}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture,
+            notifier: notifier,
+            notifierCapture: notifierCapture
+        )
+        try runHook(
+            hookURL: hookURL,
+            action: "notify",
+            payload: #"{"timestamp":140,"notification_type":"session_idle","aborted":false}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture,
+            notifier: notifier,
+            notifierCapture: notifierCapture
+        )
+        XCTAssertTrue(waitForFile(notifierCapture, toContain: "completed \(tabId)"))
+
+        let beforeAbort = try String(contentsOf: notifierCapture, encoding: .utf8)
+        try runHook(
+            hookURL: hookURL,
+            action: "running",
+            payload: #"{"timestamp":150}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture,
+            notifier: notifier,
+            notifierCapture: notifierCapture
+        )
+        try runHook(
+            hookURL: hookURL,
+            action: "notify",
+            payload: #"{"timestamp":160,"notification_type":"session_idle","unaborted":true,"aborted":true}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture,
+            notifier: notifier,
+            notifierCapture: notifierCapture
+        )
+        usleep(100_000)
+        XCTAssertEqual(try String(contentsOf: notifierCapture, encoding: .utf8), beforeAbort)
     }
 
     func testScrollbarGutterStrippingKeepsAdjacentContent() {
@@ -121,6 +319,55 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(TerminalController.isSafeSessionId(UUID().uuidString))
         XCTAssertFalse(TerminalController.isSafeSessionId("../../bad"))
         XCTAssertEqual(TerminalController.shellSingleQuote("a'b"), "'a'\\''b'")
+    }
+
+    func testSessionStatusMarkersPersistAsAPair() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionId = UUID().uuidString
+
+        XCTAssertTrue(SessionArtifacts.persistStatus(
+            sessionId: sessionId,
+            status: .running,
+            timestamp: 123_456,
+            sessionsDirectory: root
+        ))
+        XCTAssertEqual(
+            try String(
+                contentsOf: root.appendingPathComponent("\(sessionId).status"),
+                encoding: .utf8
+            ),
+            "running"
+        )
+        XCTAssertEqual(
+            try String(
+                contentsOf: root.appendingPathComponent("\(sessionId).status-timestamp"),
+                encoding: .utf8
+            ),
+            "123456"
+        )
+    }
+
+    func testBackgroundAgentMarkerLifecycle() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionId = UUID().uuidString
+        let marker = root.appendingPathComponent("\(sessionId).background-agents")
+
+        XCTAssertTrue(SessionArtifacts.setBackgroundAgentsActive(
+            sessionId: sessionId,
+            active: true,
+            sessionsDirectory: root
+        ))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertTrue(SessionArtifacts.setBackgroundAgentsActive(
+            sessionId: sessionId,
+            active: false,
+            sessionsDirectory: root
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 
     func testStateRepositoryRecoversBackupAndNormalizesSelection() throws {
@@ -235,7 +482,9 @@ final class AppLogicTests: XCTestCase {
         tabId: String,
         root: URL,
         bin: URL,
-        capture: URL
+        capture: URL,
+        notifier: URL? = nil,
+        notifierCapture: URL? = nil
     ) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -244,6 +493,12 @@ final class AppLogicTests: XCTestCase {
         environment["COPILOT_PROJECTS_SESSION"] = tabId
         environment["COPILOT_PROJECTS_SOCKET"] = root.appendingPathComponent("control.sock").path
         environment["CAPTURE_FILE"] = capture.path
+        if let notifier {
+            environment["COPILOT_PROJECTS_NTFY_NOTIFIER"] = notifier.path
+        }
+        if let notifierCapture {
+            environment["NOTIFIER_CAPTURE"] = notifierCapture.path
+        }
         environment["PATH"] = "\(bin.path):/usr/bin:/bin"
         process.environment = environment
         let input = Pipe()
@@ -255,6 +510,19 @@ final class AppLogicTests: XCTestCase {
         try input.fileHandleForWriting.close()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 0)
+    }
+
+    private func waitForFile(_ url: URL, toContain expected: String) -> Bool {
+        let deadline = Date().addingTimeInterval(1)
+        repeat {
+            if let contents = try? String(contentsOf: url, encoding: .utf8),
+               contents.contains(expected)
+            {
+                return true
+            }
+            usleep(10_000)
+        } while Date() < deadline
+        return false
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {

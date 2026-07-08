@@ -112,6 +112,11 @@ public enum Paths {
         sessionsDir.appendingPathComponent("\(sessionId).status-timestamp").path
     }
 
+    /// Present while the app has observed Copilot waiting on background agents.
+    public static func backgroundAgentsMarkerPath(sessionId: String) -> String {
+        sessionsDir.appendingPathComponent("\(sessionId).background-agents").path
+    }
+
     /// Created after the CLI emits its first root session_idle notification. The
     /// footer scraper remains enabled until this proves the running CLI supports the
     /// authoritative idle signal; sessionStart removes it for a fresh CLI process.

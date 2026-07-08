@@ -39,27 +39,23 @@ Download the latest `Copilot-Projects-<version>.dmg` from
 [Releases](https://github.com/sirfergy/copilot-projects/releases), open it, and drag
 **Copilot Projects** onto **Applications**.
 
-The app is ad-hoc signed (not notarized), so macOS Gatekeeper quarantines the download.
-Clear it once, then launch normally:
+Release builds are Developer ID signed, notarized, and stapled for normal
+Gatekeeper installation.
 
-```bash
-xattr -dr com.apple.quarantine "/Applications/Copilot Projects.app"
-```
-
-Requires macOS 13+. Apple Silicon (arm64).
+Requires macOS 26+ on Apple Silicon.
 
 ## Build & run
 
-Requires Xcode 15+ (Swift 5.9+), macOS 13+.
+Requires Xcode 26+, macOS 26+.
 
 ```bash
 ./scripts/build-app.sh --launch        # debug build -> dist/Copilot Projects.app, then open it
 ./scripts/build-app.sh --release        # optimized build
 ```
 
-`build-app.sh` runs `swift build`, assembles `dist/Copilot Projects.app` (with `Info.plist`,
-the SwiftTerm resource bundle, and an ad-hoc code signature so notifications work), and
-prints the app path.
+`build-app.sh` runs `swift build`, assembles `dist/Copilot Projects.app`, precompiles
+SwiftTerm's Metal shaders, and signs the nested executables inner-first. Local builds
+default to ad-hoc signing; set `CODESIGN_IDENTITY` for Developer ID signing.
 
 On first launch the app symlinks its binary to `~/.local/bin/copilot-projects`. Put that on your
 `PATH` to use the CLI from anywhere:
@@ -76,21 +72,19 @@ copilot-projects ping            # -> pong
 
 ### Cutting a release
 
-The primary release path is **Actions → Release → Run workflow**. Enter an `X.Y.Z`
-version while dispatching from `main`; the workflow validates the version/tag, runs the
-tests on an Apple Silicon runner, builds the app and DMG, and publishes the GitHub release.
-
-`scripts/release.sh` is the local fallback. It builds the optimized `.app`, packages a
-drag-to-Applications DMG, and (with `--publish`) creates the GitHub release + tag:
+`scripts/release.sh` builds an Apple Silicon optimized app and drag-to-Applications DMG.
+Publishing requires a Developer ID identity and a `notarytool` Keychain profile:
 
 ```bash
 ./scripts/release.sh 0.1.0             # -> dist/Copilot-Projects-0.1.0.dmg (local only)
-./scripts/release.sh 0.1.0 --publish   # also publishes the GitHub release
+CODESIGN_IDENTITY="Developer ID Application: …" \
+NOTARY_PROFILE="copilot-projects-notary" \
+./scripts/release.sh 0.1.0 --publish
 ```
 
-`--publish` uses the active `gh` account, so run it as the account that owns the repo. The
-DMG is ad-hoc signed (not notarized); the generated release notes tell users to clear the
-download quarantine once with `xattr`.
+`--publish` refuses ad-hoc artifacts, notarizes and staples both the app and DMG, runs
+Gatekeeper checks, then uses the active `gh` account to publish. The Actions workflow
+also fails closed until equivalent signing/notarization credentials are configured.
 
 ## CLI
 
@@ -114,6 +108,24 @@ copilot-projects help
 
 Targeting flags (`--project`, `--session`) override the environment defaults.
 
+### Notification deep links
+
+External notifications can focus an existing project or session through the
+`copilot-projects` URL scheme:
+
+```text
+copilot-projects://focus?project=<project-id>
+copilot-projects://focus?session=<session-id>
+copilot-projects://focus?project=<project-id>&session=<session-id>
+```
+
+When a session is supplied it determines the owning project, so it takes precedence
+over a mismatched project id. Unknown ids still activate the app without changing
+the current selection.
+
+Launch Copilot Projects once after installing so macOS registers the bundled
+deep-link helper.
+
 ## Copilot CLI integration (automatic status)
 
 So the status dot tracks a coding agent without any manual calls, copilot-projects installs a
@@ -136,6 +148,13 @@ coexists with other integrations (e.g. cmux) and is safe to leave installed glob
 it with `copilot-projects install-hooks` / `uninstall-hooks`. Start a new Copilot CLI session to
 pick up changes.
 
+To mirror waiting and completed states to ntfy, install an executable helper at
+`~/.copilot/hooks/copilot-projects-ntfy.sh` or set `COPILOT_PROJECTS_NTFY_NOTIFIER` to another
+path. The hook invokes it asynchronously as `<helper> waiting|completed <session-id>`. Completed
+notifications require an active turn and are suppressed for aborted turns. The helper owns
+credentials and message content; use `copilot-projects://focus?session=<session-id>` as its click
+target.
+
 **Status precedence.** Hook events are authoritative. Newer CLI versions emit `session_idle`
 only after the root turn and all background work drain, including `aborted: true` for Esc-cancel.
 After a session proves it supports that signal, Copilot Projects disables footer scraping for
@@ -155,7 +174,7 @@ copilot-projects set-status idle
 
 ## Resumability & SSH reattach
 
-Each session's shell runs under a bundled, universal [dtach](https://github.com/crigler/dtach)
+Each session's shell runs under a bundled arm64 [dtach](https://github.com/crigler/dtach)
 (GPLv2; source vendored in `vendor/dtach`). dtach forwards raw bytes — it is **not** a second
 terminal emulator — so keyboard, title (OSC 0/2) and cwd (OSC 7) all stay native; SwiftTerm is
 the only emulator.

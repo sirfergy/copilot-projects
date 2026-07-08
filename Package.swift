@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "copilot-projects",
     platforms: [
-        .macOS(.v13)
+        .macOS("26.0")
     ],
     dependencies: [
         // Pinned past the post-1.13 Metal fixes for stale rows/cursor, window
@@ -26,6 +26,11 @@ let package = Package(
                 .product(name: "SwiftTerm", package: "SwiftTerm")
             ],
             path: "Sources/copilot-projects"
+        ),
+        .executableTarget(
+            name: "copilot-projects-link",
+            dependencies: ["CopilotProjectsCore"],
+            path: "Sources/copilot-projects-link"
         ),
         .testTarget(
             name: "CopilotProjectsTests",

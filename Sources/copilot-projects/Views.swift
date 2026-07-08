@@ -78,21 +78,29 @@ struct WindowConfigurator: NSViewRepresentable {
 }
 
 /// Roll-up of what every agent is doing, drawn as a trailing title-bar accessory:
-/// the running count (green), then the waiting (orange) and ready (blue) counts;
-/// "all idle" when nothing is active. (No spinner here — an NSProgressIndicator
-/// breaks Auto Layout inside the title-bar accessory's hosting view.)
+/// the running count (green), background-agent sessions (purple), then the waiting
+/// (orange) and ready (blue) counts; "all idle" when nothing is active. (No spinner
+/// here — an NSProgressIndicator breaks Auto Layout inside the title-bar accessory's
+/// hosting view.)
 struct FleetStatusBar: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
         let running = model.totalRunning
+        let background = model.totalBackgroundAgents
         let waiting = model.totalWaiting
         let ready = model.totalReady
         HStack(spacing: 10) {
             if running > 0 { Text("\(running) running").foregroundStyle(.green) }
+            if background > 0 {
+                HStack(spacing: 4) {
+                    BackgroundAgentsBadge()
+                    Text("\(background) background").foregroundStyle(.purple)
+                }
+            }
             if waiting > 0 { Text("\(waiting) waiting").foregroundStyle(.orange) }
             if ready > 0 { Text("\(ready) ready").foregroundStyle(.blue) }
-            if running == 0, waiting == 0, ready == 0 {
+            if running == 0, background == 0, waiting == 0, ready == 0 {
                 Text("all idle").foregroundStyle(.tertiary)
             }
         }

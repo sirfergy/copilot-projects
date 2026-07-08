@@ -69,8 +69,9 @@ extension Project {
 
     var runningCount: Int { sessions.filter { $0.status == .running }.count }
     var waitingCount: Int { sessions.filter { $0.status == .waiting }.count }
+    var backgroundAgentCount: Int { sessions.filter { $0.backgroundAgentsActive }.count }
     var hasUnread: Bool { sessions.contains { $0.hasUnread } }
-    var hasBackgroundAgents: Bool { sessions.contains { $0.backgroundAgentsActive } }
+    var hasBackgroundAgents: Bool { backgroundAgentCount > 0 }
 }
 
 /// The sidebar status dot's meaning (see `Project.dotState`).

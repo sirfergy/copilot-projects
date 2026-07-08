@@ -21,6 +21,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     private var scrollAccum: CGFloat = 0
     private(set) var rendererName = "unconfigured"
     private var rendererConfigured = false
+    private var surfaceRefreshGeneration = 0
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -54,7 +55,25 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         configureRendererIfNeeded()
         if isUsingMetalRenderer,
            let metalView: MTKView = firstDescendant(of: MTKView.self) {
+            surfaceRefreshGeneration += 1
+            let generation = surfaceRefreshGeneration
             metalView.setNeedsDisplay(metalView.bounds)
+            // A paused MTKView can be asked to draw before its just-unhidden
+            // CAMetalLayer has a drawable. Retry once after AppKit commits the
+            // visibility/layout transaction; rapid switches invalidate older retries.
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.surfaceRefreshGeneration == generation,
+                      self.window != nil,
+                      !self.isHiddenOrHasHiddenAncestor,
+                      self.bounds.width > 0,
+                      self.bounds.height > 0,
+                      let currentMetalView: MTKView = self.firstDescendant(of: MTKView.self),
+                      currentMetalView.bounds.width > 0,
+                      currentMetalView.bounds.height > 0
+                else { return }
+                currentMetalView.setNeedsDisplay(currentMetalView.bounds)
+            }
         } else {
             terminal.updateFullScreen()
             needsDisplay = true

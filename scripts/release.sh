@@ -5,10 +5,6 @@
 #   scripts/release.sh 0.1.0            # build dist/Copilot-Projects-0.1.0.dmg locally
 #   scripts/release.sh 0.1.0 --publish  # also create the GitHub release + tag
 #
-# The app is ad-hoc signed (not notarized), so downloaded copies are quarantined
-# by Gatekeeper — the release notes tell users to clear it once with
-#   xattr -dr com.apple.quarantine "/Applications/Copilot Projects.app"
-#
 # --publish uses the active `gh` account; run it as the account that owns $REPO.
 set -euo pipefail
 
@@ -34,14 +30,34 @@ VERSION="${VERSION#v}"   # accept either 0.1.0 or v0.1.0
   exit 1
 }
 TAG="v$VERSION"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-}"
+
+if [ "$PUBLISH" = "1" ]; then
+  [[ "$CODESIGN_IDENTITY" == Developer\ ID\ Application:* ]] || {
+    echo "error: --publish requires CODESIGN_IDENTITY='Developer ID Application: …'" >&2
+    exit 1
+  }
+  security find-identity -v -p codesigning | grep -Fq "\"$CODESIGN_IDENTITY\"" || {
+    echo "error: codesigning identity not found: $CODESIGN_IDENTITY" >&2
+    exit 1
+  }
+  [ -n "$NOTARY_PROFILE" ] || {
+    echo "error: --publish requires NOTARY_PROFILE" >&2
+    exit 1
+  }
+  xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null
+fi
 
 # SwiftPM + git need this when the user's global git sets safe.bareRepository=explicit.
-export GIT_CONFIG_COUNT="${GIT_CONFIG_COUNT:-1}"
-export GIT_CONFIG_KEY_0="${GIT_CONFIG_KEY_0:-safe.bareRepository}"
-export GIT_CONFIG_VALUE_0="${GIT_CONFIG_VALUE_0:-all}"
+GIT_CONFIG_INDEX="${GIT_CONFIG_COUNT:-0}"
+export "GIT_CONFIG_KEY_$GIT_CONFIG_INDEX=safe.bareRepository"
+export "GIT_CONFIG_VALUE_$GIT_CONFIG_INDEX=all"
+export GIT_CONFIG_COUNT="$((GIT_CONFIG_INDEX + 1))"
 
 echo "==> building release app (v$VERSION)"
-VERSION="$VERSION" ./scripts/build-app.sh --release
+VERSION="$VERSION" CODESIGN_IDENTITY="$CODESIGN_IDENTITY" \
+  ./scripts/build-app.sh --release
 
 APP="$ROOT/dist/$APP_NAME.app"
 [ -d "$APP" ] || { echo "error: $APP missing after build" >&2; exit 1; }
@@ -50,6 +66,7 @@ echo "==> packaging DMG"
 DMG="$ROOT/dist/Copilot-Projects-$VERSION.dmg"
 STAGING="$(mktemp -d)"
 NOTES_FILE=""
+APP_ZIP=""
 RELEASE_CREATED=0
 cleanup() {
   status=$?
@@ -58,14 +75,36 @@ cleanup() {
   fi
   rm -rf "$STAGING"
   [ -z "$NOTES_FILE" ] || rm -f "$NOTES_FILE"
+  [ -z "$APP_ZIP" ] || rm -f "$APP_ZIP"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [ "$CODESIGN_IDENTITY" != "-" ] && [ -n "$NOTARY_PROFILE" ]; then
+  echo "==> notarizing app"
+  APP_ZIP="$ROOT/dist/Copilot-Projects-$VERSION.zip"
+  rm -f "$APP_ZIP"
+  ditto -c -k --keepParent "$APP" "$APP_ZIP"
+  xcrun notarytool submit "$APP_ZIP" \
+    --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$APP"
+  xcrun stapler validate "$APP"
+  spctl --assess --type execute --verbose=4 "$APP"
+fi
+
 cp -R "$APP" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"   # drag-to-install target
 rm -f "$DMG"
 hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDZO "$DMG" >/dev/null
+if [ "$CODESIGN_IDENTITY" != "-" ] && [ -n "$NOTARY_PROFILE" ]; then
+  echo "==> signing and notarizing DMG"
+  codesign --force --timestamp --sign "$CODESIGN_IDENTITY" "$DMG"
+  xcrun notarytool submit "$DMG" \
+    --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$DMG"
+  xcrun stapler validate "$DMG"
+  spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
+fi
 echo "  $DMG"
 
 if [ "$PUBLISH" = "0" ]; then
@@ -84,13 +123,9 @@ cat > "$NOTES_FILE" <<NOTES
 
 1. Download \`Copilot-Projects-$VERSION.dmg\` below and open it.
 2. Drag **Copilot Projects** onto **Applications**.
-3. The app is ad-hoc signed (not notarized), so clear the download quarantine once:
-   \`\`\`bash
-   xattr -dr com.apple.quarantine "/Applications/Copilot Projects.app"
-   \`\`\`
-   Then launch it normally.
+3. Launch it normally. The app and DMG are Developer ID signed, notarized, and stapled.
 
-Requires macOS 13+. Apple Silicon (arm64).
+Requires macOS 26+ on Apple Silicon.
 NOTES
 
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then

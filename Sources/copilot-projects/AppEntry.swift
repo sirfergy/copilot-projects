@@ -70,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.installCLISymlinkIfPossible()
             CopilotHooks.installIfPossible()
         }
+        registerDeepLinkHelper()
 
         NSApp.activate(ignoringOtherApps: true)
 
@@ -101,6 +102,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor [weak self] in
                 self?.model.markActiveSessionSeen()
                 self?.model.focusActiveTerminal()
+            }
+        }
+    }
+
+    private func registerDeepLinkHelper() {
+        let helperURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Helpers/Copilot Projects Link.app")
+        guard FileManager.default.fileExists(atPath: helperURL.path) else {
+            NSLog("copilot-projects: deep-link helper is missing")
+            return
+        }
+        NSWorkspace.shared.setDefaultApplication(
+            at: helperURL,
+            toOpenURLsWithScheme: "copilot-projects"
+        ) { error in
+            if let error {
+                NSLog("copilot-projects: could not register deep-link helper: \(error)")
             }
         }
     }

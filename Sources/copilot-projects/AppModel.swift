@@ -1,6 +1,100 @@
 import SwiftUI
 import AppKit
+import ScreenCaptureKit
 import CopilotProjectsCore
+
+private final class ScreenshotCaptureBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<CGImage, Error>?
+
+    func store(_ result: Result<CGImage, Error>) {
+        lock.lock()
+        self.result = result
+        lock.unlock()
+    }
+
+    func load() -> Result<CGImage, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return result
+    }
+}
+
+private struct ScreenshotCaptureRequest: Sendable {
+    let windowID: CGWindowID
+    let width: Int
+    let height: Int
+    let path: String
+}
+
+private enum ScreenshotPreparation {
+    case ready(ScreenshotCaptureRequest)
+    case failure(String)
+}
+
+private enum WindowScreenshot {
+    static func capture(_ request: ScreenshotCaptureRequest) -> ControlResponse {
+        let result = ScreenshotCaptureBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            defer { semaphore.signal() }
+            do {
+                let content = try await SCShareableContent.currentProcess
+                guard let shareableWindow = content.windows.first(where: {
+                    $0.windowID == request.windowID
+                }) else {
+                    throw NSError(
+                        domain: "CopilotProjectsScreenshot",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "window is not shareable"]
+                    )
+                }
+                let filter = SCContentFilter(desktopIndependentWindow: shareableWindow)
+                let configuration = SCStreamConfiguration()
+                configuration.width = request.width
+                configuration.height = request.height
+                configuration.showsCursor = false
+                let image = try await SCScreenshotManager.captureImage(
+                    contentFilter: filter,
+                    configuration: configuration
+                )
+                result.store(.success(image))
+            } catch {
+                result.store(.failure(error))
+            }
+        }
+        guard semaphore.wait(timeout: .now() + 5) == .success,
+              let captureResult = result.load() else {
+            return .failure("window capture timed out")
+        }
+        let image: CGImage
+        switch captureResult {
+        case .success(let captured): image = captured
+        case .failure(let error):
+            return .failure("could not capture window: \(error.localizedDescription)")
+        }
+        let rep = NSBitmapImageRep(cgImage: image)
+        guard let data = rep.representation(using: .png, properties: [:]) else {
+            return .failure("could not encode PNG")
+        }
+
+        let destination = URL(fileURLWithPath: request.path)
+        var st = stat()
+        if lstat(request.path, &st) == 0, (st.st_mode & S_IFMT) != S_IFREG {
+            return .failure("refusing to write screenshot to a non-regular file")
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: destination)
+            return .success(request.path)
+        } catch {
+            return .failure("write failed: \(error.localizedDescription)")
+        }
+    }
+}
 
 /// Single source of truth. Holds value-type projects/sessions (observed) and live
 /// terminal controllers (NOT observed, kept out of the SwiftUI graph).
@@ -64,9 +158,8 @@ final class AppModel: ObservableObject {
             self.focus(projectId: request.projectId, sessionId: request.sessionId)
             return .success()
         },
-        screenshot: { [unowned self] path in
-            self.captureWindow(to: path ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Downloads/copilot-projects.png").path)
+        screenshot: { _ in
+            .failure("screenshot must be handled by the control server")
         },
         diagnostics: { [unowned self] in self.renderDiagnostics() }
     ))
@@ -83,6 +176,7 @@ final class AppModel: ObservableObject {
 
     private var activityTracker = ActivityTracker()
     private var statusEventClock = StatusEventClock()
+    private var backgroundAgentsSuppressed: Set<String> = []
 
     /// Sessions hosting a live agent (refreshed by the liveness reconciler). Used
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.
@@ -148,6 +242,21 @@ final class AppModel: ObservableObject {
     func startServer() -> Bool {
         let server = ControlServer { [weak self] req in
             guard let self else { return .failure("app shutting down") }
+            if req.command == "screenshot" {
+                let path = req.path ?? FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Downloads/copilot-projects.png").path
+                let preparation = DispatchQueue.main.sync {
+                    MainActor.assumeIsolated {
+                        self.prepareScreenshot(to: path)
+                    }
+                }
+                switch preparation {
+                case .ready(let request):
+                    return WindowScreenshot.capture(request)
+                case .failure(let error):
+                    return .failure(error)
+                }
+            }
             return DispatchQueue.main.sync {
                 MainActor.assumeIsolated { self.handle(req) }
             }
@@ -379,6 +488,7 @@ final class AppModel: ObservableObject {
         controllers[sid]?.terminate()
         controllers[sid] = nil
         statusEventClock.reset(sessionId: sid)
+        backgroundAgentsSuppressed.remove(sid)
         let closedIndex = projects[pi].sessions.firstIndex { $0.id == sid }
         let wasSelected = projects[pi].selectedSessionId == sid
         projects[pi].sessions.removeAll { $0.id == sid }
@@ -442,6 +552,9 @@ final class AppModel: ObservableObject {
     /// Fleet roll-ups across every project, for the title-bar status line.
     var totalRunning: Int { projects.reduce(0) { $0 + $1.runningCount } }
     var totalWaiting: Int { projects.reduce(0) { $0 + $1.waitingCount } }
+    var totalBackgroundAgents: Int {
+        projects.reduce(0) { $0 + $1.backgroundAgentCount }
+    }
     var totalReady: Int {
         projects.reduce(0) { $0 + $1.sessions.filter { $0.finishedUnseen }.count }
     }
@@ -453,6 +566,7 @@ final class AppModel: ObservableObject {
             SessionArtifacts.destroy(sessionId: session.id, snapshot: snapshot)
             controllers[session.id]?.terminate()
             controllers[session.id] = nil
+            backgroundAgentsSuppressed.remove(session.id)
         }
         projects.remove(at: pi)
         if selectedProjectId == pid {
@@ -599,19 +713,38 @@ final class AppModel: ObservableObject {
         guard let loc = locateIndex(sessionId) else { return }
         guard statusEventClock.shouldApply(sessionId: sessionId, timestamp: timestamp) else { return }
         let previous = projects[loc.p].sessions[loc.s].status
-        let clearsBackgroundAgents = status == .idle
-            && source == "session-idle"
-            && projects[loc.p].sessions[loc.s].backgroundAgentsActive
+        let clearsBackgroundAgents = status == .idle && source == "session-idle"
+        let resumesBackgroundTracking = (status == .running || status == .waiting)
+            && backgroundAgentsSuppressed.contains(sessionId)
         guard previous != status
                 || projects[loc.p].sessions[loc.s].statusText != text
                 || clearsBackgroundAgents
+                || resumesBackgroundTracking
         else { return }
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
+        if status == .running || status == .waiting {
+            backgroundAgentsSuppressed.remove(sessionId)
+        }
+        if timestamp == nil {
+            let now = SessionArtifacts.currentStatusTimestamp()
+            let effectiveTimestamp = max(now, statusEventClock.timestamp(for: sessionId) ?? now)
+            statusEventClock.seed(sessionId: sessionId, timestamp: effectiveTimestamp)
+            SessionArtifacts.persistStatus(
+                sessionId: sessionId,
+                status: status,
+                timestamp: effectiveTimestamp
+            )
+        }
         if status == .idle {
             activityTracker.reset(sessionId: sessionId)
             if source == "session-idle" {
                 projects[loc.p].sessions[loc.s].backgroundAgentsActive = false
+                backgroundAgentsSuppressed.insert(sessionId)
+                SessionArtifacts.setBackgroundAgentsActive(
+                    sessionId: sessionId,
+                    active: false
+                )
             }
         }
         // The agent just went active → idle. If you're not currently looking at this
@@ -638,11 +771,14 @@ final class AppModel: ObservableObject {
         livenessTimer?.invalidate()
         footerTimer?.invalidate()
 
-        // Footer backstop (always on): the only signal that catches an Esc-cancel,
-        // which fires no stop hook and leaves the agent process alive — so the
-        // process-liveness check below can't help. Cheap (scans a few rows of the
-        // running/waiting sessions only), so it runs every second for a snappy
-        // spinner clear, independent of the heavier process snapshot.
+        if livenessEnabled {
+            reconcileLiveness(markFinished: false)
+        } else {
+            liveAgentSessions = []
+        }
+
+        // Footer backstop: recovers an actively-working attached session after an app
+        // restart, and catches Esc-cancel when the stop hook never fires.
         reconcileAgentFooters()
         let footer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.reconcileAgentFooters() }
@@ -651,7 +787,6 @@ final class AppModel: ObservableObject {
         footerTimer = footer
 
         guard livenessEnabled else { return }
-        reconcileLiveness(markFinished: false)   // startup: clear dead statuses without flagging them as "finished while away"
         let timer = Timer(timeInterval: 8, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.reconcileLiveness() }
         }
@@ -670,20 +805,39 @@ final class AppModel: ObservableObject {
     /// Includes `waiting`, so an Esc-cancel of an ask_user/permission wait — which
     /// also fires no stop hook — is caught too.
     private func reconcileAgentFooters() {
-        var active: Set<String> = []
+        var tracked: Set<String> = []
         for pi in projects.indices {
             for si in projects[pi].sessions.indices {
                 let status = projects[pi].sessions[si].status
-                guard status == .running || status == .waiting else { continue }
                 let sid = projects[pi].sessions[si].id
                 guard let controller = controllers[sid] else { continue }
+                if status == .idle {
+                    guard liveAgentSessions.contains(sid) else {
+                        activityTracker.reset(sessionId: sid)
+                        continue
+                    }
+                    tracked.insert(sid)
+                    if activityTracker.shouldPromoteFromFooter(
+                        sessionId: sid,
+                        currentStatus: status,
+                        activity: controller.agentActivity
+                    ) {
+                        setStatus(
+                            sessionId: sid,
+                            status: .running,
+                            text: nil,
+                            source: "footer"
+                        )
+                    }
+                    continue
+                }
                 if FileManager.default.fileExists(
                     atPath: Paths.sessionIdleHookMarkerPath(sessionId: sid)
                 ) {
                     activityTracker.reset(sessionId: sid)
                     continue
                 }
-                active.insert(sid)
+                tracked.insert(sid)
                 if activityTracker.observeFooter(
                     sessionId: sid,
                     currentStatus: status,
@@ -693,24 +847,27 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        activityTracker.retain(activeSessionIds: active)
+        activityTracker.retain(activeSessionIds: tracked)
     }
 
     /// Drop a session to idle and (unless it's on screen) flag it finished & unseen,
-    /// then drop its status marker. Shared by the liveness and footer reconcilers.
+    /// then persist the corrected status. Shared by the liveness and footer reconcilers.
     private func clearStatusToIdle(pi: Int, si: Int, markFinished: Bool) {
         let sid = projects[pi].sessions[si].id
         activityTracker.reset(sessionId: sid)
         projects[pi].sessions[si].status = .idle
         projects[pi].sessions[si].statusText = nil
-        // The agent is idle — it isn't waiting on background agents either; clear the
-        // indicator in case the title-driven clear never arrives (e.g. the CLI leaves
-        // the "Waiting for background agents" title stale).
-        projects[pi].sessions[si].backgroundAgentsActive = false
         if markFinished, !isVisible(projectIndex: pi, sessionIndex: si) {
             projects[pi].sessions[si].finishedUnseen = true
         }
-        try? FileManager.default.removeItem(atPath: Paths.statusMarkerPath(sessionId: sid))
+        let now = SessionArtifacts.currentStatusTimestamp()
+        let timestamp = max(now, statusEventClock.timestamp(for: sid) ?? now)
+        statusEventClock.seed(sessionId: sid, timestamp: timestamp)
+        SessionArtifacts.persistStatus(
+            sessionId: sid,
+            status: .idle,
+            timestamp: timestamp
+        )
     }
 
     private func reconcileLiveness(markFinished: Bool = true) {
@@ -721,6 +878,21 @@ final class AppModel: ObservableObject {
         // mouse mode), but copilot's input parser still expects mouse events — so
         // the wheel is force-forwarded as mouse when the session has a live agent.
         liveAgentSessions = ProcessTree.agentSessions(agentNames: agentProcessNames, in: snapshot)
+
+        for pi in projects.indices {
+            for si in projects[pi].sessions.indices {
+                let sid = projects[pi].sessions[si].id
+                if projects[pi].sessions[si].backgroundAgentsActive,
+                   !liveAgentSessions.contains(sid) {
+                    projects[pi].sessions[si].backgroundAgentsActive = false
+                    backgroundAgentsSuppressed.insert(sid)
+                    SessionArtifacts.setBackgroundAgentsActive(
+                        sessionId: sid,
+                        active: false
+                    )
+                }
+            }
+        }
 
         let hasActive = projects.contains { project in
             project.sessions.contains { $0.status == .running || $0.status == .waiting }
@@ -758,7 +930,6 @@ final class AppModel: ObservableObject {
     }
 
     func focus(projectId: String?, sessionId: String?) {
-        NSApp.activate(ignoringOtherApps: true)
         if let sessionId, let loc = locateIndex(sessionId) {
             selectedProjectId = projects[loc.p].id
             projects[loc.p].selectedSessionId = sessionId
@@ -776,6 +947,7 @@ final class AppModel: ObservableObject {
         }
         if let sid = currentSelectedSessionId { controller(for: sid) }
         updateDockBadge()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// Clear the on-screen session's "finished" flag when the app is brought forward
@@ -814,8 +986,15 @@ final class AppModel: ObservableObject {
         // flag it for the tab/sidebar indicator and keep the tab's real title rather
         // than letting it clobber it.
         let backgroundAgents = trimmed.range(of: "waiting for background agent", options: .caseInsensitive) != nil
+        if backgroundAgents, backgroundAgentsSuppressed.contains(sessionId) {
+            return
+        }
         if projects[loc.p].sessions[loc.s].backgroundAgentsActive != backgroundAgents {
             projects[loc.p].sessions[loc.s].backgroundAgentsActive = backgroundAgents
+            SessionArtifacts.setBackgroundAgentsActive(
+                sessionId: sessionId,
+                active: backgroundAgents
+            )
         }
         guard !backgroundAgents else { return }
         if projects[loc.p].sessions[loc.s].title != trimmed {
@@ -837,10 +1016,6 @@ final class AppModel: ObservableObject {
 
     private func handleExit(sessionId: String) {
         controllers[sessionId] = nil
-        // The agent is gone — it can't still be waiting on background agents.
-        if let loc = locateIndex(sessionId) {
-            projects[loc.p].sessions[loc.s].backgroundAgentsActive = false
-        }
         guard !isTerminating else { return }   // app quitting → keep for resume
 
         let socket = Paths.dtachSocketPath(sessionId: sessionId)
@@ -852,6 +1027,8 @@ final class AppModel: ObservableObject {
         }
 
         guard let loc = locateIndex(sessionId) else { return }
+        projects[loc.p].sessions[loc.s].backgroundAgentsActive = false
+        backgroundAgentsSuppressed.remove(sessionId)
         let projectId = projects[loc.p].id
         SessionArtifacts.removeFiles(sessionId: sessionId)
         closeSession(projectId: projectId, sessionId: sessionId)
@@ -877,9 +1054,9 @@ final class AppModel: ObservableObject {
         ].joined(separator: "\n")
     }
 
-    /// Renders the app's own window to a PNG — the app drawing itself, so it needs
-    /// no Screen Recording permission (unlike `screencapture`).
-    private func captureWindow(to path: String) -> ControlResponse {
+    /// Collects main-thread window metadata; capture and file I/O run on the
+    /// control-server thread so ScreenCaptureKit never blocks UI interaction.
+    private func prepareScreenshot(to path: String) -> ScreenshotPreparation {
         guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil })
                 ?? NSApp.mainWindow ?? NSApp.windows.first,
               let view = window.contentView else {
@@ -889,47 +1066,13 @@ final class AppModel: ObservableObject {
         guard bounds.width > 1, bounds.height > 1 else {
             return .failure("window has no drawable bounds")
         }
-        let rep: NSBitmapImageRep
-        if let image = CGWindowListCreateImage(
-            .null,
-            .optionIncludingWindow,
-            CGWindowID(window.windowNumber),
-            [.boundsIgnoreFraming, .bestResolution]
-        ) {
-            // cacheDisplay does not include MTKView/CAMetalLayer contents; capturing
-            // our own window through WindowServer does.
-            rep = NSBitmapImageRep(cgImage: image)
-        } else if activeController?.terminalView.isUsingMetalRenderer == true {
-            return .failure(
-                "could not capture the Metal surface; Screen Recording permission may be required"
-            )
-        } else if let fallback = view.bitmapImageRepForCachingDisplay(in: bounds) {
-            view.cacheDisplay(in: bounds, to: fallback)
-            rep = fallback
-        } else {
-            return .failure("could not capture window")
-        }
-        guard let data = rep.representation(using: .png, properties: [:]) else {
-            return .failure("could not encode PNG")
-        }
-        // A control client chooses this path; refuse anything that isn't a plain
-        // regular-file (or new) destination so a same-user process can't hang the
-        // main thread by aiming it at a FIFO with no reader, or follow a symlink to
-        // clobber an arbitrary file.
-        let dest = URL(fileURLWithPath: path)
-        var st = stat()
-        if lstat(path, &st) == 0, (st.st_mode & S_IFMT) != S_IFREG {
-            return .failure("refusing to write screenshot to a non-regular file")
-        }
-        do {
-            try FileManager.default.createDirectory(
-                at: dest.deletingLastPathComponent(),
-                withIntermediateDirectories: true)
-            try data.write(to: dest)
-            return .success(path)
-        } catch {
-            return .failure("write failed: \(error.localizedDescription)")
-        }
+        let scale = window.backingScaleFactor
+        return .ready(ScreenshotCaptureRequest(
+            windowID: CGWindowID(window.windowNumber),
+            width: Int(bounds.width * scale),
+            height: Int(bounds.height * scale),
+            path: path
+        ))
     }
 
     private func resolve(_ req: ControlRequest) -> (projectId: String, sessionId: String)? {
@@ -1022,6 +1165,17 @@ final class AppModel: ObservableObject {
                 )
                 projects[pi].sessions[si].statusText = nil
                 projects[pi].sessions[si].hasUnread = false
+                let sid = projects[pi].sessions[si].id
+                let hasBackgroundAgents = FileManager.default.fileExists(
+                    atPath: Paths.backgroundAgentsMarkerPath(sessionId: sid)
+                )
+                projects[pi].sessions[si].backgroundAgentsActive = hasBackgroundAgents
+                if !hasBackgroundAgents, projects[pi].sessions[si].status == .idle,
+                   FileManager.default.fileExists(
+                    atPath: Paths.sessionIdleHookMarkerPath(sessionId: sid)
+                ) {
+                    backgroundAgentsSuppressed.insert(sid)
+                }
             }
         }
     }

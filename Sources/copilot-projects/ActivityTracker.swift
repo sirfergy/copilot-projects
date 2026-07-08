@@ -7,12 +7,35 @@ enum FooterActivity: Equatable {
     case unknown
 }
 
-/// Reducer for advisory status evidence. Hooks remain authoritative for positive
-/// transitions (running/waiting/idle). Liveness and footer observations may only
-/// demote an existing active state to idle.
+/// Reducer for advisory status evidence. Hooks remain authoritative; a sustained
+/// working footer may recover missed running state, while liveness and an observed
+/// return to the idle footer may demote stale activity.
 struct ActivityTracker {
     private var footerIdleTicks: [String: Int] = [:]
+    private var footerWorkingTicks: [String: Int] = [:]
     private var footerSawWorking: Set<String> = []
+
+    mutating func shouldPromoteFromFooter(
+        sessionId: String,
+        currentStatus: SessionStatus,
+        activity: FooterActivity
+    ) -> Bool {
+        guard currentStatus == .idle else {
+            footerWorkingTicks[sessionId] = nil
+            return false
+        }
+        guard activity == .working else {
+            footerWorkingTicks[sessionId] = nil
+            return false
+        }
+        let ticks = (footerWorkingTicks[sessionId] ?? 0) + 1
+        footerWorkingTicks[sessionId] = ticks
+        guard ticks >= 2 else { return false }
+        footerWorkingTicks[sessionId] = nil
+        footerSawWorking.insert(sessionId)
+        footerIdleTicks[sessionId] = 0
+        return true
+    }
 
     mutating func observeFooter(
         sessionId: String,
@@ -45,11 +68,13 @@ struct ActivityTracker {
 
     mutating func retain(activeSessionIds: Set<String>) {
         footerIdleTicks = footerIdleTicks.filter { activeSessionIds.contains($0.key) }
+        footerWorkingTicks = footerWorkingTicks.filter { activeSessionIds.contains($0.key) }
         footerSawWorking = footerSawWorking.intersection(activeSessionIds)
     }
 
     mutating func reset(sessionId: String) {
         footerIdleTicks[sessionId] = nil
+        footerWorkingTicks[sessionId] = nil
         footerSawWorking.remove(sessionId)
     }
 
@@ -76,6 +101,10 @@ struct StatusEventClock {
     mutating func seed(sessionId: String, timestamp: Int64?) {
         guard let timestamp else { return }
         latestTimestamp[sessionId] = max(latestTimestamp[sessionId] ?? timestamp, timestamp)
+    }
+
+    func timestamp(for sessionId: String) -> Int64? {
+        latestTimestamp[sessionId]
     }
 
     mutating func reset(sessionId: String) {
