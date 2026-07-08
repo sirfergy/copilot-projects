@@ -53,7 +53,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// SwiftTerm's Metal view is intentionally paused and redraws on demand.
     func refreshSurface() {
         configureRendererIfNeeded()
-        terminal.updateFullScreen()
+        terminal?.updateFullScreen()
         if isUsingMetalRenderer,
            let metalView: MTKView = firstDescendant(of: MTKView.self) {
             surfaceRefreshGeneration += 1
@@ -73,7 +73,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                       currentMetalView.bounds.width > 0,
                       currentMetalView.bounds.height > 0
                 else { return }
-                self.terminal.updateFullScreen()
+                self.terminal?.updateFullScreen()
                 currentMetalView.setNeedsDisplay(currentMetalView.bounds)
             }
         } else {
