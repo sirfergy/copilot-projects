@@ -220,8 +220,9 @@ layout, and synchronized output.
   Existing pre-rebrand installs may use the legacy path described above. Writes are atomic,
   preserve a known-good backup, and never overwrite unreadable state with an empty workspace.
 
-Override locations with `COPILOT_PROJECTS_SOCKET` and `COPILOT_PROJECTS_STATE_DIR` (useful for running
-an isolated instance).
+Override locations with `COPILOT_PROJECTS_SOCKET` and `COPILOT_PROJECTS_STATE_DIR` to run an isolated
+instance. An app launched with either override does not replace the global CLI symlink or Copilot
+hooks.
 
 ## License
 

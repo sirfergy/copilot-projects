@@ -17,6 +17,16 @@ public enum Env {
         first(env, "COPILOT_PROJECTS_SOCKET", "COPILOT_MUX_SOCKET")
     }
 
+    public static func shouldInstallGlobalIntegration(
+        _ env: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        guard first(env, "COPILOT_PROJECTS_NO_INSTALL", "COPILOT_MUX_NO_INSTALL") != "1"
+        else { return false }
+
+        return first(env, "COPILOT_PROJECTS_STATE_DIR", "COPILOT_MUX_STATE_DIR") == nil
+            && socket(env) == nil
+    }
+
     private static func first(_ env: [String: String], _ keys: String...) -> String? {
         for key in keys {
             if let value = env[key], !value.isEmpty { return value }

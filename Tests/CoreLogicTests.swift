@@ -52,6 +52,25 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertFalse(CLIMain.isCocoaLaunchArguments(["unknown-command"]))
     }
 
+    func testIsolatedInstancesDoNotInstallGlobalIntegration() {
+        XCTAssertTrue(Env.shouldInstallGlobalIntegration([:]))
+        XCTAssertFalse(Env.shouldInstallGlobalIntegration([
+            "COPILOT_PROJECTS_NO_INSTALL": "1",
+        ]))
+        XCTAssertFalse(Env.shouldInstallGlobalIntegration([
+            "COPILOT_PROJECTS_STATE_DIR": "/isolated/state",
+        ]))
+        XCTAssertFalse(Env.shouldInstallGlobalIntegration([
+            "COPILOT_MUX_STATE_DIR": "/isolated/legacy-state",
+        ]))
+        XCTAssertFalse(Env.shouldInstallGlobalIntegration([
+            "COPILOT_PROJECTS_SOCKET": "/isolated/control.sock",
+        ]))
+        XCTAssertFalse(Env.shouldInstallGlobalIntegration([
+            "COPILOT_MUX_SOCKET": "/isolated/legacy-control.sock",
+        ]))
+    }
+
     func testDtachMasterSelectionIgnoresAttachedClient() {
         let socket = "/tmp/session.sock"
         let processes = [
