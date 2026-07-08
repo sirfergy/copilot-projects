@@ -337,6 +337,9 @@ final class AppLogicTests: XCTestCase {
             isAppActive: { true }
         )
         let notifications = NotificationSpy()
+        let unexpectedCompletion = expectation(description: "visible completion remains suppressed")
+        unexpectedCompletion.isInverted = true
+        notifications.onPost = { _ in unexpectedCompletion.fulfill() }
         model.attach(notifications: notifications)
         model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 100)
         model.setStatus(
@@ -347,7 +350,8 @@ final class AppLogicTests: XCTestCase {
             source: "agent-stop"
         )
 
-        try await Task.sleep(nanoseconds: 50_000_000)
+        await fulfillment(of: [unexpectedCompletion], timeout: 0.1)
+        notifications.onPost = nil
         XCTAssertTrue(model.projects[0].sessions[0].turnCompleted)
         XCTAssertFalse(model.projects[0].sessions[0].hasUnread)
         XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
