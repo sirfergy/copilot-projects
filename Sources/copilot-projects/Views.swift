@@ -165,14 +165,23 @@ struct SidebarView: View {
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
-            Button {
-                model.addProjectInteractive()
-            } label: {
-                Label("New Project", systemImage: "plus")
-                    .frame(maxWidth: .infinity)
+            HStack(spacing: 8) {
+                Button {
+                    model.addProjectInteractive()
+                } label: {
+                    Label("New Project", systemImage: "plus")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderless)
+                .hoverHighlight()
+
+                Text("v\(CLIMain.versionNumber)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
             }
-            .controlSize(.large)
-            .buttonStyle(.borderless)
             .padding(8)
         }
     }
@@ -416,10 +425,12 @@ struct SessionTabBar: View {
                         targetId: "", dragged: $draggedSession,
                         dropTargetId: $dropTargetId, model: model, projectId: project.id))
                 Button { model.addSession(toProjectId: project.id) } label: {
-                    Image(systemName: "plus").font(.caption)
+                    Image(systemName: "plus")
+                        .font(.caption)
+                        .frame(width: 24, height: 22)
                 }
                 .buttonStyle(.borderless)
-                .padding(.horizontal, 4)
+                .hoverHighlight()
                 .help("New Session (⌘T)")
             }
             .padding(.horizontal, 8)
@@ -432,6 +443,27 @@ struct SessionTabBar: View {
             .fill(Color.accentColor)
             .frame(width: 3)
             .padding(.vertical, 3)
+    }
+}
+
+private struct HoverHighlightModifier: ViewModifier {
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(isHovering ? 0.08 : 0))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .onHover { isHovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+    }
+}
+
+private extension View {
+    func hoverHighlight() -> some View {
+        modifier(HoverHighlightModifier())
     }
 }
 

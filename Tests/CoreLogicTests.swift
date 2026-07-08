@@ -41,6 +41,15 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(parsed.positionals, ["first", "--literal"])
     }
 
+    func testStatusNotificationKindRoundTripsOverControlProtocol() throws {
+        var request = ControlRequest(command: "set-status")
+        request.notification = .completed
+
+        let encoded = try Wire.encodeLine(request)
+        let decoded = try Wire.decode(ControlRequest.self, from: encoded)
+        XCTAssertEqual(decoded.notification, .completed)
+    }
+
     func testCocoaLaunchArgumentsAreAcceptedButUnknownCLIFlagsAreNot() {
         XCTAssertTrue(CLIMain.isCocoaLaunchArguments([
             "-NSDocumentRevisionsDebugMode", "YES", "-psn_0_12345",

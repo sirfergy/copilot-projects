@@ -236,6 +236,24 @@ final class AppLogicTests: XCTestCase {
             notifierCapture: notifierCapture
         )
         XCTAssertTrue(waitForFile(notifierCapture, toContain: "waiting \(tabId)"))
+        var cliCalls = try String(contentsOf: capture, encoding: .utf8)
+        XCTAssertTrue(cliCalls.contains(
+            "set-status waiting --timestamp 120 --notification elicitation"
+        ))
+
+        try runHook(
+            hookURL: hookURL,
+            action: "notify",
+            payload: #"{"timestamp":125,"notification_type":"permission_prompt"}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture,
+            notifier: notifier,
+            notifierCapture: notifierCapture
+        )
+        cliCalls = try String(contentsOf: capture, encoding: .utf8)
+        XCTAssertFalse(cliCalls.contains("--notification permission"))
 
         try runHook(
             hookURL: hookURL,
@@ -271,6 +289,13 @@ final class AppLogicTests: XCTestCase {
             notifierCapture: notifierCapture
         )
         XCTAssertTrue(waitForFile(notifierCapture, toContain: "completed \(tabId)"))
+        cliCalls = try String(contentsOf: capture, encoding: .utf8)
+        XCTAssertTrue(cliCalls.contains(
+            "set-status idle --timestamp 140 --source session-idle --notification completed"
+        ))
+        let completedNotificationCount = cliCalls.components(
+            separatedBy: "--notification completed"
+        ).count - 1
 
         let beforeAbort = try String(contentsOf: notifierCapture, encoding: .utf8)
         try runHook(
@@ -296,6 +321,21 @@ final class AppLogicTests: XCTestCase {
             notifierCapture: notifierCapture
         )
         XCTAssertFalse(waitForFile(notifierCapture, toDifferFrom: beforeAbort))
+        cliCalls = try String(contentsOf: capture, encoding: .utf8)
+        XCTAssertEqual(
+            cliCalls.components(separatedBy: "--notification completed").count - 1,
+            completedNotificationCount
+        )
+    }
+
+    func testStatusNotificationTitlesDescribeWhyCopilotNeedsAttention() {
+        XCTAssertEqual(StatusNotificationKind.elicitation.title, "Copilot has a question")
+        XCTAssertEqual(StatusNotificationKind.permission.title, "Copilot needs permission")
+        XCTAssertEqual(StatusNotificationKind.completed.title, "Copilot finished a task")
+        XCTAssertEqual(
+            AppModel.notificationSubtitle(projectName: "Checkout", sessionTitle: "Fix taxes"),
+            "Checkout · Fix taxes"
+        )
     }
 
     func testScrollbarGutterStrippingKeepsAdjacentContent() {
@@ -445,6 +485,34 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(router.handle(ControlRequest(command: "set-status")).ok)
         XCTAssertFalse(didSetStatus)
         XCTAssertFalse(router.handle(ControlRequest(command: "unknown")).ok)
+    }
+
+    func testCLIParsesStatusNotificationFlagIntoControlRequest() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let socketPath = root.appendingPathComponent("control.sock").path
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var received: ControlRequest?
+        let server = ControlServer(socketPath: socketPath) { request in
+            received = request
+            return .success()
+        }
+        XCTAssertTrue(server.start())
+        defer { server.stop() }
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["COPILOT_PROJECTS_SOCKET"] = socketPath
+
+        XCTAssertEqual(CLIMain.run([
+            "set-status", "waiting",
+            "--notification", "permission",
+            "--session", "session-1",
+        ], environment: environment), 0)
+        XCTAssertEqual(received?.status, "waiting")
+        XCTAssertEqual(received?.notification, .permission)
+        XCTAssertEqual(received?.sessionId, "session-1")
     }
 
     func testControlServerSurvivesClientDisconnectBeforeResponse() throws {

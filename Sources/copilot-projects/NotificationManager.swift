@@ -1,5 +1,16 @@
 import Foundation
 import UserNotifications
+import CopilotProjectsCore
+
+extension StatusNotificationKind {
+    var title: String {
+        switch self {
+        case .elicitation: return "Copilot has a question"
+        case .permission: return "Copilot needs permission"
+        case .completed: return "Copilot finished a task"
+        }
+    }
+}
 
 /// Thin wrapper over UNUserNotificationCenter. Posts banners and routes taps back
 /// to the app via `onActivate(projectId, sessionId)`.
@@ -19,9 +30,16 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    func post(title: String, body: String?, projectId: String?, sessionId: String?) {
+    func post(
+        title: String,
+        subtitle: String?,
+        body: String?,
+        projectId: String?,
+        sessionId: String?
+    ) {
         let content = UNMutableNotificationContent()
         content.title = title
+        if let subtitle, !subtitle.isEmpty { content.subtitle = subtitle }
         if let body = body, !body.isEmpty { content.body = body }
         content.sound = .default
         var info: [String: String] = [:]

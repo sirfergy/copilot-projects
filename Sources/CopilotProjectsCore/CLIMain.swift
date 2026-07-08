@@ -50,7 +50,10 @@ public enum CLIMain {
         return true
     }
 
-    public static func run(_ args: [String]) -> Int32 {
+    public static func run(
+        _ args: [String],
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Int32 {
         guard let raw = args.first else {
             printUsage()
             return 1
@@ -89,14 +92,12 @@ public enum CLIMain {
         }
 
         let parsed = parseFlags(rest)
-        let env = ProcessInfo.processInfo.environment
-
         var req = ControlRequest(command: command)
         // Only an explicit --project sets the target project. The implicit project is
         // derived server-side from the session id: COPILOT_PROJECTS_PROJECT goes stale
         // when a tab is dragged to another project, but the session id never does.
         req.projectId = parsed.flags["project"]
-        req.sessionId = parsed.flags["session"] ?? Env.sessionId(env)
+        req.sessionId = parsed.flags["session"] ?? Env.sessionId(environment)
 
         switch command {
         case "set-status":
@@ -114,6 +115,13 @@ public enum CLIMain {
                 req.timestamp = timestamp
             }
             req.source = parsed.flags["source"]
+            if let rawNotification = parsed.flags["notification"] {
+                guard let notification = StatusNotificationKind(rawValue: rawNotification) else {
+                    fail("--notification must be elicitation, permission, or completed")
+                    return 1
+                }
+                req.notification = notification
+            }
         case "notify":
             req.title = parsed.flags["title"] ?? parsed.positionals.first
             req.body = parsed.flags["body"]
@@ -145,7 +153,8 @@ public enum CLIMain {
         }
 
         do {
-            let resp = try ControlClient().send(req)
+            let socketPath = Env.socket(environment) ?? Paths.socketPath
+            let resp = try ControlClient(socketPath: socketPath).send(req)
             if let text = resp.text, !text.isEmpty {
                 print(text)
             }
@@ -173,7 +182,7 @@ public enum CLIMain {
         }
     }
 
-    public static var versionString: String {
+    public static var versionNumber: String {
         let direct = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         let executable = URL(fileURLWithPath: CommandLine.arguments.first ?? "")
             .resolvingSymlinksInPath()
@@ -183,8 +192,11 @@ public enum CLIMain {
             .deletingLastPathComponent()   // Contents -> app bundle
         let enclosing = Bundle(url: appURL)?
             .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        let version = direct ?? enclosing
-        return "Copilot Projects \(version ?? "development")"
+        return direct ?? enclosing ?? "development"
+    }
+
+    public static var versionString: String {
+        "Copilot Projects \(versionNumber)"
     }
 
     // MARK: - diagnostics
@@ -407,7 +419,8 @@ public enum CLIMain {
           copilot-projects                         Launch the app
           copilot-projects set-status <state>      Set status of the current session
                                               state: idle | running | waiting
-              [--text "..."] [--timestamp MS] [--source NAME] [--session ID] [--project ID]
+              [--text "..."] [--timestamp MS] [--source NAME]
+              [--notification elicitation|permission|completed] [--session ID] [--project ID]
           copilot-projects notify <title> [body]   Post a macOS notification
               [--title T] [--body B] [--session ID] [--project ID]
           copilot-projects list-projects           List projects and their status

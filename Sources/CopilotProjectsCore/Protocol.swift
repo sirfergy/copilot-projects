@@ -7,6 +7,12 @@ public enum SessionStatus: String, Codable, Sendable, CaseIterable {
     case waiting   // waiting for user input
 }
 
+public enum StatusNotificationKind: String, Codable, Sendable {
+    case elicitation
+    case permission
+    case completed
+}
+
 /// A single request sent over the control socket as one line of JSON.
 public struct ControlRequest: Codable, Sendable {
     public var command: String
@@ -16,6 +22,7 @@ public struct ControlRequest: Codable, Sendable {
     public var timestamp: Int64?
     public var source: String?
     public var text: String?
+    public var notification: StatusNotificationKind?
     public var title: String?
     public var body: String?
     public var name: String?

@@ -23,8 +23,9 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 - **Status:** each session reports `idle` / `running` / `waiting`. Running and waiting
   counts appear in the sidebar; a blue dot marks work that finished while you were away.
   With the Copilot CLI hooks installed (below), this is driven automatically.
-- **Notifications:** post a native macOS banner from any session; clicking it focuses the
-  originating project/session. Unread sessions get a bell badge + a Dock badge count.
+- **Notifications:** native macOS banners identify the originating project/session and
+  automatically alert when Copilot has a question, needs permission, or finishes a task.
+  Clicking one focuses that session. Unread sessions get a bell badge + a Dock badge count.
 - **Control socket + CLI:** the same `copilot-projects` binary is also a CLI that talks to the
   running app over a Unix socket — ideal for agent hooks.
 - **Resumable sessions:** each terminal runs under a bundled [dtach](https://github.com/crigler/dtach),
@@ -148,12 +149,18 @@ coexists with other integrations (e.g. cmux) and is safe to leave installed glob
 it with `copilot-projects install-hooks` / `uninstall-hooks`. Start a new Copilot CLI session to
 pick up changes.
 
+While the app is running, the first elicitation or permission prompt and each successfully
+completed turn also post a native macOS banner. The banner includes the project and session name,
+and clicking it focuses the originating session. Repeated waiting events are suppressed, as are
+completion alerts for aborted turns; completion waits for the authoritative `session_idle` event
+after background work drains.
+
 To mirror waiting and completed states to ntfy, install an executable helper at
 `~/.copilot/hooks/copilot-projects-ntfy.sh` or set `COPILOT_PROJECTS_NTFY_NOTIFIER` to another
 path. The hook invokes it asynchronously as `<helper> waiting|completed <session-id>`. Completed
 notifications require an active turn and are suppressed for aborted turns. The helper owns
 credentials and message content; use `copilot-projects://focus?session=<session-id>` as its click
-target.
+target. Native and ntfy notifications are independent, so configuring the helper enables both.
 
 **Status precedence.** Hook events are authoritative. Newer CLI versions emit `session_idle`
 only after the root turn and all background work drain, including `aborted: true` for Esc-cancel.

@@ -116,7 +116,8 @@ final class AppModel: ObservableObject {
                 status: status,
                 text: text,
                 timestamp: request.timestamp,
-                source: request.source
+                source: request.source,
+                notification: request.notification
             )
             return .success()
         },
@@ -127,7 +128,7 @@ final class AppModel: ObservableObject {
                     title: title, body: body)
             } else {
                 self.notifications?.post(
-                    title: title, body: body,
+                    title: title, subtitle: nil, body: body,
                     projectId: request.projectId, sessionId: request.sessionId)
             }
             return .success()
@@ -708,7 +709,8 @@ final class AppModel: ObservableObject {
         status: SessionStatus,
         text: String?,
         timestamp: Int64? = nil,
-        source: String? = nil
+        source: String? = nil,
+        notification: StatusNotificationKind? = nil
     ) {
         guard let loc = locateIndex(sessionId) else { return }
         guard statusEventClock.shouldApply(sessionId: sessionId, timestamp: timestamp) else { return }
@@ -720,6 +722,7 @@ final class AppModel: ObservableObject {
                 || projects[loc.p].sessions[loc.s].statusText != text
                 || clearsBackgroundAgents
                 || resumesBackgroundTracking
+                || notification != nil
         else { return }
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
@@ -752,6 +755,14 @@ final class AppModel: ObservableObject {
         if status == .idle, previous == .running || previous == .waiting,
            !isVisible(projectIndex: loc.p, sessionIndex: loc.s) {
             projects[loc.p].sessions[loc.s].finishedUnseen = true
+        }
+        if let notification {
+            postNotification(
+                projectId: projects[loc.p].id,
+                sessionId: sessionId,
+                title: notification.title,
+                body: nil
+            )
         }
     }
 
@@ -917,6 +928,7 @@ final class AppModel: ObservableObject {
     }
 
     func postNotification(projectId: String, sessionId: String, title: String, body: String?) {
+        var subtitle: String?
         if let loc = locateIndex(sessionId) {
             let visible = NSApp.isActive
                 && selectedProjectId == projectId
@@ -924,9 +936,26 @@ final class AppModel: ObservableObject {
             if !visible {
                 projects[loc.p].sessions[loc.s].hasUnread = true
             }
+            subtitle = Self.notificationSubtitle(
+                projectName: projects[loc.p].name,
+                sessionTitle: projects[loc.p].sessions[loc.s].title
+            )
         }
-        notifications?.post(title: title, body: body, projectId: projectId, sessionId: sessionId)
+        notifications?.post(
+            title: title,
+            subtitle: subtitle,
+            body: body,
+            projectId: projectId,
+            sessionId: sessionId
+        )
         updateDockBadge()
+    }
+
+    nonisolated static func notificationSubtitle(
+        projectName: String,
+        sessionTitle: String
+    ) -> String {
+        "\(projectName) · \(sessionTitle)"
     }
 
     func focus(projectId: String?, sessionId: String?) {

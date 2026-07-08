@@ -78,6 +78,7 @@ public enum CopilotHooks {
         args=(set-status "$1")
         [ -z "${2:-}" ] || args+=(--timestamp "$2")
         [ -z "${3:-}" ] || args+=(--source "$3")
+        [ -z "${4:-}" ] || args+=(--notification "$4")
         "$cli" "${args[@]}" >/dev/null 2>&1 || true
       fi
     }
@@ -98,11 +99,12 @@ public enum CopilotHooks {
         | head -1 \
         | sed -E 's/.*:[[:space:]]*//'
     }
-    # The agent is blocked on the user when the CLI raises an elicitation
-    # (the ask_user tool) or a permission prompt. Those don't fire tool hooks —
-    # they arrive via the `notification` hook, tagged with a notification_type.
-    is_input_wait() {
-      printf '%s' "$1" | grep -qE '"notification_type"[[:space:]]*:[[:space:]]*"(elicitation_dialog|permission_prompt)"'
+    input_notification_kind() {
+      if printf '%s' "$1" | grep -qE '"notification_type"[[:space:]]*:[[:space:]]*"elicitation_dialog"'; then
+        printf 'elicitation'
+      elif printf '%s' "$1" | grep -qE '"notification_type"[[:space:]]*:[[:space:]]*"permission_prompt"'; then
+        printf 'permission'
+      fi
     }
     is_session_idle() {
       printf '%s' "$1" | grep -qE '"notification_type"[[:space:]]*:[[:space:]]*"session_idle"'
@@ -176,14 +178,24 @@ public enum CopilotHooks {
           had_active_turn=0
           [ ! -f "$active_turn" ] || had_active_turn=1
           rm -f "$active_turn" 2>/dev/null || true
-          status idle "$timestamp" session-idle
+          notification=""
           if [ "$had_active_turn" -eq 1 ] && ! is_aborted "$payload"; then
+            notification="completed"
+          fi
+          status idle "$timestamp" session-idle "$notification"
+          if [ -n "$notification" ]; then
             notify_ntfy completed
           fi
-        elif is_input_wait "$payload"; then
+        else
+          notification="$(input_notification_kind "$payload")"
+          [ -n "$notification" ] || { emit; exit 0; }
           previous_status="$(current_status)"
-          status waiting "$timestamp"
-          [ "$previous_status" = "waiting" ] || notify_ntfy waiting
+          if [ "$previous_status" = "waiting" ]; then
+            status waiting "$timestamp"
+          else
+            status waiting "$timestamp" "" "$notification"
+            notify_ntfy waiting
+          fi
         fi
         ;;
       end)
