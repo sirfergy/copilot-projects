@@ -222,7 +222,7 @@ final class AppLogicTests: XCTestCase {
             notifier: notifier,
             notifierCapture: notifierCapture
         )
-        XCTAssertFalse(FileManager.default.fileExists(atPath: notifierCapture.path))
+        XCTAssertFalse(waitForFile(notifierCapture, toContain: tabId))
 
         try runHook(
             hookURL: hookURL,
@@ -295,8 +295,7 @@ final class AppLogicTests: XCTestCase {
             notifier: notifier,
             notifierCapture: notifierCapture
         )
-        usleep(100_000)
-        XCTAssertEqual(try String(contentsOf: notifierCapture, encoding: .utf8), beforeAbort)
+        XCTAssertFalse(waitForFile(notifierCapture, toDifferFrom: beforeAbort))
     }
 
     func testScrollbarGutterStrippingKeepsAdjacentContent() {
@@ -517,6 +516,19 @@ final class AppLogicTests: XCTestCase {
         repeat {
             if let contents = try? String(contentsOf: url, encoding: .utf8),
                contents.contains(expected)
+            {
+                return true
+            }
+            usleep(10_000)
+        } while Date() < deadline
+        return false
+    }
+
+    private func waitForFile(_ url: URL, toDifferFrom expected: String) -> Bool {
+        let deadline = Date().addingTimeInterval(1)
+        repeat {
+            if let contents = try? String(contentsOf: url, encoding: .utf8),
+               contents != expected
             {
                 return true
             }
