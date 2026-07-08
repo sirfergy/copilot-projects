@@ -168,7 +168,7 @@ final class AppModel: ObservableObject {
     private var stateRecoveryMessage: String?
     private var didPresentStateMessage = false
     private var server: ControlServer?
-    private weak var notifications: NotificationManager?
+    private weak var notifications: (any NotificationPosting)?
     private var saveWork: DispatchWorkItem?
     private(set) var isTerminating = false
 
@@ -178,6 +178,8 @@ final class AppModel: ObservableObject {
     private var activityTracker = ActivityTracker()
     private var statusEventClock = StatusEventClock()
     private var backgroundAgentsSuppressed: Set<String> = []
+    private var completionPending: Set<String> = []
+    private let completionNotificationDelayNanoseconds: UInt64
 
     /// Sessions hosting a live agent (refreshed by the liveness reconciler). Used
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.
@@ -203,14 +205,18 @@ final class AppModel: ObservableObject {
         return (env["COPILOT_PROJECTS_LIVENESS"] ?? env["COPILOT_MUX_LIVENESS"]) != "0"
     }
 
-    init(stateRepository: StateRepository = StateRepository()) {
+    init(
+        stateRepository: StateRepository = StateRepository(),
+        completionNotificationDelayNanoseconds: UInt64 = 1_000_000_000
+    ) {
         self.stateRepository = stateRepository
+        self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
         load()
     }
 
     // MARK: - lifecycle wiring
 
-    func attach(notifications: NotificationManager) {
+    func attach(notifications: any NotificationPosting) {
         self.notifications = notifications
     }
 
@@ -490,6 +496,7 @@ final class AppModel: ObservableObject {
         controllers[sid] = nil
         statusEventClock.reset(sessionId: sid)
         backgroundAgentsSuppressed.remove(sid)
+        completionPending.remove(sid)
         let closedIndex = projects[pi].sessions.firstIndex { $0.id == sid }
         let wasSelected = projects[pi].selectedSessionId == sid
         projects[pi].sessions.removeAll { $0.id == sid }
@@ -568,6 +575,7 @@ final class AppModel: ObservableObject {
             controllers[session.id]?.terminate()
             controllers[session.id] = nil
             backgroundAgentsSuppressed.remove(session.id)
+            completionPending.remove(session.id)
         }
         projects.remove(at: pi)
         if selectedProjectId == pid {
@@ -716,6 +724,8 @@ final class AppModel: ObservableObject {
         guard statusEventClock.shouldApply(sessionId: sessionId, timestamp: timestamp) else { return }
         let previous = projects[loc.p].sessions[loc.s].status
         let clearsBackgroundAgents = status == .idle && source == "session-idle"
+        let hasCompletionSignal = status == .idle
+            && (source == "agent-stop" || notification == .completed)
         let clearsFinishedUnseen = (status == .running || status == .waiting)
             && projects[loc.p].sessions[loc.s].finishedUnseen
         let resumesBackgroundTracking = (status == .running || status == .waiting)
@@ -726,12 +736,21 @@ final class AppModel: ObservableObject {
                 || clearsFinishedUnseen
                 || resumesBackgroundTracking
                 || notification != nil
+                || hasCompletionSignal
         else { return }
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
         if status == .running || status == .waiting {
             projects[loc.p].sessions[loc.s].finishedUnseen = false
+            projects[loc.p].sessions[loc.s].turnCompleted = false
             backgroundAgentsSuppressed.remove(sessionId)
+            completionPending.remove(sessionId)
+        }
+        if hasCompletionSignal {
+            completionPending.insert(sessionId)
+        }
+        if status == .idle && source == "session-idle" && notification != .completed {
+            completionPending.remove(sessionId)
         }
         if timestamp == nil {
             let now = SessionArtifacts.currentStatusTimestamp()
@@ -746,12 +765,8 @@ final class AppModel: ObservableObject {
         if status == .idle {
             activityTracker.reset(sessionId: sessionId)
             if source == "session-idle" {
-                projects[loc.p].sessions[loc.s].backgroundAgentsActive = false
+                setBackgroundAgentsActive(sessionId: sessionId, active: false)
                 backgroundAgentsSuppressed.insert(sessionId)
-                SessionArtifacts.setBackgroundAgentsActive(
-                    sessionId: sessionId,
-                    active: false
-                )
             }
         }
         // The agent just went active → idle. If you're not currently looking at this
@@ -760,7 +775,18 @@ final class AppModel: ObservableObject {
            !isVisible(projectIndex: loc.p, sessionIndex: loc.s) {
             projects[loc.p].sessions[loc.s].finishedUnseen = true
         }
-        if let notification {
+        if hasCompletionSignal {
+            if source == "agent-stop" {
+                let delay = completionNotificationDelayNanoseconds
+                Task { @MainActor [weak self] in
+                    // Allow one footer scan for the background-agent OSC title to arrive.
+                    try? await Task.sleep(nanoseconds: delay)
+                    self?.postCompletionIfReady(sessionId: sessionId)
+                }
+            } else {
+                postCompletionIfReady(sessionId: sessionId)
+            }
+        } else if let notification, notification != .completed {
             postNotification(
                 projectId: projects[loc.p].id,
                 sessionId: sessionId,
@@ -827,7 +853,10 @@ final class AppModel: ObservableObject {
                 let sid = projects[pi].sessions[si].id
                 guard let controller = controllers[sid] else { continue }
                 if status == .idle {
-                    guard liveAgentSessions.contains(sid) else {
+                    guard ActivityTracker.canPromoteIdleFromFooter(
+                        backgroundAgentsActive: projects[pi].sessions[si].backgroundAgentsActive,
+                        hasLiveAgent: liveAgentSessions.contains(sid)
+                    ) else {
                         activityTracker.reset(sessionId: sid)
                         continue
                     }
@@ -899,12 +928,8 @@ final class AppModel: ObservableObject {
                 let sid = projects[pi].sessions[si].id
                 if projects[pi].sessions[si].backgroundAgentsActive,
                    !liveAgentSessions.contains(sid) {
-                    projects[pi].sessions[si].backgroundAgentsActive = false
+                    setBackgroundAgentsActive(sessionId: sid, active: false)
                     backgroundAgentsSuppressed.insert(sid)
-                    SessionArtifacts.setBackgroundAgentsActive(
-                        sessionId: sid,
-                        active: false
-                    )
                 }
             }
         }
@@ -953,6 +978,36 @@ final class AppModel: ObservableObject {
             sessionId: sessionId
         )
         updateDockBadge()
+    }
+
+    private func postCompletionIfReady(sessionId: String) {
+        guard completionPending.contains(sessionId) else { return }
+        guard let loc = locateIndex(sessionId) else {
+            completionPending.remove(sessionId)
+            return
+        }
+        guard !projects[loc.p].sessions[loc.s].backgroundAgentsActive else { return }
+        completionPending.remove(sessionId)
+
+        guard !projects[loc.p].sessions[loc.s].turnCompleted else { return }
+        projects[loc.p].sessions[loc.s].turnCompleted = true
+
+        postNotification(
+            projectId: projects[loc.p].id,
+            sessionId: sessionId,
+            title: StatusNotificationKind.completed.title,
+            body: nil
+        )
+    }
+
+    func setBackgroundAgentsActive(sessionId: String, active: Bool) {
+        guard let loc = locateIndex(sessionId) else { return }
+        guard projects[loc.p].sessions[loc.s].backgroundAgentsActive != active else { return }
+        projects[loc.p].sessions[loc.s].backgroundAgentsActive = active
+        SessionArtifacts.setBackgroundAgentsActive(sessionId: sessionId, active: active)
+        if !active {
+            postCompletionIfReady(sessionId: sessionId)
+        }
     }
 
     nonisolated static func notificationSubtitle(
@@ -1022,13 +1077,7 @@ final class AppModel: ObservableObject {
         if backgroundAgents, backgroundAgentsSuppressed.contains(sessionId) {
             return
         }
-        if projects[loc.p].sessions[loc.s].backgroundAgentsActive != backgroundAgents {
-            projects[loc.p].sessions[loc.s].backgroundAgentsActive = backgroundAgents
-            SessionArtifacts.setBackgroundAgentsActive(
-                sessionId: sessionId,
-                active: backgroundAgents
-            )
-        }
+        setBackgroundAgentsActive(sessionId: sessionId, active: backgroundAgents)
         guard !backgroundAgents else { return }
         if projects[loc.p].sessions[loc.s].title != trimmed {
             projects[loc.p].sessions[loc.s].title = trimmed

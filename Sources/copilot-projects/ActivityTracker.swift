@@ -84,6 +84,13 @@ struct ActivityTracker {
     ) -> Bool {
         (currentStatus == .running || currentStatus == .waiting) && !hasLiveAgent
     }
+
+    static func canPromoteIdleFromFooter(
+        backgroundAgentsActive: Bool,
+        hasLiveAgent: Bool
+    ) -> Bool {
+        !backgroundAgentsActive && hasLiveAgent
+    }
 }
 
 struct StatusEventClock {

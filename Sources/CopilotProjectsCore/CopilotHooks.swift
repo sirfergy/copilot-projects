@@ -86,7 +86,18 @@ public enum CopilotHooks {
     }
     mark_turn_active() {
       mkdir -p "$state_dir/sessions" 2>/dev/null || true
+      rm -f "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null || true
       : > "$state_dir/sessions/$session_id.active-turn"
+    }
+    consume_active_turn() {
+      rm "$state_dir/sessions/$session_id.active-turn" 2>/dev/null
+    }
+    claim_active_turn_for_agent_stop() {
+      mv "$state_dir/sessions/$session_id.active-turn" \
+        "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null
+    }
+    consume_agent_stop_completion() {
+      rm "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null
     }
     payload_timestamp() {
       printf '%s' "$1" \
@@ -138,6 +149,7 @@ public enum CopilotHooks {
         rm -f "$state_dir/sessions/$session_id.session-idle-hook" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
+        rm -f "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null || true
         status idle "$(payload_timestamp "$payload")"
         ;;
       running)
@@ -147,7 +159,15 @@ public enum CopilotHooks {
         ;;
       idle)
         payload="$(cat 2>/dev/null || true)"
-        status idle "$(payload_timestamp "$payload")"
+        source=""
+        if claim_active_turn_for_agent_stop; then
+          if is_aborted "$payload"; then
+            consume_agent_stop_completion || true
+          else
+            source="agent-stop"
+          fi
+        fi
+        status idle "$(payload_timestamp "$payload")" "$source"
         ;;
       pre)
         payload="$(cat 2>/dev/null || true)"
@@ -171,8 +191,11 @@ public enum CopilotHooks {
           : > "$state_dir/sessions/$session_id.session-idle-hook"
           rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
           had_active_turn=0
-          [ ! -f "$active_turn" ] || had_active_turn=1
-          rm -f "$active_turn" 2>/dev/null || true
+          if consume_active_turn; then
+            had_active_turn=1
+          elif consume_agent_stop_completion; then
+            had_active_turn=1
+          fi
           notification=""
           if [ "$had_active_turn" -eq 1 ] && ! is_aborted "$payload"; then
             notification="completed"
@@ -200,6 +223,7 @@ public enum CopilotHooks {
         rm -f "$state_dir/sessions/$session_id.session-idle-hook" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
+        rm -f "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null || true
         status idle "$(payload_timestamp "$payload")"
         ;;
     esac

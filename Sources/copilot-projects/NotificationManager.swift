@@ -12,10 +12,21 @@ extension StatusNotificationKind {
     }
 }
 
+@MainActor
+protocol NotificationPosting: AnyObject {
+    func post(
+        title: String,
+        subtitle: String?,
+        body: String?,
+        projectId: String?,
+        sessionId: String?
+    )
+}
+
 /// Thin wrapper over UNUserNotificationCenter. Posts banners and routes taps back
 /// to the app via `onActivate(projectId, sessionId)`.
 @MainActor
-final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
+final class NotificationManager: NSObject, NotificationPosting, UNUserNotificationCenterDelegate {
     var onActivate: ((String?, String?) -> Void)?
 
     func requestAuth() {

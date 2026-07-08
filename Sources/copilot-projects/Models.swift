@@ -15,6 +15,7 @@ struct Session: Identifiable, Codable, Equatable {
     /// The agent went active → idle while you weren't looking at this session, so it
     /// has finished and is waiting for you to come back. Cleared when you view it.
     var finishedUnseen: Bool = false
+    var turnCompleted: Bool = false
     /// copilot is waiting on its own background agents (it reports this via a
     /// "Copilot: Waiting for background agents" terminal title). Surfaced as a tab/
     /// sidebar indicator instead of letting that title clobber the tab's real name.

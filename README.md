@@ -152,8 +152,9 @@ pick up changes.
 While the app is running, the first elicitation or permission prompt and each successfully
 completed turn also post a native macOS banner. The banner includes the project and session name,
 and clicking it focuses the originating session. Repeated waiting events are suppressed, as are
-completion alerts for aborted turns; completion waits for the authoritative `session_idle` event
-after background work drains.
+completion alerts for aborted turns. `agentStop` signals completion on current CLI versions; the
+app holds the banner while background agents remain active, and a later `session_idle` clears that
+state without posting a duplicate.
 
 **Status precedence.** Hook events are authoritative. Newer CLI versions emit `session_idle`
 only after the root turn and all background work drain, including `aborted: true` for Esc-cancel.
