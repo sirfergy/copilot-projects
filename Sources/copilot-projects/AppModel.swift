@@ -1053,6 +1053,9 @@ final class AppModel: ObservableObject {
         status: SessionStatus,
         activity: FooterActivity?
     ) -> Bool {
+        // Footer scraping is advisory: only affirmative working evidence blocks an
+        // otherwise-authoritative idle hook. Unknown/unattached footers must not
+        // strand completion forever.
         status == .idle && activity != .working
     }
 
