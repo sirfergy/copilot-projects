@@ -180,6 +180,7 @@ final class AppModel: ObservableObject {
     private var backgroundAgentsSuppressed: Set<String> = []
     private var completionPending: Set<String> = []
     private let completionNotificationDelayNanoseconds: UInt64
+    private let isAppActive: @MainActor () -> Bool
 
     /// Sessions hosting a live agent (refreshed by the liveness reconciler). Used
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.
@@ -207,10 +208,12 @@ final class AppModel: ObservableObject {
 
     init(
         stateRepository: StateRepository = StateRepository(),
-        completionNotificationDelayNanoseconds: UInt64 = 1_000_000_000
+        completionNotificationDelayNanoseconds: UInt64 = 1_000_000_000,
+        isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive }
     ) {
         self.stateRepository = stateRepository
         self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
+        self.isAppActive = isAppActive
         load()
     }
 
@@ -800,7 +803,7 @@ final class AppModel: ObservableObject {
     /// tab selected). Used to decide if a just-finished session needs an attention dot.
     private func isVisible(projectIndex pi: Int, sessionIndex si: Int) -> Bool {
         Self.isSessionVisible(
-            appIsActive: NSApp.isActive,
+            appIsActive: isAppActive(),
             selectedProjectId: selectedProjectId,
             projectId: projects[pi].id,
             selectedSessionId: projects[pi].selectedSessionId,

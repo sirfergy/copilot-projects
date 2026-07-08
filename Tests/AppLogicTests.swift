@@ -311,6 +311,60 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testVisibleCompletionPostsNoNotificationAcrossAgentStopAndSessionIdle() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(title: "visible", cwd: "/tmp")
+        let project = Project(
+            name: "selected",
+            cwd: "/tmp",
+            sessions: [session],
+            selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+
+        let model = AppModel(
+            stateRepository: repository,
+            completionNotificationDelayNanoseconds: 10_000_000,
+            isAppActive: { true }
+        )
+        let notifications = NotificationSpy()
+        model.attach(notifications: notifications)
+        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 100)
+        model.setStatus(
+            sessionId: session.id,
+            status: .idle,
+            text: nil,
+            timestamp: 110,
+            source: "agent-stop"
+        )
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(model.projects[0].sessions[0].turnCompleted)
+        XCTAssertFalse(model.projects[0].sessions[0].hasUnread)
+        XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
+        XCTAssertTrue(notifications.calls.isEmpty)
+
+        model.setStatus(
+            sessionId: session.id,
+            status: .idle,
+            text: nil,
+            timestamp: 111,
+            source: "session-idle",
+            notification: .completed
+        )
+        XCTAssertTrue(notifications.calls.isEmpty)
+    }
+
+    @MainActor
     private final class NotificationSpy: NotificationPosting {
         struct Call: Equatable {
             let title: String
