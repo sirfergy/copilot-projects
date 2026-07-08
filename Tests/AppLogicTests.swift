@@ -1,6 +1,7 @@
 import XCTest
 @testable import copilot_projects
 import CopilotProjectsCore
+import AppKit
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -53,6 +54,44 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(clock.shouldApply(sessionId: sessionId, timestamp: 100))
         XCTAssertTrue(clock.shouldApply(sessionId: sessionId, timestamp: 300))
         XCTAssertTrue(clock.shouldApply(sessionId: sessionId, timestamp: nil))
+    }
+
+    @MainActor
+    func testActiveStatusClearsStaleReadyMarker() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let targetSession = Session(title: "target", cwd: "/tmp")
+        let targetProject = Project(name: "target", cwd: "/tmp", sessions: [targetSession])
+        let selectedProject = Project(name: "selected", cwd: "/tmp")
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [targetProject, selectedProject],
+            selectedProjectId: selectedProject.id
+        ))
+
+        let model = AppModel(stateRepository: repository)
+        model.setStatus(sessionId: targetSession.id, status: .running, text: nil, timestamp: 100)
+        model.setStatus(sessionId: targetSession.id, status: .idle, text: nil, timestamp: 200)
+
+        XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
+        XCTAssertEqual(model.totalReady, 1)
+
+        model.setStatus(sessionId: targetSession.id, status: .running, text: nil, timestamp: 300)
+
+        XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
+        XCTAssertEqual(model.totalReady, 0)
+
+        model.setStatus(sessionId: targetSession.id, status: .idle, text: nil, timestamp: 400)
+        XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
+
+        model.setStatus(sessionId: targetSession.id, status: .waiting, text: nil, timestamp: 500)
+
+        XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
+        XCTAssertEqual(model.totalReady, 0)
     }
 
     func testFocusDeepLinkParsing() throws {
