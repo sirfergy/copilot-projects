@@ -747,7 +747,9 @@ final class AppModel: ObservableObject {
             projects[loc.p].sessions[loc.s].finishedUnseen = false
             projects[loc.p].sessions[loc.s].turnCompleted = false
             backgroundAgentsSuppressed.remove(sessionId)
-            completionPending.remove(sessionId)
+            if Self.shouldClearPendingCompletion(status: status, source: source) {
+                completionPending.remove(sessionId)
+            }
         }
         if hasCompletionSignal {
             completionPending.insert(sessionId)
@@ -899,6 +901,7 @@ final class AppModel: ObservableObject {
                     activity: activity
                 ) {
                     clearStatusToIdle(pi: pi, si: si, markFinished: true)
+                    postCompletionIfReady(sessionId: sid)
                 }
             }
         }
@@ -1051,6 +1054,13 @@ final class AppModel: ObservableObject {
         activity: FooterActivity?
     ) -> Bool {
         status == .idle && activity != .working
+    }
+
+    nonisolated static func shouldClearPendingCompletion(
+        status: SessionStatus,
+        source: String?
+    ) -> Bool {
+        (status == .running || status == .waiting) && source != "footer"
     }
 
     func focus(projectId: String?, sessionId: String?) {

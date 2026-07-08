@@ -794,6 +794,11 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(AppModel.canPostCompletion(status: .running, activity: .idle))
         XCTAssertFalse(AppModel.canPostCompletion(status: .idle, activity: .working))
         XCTAssertTrue(AppModel.canPostCompletion(status: .idle, activity: .idle))
+        XCTAssertTrue(AppModel.canPostCompletion(status: .idle, activity: .unknown))
+        XCTAssertTrue(AppModel.canPostCompletion(status: .idle, activity: nil))
+        XCTAssertFalse(AppModel.shouldClearPendingCompletion(status: .running, source: "footer"))
+        XCTAssertTrue(AppModel.shouldClearPendingCompletion(status: .running, source: nil))
+        XCTAssertTrue(AppModel.shouldClearPendingCompletion(status: .waiting, source: "hook"))
     }
 
     func testScrollbarGutterStrippingKeepsAdjacentContent() {
