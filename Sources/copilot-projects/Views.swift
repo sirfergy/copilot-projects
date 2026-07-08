@@ -198,7 +198,7 @@ struct ProjectRow: View {
             if project.hasBackgroundAgents {
                 BackgroundAgentsBadge()
             } else {
-                ProjectDotView(state: project.dotState)
+                Color.clear.frame(width: 9, height: 9)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name).lineLimit(1)
@@ -299,39 +299,8 @@ struct SessionTabIndicator: View {
     }
 }
 
-/// The sidebar's per-project dot — blue once a session has finished and is unviewed
-/// ("ready for you"). Anything else shows no dot; running and waiting are surfaced
-/// by the color-coded subtitle counts instead. The 9pt frame is always reserved so
-/// project names stay aligned whether or not a dot is shown.
-struct ProjectDotView: View {
-    let state: ProjectDotState
-
-    var body: some View {
-        Circle()
-            .fill(color ?? .clear)
-            .frame(width: 9, height: 9)
-            .overlay(Circle().stroke(color == nil ? .clear : .black.opacity(0.15), lineWidth: 0.5))
-            .help(help)
-    }
-
-    private var color: Color? {
-        switch state {
-        case .idle: return nil
-        case .finished: return .blue
-        }
-    }
-
-    private var help: String {
-        switch state {
-        case .idle: return "idle"
-        case .finished: return "finished — ready for you"
-        }
-    }
-}
-
 /// Shown on a tab and its project's sidebar row while copilot is waiting on its own
-/// background agents. Sized to the same 9pt slot as the status dot so swapping it in
-/// doesn't shift the layout. Takes priority over the status indicator while active.
+/// background agents. Sized to the reserved 9pt slot so the project name stays aligned.
 struct BackgroundAgentsBadge: View {
     var body: some View {
         Image(systemName: "person.2.fill")

@@ -21,8 +21,8 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   (prev) / **`⌃1`–`⌃9`** / `⌘⇧[` / `⌘⇧]`, close with `⌘W` or the tab's ✕. Background tabs keep
   running. Hold **⌘** (projects) or **⌃** (tabs) to see the number on each.
 - **Status:** each session reports `idle` / `running` / `waiting`. Running and waiting
-  counts appear in the sidebar; a blue dot marks work that finished while you were away.
-  With the Copilot CLI hooks installed (below), this is driven automatically.
+  counts appear in the sidebar; a blue dot on the session tab marks work that finished
+  while you were away. With the Copilot CLI hooks installed (below), this is driven automatically.
 - **Notifications:** native macOS banners identify the originating project/session and
   automatically alert when Copilot has a question, needs permission, or finishes a task.
   Clicking one focuses that session. Unread sessions get a bell badge + a Dock badge count.

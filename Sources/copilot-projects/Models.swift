@@ -59,26 +59,11 @@ extension Project {
         return .idle
     }
 
-    /// What the sidebar dot shows. The dot lights up only when a project has a
-    /// session that finished and you haven't viewed it yet ("ready for you").
-    /// Running and waiting are conveyed by the color-coded subtitle counts, not the
-    /// dot, so an idle/busy/waiting project stays dot-free.
-    var dotState: ProjectDotState {
-        if sessions.contains(where: { $0.finishedUnseen }) { return .finished }
-        return .idle
-    }
-
     var runningCount: Int { sessions.filter { $0.status == .running }.count }
     var waitingCount: Int { sessions.filter { $0.status == .waiting }.count }
     var backgroundAgentCount: Int { sessions.filter { $0.backgroundAgentsActive }.count }
     var hasUnread: Bool { sessions.contains { $0.hasUnread } }
     var hasBackgroundAgents: Bool { backgroundAgentCount > 0 }
-}
-
-/// The sidebar status dot's meaning (see `Project.dotState`).
-enum ProjectDotState {
-    case idle      // no dot — nothing finished is waiting to be seen
-    case finished  // a session finished and hasn't been viewed yet (blue)
 }
 
 /// On-disk shape of the app state.
