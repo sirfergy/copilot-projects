@@ -64,9 +64,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isPrimaryInstance = true
         model.bootstrapIfNeeded()
         model.startLivenessReconciler()
-        // A test/isolated instance can opt out of mutating the user's CLI + hooks.
         let env = ProcessInfo.processInfo.environment
-        if (env["COPILOT_PROJECTS_NO_INSTALL"] ?? env["COPILOT_MUX_NO_INSTALL"]) != "1" {
+        if Env.shouldInstallGlobalIntegration(env) {
             model.installCLISymlinkIfPossible()
             CopilotHooks.installIfPossible()
         }

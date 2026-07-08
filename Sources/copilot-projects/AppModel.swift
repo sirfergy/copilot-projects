@@ -716,17 +716,21 @@ final class AppModel: ObservableObject {
         guard statusEventClock.shouldApply(sessionId: sessionId, timestamp: timestamp) else { return }
         let previous = projects[loc.p].sessions[loc.s].status
         let clearsBackgroundAgents = status == .idle && source == "session-idle"
+        let clearsFinishedUnseen = (status == .running || status == .waiting)
+            && projects[loc.p].sessions[loc.s].finishedUnseen
         let resumesBackgroundTracking = (status == .running || status == .waiting)
             && backgroundAgentsSuppressed.contains(sessionId)
         guard previous != status
                 || projects[loc.p].sessions[loc.s].statusText != text
                 || clearsBackgroundAgents
+                || clearsFinishedUnseen
                 || resumesBackgroundTracking
                 || notification != nil
         else { return }
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
         if status == .running || status == .waiting {
+            projects[loc.p].sessions[loc.s].finishedUnseen = false
             backgroundAgentsSuppressed.remove(sessionId)
         }
         if timestamp == nil {
