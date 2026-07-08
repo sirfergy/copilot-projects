@@ -186,7 +186,6 @@ public enum CopilotHooks {
         record_cli_session "$payload"
         timestamp="$(payload_timestamp "$payload")"
         if is_session_idle "$payload"; then
-          active_turn="$state_dir/sessions/$session_id.active-turn"
           mkdir -p "$state_dir/sessions" 2>/dev/null || true
           : > "$state_dir/sessions/$session_id.session-idle-hook"
           rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true

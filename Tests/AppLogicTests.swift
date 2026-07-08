@@ -140,6 +140,12 @@ final class AppLogicTests: XCTestCase {
             completionNotificationDelayNanoseconds: 10_000_000
         )
         let notifications = NotificationSpy()
+        let immediateCompletion = expectation(description: "agentStop posts completion")
+        notifications.onPost = { call in
+            if call.sessionId == immediateSession.id {
+                immediateCompletion.fulfill()
+            }
+        }
         model.attach(notifications: notifications)
         model.setStatus(
             sessionId: immediateSession.id,
@@ -154,10 +160,25 @@ final class AppLogicTests: XCTestCase {
             timestamp: 200,
             source: "agent-stop"
         )
-        try await Task.sleep(nanoseconds: 50_000_000)
+        await fulfillment(of: [immediateCompletion], timeout: 1)
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
-        XCTAssertEqual(notifications.completedCount, 1)
+        XCTAssertEqual(notifications.calls, [
+            NotificationSpy.Call(
+                title: StatusNotificationKind.completed.title,
+                subtitle: "target · immediate",
+                body: nil,
+                projectId: targetProject.id,
+                sessionId: immediateSession.id
+            )
+        ])
 
+        let prematureCompletion = expectation(description: "background agents suppress completion")
+        prematureCompletion.isInverted = true
+        notifications.onPost = { call in
+            if call.sessionId == backgroundSession.id {
+                prematureCompletion.fulfill()
+            }
+        }
         model.setBackgroundAgentsActive(sessionId: backgroundSession.id, active: true)
         model.setStatus(
             sessionId: backgroundSession.id,
@@ -172,12 +193,29 @@ final class AppLogicTests: XCTestCase {
             timestamp: 400,
             source: "agent-stop"
         )
-        try await Task.sleep(nanoseconds: 50_000_000)
+        await fulfillment(of: [prematureCompletion], timeout: 0.1)
         XCTAssertFalse(model.projects[0].sessions[1].hasUnread)
+        XCTAssertEqual(notifications.calls.count, 1)
 
+        notifications.onPost = nil
         model.setBackgroundAgentsActive(sessionId: backgroundSession.id, active: false)
         XCTAssertTrue(model.projects[0].sessions[1].hasUnread)
-        XCTAssertEqual(notifications.completedCount, 2)
+        XCTAssertEqual(notifications.calls, [
+            NotificationSpy.Call(
+                title: StatusNotificationKind.completed.title,
+                subtitle: "target · immediate",
+                body: nil,
+                projectId: targetProject.id,
+                sessionId: immediateSession.id
+            ),
+            NotificationSpy.Call(
+                title: StatusNotificationKind.completed.title,
+                subtitle: "target · background",
+                body: nil,
+                projectId: targetProject.id,
+                sessionId: backgroundSession.id
+            )
+        ])
     }
 
     @MainActor
@@ -252,19 +290,38 @@ final class AppLogicTests: XCTestCase {
             source: "agent-stop"
         )
 
-        try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
         XCTAssertTrue(model.projects[0].sessions[1].hasUnread)
-        XCTAssertEqual(notifications.completedCount, 2)
+        XCTAssertEqual(notifications.calls, [
+            NotificationSpy.Call(
+                title: StatusNotificationKind.completed.title,
+                subtitle: "target · agent-stop-first",
+                body: nil,
+                projectId: targetProject.id,
+                sessionId: agentStopFirst.id
+            ),
+            NotificationSpy.Call(
+                title: StatusNotificationKind.completed.title,
+                subtitle: "target · session-idle-first",
+                body: nil,
+                projectId: targetProject.id,
+                sessionId: sessionIdleFirst.id
+            )
+        ])
     }
 
     @MainActor
     private final class NotificationSpy: NotificationPosting {
-        private(set) var titles: [String] = []
-
-        var completedCount: Int {
-            titles.filter { $0 == StatusNotificationKind.completed.title }.count
+        struct Call: Equatable {
+            let title: String
+            let subtitle: String?
+            let body: String?
+            let projectId: String?
+            let sessionId: String?
         }
+
+        private(set) var calls: [Call] = []
+        var onPost: ((Call) -> Void)?
 
         func post(
             title: String,
@@ -273,7 +330,15 @@ final class AppLogicTests: XCTestCase {
             projectId: String?,
             sessionId: String?
         ) {
-            titles.append(title)
+            let call = Call(
+                title: title,
+                subtitle: subtitle,
+                body: body,
+                projectId: projectId,
+                sessionId: sessionId
+            )
+            calls.append(call)
+            onPost?(call)
         }
     }
 
@@ -442,10 +507,12 @@ final class AppLogicTests: XCTestCase {
             bin: bin,
             capture: capture
         )
-        var cliCalls = try String(contentsOf: capture, encoding: .utf8)
-        XCTAssertTrue(cliCalls.contains(
-            "set-status waiting --timestamp 120 --notification elicitation"
-        ))
+        var cliCalls = try cliCallLines(in: capture)
+        XCTAssertEqual(cliCalls, [
+            "set-status idle --timestamp 100",
+            "set-status idle --timestamp 110 --source session-idle",
+            "set-status waiting --timestamp 120 --notification elicitation",
+        ])
 
         try runHook(
             hookURL: hookURL,
@@ -456,8 +523,8 @@ final class AppLogicTests: XCTestCase {
             bin: bin,
             capture: capture
         )
-        cliCalls = try String(contentsOf: capture, encoding: .utf8)
-        XCTAssertFalse(cliCalls.contains("--notification permission"))
+        cliCalls = try cliCallLines(in: capture)
+        XCTAssertEqual(cliCalls.last, "set-status waiting --timestamp 125")
 
         try runHook(
             hookURL: hookURL,
@@ -477,10 +544,11 @@ final class AppLogicTests: XCTestCase {
             bin: bin,
             capture: capture
         )
-        cliCalls = try String(contentsOf: capture, encoding: .utf8)
-        XCTAssertTrue(cliCalls.contains(
-            "set-status idle --timestamp 135 --source agent-stop"
-        ))
+        cliCalls = try cliCallLines(in: capture)
+        XCTAssertEqual(cliCalls.suffix(2), [
+            "set-status running --timestamp 130",
+            "set-status idle --timestamp 135 --source agent-stop",
+        ])
         try runHook(
             hookURL: hookURL,
             action: "notify",
@@ -490,14 +558,12 @@ final class AppLogicTests: XCTestCase {
             bin: bin,
             capture: capture
         )
-        cliCalls = try String(contentsOf: capture, encoding: .utf8)
-        XCTAssertTrue(cliCalls.contains(
-            "set-status idle --timestamp 140 --source session-idle --notification completed"
-        ))
+        cliCalls = try cliCallLines(in: capture)
         XCTAssertEqual(
-            completionSignals(in: cliCalls),
-            2
+            cliCalls.last,
+            "set-status idle --timestamp 140 --source session-idle --notification completed"
         )
+        XCTAssertEqual(completionSignals(in: cliCalls), 2)
 
         try runHook(
             hookURL: hookURL,
@@ -517,10 +583,11 @@ final class AppLogicTests: XCTestCase {
             bin: bin,
             capture: capture
         )
-        cliCalls = try String(contentsOf: capture, encoding: .utf8)
-        XCTAssertTrue(cliCalls.contains(
+        cliCalls = try cliCallLines(in: capture)
+        XCTAssertEqual(
+            cliCalls.last,
             "set-status idle --timestamp 160 --source session-idle --notification completed"
-        ))
+        )
         let completionSignalCount = completionSignals(in: cliCalls)
         XCTAssertEqual(completionSignalCount, 3)
 
@@ -542,8 +609,38 @@ final class AppLogicTests: XCTestCase {
             bin: bin,
             capture: capture
         )
-        cliCalls = try String(contentsOf: capture, encoding: .utf8)
+        cliCalls = try cliCallLines(in: capture)
         XCTAssertEqual(completionSignals(in: cliCalls), completionSignalCount)
+        XCTAssertEqual(
+            cliCalls.last,
+            "set-status idle --timestamp 180 --source session-idle"
+        )
+
+        try runHook(
+            hookURL: hookURL,
+            action: "running",
+            payload: #"{"timestamp":190}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture
+        )
+        try runHook(
+            hookURL: hookURL,
+            action: "idle",
+            payload: #"{"timestamp":195,"aborted":true}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture
+        )
+        cliCalls = try cliCallLines(in: capture)
+        XCTAssertEqual(completionSignals(in: cliCalls), completionSignalCount)
+        XCTAssertEqual(cliCalls.suffix(2), [
+            "set-status running --timestamp 190",
+            "set-status idle --timestamp 195",
+        ])
+        XCTAssertEqual(cliCalls.count, 13)
     }
 
     func testAgentStopAndSessionIdleAtomicallyClaimCompletion() throws {
@@ -599,7 +696,11 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(agentStop.terminationStatus, 0)
         XCTAssertEqual(sessionIdle.terminationStatus, 0)
 
-        let cliCalls = try String(contentsOf: capture, encoding: .utf8)
+        let cliCalls = try cliCallLines(in: capture)
+        XCTAssertEqual(cliCalls.count, 3)
+        XCTAssertTrue(cliCalls.contains("set-status running --timestamp 100"))
+        XCTAssertEqual(cliCalls.filter { $0.contains("--timestamp 110") }.count, 1)
+        XCTAssertEqual(cliCalls.filter { $0.contains("--timestamp 111") }.count, 1)
         XCTAssertTrue((1...2).contains(completionSignals(in: cliCalls)))
         let sessions = root.appendingPathComponent("sessions", isDirectory: true)
         XCTAssertFalse(FileManager.default.fileExists(
@@ -689,6 +790,14 @@ final class AppLogicTests: XCTestCase {
             sessionsDirectory: root
         ))
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    func testCompletionCoordinationStateIsNotPersisted() throws {
+        let session = Session(title: "test", cwd: "/tmp")
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(session)) as? [String: Any]
+        )
+        XCTAssertEqual(Set(object.keys), ["id", "title", "cwd"])
     }
 
     func testStateRepositoryRecoversBackupAndNormalizesSelection() throws {
@@ -874,9 +983,16 @@ final class AppLogicTests: XCTestCase {
         return process
     }
 
-    private func completionSignals(in calls: String) -> Int {
-        calls.components(separatedBy: "--source agent-stop").count - 1
-            + calls.components(separatedBy: "--notification completed").count - 1
+    private func cliCallLines(in capture: URL) throws -> [String] {
+        try String(contentsOf: capture, encoding: .utf8)
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+    }
+
+    private func completionSignals(in calls: [String]) -> Int {
+        calls.filter {
+            $0.contains("--source agent-stop") || $0.contains("--notification completed")
+        }.count
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {
