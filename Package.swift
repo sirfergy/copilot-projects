@@ -12,7 +12,11 @@ let package = Package(
         .package(
             url: "https://github.com/migueldeicaza/SwiftTerm",
             revision: "9adb62463d2264e7403feb7a1471aaf27eaab2f4"
-        )
+        ),
+        .package(
+            url: "https://github.com/apple/swift-nio",
+            revision: "0f54d58bb5db9e064f332e8524150de379d1e51c"
+        ),
     ],
     targets: [
         .target(
@@ -23,7 +27,11 @@ let package = Package(
             name: "copilot-projects",
             dependencies: [
                 "CopilotProjectsCore",
-                .product(name: "SwiftTerm", package: "SwiftTerm")
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio")
             ],
             path: "Sources/copilot-projects"
         ),

@@ -23,6 +23,10 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     private var rendererConfigured = false
     private var surfaceRefreshGeneration = 0
 
+    func sendRemoteInput(_ value: String) {
+        send(Array(value.utf8))
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         configureRendererIfNeeded()

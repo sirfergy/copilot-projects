@@ -13,6 +13,7 @@ struct ControlCommandRouter {
         let focus: (ControlRequest) -> ControlResponse
         let screenshot: (String?) -> ControlResponse
         let diagnostics: () -> String
+        let remote: (String) -> ControlResponse
     }
 
     let actions: Actions
@@ -49,6 +50,8 @@ struct ControlCommandRouter {
             return actions.screenshot(request.path)
         case "diagnostics":
             return .success(actions.diagnostics())
+        case "remote":
+            return actions.remote(request.action ?? "status")
         default:
             return .failure("unknown command: \(request.command)")
         }

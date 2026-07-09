@@ -163,12 +163,16 @@ final class AppModel: ObservableObject {
         screenshot: { _ in
             .failure("screenshot must be handled by the control server")
         },
-        diagnostics: { [unowned self] in self.renderDiagnostics() }
+        diagnostics: { [unowned self] in self.renderDiagnostics() },
+        remote: { [unowned self] action in
+            .success(self.remoteAccess.command(action, model: self))
+        }
     ))
     private var stateLoadFailure: String?
     private var stateRecoveryMessage: String?
     private var didPresentStateMessage = false
     private var server: ControlServer?
+    private let remoteAccess = RemoteAccessController()
     private weak var notifications: (any NotificationPosting)?
     private var saveWork: DispatchWorkItem?
     private(set) var isTerminating = false
@@ -564,6 +568,11 @@ final class AppModel: ObservableObject {
         agentActivityTimer?.invalidate()
         agentActivitySource?.cancel()
         agentActivitySource = nil
+        remoteAccess.stopGateway()
+    }
+
+    func startRemoteAccessIfEnabled() {
+        remoteAccess.startIfEnabled(model: self)
     }
 
     /// Count of sessions with an in-flight agent (running or waiting).
@@ -584,6 +593,59 @@ final class AppModel: ObservableObject {
     }
     var totalReady: Int {
         projects.reduce(0) { $0 + $1.sessions.filter { $0.finishedUnseen }.count }
+    }
+
+    func remoteWorkspaceSnapshot() -> RemoteWorkspaceSnapshot {
+        RemoteWorkspaceSnapshot(
+            projects: projects.map { project in
+                RemoteProjectSnapshot(
+                    id: project.id,
+                    name: project.name,
+                    selectedSessionId: project.selectedSessionId,
+                    sessions: project.sessions.map { session in
+                        RemoteSessionSnapshot(
+                            id: session.id,
+                            title: session.title,
+                            status: session.status.rawValue,
+                            statusText: session.statusText,
+                            unread: session.hasUnread,
+                            ready: session.finishedUnseen,
+                            background: session.hasBackgroundWork,
+                            scheduled: !session.schedules.isEmpty
+                        )
+                    }
+                )
+            },
+            selectedProjectId: selectedProjectId
+        )
+    }
+
+    func remoteScreen(sessionId: String) -> RemoteTerminalScreen? {
+        guard locateIndex(sessionId) != nil,
+              let terminal = controller(for: sessionId)?.terminalView.terminal else {
+            return nil
+        }
+        var lines: [String] = []
+        lines.reserveCapacity(terminal.rows)
+        for row in 0 ..< terminal.rows {
+            var line = ""
+            line.reserveCapacity(terminal.cols)
+            for col in 0 ..< terminal.cols {
+                line.append(terminal.getCharacter(col: col, row: row) ?? " ")
+            }
+            lines.append(line.replacingOccurrences(of: "\u{0}", with: " "))
+        }
+        return RemoteTerminalScreen(
+            sessionId: sessionId,
+            cols: terminal.cols,
+            rows: terminal.rows,
+            lines: lines
+        )
+    }
+
+    func sendRemoteInput(sessionId: String, value: String) {
+        guard value.utf8.count <= 8_192 else { return }
+        controller(for: sessionId)?.terminalView.sendRemoteInput(value)
     }
 
     func closeProject(_ pid: String) {

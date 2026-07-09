@@ -19,6 +19,7 @@ public enum CLIMain {
         "attach",
         "ping",
         "screenshot",
+        "remote",
         "doctor",
         "version", "--version", "-v",
         "install-cli",
@@ -146,6 +147,8 @@ public enum CLIMain {
             var p = parsed.flags["path"] ?? parsed.positionals.first ?? "copilot-projects.png"
             if !p.hasPrefix("/") { p = FileManager.default.currentDirectoryPath + "/" + p }
             req.path = p
+        case "remote":
+            req.action = parsed.positionals.first ?? "status"
         case "focus", "list-projects", "list-status", "ping":
             break
         default:
@@ -433,6 +436,7 @@ public enum CLIMain {
           copilot-projects focus                   Focus a project/session [--project ID] [--session ID]
           copilot-projects ping                    Check the app is reachable
           copilot-projects screenshot [path]       Save a PNG of the app window
+          copilot-projects remote <action>         Remote access: enable | disable | status
           copilot-projects doctor                  Diagnose app/session/runtime state
           copilot-projects version                 Print the installed version
           copilot-projects install-cli [--dir D]   Symlink this binary onto your PATH

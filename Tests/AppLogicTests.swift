@@ -1244,11 +1244,61 @@ final class AppLogicTests: XCTestCase {
             renameProject: { _, _ in .success() },
             focus: { _ in .success() },
             screenshot: { _ in .success() },
-            diagnostics: { "" }
+            diagnostics: { "" },
+            remote: { _ in .success() }
         ))
         XCTAssertFalse(router.handle(ControlRequest(command: "set-status")).ok)
         XCTAssertFalse(didSetStatus)
         XCTAssertFalse(router.handle(ControlRequest(command: "unknown")).ok)
+    }
+
+    func testRemoteRequestAuthFailsClosed() {
+        let auth = RemoteRequestAuth(
+            expectedHost: "mac.tailnet.ts.net",
+            expectedOrigin: "https://mac.tailnet.ts.net",
+            allowedLogin: "user@example.com",
+            pathPrefix: "/copilot-projects-secret"
+        )
+        XCTAssertTrue(auth.authorize(
+            host: "mac.tailnet.ts.net",
+            login: "user@example.com",
+            origin: "https://mac.tailnet.ts.net",
+            requireOrigin: true
+        ))
+        XCTAssertFalse(auth.authorize(
+            host: "mac.tailnet.ts.net",
+            login: nil,
+            origin: "https://mac.tailnet.ts.net",
+            requireOrigin: true
+        ))
+        XCTAssertFalse(auth.authorize(
+            host: "mac.tailnet.ts.net",
+            login: "other@example.com",
+            origin: "https://mac.tailnet.ts.net",
+            requireOrigin: true
+        ))
+        XCTAssertFalse(auth.authorize(
+            host: "mac.tailnet.ts.net",
+            login: "user@example.com",
+            origin: "https://evil.example.com",
+            requireOrigin: true
+        ))
+        XCTAssertEqual(
+            auth.normalizedPath("/copilot-projects-secret/app.js"),
+            "/app.js"
+        )
+        XCTAssertNil(auth.normalizedPath("/ws"))
+    }
+
+    func testRemoteWriterLeaseAllowsOnlyOneRemoteController() {
+        let leases = RemoteWriterLeases()
+        let first = UUID()
+        let second = UUID()
+        XCTAssertTrue(leases.acquire(sessionId: "session", connectionId: first))
+        XCTAssertFalse(leases.acquire(sessionId: "session", connectionId: second))
+        XCTAssertTrue(leases.holds(sessionId: "session", connectionId: first))
+        leases.release(connectionId: first)
+        XCTAssertTrue(leases.acquire(sessionId: "session", connectionId: second))
     }
 
     func testCLIParsesStatusNotificationFlagIntoControlRequest() throws {

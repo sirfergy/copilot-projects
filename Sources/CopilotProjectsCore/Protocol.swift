@@ -28,6 +28,7 @@ public struct ControlRequest: Codable, Sendable {
     public var name: String?
     public var cwd: String?
     public var path: String?
+    public var action: String?
 
     public init(command: String) {
         self.command = command

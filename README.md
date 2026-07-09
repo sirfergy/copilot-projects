@@ -26,6 +26,8 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 - **Schedules + background work:** queued scheduled prompts show a clock with cadence/next-run
   details; active scheduled turns and subagents use a separate background indicator instead of
   making the foreground session look busy.
+- **Private remote control:** expose a mobile web terminal only to your Tailscale identity, with
+  project/session status, live screen snapshots, and a single remote writer lease.
 - **Notifications:** native macOS banners identify the originating project/session and
   automatically alert when Copilot has a question, needs permission, or finishes a task.
   Clicking one focuses that session. Unread sessions get a bell badge + a Dock badge count.
@@ -104,6 +106,9 @@ copilot-projects list-status
 copilot-projects new-project myapp                # name only; --cwd optional
 copilot-projects new-session --project <id> --cwd /tmp
 copilot-projects focus --session <id>             # bring app forward + select
+copilot-projects remote enable                    # enable private Tailscale web access
+copilot-projects remote status                    # print its private URL and state
+copilot-projects remote disable
 copilot-projects doctor                           # diagnose state/session/runtime health
 copilot-projects version                          # print installed version
 copilot-projects install-hooks                    # wire up Copilot CLI status hooks
@@ -111,6 +116,24 @@ copilot-projects help
 ```
 
 Targeting flags (`--project`, `--session`) override the environment defaults.
+
+### Remote access
+
+Remote access is opt-in and requires the Tailscale macOS app to be connected:
+
+```bash
+copilot-projects remote enable
+copilot-projects remote status
+```
+
+The status command prints a private `https://<machine>.<tailnet>.ts.net/...` URL. The app listens
+only on `127.0.0.1`; `tailscale serve` provides tailnet-only HTTPS and verified user identity.
+Requests without the current Tailscale login, expected host/origin, and unguessable route are
+rejected. Funnel is never used.
+
+The mobile client can list projects, select a terminal, and acquire the single remote writer
+lease. The desktop remains independently usable. Remote clients do not resize the PTY because
+dtach shares one terminal size with the desktop.
 
 ### Notification deep links
 

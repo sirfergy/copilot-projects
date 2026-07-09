@@ -65,6 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.bootstrapIfNeeded()
         model.startLivenessReconciler()
         model.startAgentActivityTracking()
+        model.startRemoteAccessIfEnabled()
         let env = ProcessInfo.processInfo.environment
         if Env.shouldInstallGlobalIntegration(env) {
             model.installCLISymlinkIfPossible()
