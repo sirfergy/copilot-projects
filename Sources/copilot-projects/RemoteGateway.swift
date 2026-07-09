@@ -190,15 +190,16 @@ struct RemoteRequestAuth: Sendable {
         origin: String?,
         originPolicy: RemoteOriginPolicy
     ) -> Date? {
-        guard host == expectedHost,
+        guard host?.lowercased() == expectedHost.lowercased(),
               let token else {
             return nil
         }
+        let originMatches = origin?.lowercased() == expectedOrigin.lowercased()
         switch originPolicy {
         case .requireMatch:
-            guard origin == expectedOrigin else { return nil }
+            guard originMatches else { return nil }
         case .matchIfPresent:
-            guard origin == nil || origin == expectedOrigin else { return nil }
+            guard origin == nil || originMatches else { return nil }
         }
         return verifier.verifiedExpiration(token: token)
     }

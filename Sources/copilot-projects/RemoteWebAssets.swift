@@ -27,7 +27,7 @@ enum RemoteWebAssets {
           <pre id="terminal" tabindex="0">Select a session</pre>
           <form id="input-form">
             <input id="input" autocomplete="off" autocapitalize="none" spellcheck="false"
-              placeholder="Send a command">
+              aria-label="Command input" placeholder="Send a command">
             <button>Send</button>
           </form>
         </section>

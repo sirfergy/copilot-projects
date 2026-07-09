@@ -1354,6 +1354,12 @@ final class AppLogicTests: XCTestCase {
             origin: "https://projects.example.com",
             originPolicy: .requireMatch
         ))
+        XCTAssertTrue(auth.authorize(
+            host: "PROJECTS.EXAMPLE.COM",
+            token: token,
+            origin: "HTTPS://PROJECTS.EXAMPLE.COM",
+            originPolicy: .requireMatch
+        ))
         XCTAssertFalse(auth.authorize(
             host: "projects.example.com",
             token: nil,
@@ -1600,6 +1606,10 @@ final class AppLogicTests: XCTestCase {
             rows: 2,
             lines: ["A ", " B"]
         ))
+    }
+
+    func testRemoteWebCommandInputHasAccessibleName() {
+        XCTAssertTrue(RemoteWebAssets.html.contains("aria-label=\"Command input\""))
     }
 
     func testRemoteQueryItemsParsesSession() {
