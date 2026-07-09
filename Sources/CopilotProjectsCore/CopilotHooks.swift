@@ -175,7 +175,7 @@ public enum CopilotHooks {
         payload="$(cat 2>/dev/null || true)"
         if [ -f "$scheduled_turn" ]; then
           : > "$scheduled_turn"
-          status idle "$(payload_timestamp "$payload")" scheduled-active
+          status idle "$(payload_timestamp "$payload")" scheduled-idle
           rm -f "$scheduled_turn" 2>/dev/null || true
           emit
           exit 0

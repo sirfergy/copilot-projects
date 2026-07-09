@@ -69,10 +69,10 @@ extension Project {
 
     var runningCount: Int { sessions.filter { $0.status == .running }.count }
     var waitingCount: Int { sessions.filter { $0.status == .waiting }.count }
-    var backgroundAgentCount: Int { sessions.filter(\.hasBackgroundWork).count }
+    var backgroundWorkCount: Int { sessions.filter(\.hasBackgroundWork).count }
     var scheduledCount: Int { sessions.filter { !$0.schedules.isEmpty }.count }
     var hasUnread: Bool { sessions.contains { $0.hasUnread } }
-    var hasBackgroundAgents: Bool { backgroundAgentCount > 0 }
+    var hasBackgroundWork: Bool { backgroundWorkCount > 0 }
 }
 
 /// On-disk shape of the app state.

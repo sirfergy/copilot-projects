@@ -576,8 +576,8 @@ final class AppModel: ObservableObject {
     /// Fleet roll-ups across every project, for the title-bar status line.
     var totalRunning: Int { projects.reduce(0) { $0 + $1.runningCount } }
     var totalWaiting: Int { projects.reduce(0) { $0 + $1.waitingCount } }
-    var totalBackgroundAgents: Int {
-        projects.reduce(0) { $0 + $1.backgroundAgentCount }
+    var totalBackgroundWork: Int {
+        projects.reduce(0) { $0 + $1.backgroundWorkCount }
     }
     var totalScheduled: Int {
         projects.reduce(0) { $0 + $1.scheduledCount }

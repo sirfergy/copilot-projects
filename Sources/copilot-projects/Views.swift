@@ -78,16 +78,16 @@ struct WindowConfigurator: NSViewRepresentable {
 }
 
 /// Roll-up of what every agent is doing, drawn as a trailing title-bar accessory:
-/// the running count (green), background-agent sessions (purple), then the waiting
-/// (orange) and ready (blue) counts; "all idle" when nothing is active. (No spinner
-/// here — an NSProgressIndicator breaks Auto Layout inside the title-bar accessory's
-/// hosting view.)
+/// the running count (green), background-work sessions (purple), queued schedules
+/// (indigo), then the waiting (orange) and ready (blue) counts; "all idle" when
+/// nothing is active. (No spinner here — an NSProgressIndicator breaks Auto Layout
+/// inside the title-bar accessory's hosting view.)
 struct FleetStatusBar: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
         let running = model.totalRunning
-        let background = model.totalBackgroundAgents
+        let background = model.totalBackgroundWork
         let scheduled = model.totalScheduled
         let waiting = model.totalWaiting
         let ready = model.totalReady
@@ -95,7 +95,7 @@ struct FleetStatusBar: View {
             if running > 0 { Text("\(running) running").foregroundStyle(.green) }
             if background > 0 {
                 HStack(spacing: 4) {
-                    BackgroundAgentsBadge()
+                    BackgroundWorkBadge()
                     Text("\(background) background").foregroundStyle(.purple)
                 }
             }
@@ -234,7 +234,7 @@ struct ProjectRow: View {
     // running is muted; idle is fainter still.
     @ViewBuilder private var statusLine: some View {
         let running = project.runningCount
-        let background = project.backgroundAgentCount
+        let background = project.backgroundWorkCount
         let scheduled = project.scheduledCount
         let waiting = project.waitingCount
         if running > 0 || background > 0 || scheduled > 0 || waiting > 0 {
@@ -306,9 +306,9 @@ struct SessionTabIndicator: View {
     }
 }
 
-/// Shown on a tab and its project's sidebar row while copilot is waiting on its own
-/// background agents. Sized to the reserved 9pt slot so the project name stays aligned.
-struct BackgroundAgentsBadge: View {
+/// Shown on a tab and its project's sidebar row while background work is active.
+/// Sized to the reserved 9pt slot so the project name stays aligned.
+struct BackgroundWorkBadge: View {
     var body: some View {
         Image(systemName: "person.2.fill")
             .resizable()
@@ -538,7 +538,7 @@ struct SessionTab: View {
                 .lineLimit(1)
                 .help(session.statusText ?? session.title)
             if session.hasBackgroundWork {
-                BackgroundAgentsBadge()
+                BackgroundWorkBadge()
             } else if !session.schedules.isEmpty {
                 ScheduleBadge(schedules: session.schedules)
             }

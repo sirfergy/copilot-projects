@@ -749,6 +749,15 @@ final class AppLogicTests: XCTestCase {
         )
         try runHook(
             hookURL: hookURL,
+            action: "idle",
+            payload: #"{"timestamp":115}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture
+        )
+        try runHook(
+            hookURL: hookURL,
             action: "notify",
             payload: #"{"timestamp":120,"notification_type":"session_idle","aborted":false}"#,
             tabId: tabId,
@@ -760,7 +769,8 @@ final class AppLogicTests: XCTestCase {
         let calls = try cliCallLines(in: capture)
         XCTAssertTrue(calls.contains("set-status idle --timestamp 100 --source scheduled-start"))
         XCTAssertTrue(calls.contains("set-status idle --timestamp 110 --source scheduled-active"))
-        XCTAssertTrue(calls.contains("set-status idle --timestamp 120 --source scheduled-idle"))
+        XCTAssertTrue(calls.contains("set-status idle --timestamp 115 --source scheduled-idle"))
+        XCTAssertTrue(calls.contains("set-status idle --timestamp 120 --source session-idle"))
         XCTAssertFalse(calls.contains { $0.contains("--notification completed") })
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: root.appendingPathComponent("sessions/\(tabId).scheduled-turn").path
