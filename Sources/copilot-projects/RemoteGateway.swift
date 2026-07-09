@@ -17,19 +17,20 @@ final class RemoteModelBridge {
         let screen: RemoteTerminalScreen?
     }
 
-    private unowned let model: AppModel
+    private weak var model: AppModel?
     private var cachedScreens: [String: CachedScreen] = [:]
 
     init(model: AppModel) {
         self.model = model
     }
 
-    func workspace() -> RemoteWorkspaceSnapshot {
-        model.remoteWorkspaceSnapshot()
+    func workspace() -> RemoteWorkspaceSnapshot? {
+        model?.remoteWorkspaceSnapshot()
     }
 
     fileprivate func screenRevision(sessionId: String) -> RemoteTerminalRevision? {
-        guard let view = model.terminalView(for: sessionId),
+        guard let model,
+              let view = model.terminalView(for: sessionId),
               let terminal = view.terminal else { return nil }
         return RemoteTerminalRevision(
             contentGeneration: view.remoteContentGeneration,
@@ -42,6 +43,7 @@ final class RemoteModelBridge {
         sessionId: String,
         revision: RemoteTerminalRevision
     ) -> RemoteTerminalScreen? {
+        guard let model else { return nil }
         if let cached = cachedScreens[sessionId], cached.revision == revision {
             return cached.screen
         }
@@ -51,7 +53,7 @@ final class RemoteModelBridge {
     }
 
     func sendInput(sessionId: String, value: String) {
-        model.sendRemoteInput(sessionId: sessionId, value: value)
+        model?.sendRemoteInput(sessionId: sessionId, value: value)
     }
 }
 
@@ -401,7 +403,9 @@ private final class RemoteHTTPHandler:
         authorizationExpiresAt: Date
     ) {
         let query = RemoteRequestAuth.queryItems(head.uri)
-        let sessionId = query["s"].flatMap { $0.isEmpty ? nil : $0 }
+        let sessionId = query["s"].flatMap {
+            $0.isEmpty || $0.utf8.count > 64 ? nil : $0
+        }
         streaming = true
         streamSessionId = sessionId
 
