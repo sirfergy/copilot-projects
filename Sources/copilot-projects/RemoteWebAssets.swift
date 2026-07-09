@@ -40,35 +40,41 @@ enum RemoteWebAssets {
     static let css = #"""
     :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
     * { box-sizing: border-box; }
-    body { margin: 0; background: #111; color: #eee; height: 100vh; overflow: hidden; }
-    header { height: 48px; display:flex; align-items:center; justify-content:space-between;
+    html, body { margin: 0; background: #111; color: #eee; }
+    body { height: 100vh; height: 100dvh; overflow: hidden;
+      display: flex; flex-direction: column; }
+    header { flex: 0 0 48px; display:flex; align-items:center; justify-content:space-between;
       padding: 0 14px; border-bottom: 1px solid #333; }
     #connection { color:#999; font-size:12px; }
-    main { display:grid; grid-template-columns: minmax(180px, 260px) 1fr; height:calc(100vh - 48px); }
-    nav { overflow:auto; border-right:1px solid #333; padding:8px; }
+    main { flex:1; min-height:0; display:grid;
+      grid-template-columns: minmax(180px, 260px) 1fr; }
+    nav { overflow:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain;
+      border-right:1px solid #333; padding:8px; }
     nav h3 { color:#999; font-size:12px; margin:12px 6px 5px; }
     nav button { display:block; width:100%; text-align:left; margin:2px 0; padding:9px;
       border:0; border-radius:7px; background:transparent; color:#ddd; }
     nav button.active { background:#29334a; }
     nav small { display:block; color:#999; margin-top:3px; }
-    section { min-width:0; display:flex; flex-direction:column; }
-    #toolbar { height:42px; display:flex; align-items:center; gap:6px; padding:5px 8px;
+    section { min-width:0; min-height:0; display:flex; flex-direction:column; }
+    #toolbar { flex:0 0 auto; display:flex; align-items:center; gap:6px; padding:5px 8px;
       border-bottom:1px solid #333; }
     button { background:#2c2c2c; color:#eee; border:1px solid #444; border-radius:6px;
       padding:7px 10px; }
     #lease { margin-left:auto; color:#999; font-size:12px; }
-    #terminal { flex:1; overflow:auto; margin:0; padding:10px; outline:none;
+    #terminal { flex:1; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch;
+      overscroll-behavior:contain; margin:0; padding:10px; outline:none;
       font: 13px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre; }
-    #input-form { display:flex; gap:8px; padding:8px; border-top:1px solid #333;
+    #input-form { flex:0 0 auto; display:flex; gap:8px; padding:8px; border-top:1px solid #333;
       padding-bottom:max(8px, env(safe-area-inset-bottom)); }
     #input { flex:1; min-width:0; background:#222; color:#fff; border:1px solid #555;
       border-radius:7px; padding:10px; font-size:16px; }
     @media (max-width: 700px) {
-      main { grid-template-columns: 128px 1fr; }
+      main { grid-template-columns: 118px 1fr; }
       nav { padding:4px; }
       nav button { padding:7px 5px; font-size:12px; }
       #terminal { font-size:10px; padding:6px; }
-      #toolbar button { padding:6px; }
+      #toolbar button { padding:6px 8px; }
+      #toolbar { flex-wrap:wrap; height:auto; }
     }
     """#
 
