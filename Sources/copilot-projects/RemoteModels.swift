@@ -32,6 +32,7 @@ struct RemoteTerminalScreen: Codable, Equatable {
 
 struct RemoteClientMessage: Codable {
     let type: String
+    let clientId: String?
     let sessionId: String?
     let data: String?
 }

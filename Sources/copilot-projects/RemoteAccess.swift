@@ -2,6 +2,62 @@ import Foundation
 import CopilotProjectsCore
 import Darwin
 
+/// State of a `tailscale serve` HTTPS port, parsed from `serve status`.
+enum RemoteServePortState: Equatable {
+    case free
+    case ours
+    case foreign(String)
+}
+
+/// Classifies who owns `httpsPort` in `tailscale serve status`. Our gateway is
+/// always a `127.0.0.1` loopback proxy, so any handler whose proxy target is not
+/// a loopback address (or that isn't a proxy at all) means the port is already
+/// used by something unrelated and must not be overwritten. Ports are matched
+/// exactly (so `:8443` never matches `:18443`).
+func remoteServePortState(status: String, httpsPort: Int) -> RemoteServePortState {
+    var inSection = false
+    var sawHandler = false
+    for raw in status.split(whereSeparator: \.isNewline) {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        if line.hasPrefix("https://") || line.hasPrefix("http://")
+            || line.hasPrefix("tcp://") || line.hasPrefix("tls-terminated-tcp://") {
+            inSection = remoteServeHeaderPort(line) == httpsPort
+            continue
+        }
+        guard inSection, line.hasPrefix("|--") else { continue }
+        sawHandler = true
+        // Classify by the proxy target, not the whole line, so a path that
+        // merely contains "localhost" can't be mistaken for our own proxy.
+        let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let proxyIndex = tokens.firstIndex(of: "proxy"),
+              proxyIndex + 1 < tokens.count,
+              remoteIsLoopbackTarget(tokens[proxyIndex + 1]) else {
+            return .foreign(line)
+        }
+    }
+    return sawHandler ? .ours : .free
+}
+
+/// Extracts the port from a serve-status header line like
+/// `https://host:8443 (tailnet only)`, or nil when there is no explicit port.
+private func remoteServeHeaderPort(_ headerLine: String) -> Int? {
+    guard let token = headerLine.split(whereSeparator: \.isWhitespace).first,
+          let authority = token.split(separator: "/").last,
+          let portField = authority.split(separator: ":").last,
+          portField != authority else { return nil }
+    return Int(portField)
+}
+
+/// True when a serve proxy target points at a loopback address (our gateway).
+private func remoteIsLoopbackTarget(_ target: String) -> Bool {
+    let prefixes = [
+        "http://127.0.0.1:", "https://127.0.0.1:",
+        "http://localhost:", "https://localhost:",
+        "http://[::1]:", "https://[::1]:",
+    ]
+    return prefixes.contains { target.hasPrefix($0) }
+}
+
 enum RemoteAccessError: LocalizedError {
     case tailscaleNotFound
     case tailscaleNotRunning
@@ -82,6 +138,11 @@ private struct TailscaleServe: Sendable {
 
     func enable(port: Int, path: String) throws {
         let existing = (try? run(["serve", "status"])) ?? ""
+        if case .foreign(let desc) = remoteServePortState(
+            status: existing, httpsPort: Self.httpsPort
+        ) {
+            throw RemoteAccessError.conflictingServeConfig(desc)
+        }
         for line in existing.split(whereSeparator: \.isNewline) {
             let fields = line.split(whereSeparator: \.isWhitespace)
             guard fields.count >= 2 else { continue }
@@ -102,7 +163,11 @@ private struct TailscaleServe: Sendable {
 
     func disable(path: String) throws {
         let existing = (try? run(["serve", "status"])) ?? ""
-        guard existing.contains(":\(Self.httpsPort)") else { return }
+        // Only tear down our own loopback proxy on the port; never clobber an
+        // unrelated service the user may have put on it.
+        guard case .ours = remoteServePortState(
+            status: existing, httpsPort: Self.httpsPort
+        ) else { return }
         _ = try run([
             "serve", "--bg", "--yes",
             "--https=\(Self.httpsPort)",

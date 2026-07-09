@@ -3,7 +3,6 @@ import Darwin
 import NIOCore
 import NIOPosix
 import NIOHTTP1
-import NIOWebSocket
 
 @MainActor
 final class RemoteModelBridge {
@@ -26,29 +25,31 @@ final class RemoteModelBridge {
     }
 }
 
+/// Writer leases ensure only one remote client injects input into a given
+/// session at a time. This is single-user by design: `acquire` is a takeover,
+/// so the most recently selected device wins and a vanished client can never
+/// block another device from taking control.
 final class RemoteWriterLeases: @unchecked Sendable {
+    // Real sessions number in the dozens; the cap only bounds memory against a
+    // buggy/hostile authenticated client POSTing many distinct session ids.
+    private static let maxHolders = 512
+
     private let lock = NSLock()
-    private var holders: [String: UUID] = [:]
+    private var holders: [String: String] = [:]
 
-    func acquire(sessionId: String, connectionId: UUID) -> Bool {
+    func acquire(sessionId: String, clientId: String) {
         lock.lock()
-        defer { lock.unlock() }
-        if let holder = holders[sessionId], holder != connectionId { return false }
-        holders = holders.filter { $0.value != connectionId || $0.key == sessionId }
-        holders[sessionId] = connectionId
-        return true
-    }
-
-    func holds(sessionId: String, connectionId: UUID) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return holders[sessionId] == connectionId
-    }
-
-    func release(connectionId: UUID) {
-        lock.lock()
-        holders = holders.filter { $0.value != connectionId }
+        if holders[sessionId] == nil, holders.count >= Self.maxHolders {
+            holders.removeAll(keepingCapacity: true)
+        }
+        holders[sessionId] = clientId
         lock.unlock()
+    }
+
+    func holds(sessionId: String, clientId: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return holders[sessionId] == clientId
     }
 }
 
@@ -76,35 +77,10 @@ final class RemoteGateway: @unchecked Sendable {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { child in
-                let http = RemoteHTTPHandler(auth: auth)
-                let upgrader = NIOWebSocketServerUpgrader(
-                    maxFrameSize: 16 * 1_024,
-                    shouldUpgrade: { channel, head in
-                        guard auth.authorize(head: head, requireOrigin: true),
-                              auth.normalizedPath(head.uri) == "/ws" else {
-                            return channel.eventLoop.makeSucceededFuture(nil)
-                        }
-                        return channel.eventLoop.makeSucceededFuture(HTTPHeaders())
-                    },
-                    upgradePipelineHandler: { channel, _ in
-                        channel.pipeline.addHandler(
-                            RemoteWebSocketHandler(
-                                bridge: bridge,
-                                leases: leases
-                            )
-                        )
-                    }
-                )
-                let upgrade = NIOHTTPServerUpgradeConfiguration(
-                    upgraders: [upgrader],
-                    completionHandler: { context in
-                        context.pipeline.removeHandler(http, promise: nil)
-                    }
-                )
-                return child.pipeline.configureHTTPServerPipeline(
-                    withServerUpgrade: upgrade
-                ).flatMap {
-                    child.pipeline.addHandler(http)
+                child.pipeline.configureHTTPServerPipeline().flatMap {
+                    child.pipeline.addHandler(
+                        RemoteHTTPHandler(auth: auth, bridge: bridge, leases: leases)
+                    )
                 }
             }
         channel = try bootstrap.bind(host: "127.0.0.1", port: 0).wait()
@@ -115,10 +91,18 @@ final class RemoteGateway: @unchecked Sendable {
     }
 
     func stop() {
-        try? channel?.close().wait()
+        channel?.close(promise: nil)
         channel = nil
-        try? group.syncShutdownGracefully()
+        group.shutdownGracefully { _ in }
     }
+}
+
+enum RemoteOriginPolicy {
+    /// Reject when Origin is present and does not match, but tolerate an absent
+    /// one (browsers omit Origin on some same-origin GET/EventSource requests).
+    case matchIfPresent
+    /// Require an exact Origin match. Browsers always send Origin on POST.
+    case requireMatch
 }
 
 struct RemoteRequestAuth: Sendable {
@@ -127,13 +111,14 @@ struct RemoteRequestAuth: Sendable {
     let allowedLogin: String
     let pathPrefix: String
 
-    func authorize(head: HTTPRequestHead, requireOrigin: Bool) -> Bool {
-        let host = head.headers.first(name: "Host")?.split(separator: ":").first.map(String.init)
+    func authorize(head: HTTPRequestHead, originPolicy: RemoteOriginPolicy) -> Bool {
+        let host = head.headers.first(name: "Host")?
+            .split(separator: ":").first.map(String.init)
         return authorize(
             host: host,
             login: head.headers.first(name: "Tailscale-User-Login"),
             origin: head.headers.first(name: "Origin"),
-            requireOrigin: requireOrigin
+            originPolicy: originPolicy
         )
     }
 
@@ -141,10 +126,15 @@ struct RemoteRequestAuth: Sendable {
         host: String?,
         login: String?,
         origin: String?,
-        requireOrigin: Bool
+        originPolicy: RemoteOriginPolicy
     ) -> Bool {
         guard login == allowedLogin, host == expectedHost else { return false }
-        return !requireOrigin || origin == expectedOrigin
+        switch originPolicy {
+        case .requireMatch:
+            return origin == expectedOrigin
+        case .matchIfPresent:
+            return origin == nil || origin == expectedOrigin
+        }
     }
 
     func normalizedPath(_ uri: String) -> String? {
@@ -155,64 +145,245 @@ struct RemoteRequestAuth: Sendable {
         }
         return nil
     }
+
+    static func queryItems(_ uri: String) -> [String: String] {
+        guard let query = uri.split(separator: "?", maxSplits: 1).dropFirst().first else {
+            return [:]
+        }
+        var items: [String: String] = [:]
+        for pair in query.split(separator: "&") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            let key = String(parts[0]).removingPercentEncoding ?? String(parts[0])
+            let value = parts.count > 1
+                ? (String(parts[1]).removingPercentEncoding ?? String(parts[1]))
+                : ""
+            items[key] = value
+        }
+        return items
+    }
 }
 
+private let remoteCSP =
+    "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'"
+private let remoteMaxBodyBytes = 16 * 1_024
+
 private final class RemoteHTTPHandler:
-    ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable
+    ChannelInboundHandler, @unchecked Sendable
 {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
-    private let auth: RemoteRequestAuth
-    private var head: HTTPRequestHead?
 
-    init(auth: RemoteRequestAuth) {
+    private let auth: RemoteRequestAuth
+    private let bridge: RemoteModelBridge
+    private let leases: RemoteWriterLeases
+
+    private var head: HTTPRequestHead?
+    private var body: [UInt8] = []
+    private var bodyTooLarge = false
+
+    // Event-stream state (set once the connection becomes an SSE stream).
+    private var streaming = false
+    private var streamSessionId: String?
+    private var refreshTask: RepeatedTask?
+    private var lastWorkspace: RemoteWorkspaceSnapshot?
+    private var lastScreen: RemoteTerminalScreen?
+
+    init(auth: RemoteRequestAuth, bridge: RemoteModelBridge, leases: RemoteWriterLeases) {
         self.auth = auth
+        self.bridge = bridge
+        self.leases = leases
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         switch unwrapInboundIn(data) {
         case .head(let head):
             self.head = head
-        case .body:
-            break
+            body.removeAll(keepingCapacity: true)
+            bodyTooLarge = false
+        case .body(var buffer):
+            if body.count + buffer.readableBytes > remoteMaxBodyBytes {
+                bodyTooLarge = true
+                return
+            }
+            if let bytes = buffer.readBytes(length: buffer.readableBytes) {
+                body.append(contentsOf: bytes)
+            }
         case .end:
-            guard let head else { return }
+            guard let head, !streaming else { return }
             self.head = nil
-            respond(context: context, head: head)
+            route(context: context, head: head)
         }
     }
 
-    private func respond(context: ChannelHandlerContext, head: HTTPRequestHead) {
-        guard head.method == .GET || head.method == .HEAD,
-              auth.authorize(head: head, requireOrigin: false),
+    private func route(context: ChannelHandlerContext, head: HTTPRequestHead) {
+        guard head.method == .GET || head.method == .HEAD || head.method == .POST,
               let path = auth.normalizedPath(head.uri) else {
-            write(
-                context: context,
-                method: head.method,
-                status: .forbidden,
-                contentType: "text/plain",
-                body: "Forbidden"
-            )
+            respond(context: context, method: head.method, status: .forbidden,
+                    contentType: "text/plain", body: "Forbidden")
             return
         }
+
+        if head.method == .POST {
+            guard path == "/control",
+                  auth.authorize(head: head, originPolicy: .requireMatch) else {
+                respond(context: context, method: head.method, status: .forbidden,
+                        contentType: "text/plain", body: "Forbidden")
+                return
+            }
+            handleControl(context: context)
+            return
+        }
+
+        guard auth.authorize(head: head, originPolicy: .matchIfPresent) else {
+            respond(context: context, method: head.method, status: .forbidden,
+                    contentType: "text/plain", body: "Forbidden")
+            return
+        }
+
         switch path {
         case "/":
-            write(context: context, method: head.method, status: .ok,
-                  contentType: "text/html; charset=utf-8", body: RemoteWebAssets.html)
+            respond(context: context, method: head.method, status: .ok,
+                    contentType: "text/html; charset=utf-8", body: RemoteWebAssets.html)
         case "/app.css":
-            write(context: context, method: head.method, status: .ok,
-                  contentType: "text/css; charset=utf-8", body: RemoteWebAssets.css)
+            respond(context: context, method: head.method, status: .ok,
+                    contentType: "text/css; charset=utf-8", body: RemoteWebAssets.css)
         case "/app.js":
-            write(context: context, method: head.method, status: .ok,
-                  contentType: "application/javascript; charset=utf-8",
-                  body: RemoteWebAssets.javascript)
+            respond(context: context, method: head.method, status: .ok,
+                    contentType: "application/javascript; charset=utf-8",
+                    body: RemoteWebAssets.javascript)
+        case "/events":
+            if head.method == .HEAD {
+                respond(context: context, method: .HEAD, status: .ok,
+                        contentType: "text/event-stream", body: "")
+            } else {
+                startEventStream(context: context, head: head)
+            }
         default:
-            write(context: context, method: head.method, status: .notFound,
-                  contentType: "text/plain", body: "Not found")
+            respond(context: context, method: head.method, status: .notFound,
+                    contentType: "text/plain", body: "Not found")
         }
     }
 
-    private func write(
+    // MARK: - Control (POST)
+
+    private func handleControl(context: ChannelHandlerContext) {
+        guard !bodyTooLarge,
+              let message = try? JSONDecoder().decode(
+                RemoteClientMessage.self, from: Data(body)
+              ),
+              let clientId = message.clientId,
+              let sessionId = message.sessionId,
+              clientId.utf8.count <= 64,
+              sessionId.utf8.count <= 64 else {
+            respond(context: context, method: .POST, status: .badRequest,
+                    contentType: "text/plain", body: "Bad request")
+            return
+        }
+        switch message.type {
+        case "acquire":
+            leases.acquire(sessionId: sessionId, clientId: clientId)
+            respond(context: context, method: .POST, status: .noContent,
+                    contentType: "text/plain", body: "")
+        case "input":
+            guard let value = message.data else {
+                respond(context: context, method: .POST, status: .badRequest,
+                        contentType: "text/plain", body: "Bad request")
+                return
+            }
+            guard value.utf8.count <= 8_192 else {
+                respond(context: context, method: .POST, status: .payloadTooLarge,
+                        contentType: "text/plain", body: "too large")
+                return
+            }
+            guard leases.holds(sessionId: sessionId, clientId: clientId) else {
+                respond(context: context, method: .POST, status: .forbidden,
+                        contentType: "text/plain", body: "view only")
+                return
+            }
+            let leases = self.leases
+            Task { @MainActor in
+                // Re-check under the lock right before injecting so a takeover
+                // between the check above and this hop can't leak a keystroke.
+                guard leases.holds(sessionId: sessionId, clientId: clientId) else { return }
+                self.bridge.sendInput(sessionId: sessionId, value: value)
+            }
+            respond(context: context, method: .POST, status: .noContent,
+                    contentType: "text/plain", body: "")
+        default:
+            respond(context: context, method: .POST, status: .badRequest,
+                    contentType: "text/plain", body: "Bad request")
+        }
+    }
+
+    // MARK: - Event stream (SSE)
+
+    private func startEventStream(context: ChannelHandlerContext, head: HTTPRequestHead) {
+        let query = RemoteRequestAuth.queryItems(head.uri)
+        let sessionId = query["s"].flatMap { $0.isEmpty ? nil : $0 }
+        streaming = true
+        streamSessionId = sessionId
+
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: "text/event-stream")
+        headers.add(name: "Cache-Control", value: "no-store")
+        headers.add(name: "Connection", value: "keep-alive")
+        headers.add(name: "Transfer-Encoding", value: "chunked")
+        headers.add(name: "Referrer-Policy", value: "no-referrer")
+        headers.add(name: "Content-Security-Policy", value: remoteCSP)
+        let response = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+        context.writeAndFlush(wrapOutboundOut(.head(response)), promise: nil)
+        writeChunk("retry: 3000\n\n", channel: context.channel)
+
+        let channel = context.channel
+        refreshTask = context.eventLoop.scheduleRepeatedTask(
+            initialDelay: .milliseconds(0),
+            delay: .milliseconds(500)
+        ) { [weak self, weak channel] _ in
+            guard let self, let channel else { return }
+            guard channel.isWritable else { return }
+            let streamSessionId = self.streamSessionId
+            Task { @MainActor in
+                let workspace = self.bridge.workspace()
+                let screen = streamSessionId.flatMap { self.bridge.screen(sessionId: $0) }
+                channel.eventLoop.execute {
+                    guard channel.isWritable else { return }
+                    if workspace != self.lastWorkspace {
+                        self.lastWorkspace = workspace
+                        self.emit(type: "workspace", value: workspace, channel: channel)
+                    }
+                    if let screen, screen != self.lastScreen {
+                        self.lastScreen = screen
+                        self.emit(type: "screen", value: screen, channel: channel)
+                    }
+                }
+            }
+        }
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        refreshTask?.cancel()
+        refreshTask = nil
+        context.fireChannelInactive()
+    }
+
+    private func emit<T: Codable>(type: String, value: T, channel: Channel) {
+        let message = RemoteServerMessage(type: type, data: value)
+        guard let data = try? JSONEncoder().encode(message),
+              let json = String(data: data, encoding: .utf8) else { return }
+        writeChunk("data: \(json)\n\n", channel: channel)
+    }
+
+    private func writeChunk(_ text: String, channel: Channel) {
+        var buffer = channel.allocator.buffer(capacity: text.utf8.count)
+        buffer.writeString(text)
+        channel.writeAndFlush(
+            HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil
+        )
+    }
+
+    // MARK: - Fixed-length responses
+
+    private func respond(
         context: ChannelHandlerContext,
         method: HTTPMethod,
         status: HTTPResponseStatus,
@@ -223,150 +394,15 @@ private final class RemoteHTTPHandler:
         headers.add(name: "Content-Type", value: contentType)
         headers.add(name: "Content-Length", value: String(body.utf8.count))
         headers.add(name: "Cache-Control", value: "no-store")
-        headers.add(
-            name: "Content-Security-Policy",
-            value: "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'"
-        )
+        headers.add(name: "Referrer-Policy", value: "no-referrer")
+        headers.add(name: "Content-Security-Policy", value: remoteCSP)
         let response = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
         context.write(wrapOutboundOut(.head(response)), promise: nil)
-        if method != .HEAD {
+        if method != .HEAD && !body.isEmpty {
             var buffer = context.channel.allocator.buffer(capacity: body.utf8.count)
             buffer.writeString(body)
             context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
         }
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
-    }
-}
-
-private final class RemoteWebSocketHandler:
-    ChannelInboundHandler, @unchecked Sendable
-{
-    typealias InboundIn = WebSocketFrame
-    typealias OutboundOut = WebSocketFrame
-
-    private let id = UUID()
-    private let bridge: RemoteModelBridge
-    private let leases: RemoteWriterLeases
-    private var selectedSessionId: String?
-    private var refreshTask: RepeatedTask?
-    private var lastWorkspace: RemoteWorkspaceSnapshot?
-    private var lastScreen: RemoteTerminalScreen?
-
-    init(bridge: RemoteModelBridge, leases: RemoteWriterLeases) {
-        self.bridge = bridge
-        self.leases = leases
-    }
-
-    func handlerAdded(context: ChannelHandlerContext) {
-        refreshTask = context.eventLoop.scheduleRepeatedTask(
-            initialDelay: .milliseconds(0),
-            delay: .milliseconds(500)
-        ) { [weak self, weak channel = context.channel] _ in
-            guard let self, let channel else { return }
-            let selectedSessionId = self.selectedSessionId
-            Task { @MainActor in
-                let workspace = self.bridge.workspace()
-                let screen = selectedSessionId.flatMap {
-                    self.bridge.screen(sessionId: $0)
-                }
-                channel.eventLoop.execute {
-                    if workspace != self.lastWorkspace {
-                        self.lastWorkspace = workspace
-                        self.send(type: "workspace", value: workspace, channel: channel)
-                    }
-                    if screen != self.lastScreen, let screen {
-                        self.lastScreen = screen
-                        self.send(type: "screen", value: screen, channel: channel)
-                    }
-                }
-            }
-        }
-    }
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let frame = unwrapInboundIn(data)
-        switch frame.opcode {
-        case .connectionClose:
-            context.close(promise: nil)
-        case .ping:
-            context.writeAndFlush(wrapOutboundOut(
-                WebSocketFrame(fin: true, opcode: .pong, data: frame.unmaskedData)
-            ), promise: nil)
-        case .text:
-            var data = frame.unmaskedData
-            guard let text = data.readString(length: data.readableBytes),
-                  let messageData = text.data(using: .utf8),
-                  let message = try? JSONDecoder().decode(
-                    RemoteClientMessage.self,
-                    from: messageData
-                  ) else { return }
-            handle(message: message, context: context)
-        default:
-            break
-        }
-    }
-
-    private func handle(message: RemoteClientMessage, context: ChannelHandlerContext) {
-        switch message.type {
-        case "workspace":
-            lastWorkspace = nil
-        case "select":
-            selectedSessionId = message.sessionId
-            lastScreen = nil
-        case "acquire":
-            guard let sessionId = message.sessionId else { return }
-            selectedSessionId = sessionId
-            let writable = leases.acquire(sessionId: sessionId, connectionId: id)
-            sendDictionary(
-                ["writable": writable],
-                type: "lease",
-                channel: context.channel
-            )
-        case "input":
-            guard let sessionId = message.sessionId,
-                  let value = message.data,
-                  value.utf8.count <= 8_192,
-                  leases.holds(sessionId: sessionId, connectionId: id) else {
-                return
-            }
-            Task { @MainActor in
-                bridge.sendInput(sessionId: sessionId, value: value)
-            }
-        default:
-            break
-        }
-    }
-
-    func channelInactive(context: ChannelHandlerContext) {
-        refreshTask?.cancel()
-        leases.release(connectionId: id)
-        context.fireChannelInactive()
-    }
-
-    private func send<T: Codable>(type: String, value: T, channel: Channel) {
-        let message = RemoteServerMessage(type: type, data: value)
-        guard let data = try? JSONEncoder().encode(message),
-              let string = String(data: data, encoding: .utf8) else { return }
-        sendText(string, channel: channel)
-    }
-
-    private func sendDictionary(
-        _ value: [String: Bool],
-        type: String,
-        channel: Channel
-    ) {
-        guard let data = try? JSONSerialization.data(
-            withJSONObject: ["type": type, "data": value]
-        ), let string = String(data: data, encoding: .utf8) else { return }
-        sendText(string, channel: channel)
-    }
-
-    private func sendText(_ string: String, channel: Channel) {
-        var buffer = channel.allocator.buffer(capacity: string.utf8.count)
-        buffer.writeString(string)
-        channel.writeAndFlush(
-            WebSocketFrame(fin: true, opcode: .text, data: buffer),
-            promise: nil
-        )
     }
 }

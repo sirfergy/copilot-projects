@@ -1263,42 +1263,114 @@ final class AppLogicTests: XCTestCase {
             host: "mac.tailnet.ts.net",
             login: "user@example.com",
             origin: "https://mac.tailnet.ts.net",
-            requireOrigin: true
+            originPolicy: .requireMatch
         ))
         XCTAssertFalse(auth.authorize(
             host: "mac.tailnet.ts.net",
             login: nil,
             origin: "https://mac.tailnet.ts.net",
-            requireOrigin: true
+            originPolicy: .requireMatch
         ))
         XCTAssertFalse(auth.authorize(
             host: "mac.tailnet.ts.net",
             login: "other@example.com",
             origin: "https://mac.tailnet.ts.net",
-            requireOrigin: true
+            originPolicy: .requireMatch
         ))
         XCTAssertFalse(auth.authorize(
             host: "mac.tailnet.ts.net",
             login: "user@example.com",
             origin: "https://evil.example.com",
-            requireOrigin: true
+            originPolicy: .requireMatch
         ))
+        // A missing Origin is rejected for POST-style requests...
+        XCTAssertFalse(auth.authorize(
+            host: "mac.tailnet.ts.net",
+            login: "user@example.com",
+            origin: nil,
+            originPolicy: .requireMatch
+        ))
+        // ...but tolerated for GET/EventSource requests, where Safari may omit it.
+        XCTAssertTrue(auth.authorize(
+            host: "mac.tailnet.ts.net",
+            login: "user@example.com",
+            origin: nil,
+            originPolicy: .matchIfPresent
+        ))
+        XCTAssertFalse(auth.authorize(
+            host: "mac.tailnet.ts.net",
+            login: "user@example.com",
+            origin: "https://evil.example.com",
+            originPolicy: .matchIfPresent
+        ))
+        XCTAssertEqual(
+            auth.normalizedPath("/copilot-projects-secret/events?c=abc"),
+            "/events"
+        )
         XCTAssertEqual(
             auth.normalizedPath("/copilot-projects-secret/app.js"),
             "/app.js"
         )
-        XCTAssertNil(auth.normalizedPath("/ws"))
+        XCTAssertNil(auth.normalizedPath("/events"))
     }
 
-    func testRemoteWriterLeaseAllowsOnlyOneRemoteController() {
+    func testRemoteQueryItemsParsesClientAndSession() {
+        let items = RemoteRequestAuth.queryItems(
+            "/copilot-projects-secret/events?c=client-1&s=session%2Fid"
+        )
+        XCTAssertEqual(items["c"], "client-1")
+        XCTAssertEqual(items["s"], "session/id")
+    }
+
+    func testRemoteWriterLeaseTakeoverGivesControlToLatestClient() {
         let leases = RemoteWriterLeases()
-        let first = UUID()
-        let second = UUID()
-        XCTAssertTrue(leases.acquire(sessionId: "session", connectionId: first))
-        XCTAssertFalse(leases.acquire(sessionId: "session", connectionId: second))
-        XCTAssertTrue(leases.holds(sessionId: "session", connectionId: first))
-        leases.release(connectionId: first)
-        XCTAssertTrue(leases.acquire(sessionId: "session", connectionId: second))
+        leases.acquire(sessionId: "session", clientId: "phone")
+        XCTAssertTrue(leases.holds(sessionId: "session", clientId: "phone"))
+        XCTAssertFalse(leases.holds(sessionId: "session", clientId: "laptop"))
+        // A second device takes over by acquiring; the previous holder loses it.
+        leases.acquire(sessionId: "session", clientId: "laptop")
+        XCTAssertTrue(leases.holds(sessionId: "session", clientId: "laptop"))
+        XCTAssertFalse(leases.holds(sessionId: "session", clientId: "phone"))
+        // Leases are scoped per session.
+        leases.acquire(sessionId: "other", clientId: "phone")
+        XCTAssertTrue(leases.holds(sessionId: "other", clientId: "phone"))
+        XCTAssertTrue(leases.holds(sessionId: "session", clientId: "laptop"))
+    }
+
+    func testRemoteServePortStateClassifiesOwnership() {
+        let port = 8_443
+        // A non-loopback proxy on the port is foreign and must not be clobbered.
+        let foreign = """
+        https://host.ts.net:8443 (tailnet only)
+        |-- / proxy http://192.168.1.5:3000
+        """
+        XCTAssertEqual(
+            remoteServePortState(status: foreign, httpsPort: port),
+            .foreign("|-- / proxy http://192.168.1.5:3000")
+        )
+        // Our own loopback proxy on the port is "ours".
+        let ours = """
+        https://host.ts.net:8443 (tailnet only)
+        |-- / proxy http://127.0.0.1:60534
+        """
+        XCTAssertEqual(remoteServePortState(status: ours, httpsPort: port), .ours)
+        // A service on a *different* port that merely shares digits is free here.
+        let otherPort = """
+        https://host.ts.net:18443 (tailnet only)
+        |-- / proxy http://192.168.1.5:3000
+        """
+        XCTAssertEqual(remoteServePortState(status: otherPort, httpsPort: port), .free)
+        // A path containing "localhost" must not disguise a non-loopback target.
+        let deceptivePath = """
+        https://host.ts.net:8443 (tailnet only)
+        |-- /localhost proxy http://192.168.1.5:3000
+        """
+        XCTAssertEqual(
+            remoteServePortState(status: deceptivePath, httpsPort: port),
+            .foreign("|-- /localhost proxy http://192.168.1.5:3000")
+        )
+        // Empty status -> free.
+        XCTAssertEqual(remoteServePortState(status: "", httpsPort: port), .free)
     }
 
     func testCLIParsesStatusNotificationFlagIntoControlRequest() throws {

@@ -7,6 +7,7 @@ enum RemoteWebAssets {
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+      <meta name="referrer" content="no-referrer">
       <title>Copilot Projects</title>
       <link rel="stylesheet" href="app.css">
     </head>
@@ -16,11 +17,11 @@ enum RemoteWebAssets {
         <nav id="sessions"></nav>
         <section>
           <div id="toolbar">
-            <button data-key="\u001b">Esc</button>
-            <button data-key="\u0003">Ctrl-C</button>
-            <button data-key="\t">Tab</button>
-            <button data-key="\u001b[A">↑</button>
-            <button data-key="\u001b[B">↓</button>
+            <button data-key="esc">Esc</button>
+            <button data-key="ctrl-c">Ctrl-C</button>
+            <button data-key="tab">Tab</button>
+            <button data-key="up">↑</button>
+            <button data-key="down">↓</button>
             <span id="lease">view only</span>
           </div>
           <pre id="terminal" tabindex="0">Select a session</pre>
@@ -79,24 +80,84 @@ enum RemoteWebAssets {
     const input = document.querySelector('#input');
     const base = location.pathname.endsWith('/')
       ? location.pathname : `${location.pathname}/`;
-    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${base}ws`);
+    const clientId = (crypto.randomUUID && crypto.randomUUID()) ||
+      `c-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const TOOLBAR_KEYS = {
+      'esc': '\u001b', 'ctrl-c': '\u0003', 'tab': '\t',
+      'up': '\u001b[A', 'down': '\u001b[B'
+    };
+    let stream = null;
     let selected = null;
     let writable = false;
+    let pendingInput = '';
+    let flushing = false;
 
-    function send(message) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+    function openStream() {
+      if (stream) stream.close();
+      const query = new URLSearchParams();
+      if (selected) query.set('s', selected);
+      const suffix = query.toString() ? `?${query.toString()}` : '';
+      stream = new EventSource(`${base}events${suffix}`);
+      stream.onopen = () => { connection.textContent = 'connected'; };
+      stream.onerror = () => { connection.textContent = 'reconnecting'; };
+      stream.onmessage = onMessage;
+    }
+    async function control(message) {
+      try {
+        return await fetch(`${base}control`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clientId, ...message })
+        });
+      } catch (error) {
+        connection.textContent = 'error';
+        return null;
+      }
+    }
+    async function acquire(id) {
+      const response = await control({ type: 'acquire', sessionId: id });
+      if (selected !== id) return;
+      if (response && response.ok) {
+        writable = true;
+        lease.textContent = 'control enabled';
+      }
     }
     function selectSession(id) {
       selected = id;
-      send({type:'select', sessionId:id});
-      send({type:'acquire', sessionId:id});
+      writable = false;
+      pendingInput = '';
+      lease.textContent = 'view only';
+      terminal.textContent = 'Loading…';
       document.querySelectorAll('nav button').forEach((button) => {
         button.classList.toggle('active', button.dataset.id === id);
       });
+      openStream();
+      acquire(id);
       terminal.focus();
     }
+    // Buffer keystrokes and send them in order, one request in flight at a time,
+    // so rapid typing can't arrive out of order over HTTP/2.
     function sendInput(data) {
-      if (selected && writable) send({type:'input', sessionId:selected, data});
+      if (!selected || !writable || !data) return;
+      pendingInput += data;
+      flushInput();
+    }
+    async function flushInput() {
+      if (flushing || !pendingInput) return;
+      flushing = true;
+      const sessionId = selected;
+      const data = pendingInput;
+      pendingInput = '';
+      const response = await control({ type: 'input', sessionId, data });
+      flushing = false;
+      if (response && response.status === 403) {
+        // Another device took control of this session.
+        writable = false;
+        pendingInput = '';
+        lease.textContent = 'view only';
+      } else if (pendingInput && writable) {
+        flushInput();
+      }
     }
     function renderWorkspace(data) {
       const active = selected;
@@ -122,21 +183,13 @@ enum RemoteWebAssets {
         });
       });
     }
-    ws.onopen = () => { connection.textContent = 'connected'; send({type:'workspace'}); };
-    ws.onclose = () => { connection.textContent = 'disconnected'; writable = false; };
-    ws.onerror = () => { connection.textContent = 'error'; };
-    ws.onmessage = (event) => {
+    function onMessage(event) {
       const message = JSON.parse(event.data);
       if (message.type === 'workspace') renderWorkspace(message.data);
       if (message.type === 'screen' && message.data.sessionId === selected) {
         terminal.textContent = message.data.lines.join('\n');
       }
-      if (message.type === 'lease') {
-        writable = message.data.writable;
-        lease.textContent = writable ? 'control enabled' : 'view only';
-      }
-      if (message.type === 'error') connection.textContent = message.data;
-    };
+    }
     terminal.addEventListener('keydown', (event) => {
       if (!writable) return;
       const special = {
@@ -152,7 +205,7 @@ enum RemoteWebAssets {
       if (data) { event.preventDefault(); sendInput(data); }
     });
     document.querySelectorAll('#toolbar button').forEach((button) => {
-      button.onclick = () => sendInput(button.dataset.key);
+      button.onclick = () => sendInput(TOOLBAR_KEYS[button.dataset.key]);
     });
     document.querySelector('#input-form').onsubmit = (event) => {
       event.preventDefault();
@@ -160,5 +213,6 @@ enum RemoteWebAssets {
       input.value = '';
       terminal.focus();
     };
+    openStream();
     """#
 }
