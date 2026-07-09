@@ -1395,6 +1395,31 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(auth.normalizedPath("app.js"))
     }
 
+    func testRemoteAccessConfigurationRequiresAllSettings() throws {
+        let suiteName = "RemoteAccessConfigurationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertNil(RemoteAccessConfiguration.load(defaults: defaults))
+        defaults.set("projects.example.com", forKey: RemoteAccessConfiguration.hostnameKey)
+        defaults.set(
+            "team.cloudflareaccess.com",
+            forKey: RemoteAccessConfiguration.teamDomainKey
+        )
+        defaults.set("audience", forKey: RemoteAccessConfiguration.audienceKey)
+        XCTAssertNil(RemoteAccessConfiguration.load(defaults: defaults))
+
+        defaults.set("user@example.com", forKey: RemoteAccessConfiguration.allowedEmailKey)
+        let configuration = try XCTUnwrap(
+            RemoteAccessConfiguration.load(defaults: defaults)
+        )
+        XCTAssertEqual(configuration.hostname, "projects.example.com")
+        XCTAssertEqual(configuration.localPort, 49_271)
+        XCTAssertEqual(configuration.access.teamDomain, "team.cloudflareaccess.com")
+        XCTAssertEqual(configuration.access.audTag, "audience")
+        XCTAssertEqual(configuration.access.allowedEmail, "user@example.com")
+    }
+
     @MainActor
     func testRemoteGatewayRoutesFailClosed() async throws {
         let root = FileManager.default.temporaryDirectory

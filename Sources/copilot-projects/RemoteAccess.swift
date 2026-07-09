@@ -13,15 +13,10 @@ enum RemoteAccessError: LocalizedError {
 }
 
 struct RemoteAccessConfiguration: Sendable {
-    static let current = RemoteAccessConfiguration(
-        hostname: "projects.thefergies.com",
-        localPort: 49_271,
-        access: CloudflareAccessConfig(
-            teamDomain: "thefergies.cloudflareaccess.com",
-            audTag: "152bdb4d5f24935c5fde31e7ae219084cd7b608fa9f5dc44d5c967928918d0a8",
-            allowedEmail: "obvioussean@github.com"
-        )
-    )
+    static let hostnameKey = "remoteAccess.hostname"
+    static let teamDomainKey = "remoteAccess.cloudflareTeamDomain"
+    static let audienceKey = "remoteAccess.cloudflareAudience"
+    static let allowedEmailKey = "remoteAccess.allowedEmail"
 
     let hostname: String
     let localPort: Int
@@ -29,15 +24,39 @@ struct RemoteAccessConfiguration: Sendable {
 
     var origin: String { "https://\(hostname)" }
     var url: String { "\(origin)/" }
+
+    static func load(defaults: UserDefaults = .standard) -> RemoteAccessConfiguration? {
+        func value(forKey key: String) -> String? {
+            guard let raw = defaults.string(forKey: key) else { return nil }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        guard let hostname = value(forKey: hostnameKey),
+              let teamDomain = value(forKey: teamDomainKey),
+              let audience = value(forKey: audienceKey),
+              let allowedEmail = value(forKey: allowedEmailKey) else {
+            return nil
+        }
+        return RemoteAccessConfiguration(
+            hostname: hostname,
+            localPort: 49_271,
+            access: CloudflareAccessConfig(
+                teamDomain: teamDomain,
+                audTag: audience,
+                allowedEmail: allowedEmail
+            )
+        )
+    }
 }
 
 @MainActor
 final class RemoteAccessController {
     static let enabledKey = "remoteAccessEnabled"
 
-    private let configuration = RemoteAccessConfiguration.current
+    private let defaults: UserDefaults
     private var gateway: RemoteGateway?
     private var verifier: CloudflareAccessVerifier?
+    private var activeConfiguration: RemoteAccessConfiguration?
     private var enableTask: Task<Void, Never>?
     private var keyRefreshTask: Task<Void, Never>?
     private var shutdownTask: Task<Void, Never>?
@@ -45,34 +64,65 @@ final class RemoteAccessController {
     private(set) var url: String?
     private(set) var state = "disabled"
 
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
     var enabled: Bool {
-        UserDefaults.standard.bool(forKey: Self.enabledKey)
+        defaults.bool(forKey: Self.enabledKey)
     }
 
     func startIfEnabled(model: AppModel) {
         guard enabled else { return }
-        enable(model: model)
+        guard let configuration = RemoteAccessConfiguration.load(defaults: defaults) else {
+            defaults.set(false, forKey: Self.enabledKey)
+            state = "not configured"
+            return
+        }
+        enable(model: model, configuration: configuration)
     }
 
     func command(_ action: String, model: AppModel) -> ControlResponse {
         switch action {
         case "enable":
-            UserDefaults.standard.set(true, forKey: Self.enabledKey)
-            enable(model: model)
+            guard let configuration = RemoteAccessConfiguration.load(defaults: defaults) else {
+                defaults.set(false, forKey: Self.enabledKey)
+                state = "not configured"
+                return .failure(
+                    "remote access is not configured; see README.md#remote-access"
+                )
+            }
+            defaults.set(true, forKey: Self.enabledKey)
+            enable(model: model, configuration: configuration)
             return .success("Remote access is enabling.")
         case "disable":
-            UserDefaults.standard.set(false, forKey: Self.enabledKey)
+            defaults.set(false, forKey: Self.enabledKey)
             stopGateway()
             state = "disabled"
             return .success("Remote access is disabled.")
         case "status":
-            let statusURL = url ?? (enabled ? configuration.url : "disabled")
+            let configuration = activeConfiguration
+                ?? RemoteAccessConfiguration.load(defaults: defaults)
+            let statusURL: String
+            if let url {
+                statusURL = url
+            } else if enabled {
+                statusURL = configuration?.url ?? "not configured"
+            } else {
+                statusURL = "disabled"
+            }
+            let localOrigin = configuration.map {
+                "http://127.0.0.1:\($0.localPort)"
+            } ?? "not configured"
+            let authDescription = configuration.map {
+                "Cloudflare Access (\($0.access.allowedEmail))"
+            } ?? "not configured"
             return .success([
                 "enabled: \(enabled)",
                 "state: \(state)",
                 "url: \(statusURL)",
-                "origin: http://127.0.0.1:\(configuration.localPort)",
-                "auth: Cloudflare Access (\(configuration.access.allowedEmail))",
+                "origin: \(localOrigin)",
+                "auth: \(authDescription)",
             ].joined(separator: "\n"))
         default:
             return .failure("usage: copilot-projects remote enable|disable|status")
@@ -86,6 +136,7 @@ final class RemoteAccessController {
         keyRefreshTask?.cancel()
         keyRefreshTask = nil
         verifier = nil
+        activeConfiguration = nil
         let stoppedGateway = gateway
         gateway = nil
         url = nil
@@ -94,12 +145,11 @@ final class RemoteAccessController {
         }
     }
 
-    private func enable(model: AppModel) {
+    private func enable(model: AppModel, configuration: RemoteAccessConfiguration) {
         guard gateway == nil, enableTask == nil else { return }
         operationGeneration += 1
         let generation = operationGeneration
         state = "enabling"
-        let configuration = self.configuration
         let verifier = CloudflareAccessVerifier(config: configuration.access)
 
         enableTask = Task { @MainActor [weak self, weak model] in
@@ -153,6 +203,7 @@ final class RemoteAccessController {
             case .success:
                 self.gateway = gateway
                 self.verifier = verifier
+                activeConfiguration = configuration
                 url = configuration.url
                 state = "enabled"
                 startKeyRefresh(for: verifier)

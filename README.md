@@ -123,9 +123,19 @@ Remote access is opt-in. The local gateway listens on `127.0.0.1:49271`; a separ
 Cloudflare Tunnel maps the protected public hostname to that origin:
 
 ```bash
+# Configure the Cloudflare Access application, then relaunch the app.
+defaults write com.obvioussean.copilot-projects remoteAccess.hostname "projects.example.com"
+defaults write com.obvioussean.copilot-projects remoteAccess.cloudflareTeamDomain \
+  "your-team.cloudflareaccess.com"
+defaults write com.obvioussean.copilot-projects remoteAccess.cloudflareAudience "your-access-aud-tag"
+defaults write com.obvioussean.copilot-projects remoteAccess.allowedEmail "you@example.com"
+
 copilot-projects remote enable
 copilot-projects remote status
 ```
+
+All four settings are required. Remote access fails closed and remains disabled when any setting
+is missing.
 
 When enabled, the status command prints the protected URL. Cloudflare Access performs GitHub SSO at the edge,
 then injects a signed identity JWT into each forwarded request. The app independently verifies

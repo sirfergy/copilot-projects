@@ -6,9 +6,9 @@ import Security
 /// signing keys, `audTag` is the application's AUD, and `allowedEmail` is the
 /// single identity permitted to drive the terminal.
 struct CloudflareAccessConfig: Sendable, Equatable {
-    let teamDomain: String   // e.g. "thefergies.cloudflareaccess.com"
+    let teamDomain: String   // e.g. "team.cloudflareaccess.com"
     let audTag: String       // Access application AUD tag
-    let allowedEmail: String // e.g. "obvioussean@github.com"
+    let allowedEmail: String // e.g. "user@example.com"
 
     var issuer: String { "https://\(teamDomain)" }
     var certsURL: URL { URL(string: "https://\(teamDomain)/cdn-cgi/access/certs")! }
