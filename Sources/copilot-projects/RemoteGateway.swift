@@ -226,7 +226,8 @@ struct RemoteRequestAuth: Sendable {
 }
 
 private let remoteCSP =
-    "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'"
+    "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; "
+    + "frame-ancestors 'none'; base-uri 'none'"
 private let remoteMaxBodyBytes = 16 * 1_024
 private let remoteWorkspaceRefreshInterval: TimeInterval = 2
 

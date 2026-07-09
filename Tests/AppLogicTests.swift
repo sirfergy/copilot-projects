@@ -1443,12 +1443,17 @@ final class AppLogicTests: XCTestCase {
                 token: "invalid"
             )
             XCTAssertEqual(invalidToken, 403)
-            let allowedAsset = try await remoteHTTPStatus(
+            let allowedAsset = try await remoteHTTPResponse(
                 port: port,
                 path: "/app.js",
                 token: token
             )
-            XCTAssertEqual(allowedAsset, 200)
+            XCTAssertEqual(allowedAsset.statusCode, 200)
+            XCTAssertEqual(
+                allowedAsset.value(forHTTPHeaderField: "Content-Security-Policy"),
+                "default-src 'self'; connect-src 'self'; style-src 'self'; "
+                    + "script-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+            )
             let missingPath = try await remoteHTTPStatus(
                 port: port,
                 path: "/missing",
@@ -1797,6 +1802,25 @@ final class AppLogicTests: XCTestCase {
         origin: String? = nil,
         body: Data? = nil
     ) async throws -> Int {
+        let response = try await remoteHTTPResponse(
+            port: port,
+            path: path,
+            method: method,
+            token: token,
+            origin: origin,
+            body: body
+        )
+        return response.statusCode
+    }
+
+    private func remoteHTTPResponse(
+        port: Int,
+        path: String,
+        method: String = "GET",
+        token: String? = nil,
+        origin: String? = nil,
+        body: Data? = nil
+    ) async throws -> HTTPURLResponse {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 5
         configuration.timeoutIntervalForResource = 5
@@ -1818,7 +1842,7 @@ final class AppLogicTests: XCTestCase {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         let (_, response) = try await session.data(for: request)
-        return try XCTUnwrap(response as? HTTPURLResponse).statusCode
+        return try XCTUnwrap(response as? HTTPURLResponse)
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {
