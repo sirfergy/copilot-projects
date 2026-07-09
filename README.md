@@ -154,7 +154,7 @@ pick up changes.
 
 The app also installs a read-only Copilot extension at
 `~/.copilot/extensions/copilot-projects-tracker/extension.mjs`. It uses Copilot's session event
-stream and `session.schedule.list` RPC to report queued schedules, foreground turns, and active
+stream and `session.rpc.schedule.list()` to report queued schedules, foreground turns, and active
 subagents. Existing CLI sessions need `/restart` (or a new session) after installing/upgrading the
 extension.
 

@@ -144,6 +144,7 @@ public enum CopilotExtension {
         function cleanup() {
             clearInterval(timer);
             rmSync(snapshotPath, { force: true });
+            rmSync(scheduledTurnPath, { force: true });
         }
         process.once("SIGTERM", cleanup);
         process.once("SIGINT", cleanup);
