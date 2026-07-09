@@ -28,6 +28,30 @@ struct RemoteTerminalScreen: Codable, Equatable {
     let cols: Int
     let rows: Int
     let lines: [String]
+
+    static func capture(
+        sessionId: String,
+        cols: Int,
+        rows: Int,
+        characterAt: (Int, Int) -> Character?
+    ) -> RemoteTerminalScreen {
+        var lines: [String] = []
+        lines.reserveCapacity(rows)
+        for row in 0 ..< rows {
+            var line = ""
+            line.reserveCapacity(cols)
+            for col in 0 ..< cols {
+                line.append(characterAt(col, row) ?? " ")
+            }
+            lines.append(line.replacingOccurrences(of: "\u{0}", with: " "))
+        }
+        return RemoteTerminalScreen(
+            sessionId: sessionId,
+            cols: cols,
+            rows: rows,
+            lines: lines
+        )
+    }
 }
 
 struct RemoteClientMessage: Codable {

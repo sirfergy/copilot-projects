@@ -1389,6 +1389,214 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(auth.normalizedPath("app.js"))
     }
 
+    @MainActor
+    func testRemoteGatewayRoutesFailClosed() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [], selectedProjectId: nil))
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root
+        )
+        let config = CloudflareAccessConfig(
+            teamDomain: "team.cloudflareaccess.com",
+            audTag: "expected-aud",
+            allowedEmail: "user@example.com"
+        )
+        let verifier = CloudflareAccessVerifier(
+            config: config,
+            now: { Date() },
+            fetch: { _ in nil }
+        )
+        let (privateKey, publicKey) = try makeRSAKeyPair()
+        verifier.installKey(kid: "test-key", key: publicKey)
+        let token = try accessToken(
+            kid: "test-key",
+            claims: [
+                "iss": config.issuer,
+                "aud": config.audTag,
+                "email": config.allowedEmail,
+                "exp": Date().timeIntervalSince1970 + 3_600,
+            ],
+            privateKey: privateKey
+        )
+
+        let gateway = RemoteGateway()
+        let port = try gateway.start(
+            bridge: RemoteModelBridge(model: model),
+            expectedHost: "127.0.0.1",
+            expectedOrigin: "https://projects.example.com",
+            verifier: verifier,
+            port: 0
+        )
+        do {
+            let missingToken = try await remoteHTTPStatus(port: port, path: "/")
+            XCTAssertEqual(missingToken, 403)
+            let invalidToken = try await remoteHTTPStatus(
+                port: port,
+                path: "/",
+                token: "invalid"
+            )
+            XCTAssertEqual(invalidToken, 403)
+            let allowedAsset = try await remoteHTTPStatus(
+                port: port,
+                path: "/app.js",
+                token: token
+            )
+            XCTAssertEqual(allowedAsset, 200)
+            let missingPath = try await remoteHTTPStatus(
+                port: port,
+                path: "/missing",
+                token: token
+            )
+            XCTAssertEqual(missingPath, 404)
+            let wrongGetOrigin = try await remoteHTTPStatus(
+                port: port,
+                path: "/app.js",
+                token: token,
+                origin: "https://evil.example.com"
+            )
+            XCTAssertEqual(wrongGetOrigin, 403)
+            let controlBody = try JSONEncoder().encode(RemoteClientMessage(
+                type: "acquire",
+                clientId: "phone",
+                sessionId: "session",
+                data: nil
+            ))
+            let missingPostOrigin = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                body: controlBody
+            )
+            XCTAssertEqual(missingPostOrigin, 403)
+            let allowedControl = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: controlBody
+            )
+            XCTAssertEqual(allowedControl, 204)
+        } catch {
+            await gateway.stop()
+            throw error
+        }
+        await gateway.stop()
+    }
+
+    @MainActor
+    func testRemoteWorkspaceSnapshotPreservesModelContract() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let waiting = Session(id: "session-1", title: "waiting", cwd: "/one")
+        let completed = Session(id: "session-2", title: "completed", cwd: "/two")
+        let selected = Project(
+            id: "project-1",
+            name: "selected",
+            cwd: "/one",
+            sessions: [waiting, completed],
+            selectedSessionId: waiting.id
+        )
+        let other = Project(id: "project-2", name: "other", cwd: "/other")
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [selected, other],
+            selectedProjectId: selected.id
+        ))
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root
+        )
+        model.setStatus(
+            sessionId: waiting.id,
+            status: .waiting,
+            text: "needs input",
+            timestamp: 100,
+            source: "scheduled-start"
+        )
+        model.setStatus(
+            sessionId: completed.id,
+            status: .running,
+            text: "working",
+            timestamp: 100
+        )
+        model.setStatus(
+            sessionId: completed.id,
+            status: .idle,
+            text: nil,
+            timestamp: 200
+        )
+
+        XCTAssertEqual(model.remoteWorkspaceSnapshot(), RemoteWorkspaceSnapshot(
+            projects: [
+                RemoteProjectSnapshot(
+                    id: selected.id,
+                    name: selected.name,
+                    selectedSessionId: waiting.id,
+                    sessions: [
+                        RemoteSessionSnapshot(
+                            id: waiting.id,
+                            title: waiting.title,
+                            status: SessionStatus.waiting.rawValue,
+                            statusText: "needs input",
+                            unread: false,
+                            ready: false,
+                            background: true,
+                            scheduled: false
+                        ),
+                        RemoteSessionSnapshot(
+                            id: completed.id,
+                            title: completed.title,
+                            status: SessionStatus.idle.rawValue,
+                            statusText: nil,
+                            unread: false,
+                            ready: true,
+                            background: false,
+                            scheduled: false
+                        ),
+                    ]
+                ),
+                RemoteProjectSnapshot(
+                    id: other.id,
+                    name: other.name,
+                    selectedSessionId: nil,
+                    sessions: []
+                ),
+            ],
+            selectedProjectId: selected.id
+        ))
+    }
+
+    func testRemoteTerminalScreenCaptureNormalizesCells() {
+        let cells: [[Character?]] = [
+            ["A", "\u{0}"],
+            [nil, "B"],
+        ]
+        XCTAssertEqual(RemoteTerminalScreen.capture(
+            sessionId: "session",
+            cols: 2,
+            rows: 2,
+            characterAt: { cells[$1][$0] }
+        ), RemoteTerminalScreen(
+            sessionId: "session",
+            cols: 2,
+            rows: 2,
+            lines: ["A ", " B"]
+        ))
+    }
+
     func testRemoteQueryItemsParsesSession() {
         let items = RemoteRequestAuth.queryItems("/events?s=session%2Fid")
         XCTAssertEqual(items["s"], "session/id")
@@ -1579,6 +1787,38 @@ final class AppLogicTests: XCTestCase {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+
+    private func remoteHTTPStatus(
+        port: Int,
+        path: String,
+        method: String = "GET",
+        token: String? = nil,
+        origin: String? = nil,
+        body: Data? = nil
+    ) async throws -> Int {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 5
+        configuration.timeoutIntervalForResource = 5
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)\(path)"))
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.setValue("close", forHTTPHeaderField: "Connection")
+        if let token {
+            request.setValue(token, forHTTPHeaderField: "Cf-Access-Jwt-Assertion")
+        }
+        if let origin {
+            request.setValue(origin, forHTTPHeaderField: "Origin")
+        }
+        if body != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        let (_, response) = try await session.data(for: request)
+        return try XCTUnwrap(response as? HTTPURLResponse).statusCode
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {

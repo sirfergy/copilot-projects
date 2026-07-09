@@ -625,21 +625,11 @@ final class AppModel: ObservableObject {
               let terminal = controller(for: sessionId)?.terminalView.terminal else {
             return nil
         }
-        var lines: [String] = []
-        lines.reserveCapacity(terminal.rows)
-        for row in 0 ..< terminal.rows {
-            var line = ""
-            line.reserveCapacity(terminal.cols)
-            for col in 0 ..< terminal.cols {
-                line.append(terminal.getCharacter(col: col, row: row) ?? " ")
-            }
-            lines.append(line.replacingOccurrences(of: "\u{0}", with: " "))
-        }
-        return RemoteTerminalScreen(
+        return RemoteTerminalScreen.capture(
             sessionId: sessionId,
             cols: terminal.cols,
             rows: terminal.rows,
-            lines: lines
+            characterAt: { terminal.getCharacter(col: $0, row: $1) }
         )
     }
 
