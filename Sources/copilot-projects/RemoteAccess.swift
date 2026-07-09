@@ -37,14 +37,16 @@ struct RemoteAccessConfiguration: Sendable {
               let allowedEmail = value(forKey: allowedEmailKey) else {
             return nil
         }
+        let access = CloudflareAccessConfig(
+            teamDomain: teamDomain,
+            audTag: audience,
+            allowedEmail: allowedEmail
+        )
+        guard access.certsURL != nil else { return nil }
         return RemoteAccessConfiguration(
             hostname: hostname,
             localPort: 49_271,
-            access: CloudflareAccessConfig(
-                teamDomain: teamDomain,
-                audTag: audience,
-                allowedEmail: allowedEmail
-            )
+            access: access
         )
     }
 }

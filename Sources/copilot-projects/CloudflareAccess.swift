@@ -11,7 +11,13 @@ struct CloudflareAccessConfig: Sendable, Equatable {
     let allowedEmail: String // e.g. "user@example.com"
 
     var issuer: String { "https://\(teamDomain)" }
-    var certsURL: URL { URL(string: "https://\(teamDomain)/cdn-cgi/access/certs")! }
+    var certsURL: URL? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = teamDomain
+        components.path = "/cdn-cgi/access/certs"
+        return components.url
+    }
 }
 
 /// Verifies the `Cf-Access-Jwt-Assertion` JWT that Cloudflare's edge injects on
@@ -48,7 +54,8 @@ final class CloudflareAccessVerifier: @unchecked Sendable {
     /// callers can await this without blocking an event-loop or cooperative thread.
     @discardableResult
     func refreshKeys() async -> Bool {
-        guard let data = await fetch(config.certsURL),
+        guard let certsURL = config.certsURL,
+              let data = await fetch(certsURL),
               let parsed = Self.parseCerts(data), !parsed.isEmpty else {
             return false
         }

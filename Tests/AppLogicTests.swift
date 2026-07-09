@@ -1418,6 +1418,9 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(configuration.access.teamDomain, "team.cloudflareaccess.com")
         XCTAssertEqual(configuration.access.audTag, "audience")
         XCTAssertEqual(configuration.access.allowedEmail, "user@example.com")
+
+        defaults.set("%", forKey: RemoteAccessConfiguration.teamDomainKey)
+        XCTAssertNil(RemoteAccessConfiguration.load(defaults: defaults))
     }
 
     @MainActor
