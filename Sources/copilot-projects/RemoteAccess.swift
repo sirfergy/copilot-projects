@@ -2,13 +2,10 @@ import Foundation
 import CopilotProjectsCore
 
 enum RemoteAccessError: LocalizedError {
-    case accessKeysUnavailable
     case commandFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .accessKeysUnavailable:
-            return "Cloudflare Access signing keys could not be loaded."
         case .commandFailed(let message):
             return message
         }
@@ -69,10 +66,11 @@ final class RemoteAccessController {
             state = "disabled"
             return .success("Remote access is disabled.")
         case "status":
+            let statusURL = url ?? (enabled ? configuration.url : "disabled")
             return .success([
                 "enabled: \(enabled)",
                 "state: \(state)",
-                "url: \(url ?? configuration.url)",
+                "url: \(statusURL)",
                 "origin: http://127.0.0.1:\(configuration.localPort)",
                 "auth: Cloudflare Access (\(configuration.access.allowedEmail))",
             ].joined(separator: "\n"))

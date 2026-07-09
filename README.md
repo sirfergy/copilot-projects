@@ -127,7 +127,7 @@ copilot-projects remote enable
 copilot-projects remote status
 ```
 
-The status command prints the protected URL. Cloudflare Access performs GitHub SSO at the edge,
+When enabled, the status command prints the protected URL. Cloudflare Access performs GitHub SSO at the edge,
 then injects a signed identity JWT into each forwarded request. The app independently verifies
 that JWT's RS256 signature, issuer, audience, expiration, and allowed email; it also requires the
 expected host and same-origin POSTs. Direct requests to the localhost origin without a valid
