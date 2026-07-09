@@ -80,9 +80,12 @@ struct TrackedSchedule: Codable, Equatable, Identifiable {
     }
 
     var helpText: String {
-        "Scheduled prompt #\(id)\n"
+        let cadence = cadenceDescription
+        let displayCadence = String(cadence.prefix(1)).uppercased()
+            + String(cadence.dropFirst())
+        return "Scheduled prompt #\(id)\n"
             + "Runs next at \(nextRunDescription)\n"
-            + "\(cadenceDescription.capitalized)\n"
+            + "\(displayCadence)\n"
             + label
     }
 }

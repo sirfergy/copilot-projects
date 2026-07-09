@@ -315,7 +315,7 @@ struct BackgroundAgentsBadge: View {
             .scaledToFit()
             .frame(width: 9, height: 9)
             .foregroundStyle(.purple)
-            .help("background agents running")
+            .help("background work active")
     }
 }
 

@@ -837,6 +837,9 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(model.projects[0].sessions[0].activeSubagentCount, 1)
         XCTAssertEqual(model.projects[0].sessions[0].schedules.first?.id, 16)
         XCTAssertTrue(model.projects[0].sessions[0].schedules[0].helpText.contains(
+            "Every 10m"
+        ))
+        XCTAssertTrue(model.projects[0].sessions[0].schedules[0].helpText.contains(
             "Runs next at"
         ))
         XCTAssertEqual(model.totalScheduled, 1)

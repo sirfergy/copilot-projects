@@ -40,7 +40,25 @@ public enum CopilotExtension {
         let lastIdleTurnKind = null;
         let schedules = [];
 
-        mkdirSync(sessionsDir, { recursive: true });
+        function removeFile(path) {
+            try {
+                rmSync(path, { force: true });
+            } catch {}
+        }
+
+        function setScheduledTurnMarker(active) {
+            try {
+                if (active) {
+                    writeFileSync(scheduledTurnPath, "");
+                } else {
+                    rmSync(scheduledTurnPath, { force: true });
+                }
+            } catch {}
+        }
+
+        try {
+            mkdirSync(sessionsDir, { recursive: true });
+        } catch {}
 
         function publish(error) {
             const snapshot = {
@@ -60,7 +78,7 @@ public enum CopilotExtension {
                 writeFileSync(temporaryPath, JSON.stringify(snapshot));
                 renameSync(temporaryPath, snapshotPath);
             } catch {
-                rmSync(temporaryPath, { force: true });
+                removeFile(temporaryPath);
             }
         }
 
@@ -80,11 +98,7 @@ public enum CopilotExtension {
             currentTurnKind = event.data.source?.startsWith("schedule-")
                 ? "scheduled"
                 : "foreground";
-            if (currentTurnKind === "scheduled") {
-                writeFileSync(scheduledTurnPath, "");
-            } else {
-                rmSync(scheduledTurnPath, { force: true });
-            }
+            setScheduledTurnMarker(currentTurnKind === "scheduled");
         });
 
         session.on("assistant.turn_start", (event) => {
@@ -92,7 +106,7 @@ public enum CopilotExtension {
             lastIdleTurnKind = null;
             scheduledTurnActive = currentTurnKind === "scheduled";
             foregroundTurnActive = !scheduledTurnActive;
-            if (scheduledTurnActive) writeFileSync(scheduledTurnPath, "");
+            if (scheduledTurnActive) setScheduledTurnMarker(true);
             publish();
         });
 
@@ -112,7 +126,7 @@ public enum CopilotExtension {
             scheduledTurnActive = false;
             activeSubagents.clear();
             publish();
-            setTimeout(() => rmSync(scheduledTurnPath, { force: true }), 5_000);
+            setTimeout(() => setScheduledTurnMarker(false), 5_000);
         });
 
         session.on("subagent.started", (event) => {
@@ -147,8 +161,8 @@ public enum CopilotExtension {
 
         function cleanup() {
             clearInterval(timer);
-            rmSync(snapshotPath, { force: true });
-            rmSync(scheduledTurnPath, { force: true });
+            removeFile(snapshotPath);
+            removeFile(scheduledTurnPath);
         }
         process.once("SIGTERM", cleanup);
         process.once("SIGINT", cleanup);
