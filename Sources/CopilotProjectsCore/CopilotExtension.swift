@@ -56,8 +56,12 @@ public enum CopilotExtension {
                 ...(error ? { error: String(error) } : {}),
             };
             const temporaryPath = `${snapshotPath}.${process.pid}.tmp`;
-            writeFileSync(temporaryPath, JSON.stringify(snapshot));
-            renameSync(temporaryPath, snapshotPath);
+            try {
+                writeFileSync(temporaryPath, JSON.stringify(snapshot));
+                renameSync(temporaryPath, snapshotPath);
+            } catch {
+                rmSync(temporaryPath, { force: true });
+            }
         }
 
         async function refreshSchedules() {

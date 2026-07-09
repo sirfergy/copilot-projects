@@ -45,6 +45,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains("session.rpc.schedule.list()"))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("subagent.started""#))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("session.idle""#))
+        XCTAssertTrue(CopilotExtension.script.contains("rmSync(temporaryPath, { force: true })"))
         XCTAssertTrue(CopilotExtension.script.contains("rmSync(scheduledTurnPath, { force: true })"))
         XCTAssertFalse(CopilotExtension.script.contains("tools:"))
     }
