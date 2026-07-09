@@ -436,7 +436,7 @@ public enum CLIMain {
           copilot-projects focus                   Focus a project/session [--project ID] [--session ID]
           copilot-projects ping                    Check the app is reachable
           copilot-projects screenshot [path]       Save a PNG of the app window
-          copilot-projects remote <action>         Remote access: enable | disable | status
+          copilot-projects remote [action]         Remote access: enable | disable | status (default)
           copilot-projects doctor                  Diagnose app/session/runtime state
           copilot-projects version                 Print the installed version
           copilot-projects install-cli [--dir D]   Symlink this binary onto your PATH
