@@ -156,7 +156,14 @@ enum RemoteWebAssets {
       pendingInput = '';
       const response = await control({ type: 'input', sessionId, data });
       flushing = false;
-      if (response && response.status === 403) {
+      if (!response) {
+        if (selected === sessionId && writable) {
+          pendingInput = data + pendingInput;
+          setTimeout(flushInput, 1000);
+        }
+        return;
+      }
+      if (response.status === 403) {
         // Another device took control of this session.
         writable = false;
         pendingInput = '';

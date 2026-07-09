@@ -1612,6 +1612,15 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.html.contains("aria-label=\"Command input\""))
     }
 
+    func testRemoteWebInputRequeuesAfterNetworkFailure() {
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "pendingInput = data + pendingInput;"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "setTimeout(flushInput, 1000);"
+        ))
+    }
+
     func testRemoteQueryItemsParsesSession() {
         let items = RemoteRequestAuth.queryItems("/events?s=session%2Fid")
         XCTAssertEqual(items["s"], "session/id")

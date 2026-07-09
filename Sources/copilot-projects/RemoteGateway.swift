@@ -11,7 +11,7 @@ fileprivate struct RemoteTerminalRevision: Equatable {
 }
 
 @MainActor
-final class RemoteModelBridge {
+final class RemoteModelBridge: @unchecked Sendable {
     private struct CachedScreen {
         let revision: RemoteTerminalRevision
         let screen: RemoteTerminalScreen?
