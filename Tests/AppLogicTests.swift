@@ -709,6 +709,210 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(cliCalls.count, 13)
     }
 
+    func testCopilotHookKeepsScheduledTurnsOutOfForegroundStatus() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let bin = root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let hookURL = root.appendingPathComponent("copilot-projects-hook.sh")
+        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookURL.path)
+
+        let capture = root.appendingPathComponent("cli-args.txt")
+        let fakeCLI = bin.appendingPathComponent("copilot-projects")
+        try """
+        #!/bin/sh
+        printf '%s\n' "$*" >> "$CAPTURE_FILE"
+        """.write(to: fakeCLI, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
+
+        let tabId = UUID().uuidString
+        try runHook(
+            hookURL: hookURL,
+            action: "running",
+            payload: #"{"timestamp":100,"prompt":"[Scheduled prompt #16] Check PRs"}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture
+        )
+        try runHook(
+            hookURL: hookURL,
+            action: "pre",
+            payload: #"{"timestamp":110}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture
+        )
+        try runHook(
+            hookURL: hookURL,
+            action: "notify",
+            payload: #"{"timestamp":120,"notification_type":"session_idle","aborted":false}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture
+        )
+
+        let calls = try cliCallLines(in: capture)
+        XCTAssertTrue(calls.contains("set-status idle --timestamp 100 --source scheduled-start"))
+        XCTAssertTrue(calls.contains("set-status idle --timestamp 110 --source scheduled-active"))
+        XCTAssertTrue(calls.contains("set-status idle --timestamp 120 --source scheduled-idle"))
+        XCTAssertFalse(calls.contains { $0.contains("--notification completed") })
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("sessions/\(tabId).scheduled-turn").path
+        ))
+    }
+
+    @MainActor
+    func testAgentActivitySnapshotTracksSchedulesAndBackgroundWork() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let activityDirectory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: activityDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let targetSession = Session(title: "target", cwd: "/tmp")
+        defer { SessionArtifacts.removeFiles(sessionId: targetSession.id) }
+        let targetProject = Project(name: "target", cwd: "/tmp", sessions: [targetSession])
+        let selectedProject = Project(name: "selected", cwd: "/tmp")
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [targetProject, selectedProject],
+            selectedProjectId: selectedProject.id
+        ))
+
+        let snapshot = AgentActivitySnapshot(
+            schemaVersion: 1,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            foregroundTurnActive: false,
+            scheduledTurnActive: true,
+            activeSubagents: [
+                TrackedSubagent(
+                    id: "agent-1",
+                    name: "reviewer",
+                    description: "Reviews the PR",
+                    model: "gpt"
+                ),
+            ],
+            schedules: [
+                TrackedSchedule(
+                    id: 16,
+                    intervalMs: 600_000,
+                    cron: nil,
+                    tz: nil,
+                    at: nil,
+                    prompt: "Check PRs",
+                    recurring: true,
+                    displayPrompt: "/my-prs-status",
+                    nextRunAt: ISO8601DateFormatter().string(
+                        from: Date().addingTimeInterval(600)
+                    )
+                ),
+            ],
+            idleGeneration: 0,
+            lastIdleAborted: false,
+            lastIdleTurnKind: nil,
+            error: nil
+        )
+        let path = activityDirectory
+            .appendingPathComponent("\(targetSession.id).agent-activity.json")
+        try JSONEncoder().encode(snapshot).write(to: path)
+
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: activityDirectory
+        )
+        model.refreshAgentActivitySnapshots()
+
+        XCTAssertEqual(model.projects[0].sessions[0].status, .idle)
+        XCTAssertTrue(model.projects[0].sessions[0].scheduledTurnActive)
+        XCTAssertEqual(model.projects[0].sessions[0].activeSubagentCount, 1)
+        XCTAssertEqual(model.projects[0].sessions[0].schedules.first?.id, 16)
+        XCTAssertTrue(model.projects[0].sessions[0].schedules[0].helpText.contains(
+            "Runs next at"
+        ))
+        XCTAssertEqual(model.totalScheduled, 1)
+
+        var stale = snapshot
+        stale.updatedAt = "2000-01-01T00:00:00Z"
+        try JSONEncoder().encode(stale).write(to: path)
+        model.refreshAgentActivitySnapshots()
+
+        XCTAssertNil(model.projects[0].sessions[0].agentActivity)
+        XCTAssertFalse(model.projects[0].sessions[0].scheduledTurnActive)
+    }
+
+    @MainActor
+    func testScheduledIdleTurnDoesNotPostCompletionNotification() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let activityDirectory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: activityDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let targetSession = Session(title: "scheduled", cwd: "/tmp")
+        let targetProject = Project(name: "target", cwd: "/tmp", sessions: [targetSession])
+        let selectedProject = Project(name: "selected", cwd: "/tmp")
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [targetProject, selectedProject],
+            selectedProjectId: selectedProject.id
+        ))
+
+        let snapshot = AgentActivitySnapshot(
+            schemaVersion: 1,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            foregroundTurnActive: false,
+            scheduledTurnActive: false,
+            activeSubagents: [],
+            schedules: [],
+            idleGeneration: 1,
+            lastIdleAborted: false,
+            lastIdleTurnKind: "scheduled",
+            error: nil
+        )
+        let path = activityDirectory
+            .appendingPathComponent("\(targetSession.id).agent-activity.json")
+        try JSONEncoder().encode(snapshot).write(to: path)
+
+        let model = AppModel(
+            stateRepository: repository,
+            completionNotificationDelayNanoseconds: 10_000_000,
+            agentActivityDirectory: activityDirectory
+        )
+        let notifications = NotificationSpy()
+        model.attach(notifications: notifications)
+        model.refreshAgentActivitySnapshots()
+        model.setStatus(
+            sessionId: targetSession.id,
+            status: .running,
+            text: nil,
+            timestamp: 100
+        )
+        model.setStatus(
+            sessionId: targetSession.id,
+            status: .idle,
+            text: nil,
+            timestamp: 200,
+            source: "agent-stop"
+        )
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertTrue(notifications.calls.isEmpty)
+    }
+
     func testAgentStopAndSessionIdleAtomicallyClaimCompletion() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

@@ -74,8 +74,8 @@ public enum CLIMain {
             return installCLI(rest)
         case "install-hooks":
             do {
-                let message = try CopilotHooks.install()
-                print(message)
+                print(try CopilotHooks.install())
+                print(try CopilotExtension.install())
                 return 0
             } catch {
                 fail("\(error)")
@@ -83,7 +83,8 @@ public enum CLIMain {
             }
         case "uninstall-hooks":
             CopilotHooks.uninstall()
-            print("Removed copilot-projects Copilot CLI hooks.")
+            CopilotExtension.uninstall()
+            print("Removed copilot-projects Copilot CLI hooks and extension.")
             return 0
         case "attach":
             return attachSession(rest)

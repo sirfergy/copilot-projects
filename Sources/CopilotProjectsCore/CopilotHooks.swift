@@ -118,6 +118,10 @@ public enum CopilotHooks {
     is_aborted() {
       printf '%s' "$1" | grep -qE '"aborted"[[:space:]]*:[[:space:]]*true'
     }
+    is_scheduled_prompt() {
+      printf '%s' "$1" | grep -qE '\[Scheduled prompt #[0-9]+\]'
+    }
+    scheduled_turn="$state_dir/sessions/$session_id.scheduled-turn"
     # Record the Copilot CLI session id (carried by tool/notification payloads as
     # "sessionId") so the app can auto-resume THIS exact agent session after a
     # reboot — copilot --resume=<id> — instead of guessing per tab. Best-effort;
@@ -150,15 +154,31 @@ public enum CopilotHooks {
         rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null || true
+        rm -f "$scheduled_turn" 2>/dev/null || true
         status idle "$(payload_timestamp "$payload")"
         ;;
       running)
         payload="$(cat 2>/dev/null || true)"
-        mark_turn_active
-        status running "$(payload_timestamp "$payload")"
+        if is_scheduled_prompt "$payload"; then
+          mkdir -p "$state_dir/sessions" 2>/dev/null || true
+          : > "$scheduled_turn"
+          rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
+          rm -f "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null || true
+          status idle "$(payload_timestamp "$payload")" scheduled-start
+        else
+          rm -f "$scheduled_turn" 2>/dev/null || true
+          mark_turn_active
+          status running "$(payload_timestamp "$payload")"
+        fi
         ;;
       idle)
         payload="$(cat 2>/dev/null || true)"
+        if [ -f "$scheduled_turn" ]; then
+          : > "$scheduled_turn"
+          status idle "$(payload_timestamp "$payload")" scheduled-active
+          emit
+          exit 0
+        fi
         source=""
         if claim_active_turn_for_agent_stop; then
           if is_aborted "$payload"; then
@@ -172,20 +192,38 @@ public enum CopilotHooks {
       pre)
         payload="$(cat 2>/dev/null || true)"
         record_cli_session "$payload"
-        mark_turn_active
-        status running "$(payload_timestamp "$payload")"
+        if [ -f "$scheduled_turn" ]; then
+          : > "$scheduled_turn"
+          status idle "$(payload_timestamp "$payload")" scheduled-active
+        else
+          mark_turn_active
+          status running "$(payload_timestamp "$payload")"
+        fi
         ;;
       post)
         payload="$(cat 2>/dev/null || true)"
         record_cli_session "$payload"
-        mark_turn_active
-        status running "$(payload_timestamp "$payload")"
+        if [ -f "$scheduled_turn" ]; then
+          : > "$scheduled_turn"
+          status idle "$(payload_timestamp "$payload")" scheduled-active
+        else
+          mark_turn_active
+          status running "$(payload_timestamp "$payload")"
+        fi
         ;;
       notify)
         payload="$(cat 2>/dev/null || true)"
         record_cli_session "$payload"
         timestamp="$(payload_timestamp "$payload")"
         if is_session_idle "$payload"; then
+          if [ -f "$scheduled_turn" ]; then
+            rm -f "$scheduled_turn" 2>/dev/null || true
+            consume_active_turn || true
+            consume_agent_stop_completion || true
+            status idle "$timestamp" scheduled-idle
+            emit
+            exit 0
+          fi
           mkdir -p "$state_dir/sessions" 2>/dev/null || true
           : > "$state_dir/sessions/$session_id.session-idle-hook"
           rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
@@ -223,6 +261,7 @@ public enum CopilotHooks {
         rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null || true
+        rm -f "$scheduled_turn" 2>/dev/null || true
         status idle "$(payload_timestamp "$payload")"
         ;;
     esac

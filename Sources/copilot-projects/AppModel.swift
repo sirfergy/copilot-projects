@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import ScreenCaptureKit
 import CopilotProjectsCore
+import Darwin
 
 private final class ScreenshotCaptureBox: @unchecked Sendable {
     private let lock = NSLock()
@@ -174,6 +175,8 @@ final class AppModel: ObservableObject {
 
     private var livenessTimer: Timer?
     private var footerTimer: Timer?
+    private var agentActivityTimer: Timer?
+    private var agentActivitySource: DispatchSourceFileSystemObject?
 
     private var activityTracker = ActivityTracker()
     private var statusEventClock = StatusEventClock()
@@ -181,6 +184,7 @@ final class AppModel: ObservableObject {
     private var completionPending: Set<String> = []
     private let completionNotificationDelayNanoseconds: UInt64
     private let isAppActive: @MainActor () -> Bool
+    private let agentActivityDirectory: URL
 
     /// Sessions hosting a live agent (refreshed by the liveness reconciler). Used
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.
@@ -209,11 +213,13 @@ final class AppModel: ObservableObject {
     init(
         stateRepository: StateRepository = StateRepository(),
         completionNotificationDelayNanoseconds: UInt64 = 1_000_000_000,
-        isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive }
+        isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive },
+        agentActivityDirectory: URL = Paths.sessionsDir
     ) {
         self.stateRepository = stateRepository
         self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
         self.isAppActive = isAppActive
+        self.agentActivityDirectory = agentActivityDirectory
         load()
     }
 
@@ -551,6 +557,9 @@ final class AppModel: ObservableObject {
         isTerminating = true
         footerTimer?.invalidate()
         livenessTimer?.invalidate()
+        agentActivityTimer?.invalidate()
+        agentActivitySource?.cancel()
+        agentActivitySource = nil
     }
 
     /// Count of sessions with an in-flight agent (running or waiting).
@@ -565,6 +574,9 @@ final class AppModel: ObservableObject {
     var totalWaiting: Int { projects.reduce(0) { $0 + $1.waitingCount } }
     var totalBackgroundAgents: Int {
         projects.reduce(0) { $0 + $1.backgroundAgentCount }
+    }
+    var totalScheduled: Int {
+        projects.reduce(0) { $0 + $1.scheduledCount }
     }
     var totalReady: Int {
         projects.reduce(0) { $0 + $1.sessions.filter { $0.finishedUnseen }.count }
@@ -726,9 +738,20 @@ final class AppModel: ObservableObject {
         guard let loc = locateIndex(sessionId) else { return }
         guard statusEventClock.shouldApply(sessionId: sessionId, timestamp: timestamp) else { return }
         let previous = projects[loc.p].sessions[loc.s].status
+        let startsScheduledTurn = source == "scheduled-start" || source == "scheduled-active"
+        let endsScheduledTurn = source == "scheduled-idle"
+        let scheduledStateChanges = startsScheduledTurn
+            ? !projects[loc.p].sessions[loc.s].scheduledTurnActive
+            : endsScheduledTurn && projects[loc.p].sessions[loc.s].scheduledTurnActive
+        if startsScheduledTurn {
+            projects[loc.p].sessions[loc.s].scheduledTurnActive = true
+        } else if endsScheduledTurn {
+            projects[loc.p].sessions[loc.s].scheduledTurnActive = false
+        }
         let clearsBackgroundAgents = status == .idle && source == "session-idle"
         let hasCompletionSignal = status == .idle
             && (source == "agent-stop" || notification == .completed)
+            && !projects[loc.p].sessions[loc.s].scheduledTurnActive
         let clearsFinishedUnseen = (status == .running || status == .waiting)
             && projects[loc.p].sessions[loc.s].finishedUnseen
         let resumesBackgroundTracking = (status == .running || status == .waiting)
@@ -740,10 +763,14 @@ final class AppModel: ObservableObject {
                 || resumesBackgroundTracking
                 || notification != nil
                 || hasCompletionSignal
+                || scheduledStateChanges
         else { return }
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
         if status == .running || status == .waiting {
+            if status == .running {
+                projects[loc.p].sessions[loc.s].scheduledTurnActive = false
+            }
             projects[loc.p].sessions[loc.s].finishedUnseen = false
             projects[loc.p].sessions[loc.s].turnCompleted = false
             backgroundAgentsSuppressed.remove(sessionId)
@@ -777,6 +804,7 @@ final class AppModel: ObservableObject {
         // The agent just went active → idle. If you're not currently looking at this
         // session, flag it as finished-and-unseen (drives the blue sidebar/tab dot).
         if status == .idle, previous == .running || previous == .waiting,
+           !startsScheduledTurn, !endsScheduledTurn,
            !isVisible(projectIndex: loc.p, sessionIndex: loc.s) {
             projects[loc.p].sessions[loc.s].finishedUnseen = true
         }
@@ -844,6 +872,74 @@ final class AppModel: ObservableObject {
         livenessTimer = timer
     }
 
+    func startAgentActivityTracking() {
+        agentActivityTimer?.invalidate()
+        agentActivitySource?.cancel()
+        agentActivitySource = nil
+
+        try? FileManager.default.createDirectory(
+            at: agentActivityDirectory,
+            withIntermediateDirectories: true
+        )
+        refreshAgentActivitySnapshots()
+
+        let fd = open(agentActivityDirectory.path, O_EVTONLY)
+        if fd >= 0 {
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd,
+                eventMask: [.write, .rename, .delete],
+                queue: .main
+            )
+            source.setEventHandler { [weak self] in
+                self?.refreshAgentActivitySnapshots()
+            }
+            source.setCancelHandler { close(fd) }
+            source.resume()
+            agentActivitySource = source
+        }
+
+        let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.refreshAgentActivitySnapshots() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        agentActivityTimer = timer
+    }
+
+    func refreshAgentActivitySnapshots(now: Date = Date()) {
+        let decoder = JSONDecoder()
+        let fm = FileManager.default
+        for pi in projects.indices {
+            for si in projects[pi].sessions.indices {
+                let sessionId = projects[pi].sessions[si].id
+                let path = agentActivityDirectory
+                    .appendingPathComponent("\(sessionId).agent-activity.json").path
+                let snapshot: AgentActivitySnapshot?
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+                    snapshot = try? decoder.decode(AgentActivitySnapshot.self, from: data)
+                } else {
+                    snapshot = nil
+                }
+                let fresh = snapshot?.isFresh(at: now) == true ? snapshot : nil
+                projects[pi].sessions[si].agentActivity = fresh
+
+                let scheduledMarkerURL = agentActivityDirectory
+                    .appendingPathComponent("\(sessionId).scheduled-turn")
+                let markerModified = (try? fm.attributesOfItem(
+                    atPath: scheduledMarkerURL.path
+                )[.modificationDate]) as? Date
+                let scheduledMarker = markerModified.map {
+                    now.timeIntervalSince($0) <= 15
+                } ?? false
+                if scheduledMarker || fresh?.scheduledTurnActive == true {
+                    projects[pi].sessions[si].scheduledTurnActive = true
+                } else {
+                    projects[pi].sessions[si].scheduledTurnActive = false
+                }
+
+            }
+        }
+    }
+
     /// Backstop for cancelled turns. An Esc-cancel fires no stop hook and leaves the
     /// agent alive, so neither the stop hook nor `reconcileLiveness` clears the tab
     /// spinner — but the agent's own footer returns to its idle signature. Clear a
@@ -870,7 +966,7 @@ final class AppModel: ObservableObject {
                 }
                 if status == .idle {
                     guard ActivityTracker.canPromoteIdleFromFooter(
-                        backgroundAgentsActive: projects[pi].sessions[si].backgroundAgentsActive,
+                        backgroundAgentsActive: projects[pi].sessions[si].hasBackgroundWork,
                         hasLiveAgent: liveAgentSessions.contains(sid),
                         supportsSessionIdleHook: supportsSessionIdleHook
                     ) else {
@@ -1002,12 +1098,19 @@ final class AppModel: ObservableObject {
             completionPending.remove(sessionId)
             return
         }
+        if projects[loc.p].sessions[loc.s].scheduledTurnActive
+            || projects[loc.p].sessions[loc.s].agentActivity?.lastIdleTurnKind == "scheduled"
+        {
+            completionPending.remove(sessionId)
+            projects[loc.p].sessions[loc.s].turnCompleted = true
+            return
+        }
         let activity = controllers[sessionId]?.agentActivity
         guard Self.canPostCompletion(
             status: projects[loc.p].sessions[loc.s].status,
             activity: activity
         ) else { return }
-        guard !projects[loc.p].sessions[loc.s].backgroundAgentsActive else { return }
+        guard !projects[loc.p].sessions[loc.s].hasBackgroundWork else { return }
         completionPending.remove(sessionId)
 
         guard !projects[loc.p].sessions[loc.s].turnCompleted else { return }

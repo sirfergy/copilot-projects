@@ -23,6 +23,9 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 - **Status:** each session reports `idle` / `running` / `waiting`. Running and waiting
   counts appear in the sidebar; a blue dot on the session tab marks work that finished
   while you were away. With the Copilot CLI hooks installed (below), this is driven automatically.
+- **Schedules + background work:** queued scheduled prompts show a clock with cadence/next-run
+  details; active scheduled turns and subagents use a separate background indicator instead of
+  making the foreground session look busy.
 - **Notifications:** native macOS banners identify the originating project/session and
   automatically alert when Copilot has a question, needs permission, or finishes a task.
   Clicking one focuses that session. Unread sessions get a bell badge + a Dock badge count.
@@ -148,6 +151,12 @@ The hook no-ops outside a copilot-projects terminal (it checks `COPILOT_PROJECTS
 coexists with other integrations (e.g. cmux) and is safe to leave installed globally. Manage
 it with `copilot-projects install-hooks` / `uninstall-hooks`. Start a new Copilot CLI session to
 pick up changes.
+
+The app also installs a read-only Copilot extension at
+`~/.copilot/extensions/copilot-projects-tracker/extension.mjs`. It uses Copilot's session event
+stream and `session.schedule.list` RPC to report queued schedules, foreground turns, and active
+subagents. Existing CLI sessions need `/restart` (or a new session) after installing/upgrading the
+extension.
 
 While the app is running, the first elicitation or permission prompt and each successfully
 completed turn also post a native macOS banner. The banner includes the project and session name,

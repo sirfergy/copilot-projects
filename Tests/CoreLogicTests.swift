@@ -41,6 +41,13 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(parsed.positionals, ["first", "--literal"])
     }
 
+    func testCopilotExtensionTracksSchedulesAndSubagentsWithoutTools() {
+        XCTAssertTrue(CopilotExtension.script.contains("session.rpc.schedule.list()"))
+        XCTAssertTrue(CopilotExtension.script.contains(#"session.on("subagent.started""#))
+        XCTAssertTrue(CopilotExtension.script.contains(#"session.on("session.idle""#))
+        XCTAssertFalse(CopilotExtension.script.contains("tools:"))
+    }
+
     func testStatusNotificationKindRoundTripsOverControlProtocol() throws {
         var request = ControlRequest(command: "set-status")
         request.notification = .completed

@@ -20,6 +20,14 @@ struct Session: Identifiable, Codable, Equatable {
     /// "Copilot: Waiting for background agents" terminal title). Surfaced as a tab/
     /// sidebar indicator instead of letting that title clobber the tab's real name.
     var backgroundAgentsActive: Bool = false
+    var scheduledTurnActive: Bool = false
+    var agentActivity: AgentActivitySnapshot?
+
+    var activeSubagentCount: Int { agentActivity?.activeSubagents.count ?? 0 }
+    var schedules: [TrackedSchedule] { agentActivity?.schedules ?? [] }
+    var hasBackgroundWork: Bool {
+        backgroundAgentsActive || scheduledTurnActive || activeSubagentCount > 0
+    }
 
     private enum CodingKeys: String, CodingKey { case id, title, cwd }
 
@@ -61,7 +69,8 @@ extension Project {
 
     var runningCount: Int { sessions.filter { $0.status == .running }.count }
     var waitingCount: Int { sessions.filter { $0.status == .waiting }.count }
-    var backgroundAgentCount: Int { sessions.filter { $0.backgroundAgentsActive }.count }
+    var backgroundAgentCount: Int { sessions.filter(\.hasBackgroundWork).count }
+    var scheduledCount: Int { sessions.filter { !$0.schedules.isEmpty }.count }
     var hasUnread: Bool { sessions.contains { $0.hasUnread } }
     var hasBackgroundAgents: Bool { backgroundAgentCount > 0 }
 }

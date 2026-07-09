@@ -64,10 +64,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isPrimaryInstance = true
         model.bootstrapIfNeeded()
         model.startLivenessReconciler()
+        model.startAgentActivityTracking()
         let env = ProcessInfo.processInfo.environment
         if Env.shouldInstallGlobalIntegration(env) {
             model.installCLISymlinkIfPossible()
             CopilotHooks.installIfPossible()
+            CopilotExtension.installIfPossible()
         }
         registerDeepLinkHelper()
 

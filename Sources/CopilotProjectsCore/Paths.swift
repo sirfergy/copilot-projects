@@ -132,6 +132,14 @@ public enum Paths {
         sessionsDir.appendingPathComponent("\(sessionId).copilot-session").path
     }
 
+    public static func scheduledTurnMarkerPath(sessionId: String) -> String {
+        sessionsDir.appendingPathComponent("\(sessionId).scheduled-turn").path
+    }
+
+    public static func agentActivitySnapshotPath(sessionId: String) -> String {
+        sessionsDir.appendingPathComponent("\(sessionId).agent-activity.json").path
+    }
+
     /// The bundled dtach helper (resumability backend), or an override, or nil.
     public static var dtachExecutable: String? {
         let env = ProcessInfo.processInfo.environment

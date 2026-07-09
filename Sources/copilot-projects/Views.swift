@@ -88,6 +88,7 @@ struct FleetStatusBar: View {
     var body: some View {
         let running = model.totalRunning
         let background = model.totalBackgroundAgents
+        let scheduled = model.totalScheduled
         let waiting = model.totalWaiting
         let ready = model.totalReady
         HStack(spacing: 10) {
@@ -98,9 +99,10 @@ struct FleetStatusBar: View {
                     Text("\(background) background").foregroundStyle(.purple)
                 }
             }
+            if scheduled > 0 { Text("\(scheduled) scheduled").foregroundStyle(.indigo) }
             if waiting > 0 { Text("\(waiting) waiting").foregroundStyle(.orange) }
             if ready > 0 { Text("\(ready) ready").foregroundStyle(.blue) }
-            if running == 0, background == 0, waiting == 0, ready == 0 {
+            if running == 0, background == 0, scheduled == 0, waiting == 0, ready == 0 {
                 Text("all idle").foregroundStyle(.tertiary)
             }
         }
@@ -195,11 +197,6 @@ struct ProjectRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            if project.hasBackgroundAgents {
-                BackgroundAgentsBadge()
-            } else {
-                Color.clear.frame(width: 9, height: 9)
-            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name).lineLimit(1)
                 Text("\(project.sessions.count) session\(project.sessions.count == 1 ? "" : "s")")
@@ -237,11 +234,21 @@ struct ProjectRow: View {
     // running is muted; idle is fainter still.
     @ViewBuilder private var statusLine: some View {
         let running = project.runningCount
+        let background = project.backgroundAgentCount
+        let scheduled = project.scheduledCount
         let waiting = project.waitingCount
-        if running > 0 || waiting > 0 {
+        if running > 0 || background > 0 || scheduled > 0 || waiting > 0 {
             HStack(spacing: 4) {
                 if running > 0 { Text("\(running) running").foregroundStyle(.green) }
-                if running > 0, waiting > 0 { Text("·").foregroundStyle(.tertiary) }
+                if running > 0, background > 0 || scheduled > 0 || waiting > 0 {
+                    Text("·").foregroundStyle(.tertiary)
+                }
+                if background > 0 { Text("\(background) background").foregroundStyle(.purple) }
+                if background > 0, scheduled > 0 || waiting > 0 {
+                    Text("·").foregroundStyle(.tertiary)
+                }
+                if scheduled > 0 { Text("\(scheduled) scheduled").foregroundStyle(.indigo) }
+                if scheduled > 0, waiting > 0 { Text("·").foregroundStyle(.tertiary) }
                 if waiting > 0 { Text("\(waiting) waiting").foregroundStyle(.orange) }
             }
         } else {
@@ -258,26 +265,26 @@ struct SessionTabIndicator: View {
     let session: Session
 
     var body: some View {
-        if session.backgroundAgentsActive {
-            BackgroundAgentsBadge()
-        } else {
-            Group {
-                switch kind {
-                case .busy:
-                    ProgressView()
-                        .controlSize(.small)
-                        .scaleEffect(0.6)
-                case .dot(let color):
-                    Circle()
-                        .fill(color)
-                        .overlay(Circle().stroke(.black.opacity(0.15), lineWidth: 0.5))
-                case .none:
-                    Color.clear
-                }
+        statusIndicator
+    }
+
+    private var statusIndicator: some View {
+        Group {
+            switch kind {
+            case .busy:
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.6)
+            case .dot(let color):
+                Circle()
+                    .fill(color)
+                    .overlay(Circle().stroke(.black.opacity(0.15), lineWidth: 0.5))
+            case .none:
+                Color.clear
             }
-            .frame(width: 9, height: 9)
-            .help(help)
         }
+        .frame(width: 9, height: 9)
+        .help(help)
     }
 
     private enum Kind { case busy, dot(Color), none }
@@ -309,6 +316,19 @@ struct BackgroundAgentsBadge: View {
             .frame(width: 9, height: 9)
             .foregroundStyle(.purple)
             .help("background agents running")
+    }
+}
+
+struct ScheduleBadge: View {
+    let schedules: [TrackedSchedule]
+
+    var body: some View {
+        Image(systemName: "clock.arrow.circlepath")
+            .resizable()
+            .scaledToFit()
+            .frame(width: 10, height: 10)
+            .foregroundStyle(.indigo)
+            .help(schedules.map(\.helpText).joined(separator: "\n\n"))
     }
 }
 
@@ -360,50 +380,55 @@ struct SessionTabBar: View {
     @State private var dropTargetId: String?     // a session id, or "" for end-of-row
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                ForEach(Array(project.sessions.enumerated()), id: \.element.id) { index, session in
-                    SessionTab(
-                        session: session,
-                        isActive: session.id == project.selectedSessionId,
-                        number: index < 9 ? index + 1 : nil,
-                        showNumber: model.numberHint == .tabs,
-                        onSelect: { model.selectSession(projectId: project.id, sessionId: session.id) },
-                        onClose: { model.requestCloseSession(projectId: project.id, sessionId: session.id) }
-                    )
-                    .overlay(alignment: .leading) {
-                        insertionBar.opacity(dropTargetId == session.id ? 1 : 0).offset(x: -4)
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(Array(project.sessions.enumerated()), id: \.element.id) { index, session in
+                        SessionTab(
+                            session: session,
+                            isActive: session.id == project.selectedSessionId,
+                            number: index < 9 ? index + 1 : nil,
+                            showNumber: model.numberHint == .tabs,
+                            onSelect: { model.selectSession(projectId: project.id, sessionId: session.id) },
+                            onClose: { model.requestCloseSession(projectId: project.id, sessionId: session.id) }
+                        )
+                        .overlay(alignment: .leading) {
+                            insertionBar.opacity(dropTargetId == session.id ? 1 : 0).offset(x: -4)
+                        }
+                        .onDrag {
+                            draggedSession = session
+                            dropTargetId = nil
+                            return NSItemProvider(object: session.id as NSString)
+                        }
+                        .onDrop(of: [.text], delegate: TabDropDelegate(
+                            targetId: session.id, dragged: $draggedSession,
+                            dropTargetId: $dropTargetId, model: model, projectId: project.id))
                     }
-                    .onDrag {
-                        draggedSession = session
-                        dropTargetId = nil
-                        return NSItemProvider(object: session.id as NSString)
-                    }
-                    .onDrop(of: [.text], delegate: TabDropDelegate(
-                        targetId: session.id, dragged: $draggedSession,
-                        dropTargetId: $dropTargetId, model: model, projectId: project.id))
+                    // Trailing drop zone → move to the end of the row.
+                    Color.clear
+                        .frame(width: 24)
+                        .frame(maxHeight: .infinity)
+                        .overlay(alignment: .leading) {
+                            insertionBar.opacity(dropTargetId == "" ? 1 : 0)
+                        }
+                        .onDrop(of: [.text], delegate: TabDropDelegate(
+                            targetId: "", dragged: $draggedSession,
+                            dropTargetId: $dropTargetId, model: model, projectId: project.id))
                 }
-                // Trailing drop zone → move to the end of the row.
-                Color.clear
-                    .frame(width: 24)
-                    .frame(maxHeight: .infinity)
-                    .overlay(alignment: .leading) {
-                        insertionBar.opacity(dropTargetId == "" ? 1 : 0)
-                    }
-                    .onDrop(of: [.text], delegate: TabDropDelegate(
-                        targetId: "", dragged: $draggedSession,
-                        dropTargetId: $dropTargetId, model: model, projectId: project.id))
-                Button { model.addSession(toProjectId: project.id) } label: {
-                    Image(systemName: "plus")
-                        .font(.caption)
-                        .frame(width: 24, height: 22)
-                }
-                .buttonStyle(.borderless)
-                .hoverHighlight()
-                .help("New Session (⌘T)")
+                .padding(.leading, 8)
+                .padding(.vertical, 5)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity)
+
+            Button { model.addSession(toProjectId: project.id) } label: {
+                Image(systemName: "plus")
+                    .font(.caption)
+                    .frame(width: 24, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .hoverHighlight()
+            .help("New Session (⌘T)")
+            .padding(.trailing, 8)
         }
     }
 
@@ -511,6 +536,12 @@ struct SessionTab: View {
             Text(session.title)
                 .font(.callout)
                 .lineLimit(1)
+                .help(session.statusText ?? session.title)
+            if session.hasBackgroundWork {
+                BackgroundAgentsBadge()
+            } else if !session.schedules.isEmpty {
+                ScheduleBadge(schedules: session.schedules)
+            }
             if session.hasUnread {
                 Circle().fill(Color.blue).frame(width: 6, height: 6)
             }
@@ -537,6 +568,5 @@ struct SessionTab: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
-        .help(session.statusText ?? session.title)
     }
 }
