@@ -897,6 +897,70 @@ final class AppLogicTests: XCTestCase {
         model.refreshAgentActivitySnapshots()
         model.setStatus(
             sessionId: targetSession.id,
+            status: .idle,
+            text: nil,
+            timestamp: 100,
+            source: "scheduled-start"
+        )
+        model.setStatus(
+            sessionId: targetSession.id,
+            status: .idle,
+            text: nil,
+            timestamp: 200,
+            source: "agent-stop"
+        )
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertTrue(notifications.calls.isEmpty)
+    }
+
+    @MainActor
+    func testStaleScheduledIdleDoesNotSuppressNextForegroundCompletion() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let activityDirectory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: activityDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let targetSession = Session(title: "foreground", cwd: "/tmp")
+        let targetProject = Project(name: "target", cwd: "/tmp", sessions: [targetSession])
+        let selectedProject = Project(name: "selected", cwd: "/tmp")
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [targetProject, selectedProject],
+            selectedProjectId: selectedProject.id
+        ))
+
+        let snapshot = AgentActivitySnapshot(
+            schemaVersion: 1,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            foregroundTurnActive: false,
+            scheduledTurnActive: false,
+            activeSubagents: [],
+            schedules: [],
+            idleGeneration: 1,
+            lastIdleAborted: false,
+            lastIdleTurnKind: "scheduled",
+            error: nil
+        )
+        let path = activityDirectory
+            .appendingPathComponent("\(targetSession.id).agent-activity.json")
+        try JSONEncoder().encode(snapshot).write(to: path)
+
+        let model = AppModel(
+            stateRepository: repository,
+            completionNotificationDelayNanoseconds: 10_000_000,
+            agentActivityDirectory: activityDirectory
+        )
+        let notifications = NotificationSpy()
+        model.attach(notifications: notifications)
+        model.refreshAgentActivitySnapshots()
+        model.setStatus(
+            sessionId: targetSession.id,
             status: .running,
             text: nil,
             timestamp: 100
@@ -910,7 +974,11 @@ final class AppLogicTests: XCTestCase {
         )
         try await Task.sleep(nanoseconds: 50_000_000)
 
-        XCTAssertTrue(notifications.calls.isEmpty)
+        XCTAssertEqual(notifications.calls.count, 1)
+        XCTAssertEqual(
+            notifications.calls.first?.title,
+            StatusNotificationKind.completed.title
+        )
     }
 
     func testAgentStopAndSessionIdleAtomicallyClaimCompletion() throws {

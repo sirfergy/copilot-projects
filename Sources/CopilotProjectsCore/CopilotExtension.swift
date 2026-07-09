@@ -72,6 +72,7 @@ public enum CopilotExtension {
 
         session.on("user.message", (event) => {
             if (event.agentId) return;
+            lastIdleTurnKind = null;
             currentTurnKind = event.data.source?.startsWith("schedule-")
                 ? "scheduled"
                 : "foreground";
@@ -84,6 +85,7 @@ public enum CopilotExtension {
 
         session.on("assistant.turn_start", (event) => {
             if (event.agentId) return;
+            lastIdleTurnKind = null;
             scheduledTurnActive = currentTurnKind === "scheduled";
             foregroundTurnActive = !scheduledTurnActive;
             if (scheduledTurnActive) writeFileSync(scheduledTurnPath, "");
@@ -97,6 +99,7 @@ public enum CopilotExtension {
         });
 
         session.on("session.idle", (event) => {
+            if (event.agentId) return;
             idleGeneration += 1;
             lastIdleAborted = event.data.aborted === true;
             lastIdleTurnKind = currentTurnKind;
@@ -105,6 +108,7 @@ public enum CopilotExtension {
             scheduledTurnActive = false;
             activeSubagents.clear();
             publish();
+            setTimeout(() => rmSync(scheduledTurnPath, { force: true }), 5_000);
         });
 
         session.on("subagent.started", (event) => {

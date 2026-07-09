@@ -182,6 +182,8 @@ final class AppModel: ObservableObject {
     private var statusEventClock = StatusEventClock()
     private var backgroundAgentsSuppressed: Set<String> = []
     private var completionPending: Set<String> = []
+    private var scheduledSnapshotsSuppressed: Set<String> = []
+    private var foregroundIdleGenerationBaselines: [String: Int] = [:]
     private let completionNotificationDelayNanoseconds: UInt64
     private let isAppActive: @MainActor () -> Bool
     private let agentActivityDirectory: URL
@@ -506,6 +508,8 @@ final class AppModel: ObservableObject {
         statusEventClock.reset(sessionId: sid)
         backgroundAgentsSuppressed.remove(sid)
         completionPending.remove(sid)
+        scheduledSnapshotsSuppressed.remove(sid)
+        foregroundIdleGenerationBaselines.removeValue(forKey: sid)
         let closedIndex = projects[pi].sessions.firstIndex { $0.id == sid }
         let wasSelected = projects[pi].selectedSessionId == sid
         projects[pi].sessions.removeAll { $0.id == sid }
@@ -591,6 +595,8 @@ final class AppModel: ObservableObject {
             controllers[session.id] = nil
             backgroundAgentsSuppressed.remove(session.id)
             completionPending.remove(session.id)
+            scheduledSnapshotsSuppressed.remove(session.id)
+            foregroundIdleGenerationBaselines.removeValue(forKey: session.id)
         }
         projects.remove(at: pi)
         if selectedProjectId == pid {
@@ -745,8 +751,11 @@ final class AppModel: ObservableObject {
             : endsScheduledTurn && projects[loc.p].sessions[loc.s].scheduledTurnActive
         if startsScheduledTurn {
             projects[loc.p].sessions[loc.s].scheduledTurnActive = true
+            scheduledSnapshotsSuppressed.remove(sessionId)
+            foregroundIdleGenerationBaselines.removeValue(forKey: sessionId)
         } else if endsScheduledTurn {
             projects[loc.p].sessions[loc.s].scheduledTurnActive = false
+            scheduledSnapshotsSuppressed.insert(sessionId)
         }
         let clearsBackgroundAgents = status == .idle && source == "session-idle"
         let hasCompletionSignal = status == .idle
@@ -770,6 +779,8 @@ final class AppModel: ObservableObject {
         if status == .running || status == .waiting {
             if status == .running {
                 projects[loc.p].sessions[loc.s].scheduledTurnActive = false
+                foregroundIdleGenerationBaselines[sessionId] =
+                    projects[loc.p].sessions[loc.s].agentActivity?.idleGeneration ?? -1
             }
             projects[loc.p].sessions[loc.s].finishedUnseen = false
             projects[loc.p].sessions[loc.s].turnCompleted = false
@@ -924,13 +935,13 @@ final class AppModel: ObservableObject {
 
                 let scheduledMarkerURL = agentActivityDirectory
                     .appendingPathComponent("\(sessionId).scheduled-turn")
-                let markerModified = (try? fm.attributesOfItem(
-                    atPath: scheduledMarkerURL.path
-                )[.modificationDate]) as? Date
-                let scheduledMarker = markerModified.map {
-                    now.timeIntervalSince($0) <= 15
-                } ?? false
-                if scheduledMarker || fresh?.scheduledTurnActive == true {
+                let scheduledMarker = fm.fileExists(atPath: scheduledMarkerURL.path)
+                if fresh?.scheduledTurnActive == false {
+                    scheduledSnapshotsSuppressed.remove(sessionId)
+                }
+                let snapshotScheduled = fresh?.scheduledTurnActive == true
+                    && !scheduledSnapshotsSuppressed.contains(sessionId)
+                if scheduledMarker || snapshotScheduled {
                     projects[pi].sessions[si].scheduledTurnActive = true
                 } else {
                     projects[pi].sessions[si].scheduledTurnActive = false
@@ -1098,11 +1109,15 @@ final class AppModel: ObservableObject {
             completionPending.remove(sessionId)
             return
         }
-        if projects[loc.p].sessions[loc.s].scheduledTurnActive
-            || projects[loc.p].sessions[loc.s].agentActivity?.lastIdleTurnKind == "scheduled"
+        let snapshotActivity = projects[loc.p].sessions[loc.s].agentActivity
+        let baseline = foregroundIdleGenerationBaselines[sessionId]
+        let scheduledIdleIsCurrent = snapshotActivity?.lastIdleTurnKind == "scheduled"
+            && (baseline == nil || (snapshotActivity?.idleGeneration ?? -1) > baseline!)
+        if projects[loc.p].sessions[loc.s].scheduledTurnActive || scheduledIdleIsCurrent
         {
             completionPending.remove(sessionId)
             projects[loc.p].sessions[loc.s].turnCompleted = true
+            foregroundIdleGenerationBaselines.removeValue(forKey: sessionId)
             return
         }
         let activity = controllers[sessionId]?.agentActivity
@@ -1115,6 +1130,7 @@ final class AppModel: ObservableObject {
 
         guard !projects[loc.p].sessions[loc.s].turnCompleted else { return }
         projects[loc.p].sessions[loc.s].turnCompleted = true
+        foregroundIdleGenerationBaselines.removeValue(forKey: sessionId)
 
         guard !isVisible(projectIndex: loc.p, sessionIndex: loc.s) else { return }
         postNotification(
