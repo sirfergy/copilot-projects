@@ -146,6 +146,14 @@ struct RemoteRequestAuth: Sendable {
         return nil
     }
 
+    /// When the token root is requested without a trailing slash, returns the
+    /// path to redirect to (with the slash) so relative asset URLs resolve under
+    /// the token prefix. Returns nil for every other path.
+    func trailingSlashRedirect(_ uri: String) -> String? {
+        let path = uri.split(separator: "?", maxSplits: 1).first.map(String.init) ?? uri
+        return path == pathPrefix ? "\(pathPrefix)/" : nil
+    }
+
     static func queryItems(_ uri: String) -> [String: String] {
         guard let query = uri.split(separator: "?", maxSplits: 1).dropFirst().first else {
             return [:]
@@ -237,6 +245,14 @@ private final class RemoteHTTPHandler:
         guard auth.authorize(head: head, originPolicy: .matchIfPresent) else {
             respond(context: context, method: head.method, status: .forbidden,
                     contentType: "text/plain", body: "Forbidden")
+            return
+        }
+
+        // Redirect the bare token root to a trailing slash so relative asset
+        // URLs (app.css/app.js) resolve under the token prefix instead of
+        // resolving to the parent path and 403ing.
+        if let target = auth.trailingSlashRedirect(head.uri) {
+            redirect(context: context, method: head.method, to: target)
             return
         }
 
@@ -382,6 +398,21 @@ private final class RemoteHTTPHandler:
     }
 
     // MARK: - Fixed-length responses
+
+    private func redirect(
+        context: ChannelHandlerContext,
+        method: HTTPMethod,
+        to location: String
+    ) {
+        var headers = HTTPHeaders()
+        headers.add(name: "Location", value: location)
+        headers.add(name: "Content-Length", value: "0")
+        headers.add(name: "Cache-Control", value: "no-store")
+        headers.add(name: "Referrer-Policy", value: "no-referrer")
+        let response = HTTPResponseHead(version: .http1_1, status: .found, headers: headers)
+        context.write(wrapOutboundOut(.head(response)), promise: nil)
+        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+    }
 
     private func respond(
         context: ChannelHandlerContext,

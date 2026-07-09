@@ -1312,6 +1312,13 @@ final class AppLogicTests: XCTestCase {
             "/app.js"
         )
         XCTAssertNil(auth.normalizedPath("/events"))
+        // Bare token root (no trailing slash) redirects; everything else doesn't.
+        XCTAssertEqual(
+            auth.trailingSlashRedirect("/copilot-projects-secret"),
+            "/copilot-projects-secret/"
+        )
+        XCTAssertNil(auth.trailingSlashRedirect("/copilot-projects-secret/"))
+        XCTAssertNil(auth.trailingSlashRedirect("/copilot-projects-secret/app.css"))
     }
 
     func testRemoteQueryItemsParsesClientAndSession() {
