@@ -1,234 +1,50 @@
 import Foundation
 import CopilotProjectsCore
-import Darwin
-
-/// State of a `tailscale serve` HTTPS port, parsed from `serve status`.
-enum RemoteServePortState: Equatable {
-    case free
-    case ours
-    case foreign(String)
-}
-
-/// Classifies who owns `httpsPort` in `tailscale serve status`. Our gateway is
-/// always a `127.0.0.1` loopback proxy, so any handler whose proxy target is not
-/// a loopback address (or that isn't a proxy at all) means the port is already
-/// used by something unrelated and must not be overwritten. Ports are matched
-/// exactly (so `:8443` never matches `:18443`).
-func remoteServePortState(status: String, httpsPort: Int) -> RemoteServePortState {
-    var inSection = false
-    var sawHandler = false
-    for raw in status.split(whereSeparator: \.isNewline) {
-        let line = raw.trimmingCharacters(in: .whitespaces)
-        if line.hasPrefix("https://") || line.hasPrefix("http://")
-            || line.hasPrefix("tcp://") || line.hasPrefix("tls-terminated-tcp://") {
-            inSection = remoteServeHeaderPort(line) == httpsPort
-            continue
-        }
-        guard inSection, line.hasPrefix("|--") else { continue }
-        sawHandler = true
-        // Classify by the proxy target, not the whole line, so a path that
-        // merely contains "localhost" can't be mistaken for our own proxy.
-        let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard let proxyIndex = tokens.firstIndex(of: "proxy"),
-              proxyIndex + 1 < tokens.count,
-              remoteIsLoopbackTarget(tokens[proxyIndex + 1]) else {
-            return .foreign(line)
-        }
-    }
-    return sawHandler ? .ours : .free
-}
-
-/// Extracts the port from a serve-status header line like
-/// `https://host:8443 (tailnet only)`, or nil when there is no explicit port.
-private func remoteServeHeaderPort(_ headerLine: String) -> Int? {
-    guard let token = headerLine.split(whereSeparator: \.isWhitespace).first,
-          let authority = token.split(separator: "/").last,
-          let portField = authority.split(separator: ":").last,
-          portField != authority else { return nil }
-    return Int(portField)
-}
-
-/// True when a serve proxy target points at a loopback address (our gateway).
-private func remoteIsLoopbackTarget(_ target: String) -> Bool {
-    let prefixes = [
-        "http://127.0.0.1:", "https://127.0.0.1:",
-        "http://localhost:", "https://localhost:",
-        "http://[::1]:", "https://[::1]:",
-    ]
-    return prefixes.contains { target.hasPrefix($0) }
-}
 
 enum RemoteAccessError: LocalizedError {
-    case tailscaleNotFound
-    case tailscaleNotRunning
-    case missingIdentity
-    case conflictingServeConfig(String)
+    case accessKeysUnavailable
     case commandFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .tailscaleNotFound:
-            return "Tailscale is not installed."
-        case .tailscaleNotRunning:
-            return "Tailscale is not connected."
-        case .missingIdentity:
-            return "Tailscale did not report a DNS name and user identity."
-        case .conflictingServeConfig(let config):
-            return "Tailscale Serve already has unrelated configuration:\n\(config)"
+        case .accessKeysUnavailable:
+            return "Cloudflare Access signing keys could not be loaded."
         case .commandFailed(let message):
             return message
         }
     }
 }
 
-private struct TailscaleStatus: Decodable {
-    struct SelfNode: Decodable {
-        let DNSName: String
-        let UserID: Int64
-    }
+struct RemoteAccessConfiguration: Sendable {
+    static let current = RemoteAccessConfiguration(
+        hostname: "projects.thefergies.com",
+        localPort: 49_271,
+        access: CloudflareAccessConfig(
+            teamDomain: "thefergies.cloudflareaccess.com",
+            audTag: "152bdb4d5f24935c5fde31e7ae219084cd7b608fa9f5dc44d5c967928918d0a8",
+            allowedEmail: "obvioussean@github.com"
+        )
+    )
 
-    struct User: Decodable {
-        let LoginName: String
-    }
+    let hostname: String
+    let localPort: Int
+    let access: CloudflareAccessConfig
 
-    let BackendState: String
-    let SelfNode: SelfNode
-    let User: [String: User]
-
-    private enum CodingKeys: String, CodingKey {
-        case BackendState
-        case SelfNode = "Self"
-        case User
-    }
-}
-
-private struct TailscaleServe: Sendable {
-    static let httpsPort = 8_443
-
-    let executable: String
-
-    static func detect() throws -> TailscaleServe {
-        let candidates = [
-            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-            "/opt/homebrew/bin/tailscale",
-            "/usr/local/bin/tailscale",
-        ]
-        guard let executable = candidates.first(where: {
-            FileManager.default.isExecutableFile(atPath: $0)
-        }) else {
-            throw RemoteAccessError.tailscaleNotFound
-        }
-        return TailscaleServe(executable: executable)
-    }
-
-    func identity() throws -> (host: String, login: String) {
-        let output = try run(["status", "--json"])
-        let status = try JSONDecoder().decode(TailscaleStatus.self, from: Data(output.utf8))
-        guard status.BackendState == "Running" else {
-            throw RemoteAccessError.tailscaleNotRunning
-        }
-        let host = status.SelfNode.DNSName.trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        guard !host.isEmpty,
-              let login = status.User[String(status.SelfNode.UserID)]?.LoginName,
-              !login.isEmpty else {
-            throw RemoteAccessError.missingIdentity
-        }
-        return (host, login)
-    }
-
-    func enable(port: Int, path: String) throws {
-        let existing = (try? run(["serve", "status"])) ?? ""
-        if case .foreign(let desc) = remoteServePortState(
-            status: existing, httpsPort: Self.httpsPort
-        ) {
-            throw RemoteAccessError.conflictingServeConfig(desc)
-        }
-        for line in existing.split(whereSeparator: \.isNewline) {
-            let fields = line.split(whereSeparator: \.isWhitespace)
-            guard fields.count >= 2 else { continue }
-            let oldPath = String(fields[1])
-            guard oldPath.hasPrefix("/copilot-projects") else { continue }
-            _ = try? run([
-                "serve", "--bg", "--yes",
-                "--set-path=\(oldPath)",
-                "off",
-            ])
-        }
-        _ = try run([
-            "serve", "--bg", "--yes",
-            "--https=\(Self.httpsPort)",
-            "127.0.0.1:\(port)",
-        ])
-    }
-
-    func disable(path: String) throws {
-        let existing = (try? run(["serve", "status"])) ?? ""
-        // Only tear down our own loopback proxy on the port; never clobber an
-        // unrelated service the user may have put on it.
-        guard case .ours = remoteServePortState(
-            status: existing, httpsPort: Self.httpsPort
-        ) else { return }
-        _ = try run([
-            "serve", "--bg", "--yes",
-            "--https=\(Self.httpsPort)",
-            "off",
-        ])
-    }
-
-    func serveStatus() -> String {
-        (try? run(["serve", "status"])) ?? "unavailable"
-    }
-
-    private func run(_ arguments: [String]) throws -> String {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("copilot-projects-tailscale-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let stdoutURL = directory.appendingPathComponent("stdout")
-        let stderrURL = directory.appendingPathComponent("stderr")
-        FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
-        FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
-        let stdout = try FileHandle(forWritingTo: stdoutURL)
-        let stderr = try FileHandle(forWritingTo: stderrURL)
-        defer {
-            try? stdout.close()
-            try? stderr.close()
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardOutput = stdout
-        process.standardError = stderr
-        let completed = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in completed.signal() }
-        try process.run()
-        if completed.wait(timeout: .now() + 15) == .timedOut {
-            process.terminate()
-            _ = completed.wait(timeout: .now() + 2)
-            throw RemoteAccessError.commandFailed(
-                "Tailscale command timed out: \(arguments.joined(separator: " "))"
-            )
-        }
-        try stdout.synchronize()
-        try stderr.synchronize()
-        let output = (try? String(contentsOf: stdoutURL, encoding: .utf8)) ?? ""
-        let error = (try? String(contentsOf: stderrURL, encoding: .utf8)) ?? ""
-        guard process.terminationStatus == 0 else {
-            throw RemoteAccessError.commandFailed(
-                [output, error].filter { !$0.isEmpty }.joined(separator: "\n")
-            )
-        }
-        return output
-    }
+    var origin: String { "https://\(hostname)" }
+    var url: String { "\(origin)/" }
 }
 
 @MainActor
 final class RemoteAccessController {
     static let enabledKey = "remoteAccessEnabled"
-    static let routeTokenKey = "remoteAccessRouteToken"
 
+    private let configuration = RemoteAccessConfiguration.current
     private var gateway: RemoteGateway?
+    private var verifier: CloudflareAccessVerifier?
+    private var enableTask: Task<Void, Never>?
+    private var keyRefreshTask: Task<Void, Never>?
+    private var shutdownTask: Task<Void, Never>?
+    private var operationGeneration = 0
     private(set) var url: String?
     private(set) var state = "disabled"
 
@@ -241,101 +57,137 @@ final class RemoteAccessController {
         enable(model: model)
     }
 
-    func command(_ action: String, model: AppModel) -> String {
+    func command(_ action: String, model: AppModel) -> ControlResponse {
         switch action {
         case "enable":
             UserDefaults.standard.set(true, forKey: Self.enabledKey)
             enable(model: model)
-            return "Remote access is enabling."
+            return .success("Remote access is enabling.")
         case "disable":
             UserDefaults.standard.set(false, forKey: Self.enabledKey)
             stopGateway()
-            state = "disabling"
-            let path = routePath
-            Task.detached {
-                try? TailscaleServe.detect().disable(path: path)
-                await MainActor.run { self.state = "disabled" }
-            }
-            return "Remote access is disabling."
+            state = "disabled"
+            return .success("Remote access is disabled.")
         case "status":
-            return [
+            return .success([
                 "enabled: \(enabled)",
                 "state: \(state)",
-                "url: \(url ?? "(not running)")",
-            ].joined(separator: "\n")
+                "url: \(url ?? configuration.url)",
+                "origin: http://127.0.0.1:\(configuration.localPort)",
+                "auth: Cloudflare Access (\(configuration.access.allowedEmail))",
+            ].joined(separator: "\n"))
         default:
-            return "usage: copilot-projects remote enable|disable|status"
+            return .failure("usage: copilot-projects remote enable|disable|status")
         }
     }
 
     func stopGateway() {
+        operationGeneration += 1
+        enableTask?.cancel()
+        enableTask = nil
+        keyRefreshTask?.cancel()
+        keyRefreshTask = nil
+        verifier = nil
         let stoppedGateway = gateway
         gateway = nil
         url = nil
         if let stoppedGateway {
-            Task.detached { stoppedGateway.stop() }
+            queueShutdown(stoppedGateway)
         }
     }
 
     private func enable(model: AppModel) {
-        guard gateway == nil, state != "enabling" else { return }
+        guard gateway == nil, enableTask == nil else { return }
+        operationGeneration += 1
+        let generation = operationGeneration
         state = "enabling"
-        Task { @MainActor [weak self, weak model] in
+        let configuration = self.configuration
+        let verifier = CloudflareAccessVerifier(config: configuration.access)
+
+        enableTask = Task { @MainActor [weak self, weak model] in
             guard let self, let model else { return }
-            let result = await Task.detached {
-                Result { () -> (TailscaleServe, host: String, login: String) in
-                    let tailscale = try TailscaleServe.detect()
-                    let identity = try tailscale.identity()
-                    return (tailscale, identity.host, identity.login)
+            defer {
+                if operationGeneration == generation {
+                    enableTask = nil
+                }
+            }
+
+            if let shutdownTask {
+                await shutdownTask.value
+            }
+            guard shouldContinue(generation: generation) else { return }
+
+            var retryDelay: UInt64 = 2
+            while !(await verifier.refreshKeys()) {
+                guard shouldContinue(generation: generation) else { return }
+                state = "waiting for Cloudflare Access keys"
+                do {
+                    try await Task.sleep(nanoseconds: retryDelay * 1_000_000_000)
+                } catch {
+                    return
+                }
+                retryDelay = min(retryDelay * 2, 300)
+            }
+            guard shouldContinue(generation: generation) else { return }
+
+            let gateway = RemoteGateway()
+            let bridge = RemoteModelBridge(model: model)
+            let startResult = await Task.detached {
+                Result {
+                    try gateway.start(
+                        bridge: bridge,
+                        expectedHost: configuration.hostname,
+                        expectedOrigin: configuration.origin,
+                        verifier: verifier,
+                        port: configuration.localPort
+                    )
                 }
             }.value
-            switch result {
+            guard shouldContinue(generation: generation) else {
+                queueShutdown(gateway)
+                return
+            }
+
+            switch startResult {
             case .failure(let error):
+                await gateway.stop()
                 state = "error: \(error.localizedDescription)"
-            case .success(let value):
-                let gateway = RemoteGateway()
-                let bridge = RemoteModelBridge(model: model)
-                do {
-                    let path = routePath
-                    let origin = "https://\(value.host):\(TailscaleServe.httpsPort)"
-                    let startResult = await Task.detached {
-                        Result {
-                            try gateway.start(
-                                bridge: bridge,
-                                expectedHost: value.host,
-                                expectedOrigin: origin,
-                                allowedLogin: value.login,
-                                pathPrefix: path
-                            )
-                        }
-                    }.value
-                    let port = try startResult.get()
-                    self.gateway = gateway
-                    url = "\(origin)\(path)/"
-                    let serveResult = await Task.detached {
-                        Result { try value.0.enable(port: port, path: path) }
-                    }.value
-                    if case .failure(let error) = serveResult {
-                        stopGateway()
-                        state = "error: \(error.localizedDescription)"
-                    } else {
-                        state = "enabled"
-                    }
-                } catch {
-                    await Task.detached { gateway.stop() }.value
-                    state = "error: \(error.localizedDescription)"
-                }
+            case .success:
+                self.gateway = gateway
+                self.verifier = verifier
+                url = configuration.url
+                state = "enabled"
+                startKeyRefresh(for: verifier)
             }
         }
     }
 
-    private var routePath: String {
-        if let value = UserDefaults.standard.string(forKey: Self.routeTokenKey),
-           !value.isEmpty {
-            return "/copilot-projects-\(value)"
+    private func startKeyRefresh(for verifier: CloudflareAccessVerifier) {
+        keyRefreshTask?.cancel()
+        keyRefreshTask = Task.detached { [weak verifier] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 6 * 60 * 60 * 1_000_000_000)
+                } catch {
+                    return
+                }
+                guard let verifier else { return }
+                _ = await verifier.refreshKeys()
+            }
         }
-        let value = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        UserDefaults.standard.set(value, forKey: Self.routeTokenKey)
-        return "/copilot-projects-\(value)"
+    }
+
+    private func shouldContinue(generation: Int) -> Bool {
+        enabled && operationGeneration == generation && !Task.isCancelled
+    }
+
+    private func queueShutdown(_ gateway: RemoteGateway) {
+        let priorShutdown = shutdownTask
+        shutdownTask = Task.detached {
+            if let priorShutdown {
+                await priorShutdown.value
+            }
+            await gateway.stop()
+        }
     }
 }

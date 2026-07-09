@@ -61,15 +61,14 @@ final class RemoteGateway: @unchecked Sendable {
         bridge: RemoteModelBridge,
         expectedHost: String,
         expectedOrigin: String,
-        allowedLogin: String,
-        pathPrefix: String
+        verifier: CloudflareAccessVerifier,
+        port: Int
     ) throws -> Int {
-        if let port = channel?.localAddress?.port { return port }
+        if let boundPort = channel?.localAddress?.port { return boundPort }
         let auth = RemoteRequestAuth(
             expectedHost: expectedHost,
             expectedOrigin: expectedOrigin,
-            allowedLogin: allowedLogin,
-            pathPrefix: pathPrefix
+            verifier: verifier
         )
         let leases = RemoteWriterLeases()
         let bootstrap = ServerBootstrap(group: group)
@@ -83,17 +82,28 @@ final class RemoteGateway: @unchecked Sendable {
                     )
                 }
             }
-        channel = try bootstrap.bind(host: "127.0.0.1", port: 0).wait()
-        guard let port = channel?.localAddress?.port else {
+        channel = try bootstrap.bind(host: "127.0.0.1", port: port).wait()
+        guard let boundPort = channel?.localAddress?.port else {
             throw RemoteAccessError.commandFailed("Remote gateway did not receive a port.")
         }
-        return port
+        return boundPort
     }
 
-    func stop() {
-        channel?.close(promise: nil)
+    func stop() async {
+        let closingChannel = channel
         channel = nil
-        group.shutdownGracefully { _ in }
+        await withCheckedContinuation { continuation in
+            let shutdown = {
+                self.group.shutdownGracefully { _ in
+                    continuation.resume()
+                }
+            }
+            if let closingChannel {
+                closingChannel.close().whenComplete { _ in shutdown() }
+            } else {
+                shutdown()
+            }
+        }
     }
 }
 
@@ -108,15 +118,21 @@ enum RemoteOriginPolicy {
 struct RemoteRequestAuth: Sendable {
     let expectedHost: String
     let expectedOrigin: String
-    let allowedLogin: String
-    let pathPrefix: String
+    let verifier: CloudflareAccessVerifier
 
     func authorize(head: HTTPRequestHead, originPolicy: RemoteOriginPolicy) -> Bool {
+        authorizationExpiration(head: head, originPolicy: originPolicy) != nil
+    }
+
+    func authorizationExpiration(
+        head: HTTPRequestHead,
+        originPolicy: RemoteOriginPolicy
+    ) -> Date? {
         let host = head.headers.first(name: "Host")?
             .split(separator: ":").first.map(String.init)
-        return authorize(
+        return authorizationExpiration(
             host: host,
-            login: head.headers.first(name: "Tailscale-User-Login"),
+            token: head.headers.first(name: "Cf-Access-Jwt-Assertion"),
             origin: head.headers.first(name: "Origin"),
             originPolicy: originPolicy
         )
@@ -124,34 +140,40 @@ struct RemoteRequestAuth: Sendable {
 
     func authorize(
         host: String?,
-        login: String?,
+        token: String?,
         origin: String?,
         originPolicy: RemoteOriginPolicy
     ) -> Bool {
-        guard login == allowedLogin, host == expectedHost else { return false }
+        authorizationExpiration(
+            host: host,
+            token: token,
+            origin: origin,
+            originPolicy: originPolicy
+        ) != nil
+    }
+
+    func authorizationExpiration(
+        host: String?,
+        token: String?,
+        origin: String?,
+        originPolicy: RemoteOriginPolicy
+    ) -> Date? {
+        guard host == expectedHost,
+              let token else {
+            return nil
+        }
         switch originPolicy {
         case .requireMatch:
-            return origin == expectedOrigin
+            guard origin == expectedOrigin else { return nil }
         case .matchIfPresent:
-            return origin == nil || origin == expectedOrigin
+            guard origin == nil || origin == expectedOrigin else { return nil }
         }
+        return verifier.verifiedExpiration(token: token)
     }
 
     func normalizedPath(_ uri: String) -> String? {
         let path = uri.split(separator: "?", maxSplits: 1).first.map(String.init) ?? uri
-        if path == pathPrefix || path == "\(pathPrefix)/" { return "/" }
-        if path.hasPrefix("\(pathPrefix)/") {
-            return String(path.dropFirst(pathPrefix.count))
-        }
-        return nil
-    }
-
-    /// When the token root is requested without a trailing slash, returns the
-    /// path to redirect to (with the slash) so relative asset URLs resolve under
-    /// the token prefix. Returns nil for every other path.
-    func trailingSlashRedirect(_ uri: String) -> String? {
-        let path = uri.split(separator: "?", maxSplits: 1).first.map(String.init) ?? uri
-        return path == pathPrefix ? "\(pathPrefix)/" : nil
+        return path.hasPrefix("/") ? path : nil
     }
 
     static func queryItems(_ uri: String) -> [String: String] {
@@ -233,7 +255,10 @@ private final class RemoteHTTPHandler:
 
         if head.method == .POST {
             guard path == "/control",
-                  auth.authorize(head: head, originPolicy: .requireMatch) else {
+                  auth.authorizationExpiration(
+                    head: head,
+                    originPolicy: .requireMatch
+                  ) != nil else {
                 respond(context: context, method: head.method, status: .forbidden,
                         contentType: "text/plain", body: "Forbidden")
                 return
@@ -242,17 +267,12 @@ private final class RemoteHTTPHandler:
             return
         }
 
-        guard auth.authorize(head: head, originPolicy: .matchIfPresent) else {
+        guard let authorizationExpiresAt = auth.authorizationExpiration(
+            head: head,
+            originPolicy: .matchIfPresent
+        ) else {
             respond(context: context, method: head.method, status: .forbidden,
                     contentType: "text/plain", body: "Forbidden")
-            return
-        }
-
-        // Redirect the bare token root to a trailing slash so relative asset
-        // URLs (app.css/app.js) resolve under the token prefix instead of
-        // resolving to the parent path and 403ing.
-        if let target = auth.trailingSlashRedirect(head.uri) {
-            redirect(context: context, method: head.method, to: target)
             return
         }
 
@@ -272,7 +292,11 @@ private final class RemoteHTTPHandler:
                 respond(context: context, method: .HEAD, status: .ok,
                         contentType: "text/event-stream", body: "")
             } else {
-                startEventStream(context: context, head: head)
+                startEventStream(
+                    context: context,
+                    head: head,
+                    authorizationExpiresAt: authorizationExpiresAt
+                )
             }
         default:
             respond(context: context, method: head.method, status: .notFound,
@@ -283,8 +307,12 @@ private final class RemoteHTTPHandler:
     // MARK: - Control (POST)
 
     private func handleControl(context: ChannelHandlerContext) {
-        guard !bodyTooLarge,
-              let message = try? JSONDecoder().decode(
+        guard !bodyTooLarge else {
+            respond(context: context, method: .POST, status: .payloadTooLarge,
+                    contentType: "text/plain", body: "too large")
+            return
+        }
+        guard let message = try? JSONDecoder().decode(
                 RemoteClientMessage.self, from: Data(body)
               ),
               let clientId = message.clientId,
@@ -333,7 +361,11 @@ private final class RemoteHTTPHandler:
 
     // MARK: - Event stream (SSE)
 
-    private func startEventStream(context: ChannelHandlerContext, head: HTTPRequestHead) {
+    private func startEventStream(
+        context: ChannelHandlerContext,
+        head: HTTPRequestHead,
+        authorizationExpiresAt: Date
+    ) {
         let query = RemoteRequestAuth.queryItems(head.uri)
         let sessionId = query["s"].flatMap { $0.isEmpty ? nil : $0 }
         streaming = true
@@ -356,6 +388,10 @@ private final class RemoteHTTPHandler:
             delay: .milliseconds(500)
         ) { [weak self, weak channel] _ in
             guard let self, let channel else { return }
+            guard Date() < authorizationExpiresAt else {
+                channel.close(promise: nil)
+                return
+            }
             guard channel.isWritable else { return }
             let streamSessionId = self.streamSessionId
             Task { @MainActor in
@@ -398,21 +434,6 @@ private final class RemoteHTTPHandler:
     }
 
     // MARK: - Fixed-length responses
-
-    private func redirect(
-        context: ChannelHandlerContext,
-        method: HTTPMethod,
-        to location: String
-    ) {
-        var headers = HTTPHeaders()
-        headers.add(name: "Location", value: location)
-        headers.add(name: "Content-Length", value: "0")
-        headers.add(name: "Cache-Control", value: "no-store")
-        headers.add(name: "Referrer-Policy", value: "no-referrer")
-        let response = HTTPResponseHead(version: .http1_1, status: .found, headers: headers)
-        context.write(wrapOutboundOut(.head(response)), promise: nil)
-        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
-    }
 
     private func respond(
         context: ChannelHandlerContext,

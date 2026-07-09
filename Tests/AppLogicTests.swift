@@ -2,6 +2,7 @@ import XCTest
 @testable import copilot_projects
 import CopilotProjectsCore
 import AppKit
+import Security
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -1252,80 +1253,144 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(router.handle(ControlRequest(command: "unknown")).ok)
     }
 
-    func testRemoteRequestAuthFailsClosed() {
-        let auth = RemoteRequestAuth(
-            expectedHost: "mac.tailnet.ts.net",
-            expectedOrigin: "https://mac.tailnet.ts.net",
-            allowedLogin: "user@example.com",
-            pathPrefix: "/copilot-projects-secret"
+    func testCloudflareAccessVerifierValidatesSignatureAndClaims() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let config = CloudflareAccessConfig(
+            teamDomain: "team.cloudflareaccess.com",
+            audTag: "expected-aud",
+            allowedEmail: "user@example.com"
         )
-        XCTAssertTrue(auth.authorize(
-            host: "mac.tailnet.ts.net",
-            login: "user@example.com",
-            origin: "https://mac.tailnet.ts.net",
-            originPolicy: .requireMatch
-        ))
-        XCTAssertFalse(auth.authorize(
-            host: "mac.tailnet.ts.net",
-            login: nil,
-            origin: "https://mac.tailnet.ts.net",
-            originPolicy: .requireMatch
-        ))
-        XCTAssertFalse(auth.authorize(
-            host: "mac.tailnet.ts.net",
-            login: "other@example.com",
-            origin: "https://mac.tailnet.ts.net",
-            originPolicy: .requireMatch
-        ))
-        XCTAssertFalse(auth.authorize(
-            host: "mac.tailnet.ts.net",
-            login: "user@example.com",
-            origin: "https://evil.example.com",
-            originPolicy: .requireMatch
-        ))
-        // A missing Origin is rejected for POST-style requests...
-        XCTAssertFalse(auth.authorize(
-            host: "mac.tailnet.ts.net",
-            login: "user@example.com",
-            origin: nil,
-            originPolicy: .requireMatch
-        ))
-        // ...but tolerated for GET/EventSource requests, where Safari may omit it.
-        XCTAssertTrue(auth.authorize(
-            host: "mac.tailnet.ts.net",
-            login: "user@example.com",
-            origin: nil,
-            originPolicy: .matchIfPresent
-        ))
-        XCTAssertFalse(auth.authorize(
-            host: "mac.tailnet.ts.net",
-            login: "user@example.com",
-            origin: "https://evil.example.com",
-            originPolicy: .matchIfPresent
-        ))
+        let verifier = CloudflareAccessVerifier(
+            config: config,
+            now: { now },
+            fetch: { _ in nil }
+        )
+        let (privateKey, publicKey) = try makeRSAKeyPair()
+        verifier.installKey(kid: "test-key", key: publicKey)
+
+        let claims: [String: Any] = [
+            "iss": config.issuer,
+            "aud": [config.audTag],
+            "email": "USER@example.com",
+            "exp": now.timeIntervalSince1970 + 3_600,
+            "nbf": now.timeIntervalSince1970 - 60,
+        ]
+        let validToken = try accessToken(
+            kid: "test-key", claims: claims, privateKey: privateKey
+        )
+        XCTAssertTrue(verifier.verify(token: validToken))
         XCTAssertEqual(
-            auth.normalizedPath("/copilot-projects-secret/events?c=abc"),
-            "/events"
+            verifier.verifiedExpiration(token: validToken),
+            Date(timeIntervalSince1970: now.timeIntervalSince1970 + 3_600)
         )
-        XCTAssertEqual(
-            auth.normalizedPath("/copilot-projects-secret/app.js"),
-            "/app.js"
-        )
-        XCTAssertNil(auth.normalizedPath("/events"))
-        // Bare token root (no trailing slash) redirects; everything else doesn't.
-        XCTAssertEqual(
-            auth.trailingSlashRedirect("/copilot-projects-secret"),
-            "/copilot-projects-secret/"
-        )
-        XCTAssertNil(auth.trailingSlashRedirect("/copilot-projects-secret/"))
-        XCTAssertNil(auth.trailingSlashRedirect("/copilot-projects-secret/app.css"))
+
+        var wrongAudience = claims
+        wrongAudience["aud"] = ["wrong"]
+        XCTAssertFalse(verifier.verify(token: try accessToken(
+            kid: "test-key", claims: wrongAudience, privateKey: privateKey
+        )))
+
+        var wrongEmail = claims
+        wrongEmail["email"] = "attacker@example.com"
+        XCTAssertFalse(verifier.verify(token: try accessToken(
+            kid: "test-key", claims: wrongEmail, privateKey: privateKey
+        )))
+
+        var expired = claims
+        expired["exp"] = now.timeIntervalSince1970
+        XCTAssertFalse(verifier.verify(token: try accessToken(
+            kid: "test-key", claims: expired, privateKey: privateKey
+        )))
+
+        var notYetValid = claims
+        notYetValid["nbf"] = now.timeIntervalSince1970 + 60
+        XCTAssertFalse(verifier.verify(token: try accessToken(
+            kid: "test-key", claims: notYetValid, privateKey: privateKey
+        )))
+
+        let (otherPrivateKey, _) = try makeRSAKeyPair()
+        XCTAssertFalse(verifier.verify(token: try accessToken(
+            kid: "test-key", claims: claims, privateKey: otherPrivateKey
+        )))
+        XCTAssertFalse(verifier.verify(token: try accessToken(
+            kid: "unknown-key", claims: claims, privateKey: privateKey
+        )))
+        XCTAssertFalse(verifier.verify(token: String(repeating: "x", count: 16_385)))
     }
 
-    func testRemoteQueryItemsParsesClientAndSession() {
-        let items = RemoteRequestAuth.queryItems(
-            "/copilot-projects-secret/events?c=client-1&s=session%2Fid"
+    func testRemoteRequestAuthFailsClosed() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let config = CloudflareAccessConfig(
+            teamDomain: "team.cloudflareaccess.com",
+            audTag: "expected-aud",
+            allowedEmail: "user@example.com"
         )
-        XCTAssertEqual(items["c"], "client-1")
+        let verifier = CloudflareAccessVerifier(
+            config: config,
+            now: { now },
+            fetch: { _ in nil }
+        )
+        let (privateKey, publicKey) = try makeRSAKeyPair()
+        verifier.installKey(kid: "test-key", key: publicKey)
+        let token = try accessToken(
+            kid: "test-key",
+            claims: [
+                "iss": config.issuer,
+                "aud": config.audTag,
+                "email": config.allowedEmail,
+                "exp": now.timeIntervalSince1970 + 3_600,
+            ],
+            privateKey: privateKey
+        )
+        let auth = RemoteRequestAuth(
+            expectedHost: "projects.example.com",
+            expectedOrigin: "https://projects.example.com",
+            verifier: verifier
+        )
+
+        XCTAssertTrue(auth.authorize(
+            host: "projects.example.com",
+            token: token,
+            origin: "https://projects.example.com",
+            originPolicy: .requireMatch
+        ))
+        XCTAssertFalse(auth.authorize(
+            host: "projects.example.com",
+            token: nil,
+            origin: "https://projects.example.com",
+            originPolicy: .requireMatch
+        ))
+        XCTAssertFalse(auth.authorize(
+            host: "evil.example.com",
+            token: token,
+            origin: "https://projects.example.com",
+            originPolicy: .requireMatch
+        ))
+        XCTAssertFalse(auth.authorize(
+            host: "projects.example.com",
+            token: token,
+            origin: "https://evil.example.com",
+            originPolicy: .requireMatch
+        ))
+        XCTAssertFalse(auth.authorize(
+            host: "projects.example.com",
+            token: token,
+            origin: nil,
+            originPolicy: .requireMatch
+        ))
+        XCTAssertTrue(auth.authorize(
+            host: "projects.example.com",
+            token: token,
+            origin: nil,
+            originPolicy: .matchIfPresent
+        ))
+        XCTAssertEqual(auth.normalizedPath("/events?s=session%2Fid"), "/events")
+        XCTAssertEqual(auth.normalizedPath("/app.js"), "/app.js")
+        XCTAssertNil(auth.normalizedPath("app.js"))
+    }
+
+    func testRemoteQueryItemsParsesSession() {
+        let items = RemoteRequestAuth.queryItems("/events?s=session%2Fid")
         XCTAssertEqual(items["s"], "session/id")
     }
 
@@ -1342,42 +1407,6 @@ final class AppLogicTests: XCTestCase {
         leases.acquire(sessionId: "other", clientId: "phone")
         XCTAssertTrue(leases.holds(sessionId: "other", clientId: "phone"))
         XCTAssertTrue(leases.holds(sessionId: "session", clientId: "laptop"))
-    }
-
-    func testRemoteServePortStateClassifiesOwnership() {
-        let port = 8_443
-        // A non-loopback proxy on the port is foreign and must not be clobbered.
-        let foreign = """
-        https://host.ts.net:8443 (tailnet only)
-        |-- / proxy http://192.168.1.5:3000
-        """
-        XCTAssertEqual(
-            remoteServePortState(status: foreign, httpsPort: port),
-            .foreign("|-- / proxy http://192.168.1.5:3000")
-        )
-        // Our own loopback proxy on the port is "ours".
-        let ours = """
-        https://host.ts.net:8443 (tailnet only)
-        |-- / proxy http://127.0.0.1:60534
-        """
-        XCTAssertEqual(remoteServePortState(status: ours, httpsPort: port), .ours)
-        // A service on a *different* port that merely shares digits is free here.
-        let otherPort = """
-        https://host.ts.net:18443 (tailnet only)
-        |-- / proxy http://192.168.1.5:3000
-        """
-        XCTAssertEqual(remoteServePortState(status: otherPort, httpsPort: port), .free)
-        // A path containing "localhost" must not disguise a non-loopback target.
-        let deceptivePath = """
-        https://host.ts.net:8443 (tailnet only)
-        |-- /localhost proxy http://192.168.1.5:3000
-        """
-        XCTAssertEqual(
-            remoteServePortState(status: deceptivePath, httpsPort: port),
-            .foreign("|-- /localhost proxy http://192.168.1.5:3000")
-        )
-        // Empty status -> free.
-        XCTAssertEqual(remoteServePortState(status: "", httpsPort: port), .free)
     }
 
     func testCLIParsesStatusNotificationFlagIntoControlRequest() throws {
@@ -1495,6 +1524,61 @@ final class AppLogicTests: XCTestCase {
         calls.filter {
             $0.contains("--source agent-stop") || $0.contains("--notification completed")
         }.count
+    }
+
+    private func makeRSAKeyPair() throws -> (privateKey: SecKey, publicKey: SecKey) {
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+            kSecAttrKeySizeInBits as String: 2_048,
+        ]
+        var creationError: Unmanaged<CFError>?
+        guard let privateKey = SecKeyCreateRandomKey(
+            attributes as CFDictionary,
+            &creationError
+        ), let publicKey = SecKeyCopyPublicKey(privateKey) else {
+            if let creationError {
+                throw creationError.takeRetainedValue() as Error
+            }
+            throw NSError(domain: "CloudflareAccessTests", code: 1)
+        }
+        return (privateKey, publicKey)
+    }
+
+    private func accessToken(
+        kid: String,
+        claims: [String: Any],
+        privateKey: SecKey
+    ) throws -> String {
+        let header: [String: Any] = ["alg": "RS256", "kid": kid, "typ": "JWT"]
+        let headerData = try JSONSerialization.data(
+            withJSONObject: header,
+            options: [.sortedKeys]
+        )
+        let claimsData = try JSONSerialization.data(
+            withJSONObject: claims,
+            options: [.sortedKeys]
+        )
+        let signingInput = "\(base64URL(headerData)).\(base64URL(claimsData))"
+        var signingError: Unmanaged<CFError>?
+        guard let signature = SecKeyCreateSignature(
+            privateKey,
+            .rsaSignatureMessagePKCS1v15SHA256,
+            Data(signingInput.utf8) as CFData,
+            &signingError
+        ) as Data? else {
+            if let signingError {
+                throw signingError.takeRetainedValue() as Error
+            }
+            throw NSError(domain: "CloudflareAccessTests", code: 2)
+        }
+        return "\(signingInput).\(base64URL(signature))"
+    }
+
+    private func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {

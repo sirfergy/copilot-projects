@@ -165,7 +165,7 @@ final class AppModel: ObservableObject {
         },
         diagnostics: { [unowned self] in self.renderDiagnostics() },
         remote: { [unowned self] action in
-            .success(self.remoteAccess.command(action, model: self))
+            self.remoteAccess.command(action, model: self)
         }
     ))
     private var stateLoadFailure: String?
