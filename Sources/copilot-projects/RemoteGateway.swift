@@ -4,9 +4,21 @@ import NIOCore
 import NIOPosix
 import NIOHTTP1
 
+fileprivate struct RemoteTerminalRevision: Equatable {
+    let contentGeneration: UInt64
+    let cols: Int
+    let rows: Int
+}
+
 @MainActor
 final class RemoteModelBridge {
+    private struct CachedScreen {
+        let revision: RemoteTerminalRevision
+        let screen: RemoteTerminalScreen?
+    }
+
     private unowned let model: AppModel
+    private var cachedScreens: [String: CachedScreen] = [:]
 
     init(model: AppModel) {
         self.model = model
@@ -16,8 +28,26 @@ final class RemoteModelBridge {
         model.remoteWorkspaceSnapshot()
     }
 
-    func screen(sessionId: String) -> RemoteTerminalScreen? {
-        model.remoteScreen(sessionId: sessionId)
+    fileprivate func screenRevision(sessionId: String) -> RemoteTerminalRevision? {
+        guard let view = model.terminalView(for: sessionId),
+              let terminal = view.terminal else { return nil }
+        return RemoteTerminalRevision(
+            contentGeneration: view.remoteContentGeneration,
+            cols: terminal.cols,
+            rows: terminal.rows
+        )
+    }
+
+    fileprivate func screen(
+        sessionId: String,
+        revision: RemoteTerminalRevision
+    ) -> RemoteTerminalScreen? {
+        if let cached = cachedScreens[sessionId], cached.revision == revision {
+            return cached.screen
+        }
+        let screen = model.remoteScreen(sessionId: sessionId)
+        cachedScreens[sessionId] = CachedScreen(revision: revision, screen: screen)
+        return screen
     }
 
     func sendInput(sessionId: String, value: String) {
@@ -196,6 +226,7 @@ struct RemoteRequestAuth: Sendable {
 private let remoteCSP =
     "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'"
 private let remoteMaxBodyBytes = 16 * 1_024
+private let remoteWorkspaceRefreshInterval: TimeInterval = 2
 
 private final class RemoteHTTPHandler:
     ChannelInboundHandler, @unchecked Sendable
@@ -215,7 +246,10 @@ private final class RemoteHTTPHandler:
     private var streaming = false
     private var streamSessionId: String?
     private var refreshTask: RepeatedTask?
+    private var refreshInFlight = false
+    private var lastWorkspaceRefreshAt = Date.distantPast
     private var lastWorkspace: RemoteWorkspaceSnapshot?
+    private var lastScreenRevision: RemoteTerminalRevision?
     private var lastScreen: RemoteTerminalScreen?
 
     init(auth: RemoteRequestAuth, bridge: RemoteModelBridge, leases: RemoteWriterLeases) {
@@ -388,24 +422,63 @@ private final class RemoteHTTPHandler:
             delay: .milliseconds(500)
         ) { [weak self, weak channel] _ in
             guard let self, let channel else { return }
-            guard Date() < authorizationExpiresAt else {
+            let now = Date()
+            guard now < authorizationExpiresAt else {
                 channel.close(promise: nil)
                 return
             }
-            guard channel.isWritable else { return }
+            guard channel.isWritable, !self.refreshInFlight else { return }
+            self.refreshInFlight = true
             let streamSessionId = self.streamSessionId
+            let refreshWorkspace =
+                now.timeIntervalSince(self.lastWorkspaceRefreshAt)
+                >= remoteWorkspaceRefreshInterval
+            let previousScreenRevision = self.lastScreenRevision
             Task { @MainActor in
-                let workspace = self.bridge.workspace()
-                let screen = streamSessionId.flatMap { self.bridge.screen(sessionId: $0) }
+                let workspace = refreshWorkspace ? self.bridge.workspace() : nil
+                let screenRevision = streamSessionId.flatMap {
+                    self.bridge.screenRevision(sessionId: $0)
+                }
+                let screen: RemoteTerminalScreen?
+                if let streamSessionId, let screenRevision,
+                   screenRevision != previousScreenRevision {
+                    screen = self.bridge.screen(
+                        sessionId: streamSessionId,
+                        revision: screenRevision
+                    )
+                } else {
+                    screen = nil
+                }
                 channel.eventLoop.execute {
-                    guard channel.isWritable else { return }
-                    if workspace != self.lastWorkspace {
-                        self.lastWorkspace = workspace
-                        self.emit(type: "workspace", value: workspace, channel: channel)
+                    self.refreshInFlight = false
+                    guard Date() < authorizationExpiresAt else {
+                        channel.close(promise: nil)
+                        return
                     }
-                    if let screen, screen != self.lastScreen {
-                        self.lastScreen = screen
-                        self.emit(type: "screen", value: screen, channel: channel)
+                    guard channel.isWritable else { return }
+                    if workspace != nil {
+                        self.lastWorkspaceRefreshAt = Date()
+                    }
+                    if let workspace, workspace != self.lastWorkspace {
+                        self.lastWorkspace = workspace
+                        guard self.emit(
+                            type: "workspace",
+                            value: workspace,
+                            channel: channel,
+                            authorizationExpiresAt: authorizationExpiresAt
+                        ) else { return }
+                    }
+                    if screenRevision != self.lastScreenRevision {
+                        self.lastScreenRevision = screenRevision
+                        if let screen, screen != self.lastScreen {
+                            self.lastScreen = screen
+                            guard self.emit(
+                                type: "screen",
+                                value: screen,
+                                channel: channel,
+                                authorizationExpiresAt: authorizationExpiresAt
+                            ) else { return }
+                        }
                     }
                 }
             }
@@ -418,11 +491,21 @@ private final class RemoteHTTPHandler:
         context.fireChannelInactive()
     }
 
-    private func emit<T: Codable>(type: String, value: T, channel: Channel) {
+    private func emit<T: Codable>(
+        type: String,
+        value: T,
+        channel: Channel,
+        authorizationExpiresAt: Date
+    ) -> Bool {
         let message = RemoteServerMessage(type: type, data: value)
         guard let data = try? JSONEncoder().encode(message),
-              let json = String(data: data, encoding: .utf8) else { return }
+              let json = String(data: data, encoding: .utf8) else { return true }
+        guard Date() < authorizationExpiresAt else {
+            channel.close(promise: nil)
+            return false
+        }
         writeChunk("data: \(json)\n\n", channel: channel)
+        return true
     }
 
     private func writeChunk(_ text: String, channel: Channel) {

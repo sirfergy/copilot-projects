@@ -20,8 +20,14 @@ import SwiftTerm
 final class ProjectsTerminalView: LocalProcessTerminalView {
     private var scrollAccum: CGFloat = 0
     private(set) var rendererName = "unconfigured"
+    private(set) var remoteContentGeneration: UInt64 = 0
     private var rendererConfigured = false
     private var surfaceRefreshGeneration = 0
+
+    override func dataReceived(slice: ArraySlice<UInt8>) {
+        remoteContentGeneration &+= 1
+        super.dataReceived(slice: slice)
+    }
 
     func sendRemoteInput(_ value: String) {
         send(Array(value.utf8))
