@@ -1475,11 +1475,10 @@ final class AppLogicTests: XCTestCase {
             ],
             privateKey: privateKey
         )
+        let subscriptionURL = root.appendingPathComponent("subscriptions.json")
         let webPushService = WebPushService(
             publicKey: "test-public-key",
-            store: WebPushSubscriptionStore(
-                url: root.appendingPathComponent("subscriptions.json")
-            ),
+            store: WebPushSubscriptionStore(url: subscriptionURL),
             sender: WebPushSenderSpy()
         )
 
@@ -1599,6 +1598,15 @@ final class AppLogicTests: XCTestCase {
                 body: subscriptionBody
             )
             XCTAssertEqual(missingSubscriptionOrigin, 403)
+            let malformedSubscription = try await remoteHTTPStatus(
+                port: port,
+                path: "/push/subscribe",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: Data("{".utf8)
+            )
+            XCTAssertEqual(malformedSubscription, 400)
             let subscriptionStatus = try await remoteHTTPStatus(
                 port: port,
                 path: "/push/subscribe",
@@ -1608,6 +1616,22 @@ final class AppLogicTests: XCTestCase {
                 body: subscriptionBody
             )
             XCTAssertEqual(subscriptionStatus, 204)
+            try FileManager.default.removeItem(at: subscriptionURL)
+            try FileManager.default.createDirectory(
+                at: subscriptionURL,
+                withIntermediateDirectories: false
+            )
+            let unavailableSubscription = try await remoteHTTPStatus(
+                port: port,
+                path: "/push/subscribe",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: try webPushRegistrationData(
+                    endpoint: "https://wns2-by3p.notify.windows.com/sub/retry"
+                )
+            )
+            XCTAssertEqual(unavailableSubscription, 503)
         } catch {
             await gateway.stop()
             throw error
@@ -1889,6 +1913,10 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.html.contains("manifest.webmanifest"))
         XCTAssertTrue(RemoteWebAssets.html.contains("connection-dot"))
         XCTAssertTrue(RemoteWebAssets.html.contains("role=\"region\" aria-live=\"off\""))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("document.createDocumentFragment()"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "registerSubscription(subscription, applicationServerKey)"
+        ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("rel = 'noopener noreferrer'"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("push/subscribe"))
         XCTAssertTrue(RemoteWebAssets.serviceWorker.contains("notificationclick"))

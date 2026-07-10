@@ -245,10 +245,12 @@ final class WebPushService: @unchecked Sendable {
         guard data.count <= 16_384 else {
             throw WebPushServiceError.invalidSubscription
         }
-        let registration = try JSONDecoder().decode(
+        guard let registration = try? JSONDecoder().decode(
             WebPushRegistration.self,
             from: data
-        )
+        ) else {
+            throw WebPushServiceError.invalidSubscription
+        }
         try store.add(registration)
     }
 

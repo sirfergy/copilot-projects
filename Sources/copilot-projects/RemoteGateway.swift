@@ -489,9 +489,12 @@ private final class RemoteHTTPHandler:
             }
             respond(context: context, method: .POST, status: .noContent,
                     contentType: "text/plain", body: "")
-        } catch {
+        } catch WebPushServiceError.invalidSubscription {
             respond(context: context, method: .POST, status: .badRequest,
                     contentType: "text/plain", body: "Bad subscription")
+        } catch {
+            respond(context: context, method: .POST, status: .serviceUnavailable,
+                    contentType: "text/plain", body: "Push unavailable")
         }
     }
 

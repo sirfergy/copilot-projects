@@ -77,7 +77,12 @@ enum RemoteWebAssets {
     });
 
     self.addEventListener('push', (event) => {
-      const payload = event.data?.json() || {};
+      let payload;
+      try {
+        payload = event.data?.json() || {};
+      } catch {
+        payload = {};
+      }
       const sentAt = Date.parse(payload.sentAt || '') || Date.now();
       const sentTime = new Date(sentAt).toLocaleTimeString([], {
         hour: 'numeric',
@@ -431,13 +436,14 @@ enum RemoteWebAssets {
         historyLines.pop();
       }
 
-      terminal.replaceChildren();
+      const fragment = document.createDocumentFragment();
       historyLines.forEach((line) => {
         const row = document.createElement('div');
         row.className = 'terminal-line';
         appendLinkedText(row, line);
-        terminal.append(row);
+        fragment.append(row);
       });
+      terminal.replaceChildren(fragment);
       terminal.classList.toggle('terminal-scroll', screen.scrollMode === 'terminal');
 
       const lineHeight = Math.max(
@@ -559,7 +565,7 @@ enum RemoteWebAssets {
       return btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     }
 
-    async function registerSubscription(registration, subscription, publicKey) {
+    async function registerSubscription(subscription, publicKey) {
       const response = await fetch(`${base}push/subscribe`, {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
@@ -617,11 +623,7 @@ enum RemoteWebAssets {
         });
       }
       if (subscription) {
-        await registerSubscription(
-          registration,
-          subscription,
-          applicationServerKey
-        );
+        await registerSubscription(subscription, applicationServerKey);
       }
     }
 
