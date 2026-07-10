@@ -1811,7 +1811,8 @@ final class AppLogicTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let url = root.appendingPathComponent("subscriptions.json")
+        let directory = root.appendingPathComponent("nested", isDirectory: true)
+        let url = directory.appendingPathComponent("subscriptions.json")
         let store = WebPushSubscriptionStore(url: url)
 
         let safe = try JSONDecoder().decode(
@@ -1826,6 +1827,10 @@ final class AppLogicTests: XCTestCase {
             .posixPermissions
         ] as? NSNumber
         XCTAssertEqual(permissions?.intValue, 0o600)
+        let directoryPermissions = try FileManager.default.attributesOfItem(
+            atPath: directory.path
+        )[.posixPermissions] as? NSNumber
+        XCTAssertEqual(directoryPermissions?.intValue, 0o700)
 
         let unsafe = try JSONDecoder().decode(
             WebPushRegistration.self,
@@ -1883,6 +1888,7 @@ final class AppLogicTests: XCTestCase {
     func testRemoteWebAssetsIncludePushLinksAndConnectionState() {
         XCTAssertTrue(RemoteWebAssets.html.contains("manifest.webmanifest"))
         XCTAssertTrue(RemoteWebAssets.html.contains("connection-dot"))
+        XCTAssertTrue(RemoteWebAssets.html.contains("role=\"region\" aria-live=\"off\""))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("rel = 'noopener noreferrer'"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("push/subscribe"))
         XCTAssertTrue(RemoteWebAssets.serviceWorker.contains("notificationclick"))

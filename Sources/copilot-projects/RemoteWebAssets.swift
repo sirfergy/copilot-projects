@@ -36,8 +36,8 @@ enum RemoteWebAssets {
               title="Enable web notifications">🔔</button>
             <span id="lease">view only</span>
           </div>
-          <div id="terminal" role="log" aria-label="Terminal output"
-            tabindex="0">Select a session</div>
+          <div id="terminal" role="region" aria-live="off"
+            aria-label="Terminal output" tabindex="0">Select a session</div>
           <form id="input-form">
             <input id="input" autocomplete="off" autocapitalize="none" spellcheck="false"
               aria-label="Command input" placeholder="Send a command">

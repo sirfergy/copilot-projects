@@ -92,13 +92,20 @@ final class WebPushSubscriptionStore: @unchecked Sendable {
     }
 
     private func persistLocked() throws {
-        guard Paths.ensureStateDir() else {
+        let directoryURL = url.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
             throw WebPushServiceError.persistenceFailed
         }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(subscriptions)
-        let temporaryURL = url.deletingLastPathComponent()
+        let temporaryURL = directoryURL
             .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
         guard FileManager.default.createFile(
             atPath: temporaryURL.path,
