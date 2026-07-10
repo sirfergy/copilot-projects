@@ -15,7 +15,11 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/apple/swift-nio",
-            revision: "0f54d58bb5db9e064f332e8524150de379d1e51c"
+            revision: "cd3e1152083706d77b223fb29110e590efcc70c0"
+        ),
+        .package(
+            url: "https://github.com/mochidev/swift-webpush.git",
+            exact: "0.4.1"
         ),
     ],
     targets: [
@@ -30,7 +34,8 @@ let package = Package(
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOHTTP1", package: "swift-nio")
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "WebPush", package: "swift-webpush")
             ],
             path: "Sources/copilot-projects"
         ),
@@ -41,7 +46,11 @@ let package = Package(
         ),
         .testTarget(
             name: "CopilotProjectsTests",
-            dependencies: ["CopilotProjectsCore", "copilot-projects"],
+            dependencies: [
+                "CopilotProjectsCore",
+                "copilot-projects",
+                .product(name: "WebPush", package: "swift-webpush"),
+            ],
             path: "Tests"
         )
     ]

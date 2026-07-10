@@ -33,6 +33,43 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         send(Array(value.utf8))
     }
 
+    /// Forwards a web-client wheel gesture into a TUI without attaching or
+    /// resizing another PTY. Positive deltas mean up/older, matching the desktop
+    /// `forwardScroll` convention.
+    @discardableResult
+    func sendRemoteScroll(delta: Int, agentLive: Bool) -> Bool {
+        guard let terminal, delta != 0 else { return false }
+        let up = delta > 0
+        let count = min(abs(delta), 8)
+
+        if agentLive || (allowMouseReporting && terminal.mouseMode != .off) {
+            let flags = terminal.encodeButton(
+                button: up ? 4 : 5,
+                release: false,
+                shift: false,
+                meta: false,
+                control: false
+            )
+            let col = max(0, terminal.cols / 2)
+            let row = max(0, terminal.rows / 2)
+            for _ in 0 ..< count {
+                terminal.sendEvent(buttonFlags: flags, x: col, y: row)
+            }
+            return true
+        }
+
+        guard terminal.isCurrentBufferAlternate else { return false }
+        let sequence: [UInt8] = up
+            ? (terminal.applicationCursor
+                ? [0x1b, 0x4f, 0x41]
+                : [0x1b, 0x5b, 0x41])
+            : (terminal.applicationCursor
+                ? [0x1b, 0x4f, 0x42]
+                : [0x1b, 0x5b, 0x42])
+        for _ in 0 ..< count { send(sequence) }
+        return true
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         configureRendererIfNeeded()

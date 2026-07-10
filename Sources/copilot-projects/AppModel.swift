@@ -128,9 +128,11 @@ final class AppModel: ObservableObject {
                     projectId: target.projectId, sessionId: target.sessionId,
                     title: title, body: body)
             } else {
-                self.notifications?.post(
+                self.notifications?.post(NotificationEvent(
+                    kind: nil,
                     title: title, subtitle: nil, body: body,
-                    projectId: request.projectId, sessionId: request.sessionId)
+                    projectId: request.projectId, sessionId: request.sessionId
+                ))
             }
             return .success()
         },
@@ -172,7 +174,7 @@ final class AppModel: ObservableObject {
     private var stateRecoveryMessage: String?
     private var didPresentStateMessage = false
     private var server: ControlServer?
-    private let remoteAccess = RemoteAccessController()
+    private let remoteAccess: RemoteAccessController
     private weak var notifications: (any NotificationPosting)?
     private var saveWork: DispatchWorkItem?
     private(set) var isTerminating = false
@@ -220,12 +222,14 @@ final class AppModel: ObservableObject {
         stateRepository: StateRepository = StateRepository(),
         completionNotificationDelayNanoseconds: UInt64 = 1_000_000_000,
         isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive },
-        agentActivityDirectory: URL = Paths.sessionsDir
+        agentActivityDirectory: URL = Paths.sessionsDir,
+        webPushService: WebPushService? = nil
     ) {
         self.stateRepository = stateRepository
         self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
         self.isAppActive = isAppActive
         self.agentActivityDirectory = agentActivityDirectory
+        remoteAccess = RemoteAccessController(webPushService: webPushService)
         load()
     }
 
@@ -620,22 +624,62 @@ final class AppModel: ObservableObject {
         )
     }
 
-    func remoteScreen(sessionId: String) -> RemoteTerminalScreen? {
+    func remoteScreen(
+        sessionId: String,
+        afterLine: Int? = nil
+    ) -> RemoteTerminalScreen? {
         guard locateIndex(sessionId) != nil,
-              let terminal = controller(for: sessionId)?.terminalView.terminal else {
+              let view = controller(for: sessionId)?.terminalView,
+              let terminal = view.terminal else {
             return nil
         }
-        return RemoteTerminalScreen.capture(
+        let translate: (Int) -> String? = { row in
+            terminal.getScrollInvariantLine(row: row)?.translateToString(
+                trimRight: true,
+                skipNullCellsFollowingWide: false,
+                characterProvider: { terminal.getCharacter(for: $0) }
+            )
+        }
+        let terminalScroll = terminal.isCurrentBufferAlternate
+            || liveAgentSessions.contains(sessionId)
+        if terminalScroll {
+            return RemoteTerminalScreen.captureVisible(
+                sessionId: sessionId,
+                cols: terminal.cols,
+                rows: terminal.rows,
+                lineAt: { row in
+                    terminal.getLine(row: row)?.translateToString(
+                        trimRight: true,
+                        skipNullCellsFollowingWide: false,
+                        characterProvider: { terminal.getCharacter(for: $0) }
+                    )
+                }
+            )
+        }
+        return RemoteTerminalScreen.captureHistory(
             sessionId: sessionId,
             cols: terminal.cols,
             rows: terminal.rows,
-            characterAt: { terminal.getCharacter(col: $0, row: $1) }
+            absoluteStart: terminal.buffer.totalLinesTrimmed,
+            scanRows: terminal.options.scrollback + terminal.rows,
+            maximumRows: min(terminal.options.scrollback, 500) + terminal.rows,
+            afterLine: afterLine,
+            lineExists: { terminal.getScrollInvariantLine(row: $0) != nil },
+            lineAt: translate
         )
     }
 
     func sendRemoteInput(sessionId: String, value: String) {
         guard value.utf8.count <= 8_192 else { return }
         controller(for: sessionId)?.terminalView.sendRemoteInput(value)
+    }
+
+    func sendRemoteScroll(sessionId: String, delta: Int) {
+        guard abs(delta) <= 20 else { return }
+        controller(for: sessionId)?.terminalView.sendRemoteScroll(
+            delta: delta,
+            agentLive: liveAgentSessions.contains(sessionId)
+        )
     }
 
     func closeProject(_ pid: String) {
@@ -886,6 +930,7 @@ final class AppModel: ObservableObject {
             postNotification(
                 projectId: projects[loc.p].id,
                 sessionId: sessionId,
+                kind: notification,
                 title: notification.title,
                 body: nil
             )
@@ -1131,7 +1176,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func postNotification(projectId: String, sessionId: String, title: String, body: String?) {
+    func postNotification(
+        projectId: String,
+        sessionId: String,
+        kind: StatusNotificationKind? = nil,
+        title: String,
+        body: String?
+    ) {
         var subtitle: String?
         if let loc = locateIndex(sessionId) {
             let visible = NSApp.isActive
@@ -1145,13 +1196,14 @@ final class AppModel: ObservableObject {
                 sessionTitle: projects[loc.p].sessions[loc.s].title
             )
         }
-        notifications?.post(
+        notifications?.post(NotificationEvent(
+            kind: kind,
             title: title,
             subtitle: subtitle,
             body: body,
             projectId: projectId,
             sessionId: sessionId
-        )
+        ))
         updateDockBadge()
     }
 
@@ -1188,6 +1240,7 @@ final class AppModel: ObservableObject {
         postNotification(
             projectId: projects[loc.p].id,
             sessionId: sessionId,
+            kind: .completed,
             title: StatusNotificationKind.completed.title,
             body: nil
         )

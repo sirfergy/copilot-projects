@@ -45,7 +45,7 @@ struct RemoteAccessConfiguration: Sendable {
         guard access.certsURL != nil else { return nil }
         return RemoteAccessConfiguration(
             hostname: hostname,
-            localPort: 49_271,
+            localPort: 49_272,
             access: access
         )
     }
@@ -56,6 +56,7 @@ final class RemoteAccessController {
     static let enabledKey = "remoteAccessEnabled"
 
     private let defaults: UserDefaults
+    private let webPushService: WebPushService?
     private var gateway: RemoteGateway?
     private var verifier: CloudflareAccessVerifier?
     private var activeConfiguration: RemoteAccessConfiguration?
@@ -66,8 +67,12 @@ final class RemoteAccessController {
     private(set) var url: String?
     private(set) var state = "disabled"
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        webPushService: WebPushService? = nil
+    ) {
         self.defaults = defaults
+        self.webPushService = webPushService
     }
 
     var enabled: Bool {
@@ -182,6 +187,7 @@ final class RemoteAccessController {
 
             let gateway = RemoteGateway()
             let bridge = RemoteModelBridge(model: model)
+            let webPushService = self.webPushService
             let startResult = await Task.detached {
                 Result {
                     try gateway.start(
@@ -189,7 +195,8 @@ final class RemoteAccessController {
                         expectedHost: configuration.hostname,
                         expectedOrigin: configuration.origin,
                         verifier: verifier,
-                        port: configuration.localPort
+                        port: configuration.localPort,
+                        webPushService: webPushService
                     )
                 }
             }.value

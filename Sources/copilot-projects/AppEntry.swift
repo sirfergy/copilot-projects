@@ -33,27 +33,57 @@ struct CopilotProjectsApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    let model = AppModel()
-    private let notifications = NotificationManager()
+    let model: AppModel
+    private let nativeNotifications: NotificationManager
+    private let webPushService: WebPushService?
+    private let notifications: CompositeNotificationPoster
     private let instanceLock = AppInstanceLock()
     private var isPrimaryInstance = false
     private var eventMonitor: Any?
     private var hintWork: DispatchWorkItem?
+
+    override init() {
+        let native = NotificationManager()
+        let email = UserDefaults.standard.string(
+            forKey: RemoteAccessConfiguration.allowedEmailKey
+        )
+        let webPush: WebPushService?
+        if let email {
+            do {
+                webPush = try WebPushService.production(contactEmail: email)
+            } catch {
+                webPush = nil
+                NSLog("copilot-projects: web push unavailable: %@", "\(error)")
+            }
+        } else {
+            webPush = nil
+        }
+        var posters: [any NotificationPosting] = [native]
+        if let webPush {
+            posters.append(WebPushNotificationPoster(service: webPush))
+        }
+        nativeNotifications = native
+        webPushService = webPush
+        notifications = CompositeNotificationPoster(posters)
+        model = AppModel(webPushService: webPush)
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSWindow.allowsAutomaticWindowTabbing = false
 
         guard instanceLock.acquire() else {
+            webPushService?.shutdown()
             focusExistingInstance()
             NSApp.terminate(nil)
             return
         }
 
-        notifications.onActivate = { [weak self] projectId, sessionId in
+        nativeNotifications.onActivate = { [weak self] projectId, sessionId in
             self?.model.focus(projectId: projectId, sessionId: sessionId)
         }
-        notifications.requestAuth()
+        nativeNotifications.requestAuth()
 
         model.attach(notifications: notifications)
         guard model.startServer() else {
@@ -272,6 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         guard isPrimaryInstance else { return }
         model.beginTermination()
+        webPushService?.shutdown()
         model.detachAllClients()   // keep dtach masters alive for resume
         model.stopServer()
         model.save()

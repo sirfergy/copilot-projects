@@ -8,12 +8,14 @@ fileprivate struct RemoteTerminalRevision: Equatable {
     let contentGeneration: UInt64
     let cols: Int
     let rows: Int
+    let terminalScroll: Bool
 }
 
 @MainActor
 final class RemoteModelBridge: @unchecked Sendable {
     private struct CachedScreen {
         let revision: RemoteTerminalRevision
+        let afterLine: Int?
         let screen: RemoteTerminalScreen?
     }
 
@@ -30,30 +32,43 @@ final class RemoteModelBridge: @unchecked Sendable {
 
     fileprivate func screenRevision(sessionId: String) -> RemoteTerminalRevision? {
         guard let model,
-              let view = model.terminalView(for: sessionId),
+              let view = model.controller(for: sessionId)?.terminalView,
               let terminal = view.terminal else { return nil }
         return RemoteTerminalRevision(
             contentGeneration: view.remoteContentGeneration,
             cols: terminal.cols,
-            rows: terminal.rows
+            rows: terminal.rows,
+            terminalScroll: terminal.isCurrentBufferAlternate
+                || model.liveAgentSessions.contains(sessionId)
         )
     }
 
     fileprivate func screen(
         sessionId: String,
-        revision: RemoteTerminalRevision
+        revision: RemoteTerminalRevision,
+        afterLine: Int?
     ) -> RemoteTerminalScreen? {
         guard let model else { return nil }
-        if let cached = cachedScreens[sessionId], cached.revision == revision {
+        if let cached = cachedScreens[sessionId],
+           cached.revision == revision,
+           cached.afterLine == afterLine {
             return cached.screen
         }
-        let screen = model.remoteScreen(sessionId: sessionId)
-        cachedScreens[sessionId] = CachedScreen(revision: revision, screen: screen)
+        let screen = model.remoteScreen(sessionId: sessionId, afterLine: afterLine)
+        cachedScreens[sessionId] = CachedScreen(
+            revision: revision,
+            afterLine: afterLine,
+            screen: screen
+        )
         return screen
     }
 
     func sendInput(sessionId: String, value: String) {
         model?.sendRemoteInput(sessionId: sessionId, value: value)
+    }
+
+    func sendScroll(sessionId: String, delta: Int) {
+        model?.sendRemoteScroll(sessionId: sessionId, delta: delta)
     }
 }
 
@@ -94,7 +109,8 @@ final class RemoteGateway: @unchecked Sendable {
         expectedHost: String,
         expectedOrigin: String,
         verifier: CloudflareAccessVerifier,
-        port: Int
+        port: Int,
+        webPushService: WebPushService? = nil
     ) throws -> Int {
         if let boundPort = channel?.localAddress?.port { return boundPort }
         let auth = RemoteRequestAuth(
@@ -108,17 +124,54 @@ final class RemoteGateway: @unchecked Sendable {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { child in
-                child.pipeline.configureHTTPServerPipeline().flatMap {
+                do {
+                    try Self.markCloseOnExec(child)
+                } catch {
+                    return child.eventLoop.makeFailedFuture(error)
+                }
+                return child.pipeline.configureHTTPServerPipeline().flatMap {
                     child.pipeline.addHandler(
-                        RemoteHTTPHandler(auth: auth, bridge: bridge, leases: leases)
+                        RemoteHTTPHandler(
+                            auth: auth,
+                            bridge: bridge,
+                            leases: leases,
+                            webPushService: webPushService
+                        )
                     )
                 }
             }
         channel = try bootstrap.bind(host: "127.0.0.1", port: port).wait()
+        if let channel {
+            do {
+                try channel.eventLoop.submit {
+                    try Self.markCloseOnExec(channel)
+                }.wait()
+            } catch {
+                try? channel.close().wait()
+                self.channel = nil
+                throw error
+            }
+        }
         guard let boundPort = channel?.localAddress?.port else {
             throw RemoteAccessError.commandFailed("Remote gateway did not receive a port.")
         }
         return boundPort
+    }
+
+    private static func markCloseOnExec(_ channel: Channel) throws {
+        let marked: Void? = try channel.pipeline.syncOperations
+            .withUnsafeTransportIfAvailable(of: CInt.self) { descriptor in
+                let flags = fcntl(descriptor, F_GETFD)
+                guard flags >= 0,
+                      fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) == 0 else {
+                    throw IOError(errnoCode: errno, reason: "fcntl(FD_CLOEXEC)")
+                }
+            }
+        guard marked != nil else {
+            throw RemoteAccessError.commandFailed(
+                "Remote gateway socket handle was unavailable."
+            )
+        }
     }
 
     func stop() async {
@@ -228,6 +281,7 @@ struct RemoteRequestAuth: Sendable {
 
 private let remoteCSP =
     "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; "
+    + "worker-src 'self'; manifest-src 'self'; img-src 'self'; "
     + "frame-ancestors 'none'; base-uri 'none'"
 private let remoteMaxBodyBytes = 16 * 1_024
 private let remoteWorkspaceRefreshInterval: TimeInterval = 2
@@ -241,6 +295,7 @@ private final class RemoteHTTPHandler:
     private let auth: RemoteRequestAuth
     private let bridge: RemoteModelBridge
     private let leases: RemoteWriterLeases
+    private let webPushService: WebPushService?
 
     private var head: HTTPRequestHead?
     private var body: [UInt8] = []
@@ -255,11 +310,18 @@ private final class RemoteHTTPHandler:
     private var lastWorkspace: RemoteWorkspaceSnapshot?
     private var lastScreenRevision: RemoteTerminalRevision?
     private var lastScreen: RemoteTerminalScreen?
+    private var lastHistoryEndLine: Int?
 
-    init(auth: RemoteRequestAuth, bridge: RemoteModelBridge, leases: RemoteWriterLeases) {
+    init(
+        auth: RemoteRequestAuth,
+        bridge: RemoteModelBridge,
+        leases: RemoteWriterLeases,
+        webPushService: WebPushService?
+    ) {
         self.auth = auth
         self.bridge = bridge
         self.leases = leases
+        self.webPushService = webPushService
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -292,8 +354,7 @@ private final class RemoteHTTPHandler:
         }
 
         if head.method == .POST {
-            guard path == "/control",
-                  auth.authorizationExpiration(
+            guard auth.authorizationExpiration(
                     head: head,
                     originPolicy: .requireMatch
                   ) != nil else {
@@ -301,7 +362,17 @@ private final class RemoteHTTPHandler:
                         contentType: "text/plain", body: "Forbidden")
                 return
             }
-            handleControl(context: context)
+            switch path {
+            case "/control":
+                handleControl(context: context)
+            case "/push/subscribe":
+                handlePushRegistration(context: context, subscribe: true)
+            case "/push/unsubscribe":
+                handlePushRegistration(context: context, subscribe: false)
+            default:
+                respond(context: context, method: head.method, status: .notFound,
+                        contentType: "text/plain", body: "Not found")
+            }
             return
         }
 
@@ -325,6 +396,58 @@ private final class RemoteHTTPHandler:
             respond(context: context, method: head.method, status: .ok,
                     contentType: "application/javascript; charset=utf-8",
                     body: RemoteWebAssets.javascript)
+        case "/manifest.webmanifest":
+            respond(context: context, method: head.method, status: .ok,
+                     contentType: "application/manifest+json; charset=utf-8",
+                     body: RemoteWebAssets.manifest)
+        case "/sw.js":
+            respond(context: context, method: head.method, status: .ok,
+                     contentType: "application/javascript; charset=utf-8",
+                     body: RemoteWebAssets.serviceWorker)
+        case "/push/public-key":
+            guard let publicKey = webPushService?.publicKey,
+                  let data = try? JSONSerialization.data(
+                     withJSONObject: ["applicationServerKey": publicKey]
+                  ),
+                  let body = String(data: data, encoding: .utf8) else {
+                respond(context: context, method: head.method,
+                         status: .serviceUnavailable,
+                         contentType: "text/plain", body: "Push unavailable")
+                return
+            }
+            respond(context: context, method: head.method, status: .ok,
+                     contentType: "application/json", body: body)
+        case "/push/status":
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let status = webPushService?.status(),
+                  let data = try? encoder.encode(status),
+                  let body = String(data: data, encoding: .utf8) else {
+                respond(context: context, method: head.method,
+                         status: .serviceUnavailable,
+                         contentType: "text/plain", body: "Push unavailable")
+                return
+            }
+            respond(context: context, method: head.method, status: .ok,
+                     contentType: "application/json", body: body)
+        case "/icon-192.png":
+            let icon = RemoteWebAssets.iconPNG(size: 192)
+            respondData(
+                context: context,
+                method: head.method,
+                status: icon == nil ? .notFound : .ok,
+                contentType: "image/png",
+                body: icon ?? Data()
+            )
+        case "/icon-512.png":
+            let icon = RemoteWebAssets.iconPNG(size: 512)
+            respondData(
+                context: context,
+                method: head.method,
+                status: icon == nil ? .notFound : .ok,
+                contentType: "image/png",
+                body: icon ?? Data()
+            )
         case "/events":
             if head.method == .HEAD {
                 respond(context: context, method: .HEAD, status: .ok,
@@ -343,6 +466,34 @@ private final class RemoteHTTPHandler:
     }
 
     // MARK: - Control (POST)
+
+    private func handlePushRegistration(
+        context: ChannelHandlerContext,
+        subscribe: Bool
+    ) {
+        guard !bodyTooLarge else {
+            respond(context: context, method: .POST, status: .payloadTooLarge,
+                    contentType: "text/plain", body: "too large")
+            return
+        }
+        guard let webPushService else {
+            respond(context: context, method: .POST, status: .serviceUnavailable,
+                    contentType: "text/plain", body: "Push unavailable")
+            return
+        }
+        do {
+            if subscribe {
+                try webPushService.register(data: Data(body))
+            } else {
+                try webPushService.unregister(data: Data(body))
+            }
+            respond(context: context, method: .POST, status: .noContent,
+                    contentType: "text/plain", body: "")
+        } catch {
+            respond(context: context, method: .POST, status: .badRequest,
+                    contentType: "text/plain", body: "Bad subscription")
+        }
+    }
 
     private func handleControl(context: ChannelHandlerContext) {
         guard !bodyTooLarge else {
@@ -388,6 +539,28 @@ private final class RemoteHTTPHandler:
                 // between the check above and this hop can't leak a keystroke.
                 guard leases.holds(sessionId: sessionId, clientId: clientId) else { return }
                 self.bridge.sendInput(sessionId: sessionId, value: value)
+            }
+            respond(context: context, method: .POST, status: .noContent,
+                    contentType: "text/plain", body: "")
+        case "scroll":
+            guard let delta = message.delta,
+                  delta != 0,
+                  abs(delta) <= 20 else {
+                respond(context: context, method: .POST, status: .badRequest,
+                        contentType: "text/plain", body: "Bad request")
+                return
+            }
+            guard leases.holds(sessionId: sessionId, clientId: clientId) else {
+                respond(context: context, method: .POST, status: .forbidden,
+                        contentType: "text/plain", body: "view only")
+                return
+            }
+            let leases = self.leases
+            Task { @MainActor in
+                guard leases.holds(sessionId: sessionId, clientId: clientId) else {
+                    return
+                }
+                self.bridge.sendScroll(sessionId: sessionId, delta: delta)
             }
             respond(context: context, method: .POST, status: .noContent,
                     contentType: "text/plain", body: "")
@@ -440,6 +613,7 @@ private final class RemoteHTTPHandler:
                 now.timeIntervalSince(self.lastWorkspaceRefreshAt)
                 >= remoteWorkspaceRefreshInterval
             let previousScreenRevision = self.lastScreenRevision
+            let lastHistoryEndLine = self.lastHistoryEndLine
             Task { @MainActor in
                 let workspace = refreshWorkspace ? self.bridge.workspace() : nil
                 let screenRevision = streamSessionId.flatMap {
@@ -450,7 +624,10 @@ private final class RemoteHTTPHandler:
                    screenRevision != previousScreenRevision {
                     screen = self.bridge.screen(
                         sessionId: streamSessionId,
-                        revision: screenRevision
+                        revision: screenRevision,
+                        afterLine: screenRevision.terminalScroll
+                            ? nil
+                            : lastHistoryEndLine
                     )
                 } else {
                     screen = nil
@@ -478,6 +655,9 @@ private final class RemoteHTTPHandler:
                         self.lastScreenRevision = screenRevision
                         if let screen, screen != self.lastScreen {
                             self.lastScreen = screen
+                            self.lastHistoryEndLine = screen.scrollMode == .history
+                                ? screen.firstLine + screen.lines.count
+                                : nil
                             guard self.emit(
                                 type: "screen",
                                 value: screen,
@@ -542,6 +722,33 @@ private final class RemoteHTTPHandler:
         if method != .HEAD && !body.isEmpty {
             var buffer = context.channel.allocator.buffer(capacity: body.utf8.count)
             buffer.writeString(body)
+            context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+        }
+        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+    }
+
+    private func respondData(
+        context: ChannelHandlerContext,
+        method: HTTPMethod,
+        status: HTTPResponseStatus,
+        contentType: String,
+        body: Data
+    ) {
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: contentType)
+        headers.add(name: "Content-Length", value: String(body.count))
+        headers.add(name: "Cache-Control", value: "no-store")
+        headers.add(name: "Referrer-Policy", value: "no-referrer")
+        headers.add(name: "Content-Security-Policy", value: remoteCSP)
+        let response = HTTPResponseHead(
+            version: .http1_1,
+            status: status,
+            headers: headers
+        )
+        context.write(wrapOutboundOut(.head(response)), promise: nil)
+        if method != .HEAD && !body.isEmpty {
+            var buffer = context.channel.allocator.buffer(capacity: body.count)
+            buffer.writeBytes(body)
             context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
         }
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)

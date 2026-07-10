@@ -59,6 +59,11 @@ cp "$BUILD_DIR/copilot-projects-link" "$HELPER_MACOS/copilot-projects-link"
 if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
   cp "$ROOT/Resources/AppIcon.icns" "$RES/AppIcon.icns"
 fi
+for icon in PWAIcon-192.png PWAIcon-512.png; do
+  if [ -f "$ROOT/Resources/$icon" ]; then
+    cp "$ROOT/Resources/$icon" "$RES/$icon"
+  fi
+done
 
 # Build + bundle the dtach helper (resumability backend).
 DTACH_SRC="$ROOT/vendor/dtach"

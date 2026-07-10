@@ -3,6 +3,7 @@ import XCTest
 import CopilotProjectsCore
 import AppKit
 import Security
+import WebPush
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -180,6 +181,11 @@ final class AppLogicTests: XCTestCase {
                 sessionId: immediateSession.id
             )
         ])
+        XCTAssertEqual(notifications.events.first?.kind, .completed)
+        XCTAssertNotNil(notifications.events.first?.sentAt)
+        XCTAssertTrue(
+            notifications.events.first?.displayedBody.contains("Sent at ") == true
+        )
 
         let prematureCompletion = expectation(description: "background agents suppress completion")
         prematureCompletion.isInverted = true
@@ -388,25 +394,35 @@ final class AppLogicTests: XCTestCase {
         }
 
         private(set) var calls: [Call] = []
+        private(set) var events: [NotificationEvent] = []
         var onPost: ((Call) -> Void)?
 
-        func post(
-            title: String,
-            subtitle: String?,
-            body: String?,
-            projectId: String?,
-            sessionId: String?
-        ) {
+        func post(_ event: NotificationEvent) {
             let call = Call(
-                title: title,
-                subtitle: subtitle,
-                body: body,
-                projectId: projectId,
-                sessionId: sessionId
+                title: event.title,
+                subtitle: event.subtitle,
+                body: event.body,
+                projectId: event.projectId,
+                sessionId: event.sessionId
             )
             calls.append(call)
+            events.append(event)
             onPost?(call)
         }
+    }
+
+    private actor WebPushSenderSpy: WebPushSending {
+        private(set) var payloads: [Data] = []
+
+        func send(
+            data: Data,
+            to subscriber: Subscriber,
+            eventID: UUID
+        ) async throws {
+            payloads.append(data)
+        }
+
+        func firstPayload() -> Data? { payloads.first }
     }
 
     func testFocusDeepLinkParsing() throws {
@@ -1414,7 +1430,7 @@ final class AppLogicTests: XCTestCase {
             RemoteAccessConfiguration.load(defaults: defaults)
         )
         XCTAssertEqual(configuration.hostname, "projects.example.com")
-        XCTAssertEqual(configuration.localPort, 49_271)
+        XCTAssertEqual(configuration.localPort, 49_272)
         XCTAssertEqual(configuration.access.teamDomain, "team.cloudflareaccess.com")
         XCTAssertEqual(configuration.access.audTag, "audience")
         XCTAssertEqual(configuration.access.allowedEmail, "user@example.com")
@@ -1459,6 +1475,13 @@ final class AppLogicTests: XCTestCase {
             ],
             privateKey: privateKey
         )
+        let webPushService = WebPushService(
+            publicKey: "test-public-key",
+            store: WebPushSubscriptionStore(
+                url: root.appendingPathComponent("subscriptions.json")
+            ),
+            sender: WebPushSenderSpy()
+        )
 
         let gateway = RemoteGateway()
         let port = try gateway.start(
@@ -1466,7 +1489,8 @@ final class AppLogicTests: XCTestCase {
             expectedHost: "127.0.0.1",
             expectedOrigin: "https://projects.example.com",
             verifier: verifier,
-            port: 0
+            port: 0,
+            webPushService: webPushService
         )
         do {
             let missingToken = try await remoteHTTPStatus(port: port, path: "/")
@@ -1486,7 +1510,32 @@ final class AppLogicTests: XCTestCase {
             XCTAssertEqual(
                 allowedAsset.value(forHTTPHeaderField: "Content-Security-Policy"),
                 "default-src 'self'; connect-src 'self'; style-src 'self'; "
-                    + "script-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+                    + "script-src 'self'; worker-src 'self'; manifest-src 'self'; "
+                    + "img-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+            )
+            let manifestStatus = try await remoteHTTPStatus(
+                port: port,
+                path: "/manifest.webmanifest",
+                token: token
+            )
+            XCTAssertEqual(manifestStatus, 200)
+            let pushKey = try await remoteHTTPData(
+                port: port,
+                path: "/push/public-key",
+                token: token
+            )
+            XCTAssertTrue(String(decoding: pushKey, as: UTF8.self).contains(
+                "test-public-key"
+            ))
+            let pushStatus = try await remoteHTTPData(
+                port: port,
+                path: "/push/status",
+                token: token
+            )
+            XCTAssertEqual(
+                (try JSONSerialization.jsonObject(with: pushStatus)
+                    as? [String: Any])?["subscriptions"] as? Int,
+                0
             )
             let missingPath = try await remoteHTTPStatus(
                 port: port,
@@ -1524,6 +1573,41 @@ final class AppLogicTests: XCTestCase {
                 body: controlBody
             )
             XCTAssertEqual(allowedControl, 204)
+            let scrollBody = try JSONEncoder().encode(RemoteClientMessage(
+                type: "scroll",
+                clientId: "phone",
+                sessionId: "session",
+                delta: 2
+            ))
+            let scrollStatus = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: scrollBody
+            )
+            XCTAssertEqual(scrollStatus, 204)
+            let subscriptionBody = try webPushRegistrationData(
+                endpoint: "https://wns2-by3p.notify.windows.com/sub/route"
+            )
+            let missingSubscriptionOrigin = try await remoteHTTPStatus(
+                port: port,
+                path: "/push/subscribe",
+                method: "POST",
+                token: token,
+                body: subscriptionBody
+            )
+            XCTAssertEqual(missingSubscriptionOrigin, 403)
+            let subscriptionStatus = try await remoteHTTPStatus(
+                port: port,
+                path: "/push/subscribe",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: subscriptionBody
+            )
+            XCTAssertEqual(subscriptionStatus, 204)
         } catch {
             await gateway.stop()
             throw error
@@ -1619,21 +1703,94 @@ final class AppLogicTests: XCTestCase {
     }
 
     func testRemoteTerminalScreenCaptureNormalizesCells() {
-        let cells: [[Character?]] = [
-            ["A", "\u{0}"],
-            [nil, "B"],
-        ]
-        XCTAssertEqual(RemoteTerminalScreen.capture(
+        XCTAssertEqual(RemoteTerminalScreen.captureVisible(
             sessionId: "session",
             cols: 2,
             rows: 2,
-            characterAt: { cells[$1][$0] }
+            lineAt: { ["A\u{0}", "\u{0}B"][$0] }
         ), RemoteTerminalScreen(
             sessionId: "session",
             cols: 2,
             rows: 2,
+            scrollMode: .terminal,
+            historyStartLine: 0,
+            firstLine: 0,
+            liveTopLine: 0,
+            reset: true,
             lines: ["A ", " B"]
         ))
+    }
+
+    func testRemoteTerminalHistoryUsesAbsoluteIncrementalSegments() {
+        let values = Dictionary(uniqueKeysWithValues: (100 ..< 108).map {
+            ($0, "line-\($0)")
+        })
+        let initial = RemoteTerminalScreen.captureHistory(
+            sessionId: "session",
+            cols: 20,
+            rows: 3,
+            absoluteStart: 100,
+            scanRows: 8,
+            maximumRows: 6,
+            afterLine: nil,
+            lineExists: { values[$0] != nil },
+            lineAt: { values[$0] }
+        )
+        XCTAssertEqual(initial.historyStartLine, 102)
+        XCTAssertEqual(initial.firstLine, 102)
+        XCTAssertEqual(initial.liveTopLine, 105)
+        XCTAssertTrue(initial.reset)
+        XCTAssertEqual(initial.lines, (102 ..< 108).map { "line-\($0)" })
+
+        let delta = RemoteTerminalScreen.captureHistory(
+            sessionId: "session",
+            cols: 20,
+            rows: 3,
+            absoluteStart: 100,
+            scanRows: 8,
+            maximumRows: 6,
+            afterLine: 106,
+            lineExists: { values[$0] != nil },
+            lineAt: { values[$0] }
+        )
+        XCTAssertEqual(delta.firstLine, 103)
+        XCTAssertFalse(delta.reset)
+        XCTAssertEqual(delta.lines, (103 ..< 108).map { "line-\($0)" })
+    }
+
+    func testRemoteTerminalHistoryScansPastDisplayedWindowToLiveRows() {
+        let values = Dictionary(uniqueKeysWithValues: (0 ..< 12).map {
+            ($0, "line-\($0)")
+        })
+        let screen = RemoteTerminalScreen.captureHistory(
+            sessionId: "session",
+            cols: 20,
+            rows: 3,
+            absoluteStart: 0,
+            scanRows: 12,
+            maximumRows: 6,
+            afterLine: nil,
+            lineExists: { values[$0] != nil },
+            lineAt: { values[$0] }
+        )
+        XCTAssertEqual(screen.historyStartLine, 6)
+        XCTAssertEqual(screen.liveTopLine, 9)
+        XCTAssertEqual(screen.lines, (6 ..< 12).map { "line-\($0)" })
+    }
+
+    func testRemoteScrollMessageRoundTrips() throws {
+        let message = RemoteClientMessage(
+            type: "scroll",
+            clientId: "phone",
+            sessionId: "session",
+            delta: -4
+        )
+        let decoded = try JSONDecoder().decode(
+            RemoteClientMessage.self,
+            from: JSONEncoder().encode(message)
+        )
+        XCTAssertEqual(decoded.type, "scroll")
+        XCTAssertEqual(decoded.delta, -4)
     }
 
     func testRemoteWebCommandInputHasAccessibleName() {
@@ -1647,6 +1804,88 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "setTimeout(flushInput, 1000);"
         ))
+    }
+
+    func testWebPushStoreRejectsUnsafeEndpointsAndPersistsSubscriptions() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("subscriptions.json")
+        let store = WebPushSubscriptionStore(url: url)
+
+        let safe = try JSONDecoder().decode(
+            WebPushRegistration.self,
+            from: webPushRegistrationData(
+                endpoint: "https://wns2-by3p.notify.windows.com/sub/1"
+            )
+        )
+        try store.add(safe)
+        XCTAssertEqual(store.all().count, 1)
+        let permissions = try FileManager.default.attributesOfItem(atPath: url.path)[
+            .posixPermissions
+        ] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o600)
+
+        let unsafe = try JSONDecoder().decode(
+            WebPushRegistration.self,
+            from: webPushRegistrationData(endpoint: "https://127.0.0.1/push")
+        )
+        XCTAssertThrowsError(try store.add(unsafe))
+        XCTAssertEqual(store.all().count, 1)
+    }
+
+    func testWebPushServiceSendsTimestampedNotificationPayload() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WebPushSubscriptionStore(
+            url: root.appendingPathComponent("subscriptions.json")
+        )
+        try store.add(JSONDecoder().decode(
+            WebPushRegistration.self,
+            from: webPushRegistrationData(
+                endpoint: "https://wns2-by3p.notify.windows.com/sub/1"
+            )
+        ))
+        let sender = WebPushSenderSpy()
+        let service = WebPushService(
+            publicKey: VAPID.Key().id.description,
+            store: store,
+            sender: sender
+        )
+        let sentAt = Date(timeIntervalSince1970: 1_800_000_000)
+        await service.send(NotificationEvent(
+            kind: .permission,
+            title: "Copilot needs permission",
+            subtitle: "Project · Session",
+            body: nil,
+            projectId: "project",
+            sessionId: "session",
+            sentAt: sentAt
+        ))
+        let firstPayload = await sender.firstPayload()
+        let payload = try XCTUnwrap(firstPayload)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: payload) as? [String: Any]
+        )
+        XCTAssertEqual(object["kind"] as? String, "permission")
+        XCTAssertEqual(object["sessionId"] as? String, "session")
+        XCTAssertEqual(object["sentAt"] as? String, "2027-01-15T08:00:00Z")
+        XCTAssertEqual(object["body"] as? String, "Project · Session")
+        XCTAssertTrue(RemoteWebAssets.serviceWorker.contains("Sent at ${sentTime}"))
+        XCTAssertEqual(service.status().subscriptions, 1)
+        XCTAssertNotNil(service.status().lastSuccessAt)
+        XCTAssertNil(service.status().lastError)
+    }
+
+    func testRemoteWebAssetsIncludePushLinksAndConnectionState() {
+        XCTAssertTrue(RemoteWebAssets.html.contains("manifest.webmanifest"))
+        XCTAssertTrue(RemoteWebAssets.html.contains("connection-dot"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("rel = 'noopener noreferrer'"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("push/subscribe"))
+        XCTAssertTrue(RemoteWebAssets.serviceWorker.contains("notificationclick"))
     }
 
     func testRemoteQueryItemsParsesSession() {
@@ -1841,6 +2080,21 @@ final class AppLogicTests: XCTestCase {
             .replacingOccurrences(of: "=", with: "")
     }
 
+    private func webPushRegistrationData(endpoint: String) throws -> Data {
+        let key = VAPID.Key().id.description
+        return try JSONSerialization.data(withJSONObject: [
+            "subscription": [
+                "endpoint": endpoint,
+                "keys": [
+                    "p256dh": key,
+                    "auth": base64URL(Data(repeating: 7, count: 16)),
+                ],
+                "applicationServerKey": key,
+            ],
+            "label": "Test Browser",
+        ])
+    }
+
     private func remoteHTTPStatus(
         port: Int,
         path: String,
@@ -1890,6 +2144,27 @@ final class AppLogicTests: XCTestCase {
         }
         let (_, response) = try await session.data(for: request)
         return try XCTUnwrap(response as? HTTPURLResponse)
+    }
+
+    private func remoteHTTPData(
+        port: Int,
+        path: String,
+        token: String? = nil
+    ) async throws -> Data {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 5
+        configuration.timeoutIntervalForResource = 5
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)\(path)"))
+        var request = URLRequest(url: url)
+        request.setValue("close", forHTTPHeaderField: "Connection")
+        if let token {
+            request.setValue(token, forHTTPHeaderField: "Cf-Access-Jwt-Assertion")
+        }
+        let (data, response) = try await session.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        return data
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {

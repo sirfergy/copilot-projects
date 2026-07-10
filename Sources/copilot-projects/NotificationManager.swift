@@ -12,15 +12,67 @@ extension StatusNotificationKind {
     }
 }
 
-@MainActor
-protocol NotificationPosting: AnyObject {
-    func post(
+struct NotificationEvent: Codable, Equatable, Sendable {
+    let id: UUID
+    let kind: StatusNotificationKind?
+    let title: String
+    let subtitle: String?
+    let body: String?
+    let projectId: String?
+    let sessionId: String?
+    let sentAt: Date
+
+    init(
+        id: UUID = UUID(),
+        kind: StatusNotificationKind?,
         title: String,
         subtitle: String?,
         body: String?,
         projectId: String?,
-        sessionId: String?
-    )
+        sessionId: String?,
+        sentAt: Date = Date()
+    ) {
+        self.id = id
+        self.kind = kind
+        self.title = title
+        self.subtitle = subtitle
+        self.body = body
+        self.projectId = projectId
+        self.sessionId = sessionId
+        self.sentAt = sentAt
+    }
+
+    var displayedBody: String {
+        var components: [String] = []
+        if let body, !body.isEmpty { components.append(body) }
+        components.append("Sent at \(sentAt.formatted(date: .omitted, time: .shortened))")
+        return components.joined(separator: "\n")
+    }
+
+    var webBody: String {
+        var components: [String] = []
+        if let subtitle, !subtitle.isEmpty { components.append(subtitle) }
+        if let body, !body.isEmpty { components.append(body) }
+        return components.joined(separator: "\n")
+    }
+}
+
+@MainActor
+protocol NotificationPosting: AnyObject {
+    func post(_ event: NotificationEvent)
+}
+
+@MainActor
+final class CompositeNotificationPoster: NotificationPosting {
+    private let posters: [any NotificationPosting]
+
+    init(_ posters: [any NotificationPosting]) {
+        self.posters = posters
+    }
+
+    func post(_ event: NotificationEvent) {
+        for poster in posters { poster.post(event) }
+    }
 }
 
 /// Thin wrapper over UNUserNotificationCenter. Posts banners and routes taps back
@@ -41,24 +93,21 @@ final class NotificationManager: NSObject, NotificationPosting, UNUserNotificati
         }
     }
 
-    func post(
-        title: String,
-        subtitle: String?,
-        body: String?,
-        projectId: String?,
-        sessionId: String?
-    ) {
+    func post(_ event: NotificationEvent) {
         let content = UNMutableNotificationContent()
-        content.title = title
-        if let subtitle, !subtitle.isEmpty { content.subtitle = subtitle }
-        if let body = body, !body.isEmpty { content.body = body }
+        content.title = event.title
+        if let subtitle = event.subtitle, !subtitle.isEmpty {
+            content.subtitle = subtitle
+        }
+        content.body = event.displayedBody
         content.sound = .default
         var info: [String: String] = [:]
-        if let projectId = projectId { info["projectId"] = projectId }
-        if let sessionId = sessionId { info["sessionId"] = sessionId }
+        if let projectId = event.projectId { info["projectId"] = projectId }
+        if let sessionId = event.sessionId { info["sessionId"] = sessionId }
+        info["sentAt"] = ISO8601DateFormatter().string(from: event.sentAt)
         content.userInfo = info
         let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
+            identifier: event.id.uuidString,
             content: content,
             trigger: nil
         )

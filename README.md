@@ -27,10 +27,13 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   details; active scheduled turns and subagents use a separate background indicator instead of
   making the foreground session look busy.
 - **Private remote control:** expose a mobile web terminal behind Cloudflare Access + GitHub SSO,
-  with project/session status, live screen snapshots, and a single remote writer lease.
+  with scrollback, safe clickable links, project/session status, live screen snapshots, and a
+  single remote writer lease.
 - **Notifications:** native macOS banners identify the originating project/session and
   automatically alert when Copilot has a question, needs permission, or finishes a task.
-  Clicking one focuses that session. Unread sessions get a bell badge + a Dock badge count.
+  Clicking one focuses that session. Remote web push provides the same timestamped events to
+  subscribed browsers and installed iPhone/iPad Home Screen apps. Unread sessions get a bell
+  badge + a Dock badge count.
 - **Control socket + CLI:** the same `copilot-projects` binary is also a CLI that talks to the
   running app over a Unix socket — ideal for agent hooks.
 - **Resumable sessions:** each terminal runs under a bundled [dtach](https://github.com/crigler/dtach),
@@ -119,7 +122,7 @@ Targeting flags (`--project`, `--session`) override the environment defaults.
 
 ### Remote access
 
-Remote access is opt-in. The local gateway listens on `127.0.0.1:49271`; a separately managed
+Remote access is opt-in. The local gateway listens on `127.0.0.1:49272`; a separately managed
 Cloudflare Tunnel maps the protected public hostname to that origin:
 
 ```bash
@@ -146,6 +149,17 @@ Access token are rejected.
 The mobile client can list projects, select a terminal, and acquire the single remote writer
 lease. The desktop remains independently usable. Remote clients do not resize the PTY because
 dtach shares one terminal size with the desktop.
+
+Normal-buffer sessions expose a bounded, independently scrollable history without moving the
+desktop terminal viewport. Active Copilot/full-screen sessions forward web wheel gestures to the
+existing TUI only while the remote client holds the writer lease. Terminal `http://`/`https://`
+links are rendered as safe new-tab links.
+
+Web Push is optional. Tap the bell in the remote toolbar to subscribe. Safari on iPhone/iPad
+requires adding the site to the Home Screen first (iOS/iPadOS 16.4+); desktop Safari/Edge/Chrome
+can subscribe directly. The app generates and keeps its VAPID private key in the macOS Keychain
+and stores browser subscriptions under the private state directory. Web and native notifications
+include the time the event was sent; clicking a web notification opens and selects its session.
 
 ### Notification deep links
 
