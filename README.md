@@ -29,6 +29,8 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 - **Private remote control:** expose a mobile web terminal behind Cloudflare Access + GitHub SSO,
   with scrollback, safe clickable links, project/session status, live screen snapshots, and a
   single remote writer lease.
+- **Native iOS client:** the `ios/` app uses the same secure remote protocol with native
+  project/session navigation, terminal input and scrolling, deep links, and APNs notifications.
 - **Notifications:** native macOS banners identify the originating project/session and
   automatically alert when Copilot has a question, needs permission, or finishes a task.
   Clicking one focuses that session. Remote web push provides the same timestamped events to

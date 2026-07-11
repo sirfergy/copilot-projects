@@ -14,3 +14,25 @@ jobs:
         run: swift test
       - name: Release build
         run: swift build -c release
+  ios-test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        working-directory: ios
+        run: xcodegen generate
+      - name: Test iOS client
+        working-directory: ios
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: safe.bareRepository
+          GIT_CONFIG_VALUE_0: all
+        run: |
+          xcodebuild \
+            -project CopilotProjects.xcodeproj \
+            -scheme CopilotProjects \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            CODE_SIGNING_ALLOWED=NO \
+            test

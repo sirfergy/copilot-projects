@@ -3,7 +3,11 @@
 *.xcodeproj
 DerivedData/
 *.app
+AuthKey_*.p8
+*.p8
 dist/
+ios/build/
+ios/CopilotProjects/Info.plist
 .DS_Store
 
 # vendored dtach build artifacts (source is kept, binaries are rebuilt)
@@ -15,3 +19,4 @@ vendor/dtach/config.status
 vendor/dtach/Makefile
 vendor/dtach/autom4te.cache/
 vendor/dtach/dtach-universal
+vendor/dtach/dtach-arm64

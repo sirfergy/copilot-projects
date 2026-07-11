@@ -3,6 +3,7 @@ import Darwin
 import NIOCore
 import NIOPosix
 import NIOHTTP1
+import CopilotProjectsProtocol
 
 fileprivate struct RemoteTerminalRevision: Equatable {
     let contentGeneration: UInt64
@@ -67,6 +68,10 @@ final class RemoteModelBridge: @unchecked Sendable {
         model?.sendRemoteInput(sessionId: sessionId, value: value)
     }
 
+    func sendKey(sessionId: String, key: String) {
+        model?.sendRemoteKey(sessionId: sessionId, key: key)
+    }
+
     func sendScroll(sessionId: String, delta: Int) {
         model?.sendRemoteScroll(sessionId: sessionId, delta: delta)
     }
@@ -110,7 +115,8 @@ final class RemoteGateway: @unchecked Sendable {
         expectedOrigin: String,
         verifier: CloudflareAccessVerifier,
         port: Int,
-        webPushService: WebPushService? = nil
+        webPushService: WebPushService? = nil,
+        apnsService: APNsService? = nil
     ) throws -> Int {
         if let boundPort = channel?.localAddress?.port { return boundPort }
         let auth = RemoteRequestAuth(
@@ -135,7 +141,8 @@ final class RemoteGateway: @unchecked Sendable {
                             auth: auth,
                             bridge: bridge,
                             leases: leases,
-                            webPushService: webPushService
+                            webPushService: webPushService,
+                            apnsService: apnsService
                         )
                     )
                 }
@@ -296,6 +303,7 @@ private final class RemoteHTTPHandler:
     private let bridge: RemoteModelBridge
     private let leases: RemoteWriterLeases
     private let webPushService: WebPushService?
+    private let apnsService: APNsService?
 
     private var head: HTTPRequestHead?
     private var body: [UInt8] = []
@@ -316,12 +324,14 @@ private final class RemoteHTTPHandler:
         auth: RemoteRequestAuth,
         bridge: RemoteModelBridge,
         leases: RemoteWriterLeases,
-        webPushService: WebPushService?
+        webPushService: WebPushService?,
+        apnsService: APNsService?
     ) {
         self.auth = auth
         self.bridge = bridge
         self.leases = leases
         self.webPushService = webPushService
+        self.apnsService = apnsService
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -369,6 +379,10 @@ private final class RemoteHTTPHandler:
                 handlePushRegistration(context: context, subscribe: true)
             case "/push/unsubscribe":
                 handlePushRegistration(context: context, subscribe: false)
+            case "/apns/subscribe":
+                handleAPNsRegistration(context: context, subscribe: true)
+            case "/apns/unsubscribe":
+                handleAPNsRegistration(context: context, subscribe: false)
             default:
                 respond(context: context, method: head.method, status: .notFound,
                         contentType: "text/plain", body: "Not found")
@@ -476,6 +490,7 @@ private final class RemoteHTTPHandler:
                     contentType: "text/plain", body: "too large")
             return
         }
+
         guard let webPushService else {
             respond(context: context, method: .POST, status: .serviceUnavailable,
                     contentType: "text/plain", body: "Push unavailable")
@@ -495,6 +510,37 @@ private final class RemoteHTTPHandler:
         } catch {
             respond(context: context, method: .POST, status: .serviceUnavailable,
                     contentType: "text/plain", body: "Push unavailable")
+        }
+    }
+
+    private func handleAPNsRegistration(
+        context: ChannelHandlerContext,
+        subscribe: Bool
+    ) {
+        guard !bodyTooLarge else {
+            respond(context: context, method: .POST, status: .payloadTooLarge,
+                    contentType: "text/plain", body: "too large")
+            return
+        }
+        guard let apnsService else {
+            respond(context: context, method: .POST, status: .serviceUnavailable,
+                    contentType: "text/plain", body: "APNs unavailable")
+            return
+        }
+        do {
+            if subscribe {
+                try apnsService.register(data: Data(body))
+            } else {
+                try apnsService.unregister(data: Data(body))
+            }
+            respond(context: context, method: .POST, status: .noContent,
+                    contentType: "text/plain", body: "")
+        } catch APNsServiceError.invalidRegistration {
+            respond(context: context, method: .POST, status: .badRequest,
+                    contentType: "text/plain", body: "Bad registration")
+        } catch {
+            respond(context: context, method: .POST, status: .serviceUnavailable,
+                    contentType: "text/plain", body: "APNs unavailable")
         }
     }
 
@@ -542,6 +588,28 @@ private final class RemoteHTTPHandler:
                 // between the check above and this hop can't leak a keystroke.
                 guard leases.holds(sessionId: sessionId, clientId: clientId) else { return }
                 self.bridge.sendInput(sessionId: sessionId, value: value)
+            }
+            respond(context: context, method: .POST, status: .noContent,
+                    contentType: "text/plain", body: "")
+        case "key":
+            guard let key = message.data,
+                  ["enter", "escape", "backspace", "tab",
+                   "up", "down", "left", "right"].contains(key) else {
+                respond(context: context, method: .POST, status: .badRequest,
+                        contentType: "text/plain", body: "Bad request")
+                return
+            }
+            guard leases.holds(sessionId: sessionId, clientId: clientId) else {
+                respond(context: context, method: .POST, status: .forbidden,
+                        contentType: "text/plain", body: "view only")
+                return
+            }
+            let leases = self.leases
+            Task { @MainActor in
+                guard leases.holds(sessionId: sessionId, clientId: clientId) else {
+                    return
+                }
+                self.bridge.sendKey(sessionId: sessionId, key: key)
             }
             respond(context: context, method: .POST, status: .noContent,
                     contentType: "text/plain", body: "")
