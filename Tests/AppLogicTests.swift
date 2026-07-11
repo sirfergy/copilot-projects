@@ -1596,6 +1596,36 @@ final class AppLogicTests: XCTestCase {
                 body: controlBody
             )
             XCTAssertEqual(allowedControl, 204)
+            let keyBody = try JSONEncoder().encode(RemoteClientMessage(
+                type: "key",
+                clientId: "phone",
+                sessionId: "session",
+                data: "enter"
+            ))
+            let keyStatus = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: keyBody
+            )
+            XCTAssertEqual(keyStatus, 204)
+            let invalidKeyBody = try JSONEncoder().encode(RemoteClientMessage(
+                type: "key",
+                clientId: "phone",
+                sessionId: "session",
+                data: "home"
+            ))
+            let invalidKeyStatus = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: invalidKeyBody
+            )
+            XCTAssertEqual(invalidKeyStatus, 400)
             let scrollBody = try JSONEncoder().encode(RemoteClientMessage(
                 type: "scroll",
                 clientId: "phone",

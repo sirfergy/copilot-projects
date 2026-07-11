@@ -1,7 +1,6 @@
 import Foundation
 import UserNotifications
 import CopilotProjectsCore
-import CopilotProjectsProtocol
 
 extension StatusNotificationKind {
     var title: String {
