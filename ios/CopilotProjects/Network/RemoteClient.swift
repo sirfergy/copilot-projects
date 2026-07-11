@@ -18,15 +18,9 @@ enum RemoteClientError: Error {
     case rejected(Int)
 }
 
-private final class AccessRedirectDelegate:
+private final class RejectRedirectDelegate:
     NSObject, URLSessionTaskDelegate, @unchecked Sendable
 {
-    private let expectedHost: String
-
-    init(expectedHost: String) {
-        self.expectedHost = expectedHost
-    }
-
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
@@ -34,11 +28,7 @@ private final class AccessRedirectDelegate:
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
-        completionHandler(
-            request.url?.scheme?.lowercased() == "https"
-                && request.url?.host?.lowercased() == expectedHost.lowercased()
-                ? request : nil
-        )
+        completionHandler(nil)
     }
 }
 
@@ -98,9 +88,7 @@ final class RemoteClient {
             UserDefaults.standard.set(value, forKey: Self.clientIDKey)
             clientID = value
         }
-        let delegate = AccessRedirectDelegate(
-            expectedHost: Self.baseURL.host!
-        )
+        let delegate = RejectRedirectDelegate()
         let requestConfiguration = URLSessionConfiguration.ephemeral
         requestConfiguration.timeoutIntervalForRequest = 30
         requestConfiguration.timeoutIntervalForResource = 60
