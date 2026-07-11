@@ -323,30 +323,32 @@ enum RemoteWebAssets {
     async function flushInput() {
       if (flushing || !pendingActions.length) return;
       flushing = true;
-      while (writable && pendingActions.length) {
-        const sessionId = selected;
-        const action = pendingActions.shift();
-        const response = await control({
-          type: action.type,
-          sessionId,
-          data: action.data
-        });
-        if (!response) {
-          if (selected === sessionId && writable) {
-            pendingActions.unshift(action);
-            flushing = false;
-            setTimeout(flushInput, 1000);
+      try {
+        while (writable && pendingActions.length) {
+          const sessionId = selected;
+          const action = pendingActions.shift();
+          const response = await control({
+            type: action.type,
+            sessionId,
+            data: action.data
+          });
+          if (!response) {
+            if (selected === sessionId && writable) {
+              pendingActions.unshift(action);
+              setTimeout(flushInput, 1000);
+            }
+            return;
           }
-          return;
+          if (response.status === 403) {
+            writable = false;
+            pendingActions.length = 0;
+            lease.textContent = 'view only';
+            break;
+          }
         }
-        if (response.status === 403) {
-          writable = false;
-          pendingActions.length = 0;
-          lease.textContent = 'view only';
-          break;
-        }
+      } finally {
+        flushing = false;
       }
-      flushing = false;
     }
     function renderWorkspace(data) {
       const active = selected;
