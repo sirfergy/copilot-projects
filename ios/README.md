@@ -20,6 +20,12 @@ xcodebuild \
 The bundle ID is `com.sirfergy.copilotprojects`. Debug builds register APNs
 sandbox tokens; TestFlight/App Store builds register production tokens.
 
+## Xcode Cloud
+
+The generated Xcode project remains ignored. Xcode Cloud runs
+`ci_scripts/ci_post_clone.sh` to install XcodeGen, generate the project, and
+replace `CURRENT_PROJECT_VERSION` with its unique `CI_BUILD_NUMBER`.
+
 ## Configure the Mac APNs provider
 
 Create one Apple Developer key with **Apple Push Notifications service (APNs)**
