@@ -1,8 +1,24 @@
+import Foundation
 import XCTest
 import CopilotProjectsProtocol
 @testable import Copilot_Projects
 
 final class CopilotProjectsTests: XCTestCase {
+    func testRemoteClientDistinguishesAccessFailureFromViewOnly() {
+        XCTAssertTrue(RemoteClient.isAuthenticationResponse(
+            statusCode: 401,
+            body: Data()
+        ))
+        XCTAssertTrue(RemoteClient.isAuthenticationResponse(
+            statusCode: 403,
+            body: Data("Forbidden".utf8)
+        ))
+        XCTAssertFalse(RemoteClient.isAuthenticationResponse(
+            statusCode: 403,
+            body: Data("view only".utf8)
+        ))
+    }
+
     func testTerminalBufferMergesIncrementalHistory() {
         var buffer = TerminalBuffer()
         buffer.apply(RemoteTerminalScreen(

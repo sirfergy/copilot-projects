@@ -44,7 +44,7 @@ targets:
     entitlements:
       path: CopilotProjects/CopilotProjects.entitlements
       properties:
-        aps-environment: development
+        aps-environment: "$(APNS_ENVIRONMENT)"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.sirfergy.copilotprojects
@@ -59,7 +59,10 @@ targets:
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
       configs:
         Debug:
+          APNS_ENVIRONMENT: development
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+        Release:
+          APNS_ENVIRONMENT: production
   CopilotProjectsTests:
     type: bundle.unit-test
     platform: iOS

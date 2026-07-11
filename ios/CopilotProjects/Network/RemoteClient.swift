@@ -48,6 +48,18 @@ final class RemoteClient {
     static let baseURL = URL(string: "https://projects.thefergies.com")!
     private static let clientIDKey = "remoteClientID"
 
+    nonisolated static func isAuthenticationResponse(
+        statusCode: Int,
+        body: Data
+    ) -> Bool {
+        if [302, 401].contains(statusCode) {
+            return true
+        }
+        return statusCode == 403
+            && String(decoding: body, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines) == "Forbidden"
+    }
+
     let authentication: CloudflareSession
     private(set) var connectionState: RemoteConnectionState = .disconnected
     private(set) var workspace: RemoteWorkspaceSnapshot?
@@ -70,6 +82,7 @@ final class RemoteClient {
     private var pendingActions: [PendingAction] = []
     private var inputTask: Task<Void, Never>?
     private var acquiringSessionID: String?
+    private var acquireGeneration = 0
     private var pendingScroll = 0
     private var scrollTask: Task<Void, Never>?
     private var pendingDeepLink: AppDeepLink?
@@ -120,6 +133,8 @@ final class RemoteClient {
             streamTask = nil
             inputTask?.cancel()
             inputTask = nil
+            acquireGeneration += 1
+            acquiringSessionID = nil
             scrollTask?.cancel()
             scrollTask = nil
             pendingScroll = 0
@@ -136,6 +151,9 @@ final class RemoteClient {
             return
         }
         restartStream()
+        if let selectedSessionID, !writable, acquiringSessionID == nil {
+            acquire(sessionID: selectedSessionID)
+        }
     }
 
     func select(projectID: String?, sessionID: String) {
@@ -149,25 +167,47 @@ final class RemoteClient {
         selectedSessionID = sessionID
         writable = false
         pendingActions = []
+        pendingScroll = 0
         terminal.reset()
         restartStream()
         acquire(sessionID: sessionID)
     }
 
     private func acquire(sessionID: String) {
+        acquireGeneration += 1
+        let generation = acquireGeneration
         acquiringSessionID = sessionID
         Task {
-            let status = try? await postControl(
-                RemoteClientMessage(
-                    type: "acquire",
-                    clientId: clientID,
-                    sessionId: sessionID
+            do {
+                let status = try await postControl(
+                    RemoteClientMessage(
+                        type: "acquire",
+                        clientId: clientID,
+                        sessionId: sessionID
+                    )
                 )
-            )
-            guard acquiringSessionID == sessionID else { return }
-            acquiringSessionID = nil
-            if selectedSessionID == sessionID, status == 204 {
-                writable = true
+                guard acquireGeneration == generation,
+                      acquiringSessionID == sessionID else {
+                    return
+                }
+                acquiringSessionID = nil
+                if selectedSessionID == sessionID, status == 204 {
+                    writable = true
+                    startInputFlush()
+                }
+            } catch RemoteClientError.authenticationRequired {
+                guard acquireGeneration == generation,
+                      acquiringSessionID == sessionID else {
+                    return
+                }
+                acquiringSessionID = nil
+                requireAuthentication()
+            } catch {
+                guard acquireGeneration == generation,
+                      acquiringSessionID == sessionID else {
+                    return
+                }
+                acquiringSessionID = nil
             }
         }
     }
@@ -218,23 +258,49 @@ final class RemoteClient {
 
     private func scheduleScrollFlush() {
         guard scrollTask == nil else { return }
+        guard let sessionID = selectedSessionID else { return }
         scrollTask = Task {
-            defer { scrollTask = nil }
+            defer {
+                scrollTask = nil
+                if isActive, writable, pendingScroll != 0 {
+                    scheduleScrollFlush()
+                }
+            }
             while isActive, writable, pendingScroll != 0 {
                 do {
                     try await Task.sleep(for: .milliseconds(40))
                 } catch {
                     return
                 }
+                guard isActive, writable, selectedSessionID == sessionID else {
+                    return
+                }
                 let value = max(-8, min(8, pendingScroll))
                 pendingScroll -= value
                 guard value != 0 else { return }
-                _ = try? await postControl(RemoteClientMessage(
-                    type: "scroll",
-                    clientId: clientID,
-                    sessionId: selectedSessionID,
-                    delta: value
-                ))
+                do {
+                    let status = try await postControl(RemoteClientMessage(
+                        type: "scroll",
+                        clientId: clientID,
+                        sessionId: sessionID,
+                        delta: value
+                    ))
+                    if status == 403 {
+                        writable = false
+                        pendingScroll = 0
+                        return
+                    }
+                } catch RemoteClientError.authenticationRequired {
+                    pendingScroll = 0
+                    requireAuthentication()
+                    return
+                } catch {
+                    guard isActive, writable, selectedSessionID == sessionID else {
+                        return
+                    }
+                    pendingScroll += value
+                    try? await Task.sleep(for: .seconds(1))
+                }
             }
         }
     }
@@ -249,7 +315,12 @@ final class RemoteClient {
             label: UIDevice.current.name
         )
         pendingAPNsRegistration = registration
-        try await attemptAPNsRegistration(registration)
+        do {
+            try await attemptAPNsRegistration(registration)
+        } catch RemoteClientError.authenticationRequired {
+            requireAuthentication()
+            throw RemoteClientError.authenticationRequired
+        }
     }
 
     private func attemptAPNsRegistration(
@@ -292,8 +363,7 @@ final class RemoteClient {
             } catch is CancellationError {
                 return
             } catch RemoteClientError.authenticationRequired {
-                authentication.markExpired()
-                connectionState = .authenticating
+                requireAuthentication()
                 return
             } catch {
                 connectionState = .reconnecting
@@ -325,7 +395,18 @@ final class RemoteClient {
         }
         connectionState = .connected
         if let pendingAPNsRegistration {
-            Task { try? await attemptAPNsRegistration(pendingAPNsRegistration) }
+            Task {
+                do {
+                    try await attemptAPNsRegistration(pendingAPNsRegistration)
+                } catch RemoteClientError.authenticationRequired {
+                    requireAuthentication()
+                } catch {
+                    NSLog(
+                        "Copilot Projects: APNs retry failed: %@",
+                        error.localizedDescription
+                    )
+                }
+            }
         }
         for try await line in bytes.lines {
             try Task.checkCancellation()
@@ -391,6 +472,11 @@ final class RemoteClient {
                     pendingActions = []
                     return
                 }
+            } catch RemoteClientError.authenticationRequired {
+                guard isActive, selectedSessionID == sessionID else { return }
+                pendingActions.insert(action, at: 0)
+                requireAuthentication()
+                return
             } catch {
                 guard isActive, selectedSessionID == sessionID else { return }
                 pendingActions.insert(action, at: 0)
@@ -425,9 +511,6 @@ final class RemoteClient {
             method: "POST",
             body: data
         )
-        if [302, 401].contains(response.statusCode) {
-            throw RemoteClientError.authenticationRequired
-        }
         return response.statusCode
     }
 
@@ -440,14 +523,22 @@ final class RemoteClient {
         var request = try authenticatedRequest(url: url, method: method)
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (_, response) = try await requestSession.data(for: request)
+        let (data, response) = try await requestSession.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw RemoteClientError.invalidResponse
         }
-        if [302, 401].contains(http.statusCode) {
+        if Self.isAuthenticationResponse(statusCode: http.statusCode, body: data) {
             throw RemoteClientError.authenticationRequired
         }
         return http
+    }
+
+    private func requireAuthentication() {
+        writable = false
+        acquireGeneration += 1
+        acquiringSessionID = nil
+        authentication.markExpired()
+        connectionState = .authenticating
     }
 
     private func authenticatedRequest(
