@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct TerminalLineView: View {
     let text: String
@@ -33,4 +34,3 @@ struct TerminalLineView: View {
         return AttributedString(attributed)
     }
 }
-

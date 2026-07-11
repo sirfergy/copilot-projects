@@ -124,7 +124,6 @@ final class RemoteClient {
             scrollTask = nil
             pendingScroll = 0
             pendingActions = []
-            pendingScroll = 0
             connectionState = .disconnected
         }
     }
@@ -259,7 +258,7 @@ final class RemoteClient {
         guard registeredAPNsRegistration != registration else { return }
         let data = try JSONEncoder().encode(registration)
         let response = try await request(
-            path: "/apns/subscribe",
+            path: "apns/subscribe",
             method: "POST",
             body: data
         )
@@ -422,7 +421,7 @@ final class RemoteClient {
     private func postControl(_ message: RemoteClientMessage) async throws -> Int {
         let data = try JSONEncoder().encode(message)
         let response = try await request(
-            path: "/control",
+            path: "control",
             method: "POST",
             body: data
         )
