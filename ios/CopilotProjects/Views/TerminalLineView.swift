@@ -2,6 +2,10 @@ import SwiftUI
 import UIKit
 
 struct TerminalLineView: View {
+    private static let linkDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.link.rawValue
+    )
+
     let text: String
 
     var body: some View {
@@ -13,9 +17,7 @@ struct TerminalLineView: View {
 
     private func linkified(_ value: String) -> AttributedString {
         let attributed = NSMutableAttributedString(string: value)
-        guard let detector = try? NSDataDetector(
-            types: NSTextCheckingResult.CheckingType.link.rawValue
-        ) else {
+        guard let detector = Self.linkDetector else {
             return AttributedString(attributed)
         }
         let range = NSRange(location: 0, length: (value as NSString).length)

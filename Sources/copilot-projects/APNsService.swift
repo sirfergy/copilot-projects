@@ -162,7 +162,6 @@ enum APNsServiceError: Error {
 enum APNsDelivery: Sendable {
     case delivered
     case badDevice
-    case providerTokenExpired
     case failed(String)
 }
 
@@ -404,8 +403,6 @@ final class APNsService: @unchecked Sendable {
                         token: device.token,
                         environment: device.environment
                     )
-                case .providerTokenExpired:
-                    break
                 case .failed(let message):
                     NSLog("copilot-projects: APNs failed: %@", message)
                 }
