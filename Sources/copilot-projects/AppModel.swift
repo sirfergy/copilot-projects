@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import ScreenCaptureKit
 import CopilotProjectsCore
+import CopilotProjectsProtocol
 import Darwin
 
 private final class ScreenshotCaptureBox: @unchecked Sendable {
@@ -223,13 +224,17 @@ final class AppModel: ObservableObject {
         completionNotificationDelayNanoseconds: UInt64 = 1_000_000_000,
         isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive },
         agentActivityDirectory: URL = Paths.sessionsDir,
-        webPushService: WebPushService? = nil
+        webPushService: WebPushService? = nil,
+        apnsService: APNsService? = nil
     ) {
         self.stateRepository = stateRepository
         self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
         self.isAppActive = isAppActive
         self.agentActivityDirectory = agentActivityDirectory
-        remoteAccess = RemoteAccessController(webPushService: webPushService)
+        remoteAccess = RemoteAccessController(
+            webPushService: webPushService,
+            apnsService: apnsService
+        )
         load()
     }
 
@@ -672,6 +677,10 @@ final class AppModel: ObservableObject {
     func sendRemoteInput(sessionId: String, value: String) {
         guard value.utf8.count <= 8_192 else { return }
         controller(for: sessionId)?.terminalView.sendRemoteInput(value)
+    }
+
+    func sendRemoteKey(sessionId: String, key: String) {
+        controller(for: sessionId)?.terminalView.sendRemoteKey(key)
     }
 
     func sendRemoteScroll(sessionId: String, delta: Int) {

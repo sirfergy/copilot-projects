@@ -3,6 +3,8 @@
 *.xcodeproj
 DerivedData/
 *.app
+AuthKey_*.p8
+*.p8
 dist/
 .DS_Store
 
@@ -15,3 +17,4 @@ vendor/dtach/config.status
 vendor/dtach/Makefile
 vendor/dtach/autom4te.cache/
 vendor/dtach/dtach-universal
+vendor/dtach/dtach-arm64

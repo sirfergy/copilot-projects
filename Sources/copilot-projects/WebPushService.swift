@@ -3,6 +3,7 @@ import Security
 import WebPush
 import Darwin
 import CopilotProjectsCore
+import CopilotProjectsProtocol
 
 struct WebPushRegistration: Codable, Sendable {
     let subscription: Subscriber
@@ -275,20 +276,11 @@ final class WebPushService: @unchecked Sendable {
     }
 
     func send(_ event: NotificationEvent) async {
-        struct Payload: Codable {
-            let id: UUID
-            let kind: StatusNotificationKind?
-            let title: String
-            let body: String
-            let projectId: String?
-            let sessionId: String?
-            let sentAt: Date
-        }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let body = Self.truncatedUTF8(event.webBody, maximumBytes: 2_000)
         let title = Self.truncatedUTF8(event.title, maximumBytes: 512)
-        guard let payload = try? encoder.encode(Payload(
+        guard let payload = try? encoder.encode(RemoteNotificationPayload(
             id: event.id,
             kind: event.kind,
             title: title,

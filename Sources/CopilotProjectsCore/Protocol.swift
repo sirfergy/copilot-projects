@@ -1,4 +1,5 @@
 import Foundation
+import CopilotProjectsProtocol
 
 /// Lifecycle status a session can report. Mirrors cmux's running/idle/needsInput.
 public enum SessionStatus: String, Codable, Sendable, CaseIterable {
@@ -7,11 +8,8 @@ public enum SessionStatus: String, Codable, Sendable, CaseIterable {
     case waiting   // waiting for user input
 }
 
-public enum StatusNotificationKind: String, Codable, Sendable {
-    case elicitation
-    case permission
-    case completed
-}
+public typealias StatusNotificationKind =
+    CopilotProjectsProtocol.StatusNotificationKind
 
 /// A single request sent over the control socket as one line of JSON.
 public struct ControlRequest: Codable, Sendable {

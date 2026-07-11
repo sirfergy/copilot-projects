@@ -4,7 +4,14 @@ import PackageDescription
 let package = Package(
     name: "copilot-projects",
     platforms: [
-        .macOS("26.0")
+        .macOS("26.0"),
+        .iOS("17.0"),
+    ],
+    products: [
+        .library(
+            name: "CopilotProjectsProtocol",
+            targets: ["CopilotProjectsProtocol"]
+        ),
     ],
     dependencies: [
         // Pinned past the post-1.13 Metal fixes for stale rows/cursor, window
@@ -24,13 +31,19 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "CopilotProjectsProtocol",
+            path: "Sources/CopilotProjectsProtocol"
+        ),
+        .target(
             name: "CopilotProjectsCore",
+            dependencies: ["CopilotProjectsProtocol"],
             path: "Sources/CopilotProjectsCore"
         ),
         .executableTarget(
             name: "copilot-projects",
             dependencies: [
                 "CopilotProjectsCore",
+                "CopilotProjectsProtocol",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -48,6 +61,7 @@ let package = Package(
             name: "CopilotProjectsTests",
             dependencies: [
                 "CopilotProjectsCore",
+                "CopilotProjectsProtocol",
                 "copilot-projects",
                 .product(name: "WebPush", package: "swift-webpush"),
             ],

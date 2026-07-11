@@ -1,9 +1,11 @@
 import XCTest
 @testable import copilot_projects
 import CopilotProjectsCore
+import CopilotProjectsProtocol
 import AppKit
 import Security
 import WebPush
+import CryptoKit
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -423,6 +425,21 @@ final class AppLogicTests: XCTestCase {
         }
 
         func firstPayload() -> Data? { payloads.first }
+    }
+
+    private actor APNsSenderSpy: APNsSending {
+        private(set) var devices: [StoredAPNsDevice] = []
+        var result: APNsDelivery = .delivered
+
+        func send(
+            payload: RemoteNotificationPayload,
+            device: StoredAPNsDevice
+        ) async -> APNsDelivery {
+            devices.append(device)
+            return result
+        }
+
+        func firstDevice() -> StoredAPNsDevice? { devices.first }
     }
 
     func testFocusDeepLinkParsing() throws {
@@ -1481,6 +1498,12 @@ final class AppLogicTests: XCTestCase {
             store: WebPushSubscriptionStore(url: subscriptionURL),
             sender: WebPushSenderSpy()
         )
+        let apnsService = APNsService(
+            store: APNsDeviceStore(
+                url: root.appendingPathComponent("apns-devices.json")
+            ),
+            provider: APNsSenderSpy()
+        )
 
         let gateway = RemoteGateway()
         let port = try gateway.start(
@@ -1489,7 +1512,8 @@ final class AppLogicTests: XCTestCase {
             expectedOrigin: "https://projects.example.com",
             verifier: verifier,
             port: 0,
-            webPushService: webPushService
+            webPushService: webPushService,
+            apnsService: apnsService
         )
         do {
             let missingToken = try await remoteHTTPStatus(port: port, path: "/")
@@ -1616,6 +1640,20 @@ final class AppLogicTests: XCTestCase {
                 body: subscriptionBody
             )
             XCTAssertEqual(subscriptionStatus, 204)
+            let apnsBody = try JSONEncoder().encode(APNsRegistration(
+                token: String(repeating: "ab", count: 32),
+                environment: .sandbox,
+                label: "Simulator"
+            ))
+            let apnsStatus = try await remoteHTTPStatus(
+                port: port,
+                path: "/apns/subscribe",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: apnsBody
+            )
+            XCTAssertEqual(apnsStatus, 204)
             try FileManager.default.removeItem(at: subscriptionURL)
             try FileManager.default.createDirectory(
                 at: subscriptionURL,
@@ -1823,10 +1861,13 @@ final class AppLogicTests: XCTestCase {
 
     func testRemoteWebInputRequeuesAfterNetworkFailure() {
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "pendingInput = data + pendingInput;"
+            "pendingActions.unshift(action);"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "setTimeout(flushInput, 1000);"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "pendingActions.push({type:'key', data:key});"
         ))
     }
 
@@ -1907,6 +1948,69 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(service.status().subscriptions, 1)
         XCTAssertNotNil(service.status().lastSuccessAt)
         XCTAssertNil(service.status().lastError)
+    }
+
+    func testAPNsProviderTokenUsesRawES256Signature() async throws {
+        let key = P256.Signing.PrivateKey()
+        let configuration = APNsConfiguration(
+            keyID: "KEY123",
+            teamID: "TEAM123",
+            topic: "com.example.app",
+            privateKeyPEM: key.pemRepresentation
+        )
+        let provider = try APNsProvider(configuration: configuration)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let token = try await provider.providerToken(now: now)
+        let segments = token.split(separator: ".")
+        XCTAssertEqual(segments.count, 3)
+        let header = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: try XCTUnwrap(CloudflareAccessVerifier.base64URLDecode(
+                String(segments[0])
+            ))
+        ) as? [String: Any])
+        let claims = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: try XCTUnwrap(CloudflareAccessVerifier.base64URLDecode(
+                String(segments[1])
+            ))
+        ) as? [String: Any])
+        let signature = try XCTUnwrap(
+            CloudflareAccessVerifier.base64URLDecode(String(segments[2]))
+        )
+        XCTAssertEqual(header["alg"] as? String, "ES256")
+        XCTAssertEqual(header["kid"] as? String, "KEY123")
+        XCTAssertEqual(claims["iss"] as? String, "TEAM123")
+        XCTAssertEqual(claims["iat"] as? Int, 1_800_000_000)
+        XCTAssertEqual(signature.count, 64)
+    }
+
+    func testAPNsServiceStoresEnvironmentAndFansOut() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = APNsDeviceStore(url: root.appendingPathComponent("devices.json"))
+        try store.add(APNsRegistration(
+            token: String(repeating: "ab", count: 32),
+            environment: .production,
+            label: "iPhone"
+        ))
+        let sender = APNsSenderSpy()
+        let service = APNsService(store: store, provider: sender)
+        await service.send(NotificationEvent(
+            kind: .completed,
+            title: "Complete",
+            subtitle: "Project · Session",
+            body: nil,
+            projectId: "project",
+            sessionId: "session"
+        ))
+        let device = await sender.firstDevice()
+        XCTAssertEqual(device?.environment, .production)
+        XCTAssertEqual(device?.token, String(repeating: "ab", count: 32))
+        let permissions = try FileManager.default.attributesOfItem(
+            atPath: root.appendingPathComponent("devices.json").path
+        )[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o600)
     }
 
     func testRemoteWebAssetsIncludePushLinksAndConnectionState() {

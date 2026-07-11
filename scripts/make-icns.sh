@@ -20,4 +20,6 @@ for size in 16 32 128 256 512; do
 done
 
 iconutil -c icns "$ICONSET" -o "$ROOT/Resources/AppIcon.icns"
-echo "wrote Resources/AppIcon.icns"
+sips -z 192 192 "$PNG" --out "$ROOT/Resources/PWAIcon-192.png" >/dev/null
+sips -z 512 512 "$PNG" --out "$ROOT/Resources/PWAIcon-512.png" >/dev/null
+echo "wrote macOS and PWA app icons"

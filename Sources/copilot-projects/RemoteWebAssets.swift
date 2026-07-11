@@ -215,13 +215,12 @@ enum RemoteWebAssets {
     const clientId = (crypto.randomUUID && crypto.randomUUID()) ||
       `c-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const TOOLBAR_KEYS = {
-      'esc': '\u001b', 'ctrl-c': '\u0003', 'tab': '\t',
-      'up': '\u001b[A', 'down': '\u001b[B'
+      'esc': 'escape', 'tab': 'tab', 'up': 'up', 'down': 'down'
     };
     let stream = null;
     let selected = null;
     let writable = false;
-    let pendingInput = '';
+    let pendingActions = [];
     let flushing = false;
     let lastScreen = null;
     let historyStartLine = 0;
@@ -290,7 +289,7 @@ enum RemoteWebAssets {
     function selectSession(id) {
       selected = id;
       writable = false;
-      pendingInput = '';
+      pendingActions.length = 0;
       pendingScroll = 0;
       lastScreen = null;
       historyStartLine = 0;
@@ -311,32 +310,43 @@ enum RemoteWebAssets {
     // so rapid typing can't arrive out of order over HTTP/2.
     function sendInput(data) {
       if (!selected || !writable || !data) return;
-      pendingInput += data;
+      const last = pendingActions.at(-1);
+      if (last?.type === 'input') last.data += data;
+      else pendingActions.push({type:'input', data});
+      flushInput();
+    }
+    function sendKey(key) {
+      if (!selected || !writable || !key) return;
+      pendingActions.push({type:'key', data:key});
       flushInput();
     }
     async function flushInput() {
-      if (flushing || !pendingInput) return;
+      if (flushing || !pendingActions.length) return;
       flushing = true;
-      const sessionId = selected;
-      const data = pendingInput;
-      pendingInput = '';
-      const response = await control({ type: 'input', sessionId, data });
-      flushing = false;
-      if (!response) {
-        if (selected === sessionId && writable) {
-          pendingInput = data + pendingInput;
-          setTimeout(flushInput, 1000);
+      while (writable && pendingActions.length) {
+        const sessionId = selected;
+        const action = pendingActions.shift();
+        const response = await control({
+          type: action.type,
+          sessionId,
+          data: action.data
+        });
+        if (!response) {
+          if (selected === sessionId && writable) {
+            pendingActions.unshift(action);
+            flushing = false;
+            setTimeout(flushInput, 1000);
+          }
+          return;
         }
-        return;
+        if (response.status === 403) {
+          writable = false;
+          pendingActions.length = 0;
+          lease.textContent = 'view only';
+          break;
+        }
       }
-      if (response.status === 403) {
-        // Another device took control of this session.
-        writable = false;
-        pendingInput = '';
-        lease.textContent = 'view only';
-      } else if (pendingInput && writable) {
-        flushInput();
-      }
+      flushing = false;
     }
     function renderWorkspace(data) {
       const active = selected;
@@ -529,11 +539,17 @@ enum RemoteWebAssets {
     }
     terminal.addEventListener('keydown', (event) => {
       if (!writable) return;
-      const special = {
-        Enter:'\r', Backspace:'\u007f', Tab:'\t', Escape:'\u001b',
-        ArrowUp:'\u001b[A', ArrowDown:'\u001b[B', ArrowRight:'\u001b[C', ArrowLeft:'\u001b[D'
+      const specialKey = {
+        Enter:'enter', Backspace:'backspace', Tab:'tab', Escape:'escape',
+        ArrowUp:'up', ArrowDown:'down', ArrowRight:'right', ArrowLeft:'left'
       };
-      let data = special[event.key];
+      const key = specialKey[event.key];
+      if (key) {
+        event.preventDefault();
+        sendKey(key);
+        return;
+      }
+      let data = null;
       if (!data && event.ctrlKey && event.key.length === 1) {
         data = String.fromCharCode(event.key.toUpperCase().charCodeAt(0) - 64);
       } else if (!data && event.key.length === 1 && !event.metaKey) {
@@ -542,11 +558,17 @@ enum RemoteWebAssets {
       if (data) { event.preventDefault(); sendInput(data); }
     });
     document.querySelectorAll('#toolbar button').forEach((button) => {
-      button.onclick = () => sendInput(TOOLBAR_KEYS[button.dataset.key]);
+      button.onclick = () => {
+        if (button.dataset.key === 'ctrl-c') sendInput('\u0003');
+        else sendKey(TOOLBAR_KEYS[button.dataset.key]);
+      };
     });
     document.querySelector('#input-form').onsubmit = (event) => {
       event.preventDefault();
-      if (input.value) sendInput(input.value + '\r');
+      if (input.value) {
+        sendInput(input.value);
+        sendKey('enter');
+      }
       input.value = '';
       terminal.focus();
     };

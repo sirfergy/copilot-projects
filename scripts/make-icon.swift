@@ -4,10 +4,10 @@ import ImageIO
 import UniformTypeIdentifiers
 
 // Renders the Copilot Projects app icon to a 1024x1024 PNG: the official GitHub
-// Copilot mascot (primer/octicons `copilot-48`, MIT) in white on a purple
+// Copilot mascot (primer/octicons `copilot-48`, MIT) in white on a teal
 // squircle. The octicon path data is embedded and rasterized by the small
 // SVG-path parser below, then composited; no external tools required.
-// Usage: swift make-icon.swift <out.png>
+// Usage: swift make-icon.swift <out.png> [--opaque]
 
 
 // Minimal SVG path-data -> CGPath (supports M m L l H h V v C c S s Q q T t A a Z z).
@@ -133,6 +133,9 @@ let copilotMouthPath = "M28.998 28.516c1.104 0 1.999.895 1.999 1.999v3.998a2 2 0
 // MARK: - Render
 
 let S = 1024.0
+let arguments = CommandLine.arguments.dropFirst()
+let opaque = arguments.contains("--opaque")
+let out = arguments.first { !$0.hasPrefix("--") } ?? "icon-1024.png"
 let cs = CGColorSpaceCreateDeviceRGB()
 func col(_ r: Double, _ g: Double, _ b: Double, _ a: Double = 1) -> CGColor {
     CGColor(colorSpace: cs, components: [r / 255, g / 255, b / 255, a])!
@@ -143,18 +146,25 @@ func rrect(_ rect: CGRect, _ radius: Double) -> CGPath {
 
 guard let ctx = CGContext(
     data: nil, width: Int(S), height: Int(S), bitsPerComponent: 8, bytesPerRow: 0,
-    space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    space: cs,
+    bitmapInfo: (
+        opaque
+            ? CGImageAlphaInfo.noneSkipLast
+            : CGImageAlphaInfo.premultipliedLast
+    ).rawValue
 ) else { exit(1) }
 ctx.clear(CGRect(x: 0, y: 0, width: S, height: S))
 
-// purple squircle background
+// teal squircle background
 let margin = 70.0
-let bg = CGRect(x: margin, y: margin, width: S - 2 * margin, height: S - 2 * margin)
+let bg = opaque
+    ? CGRect(x: 0, y: 0, width: S, height: S)
+    : CGRect(x: margin, y: margin, width: S - 2 * margin, height: S - 2 * margin)
 ctx.saveGState()
-ctx.addPath(rrect(bg, 208))
+ctx.addPath(opaque ? CGPath(rect: bg, transform: nil) : rrect(bg, 208))
 ctx.clip()
 let grad = CGGradient(colorsSpace: cs,
-                      colors: [col(139, 92, 246), col(91, 33, 182)] as CFArray, // violet -> deep purple
+                      colors: [col(45, 212, 191), col(13, 148, 136)] as CFArray,
                       locations: [0, 1])!
 ctx.drawLinearGradient(grad, start: CGPoint(x: bg.minX, y: bg.maxY),
                        end: CGPoint(x: bg.maxX, y: bg.minY), options: [])
@@ -178,14 +188,13 @@ mark.addPath(parseSVGPath(copilotMouthPath))
 let placed = mark.copy(using: &xform)!
 
 ctx.saveGState()
-ctx.setShadow(offset: CGSize(width: 0, height: -10), blur: 38, color: col(40, 10, 80, 0.5))
+ctx.setShadow(offset: CGSize(width: 0, height: -10), blur: 38, color: col(4, 47, 46, 0.5))
 ctx.addPath(placed)
 ctx.setFillColor(col(255, 255, 255))
 ctx.fillPath(using: .evenOdd)
 ctx.restoreGState()
 
 guard let image = ctx.makeImage() else { exit(1) }
-let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "icon-1024.png"
 guard let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: out) as CFURL,
     UTType.png.identifier as CFString, 1, nil) else { exit(1) }
 CGImageDestinationAddImage(dest, image, nil)

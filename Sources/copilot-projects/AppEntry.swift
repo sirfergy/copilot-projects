@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let model: AppModel
     private let nativeNotifications: NotificationManager
     private let webPushService: WebPushService?
+    private let apnsService: APNsService?
     private let notifications: CompositeNotificationPoster
     private let instanceLock = AppInstanceLock()
     private var isPrimaryInstance = false
@@ -58,14 +59,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             webPush = nil
         }
+        let apns: APNsService?
+        do {
+            apns = try APNsService.production()
+        } catch {
+            apns = nil
+            NSLog("copilot-projects: APNs unavailable: %@", "\(error)")
+        }
         var posters: [any NotificationPosting] = [native]
         if let webPush {
             posters.append(WebPushNotificationPoster(service: webPush))
         }
+        if let apns {
+            posters.append(APNsNotificationPoster(service: apns))
+        }
         nativeNotifications = native
         webPushService = webPush
+        apnsService = apns
         notifications = CompositeNotificationPoster(posters)
-        model = AppModel(webPushService: webPush)
+        model = AppModel(webPushService: webPush, apnsService: apns)
         super.init()
     }
 

@@ -33,6 +33,22 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         send(Array(value.utf8))
     }
 
+    func sendRemoteKey(_ key: String) {
+        let selector: Selector?
+        switch key {
+        case "enter": selector = #selector(insertNewline(_:))
+        case "escape": selector = #selector(cancelOperation(_:))
+        case "backspace": selector = #selector(deleteBackward(_:))
+        case "tab": selector = #selector(insertTab(_:))
+        case "up": selector = #selector(moveUp(_:))
+        case "down": selector = #selector(moveDown(_:))
+        case "left": selector = #selector(moveLeft(_:))
+        case "right": selector = #selector(moveRight(_:))
+        default: selector = nil
+        }
+        if let selector { doCommand(by: selector) }
+    }
+
     /// Forwards a web-client wheel gesture into a TUI without attaching or
     /// resizing another PTY. Positive deltas mean up/older, matching the desktop
     /// `forwardScroll` convention.
