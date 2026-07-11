@@ -65,8 +65,8 @@ to `scripts/release.sh` for signing, notarization, stapling, packaging, and
 publishing.
 
 ```bash
-trap 'gh auth switch --hostname github.com --user obvioussean >/dev/null 2>&1' EXIT
 gh auth switch --hostname github.com --user sirfergy
+gh auth status --hostname github.com
 
 LAST_RUN_ID="$(gh run list -R sirfergy/copilot-projects \
   --workflow release.yml --branch main --event workflow_dispatch \
@@ -136,5 +136,5 @@ When a release request includes implementation:
 
 - Do not release from a dirty checkout, detached feature commit, or open PR head.
 - Do not reuse an existing version/tag.
-- Do not publish with the `obvioussean` work account.
+- Confirm `sirfergy` is the active GitHub account before publishing.
 - Do not weaken signing/notarization checks to make a release succeed.
