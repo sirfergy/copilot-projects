@@ -3,15 +3,15 @@ import CopilotProjectsProtocol
 
 public typealias AppDeepLink = CopilotProjectsProtocol.AppDeepLink
 
-public extension AppDeepLink {
-    var focusRequest: ControlRequest {
+extension AppDeepLink {
+    public var focusRequest: ControlRequest {
         var request = ControlRequest(command: "focus")
         request.projectId = projectId
         request.sessionId = sessionId
         return request
     }
 
-    static func parentApplicationURL(forHelperBundleURL helperURL: URL) -> URL? {
+    public static func parentApplicationURL(forHelperBundleURL helperURL: URL) -> URL? {
         let helpersDirectory = helperURL.deletingLastPathComponent()
         guard helpersDirectory.lastPathComponent == "Helpers" else { return nil }
         let contentsDirectory = helpersDirectory.deletingLastPathComponent()
