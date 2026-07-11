@@ -16,16 +16,20 @@ let query: [String: Any] = [
     kSecAttrService as String: "com.obvioussean.copilot-projects.apns",
     kSecAttrAccount as String: "provider-key",
 ]
+let accessibility = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 let status: OSStatus
 if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess {
     status = SecItemUpdate(
         query as CFDictionary,
-        [kSecValueData as String: keyData] as CFDictionary
+        [
+            kSecValueData as String: keyData,
+            kSecAttrAccessible as String: accessibility,
+        ] as CFDictionary
     )
 } else {
     var item = query
     item[kSecValueData as String] = keyData
-    item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+    item[kSecAttrAccessible as String] = accessibility
     status = SecItemAdd(item as CFDictionary, nil)
 }
 guard status == errSecSuccess else {
