@@ -40,6 +40,35 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(ProjectsTerminalView.remotePromptBytes("   \n"))
     }
 
+    func testRemotePromptPasteBytesExcludeSubmitCarriageReturn() throws {
+        let paste = try XCTUnwrap(
+            ProjectsTerminalView.remotePromptPasteBytes("hello")
+        )
+        // The paste carries no submit CR; the Enter is delivered separately after
+        // the TUI commits the paste.
+        XCTAssertNotEqual(paste.last, 0x0d)
+        XCTAssertFalse(paste.contains(0x0d))
+        XCTAssertEqual(
+            ProjectsTerminalView.remotePromptBytes("hello"),
+            paste + [0x0d]
+        )
+        XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("   \n"))
+    }
+
+    func testPromptSubmitDelayScalesWithSizeAndIsBounded() {
+        // Small prompts get the base delay; large ones get more, but bounded.
+        XCTAssertEqual(ProjectsTerminalView.promptSubmitDelay(byteCount: 0), .milliseconds(150))
+        XCTAssertEqual(ProjectsTerminalView.promptSubmitDelay(byteCount: 1_024), .milliseconds(150))
+        XCTAssertGreaterThan(
+            ProjectsTerminalView.promptSubmitDelay(byteCount: 8_192),
+            ProjectsTerminalView.promptSubmitDelay(byteCount: 1_024)
+        )
+        XCTAssertLessThanOrEqual(
+            ProjectsTerminalView.promptSubmitDelay(byteCount: 1_000_000),
+            .milliseconds(400)
+        )
+    }
+
     func testRemotePromptEligibilityRequiresSettledLiveCopilot() {
         XCTAssertEqual(
             AppModel.remotePromptEligibility(
