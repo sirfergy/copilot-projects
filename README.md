@@ -23,6 +23,9 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 - **Status:** each session reports `idle` / `running` / `waiting`. Running and waiting
   counts appear in the sidebar; a blue dot on the session tab marks work that finished
   while you were away. With the Copilot CLI hooks installed (below), this is driven automatically.
+- **Completed-turn drawer:** Copilot CLI remains the native interactive terminal, while a
+  collapsible drawer overlays its right edge with independently scrollable completed turns.
+  Live work, permissions, shortcuts, and input stay entirely in the CLI.
 - **Schedules + background work:** queued scheduled prompts show a clock with cadence/next-run
   details; active scheduled turns and subagents use a separate background indicator instead of
   making the foreground session look busy.
@@ -146,9 +149,13 @@ that JWT's RS256 signature, issuer, audience, expiration, and allowed email; it 
 expected host and same-origin POSTs. Direct requests to the localhost origin without a valid
 Access token are rejected.
 
-The mobile client can list projects, select a terminal, and acquire the single remote writer
-lease. The desktop remains independently usable. Remote clients do not resize the PTY because
-dtach shares one terminal size with the desktop.
+The mobile web client can list projects, select a terminal, and acquire the single remote writer
+lease. Its completed-turn pane mirrors the desktop drawer and includes a message composer. Sending
+is enabled only when a fresh server-side check confirms Copilot is alive, fully idle, and has no
+scheduled/background work; it clears any unsent desktop draft before submitting the message
+through the native CLI input path. The full terminal remains available for permissions and other
+TUI interactions. Remote clients do not resize the PTY because dtach shares one terminal size with
+the desktop.
 
 Normal-buffer sessions expose a bounded, independently scrollable history without moving the
 desktop terminal viewport. Active Copilot/full-screen sessions forward web wheel gestures to the
@@ -200,6 +207,12 @@ The hook no-ops outside a copilot-projects terminal (it checks `COPILOT_PROJECTS
 coexists with other integrations (e.g. cmux) and is safe to leave installed globally. Manage
 it with `copilot-projects install-hooks` / `uninstall-hooks`. Start a new Copilot CLI session to
 pick up changes.
+
+The companion Copilot extension records completed root turns through the supported Copilot SDK
+event API. It atomically writes a bounded per-tab transcript snapshot after each turn, including
+stopped turns and compact tool summaries but excluding raw tool arguments and results. Copilot
+Projects renders that snapshot in the drawer without parsing private CLI session files or
+changing the terminal's PTY size.
 
 The app also installs a read-only Copilot extension at
 `~/.copilot/extensions/copilot-projects-tracker/extension.mjs`. It uses Copilot's session event

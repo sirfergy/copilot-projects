@@ -1,5 +1,6 @@
 import XCTest
 @testable import CopilotProjectsCore
+import CopilotProjectsProtocol
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -45,9 +46,40 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains("session.rpc.schedule.list()"))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("subagent.started""#))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("session.idle""#))
+        XCTAssertTrue(CopilotExtension.script.contains("await session.getEvents()"))
+        XCTAssertTrue(CopilotExtension.script.contains(#"case "assistant.message":"#))
+        XCTAssertTrue(CopilotExtension.script.contains(#"case "tool.execution_complete":"#))
+        XCTAssertTrue(CopilotExtension.script.contains("isAborted"))
+        XCTAssertTrue(CopilotExtension.script.contains(".transcript.json"))
+        XCTAssertTrue(CopilotExtension.script.contains("publishTranscript();"))
         XCTAssertTrue(CopilotExtension.script.contains("removeFile(temporaryPath)"))
         XCTAssertTrue(CopilotExtension.script.contains("setScheduledTurnMarker(false)"))
-        XCTAssertFalse(CopilotExtension.script.contains("tools:"))
+        XCTAssertFalse(CopilotExtension.script.contains("joinSession({"))
+        XCTAssertFalse(CopilotExtension.script.contains("removeFile(transcriptPath)"))
+    }
+
+    func testCopilotExtensionJavaScriptSyntax() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("extension.mjs")
+        try CopilotExtension.script.write(to: script, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", "--check", script.path]
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let output = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: output, encoding: .utf8) ?? "node --check failed"
+        )
     }
 
     func testStatusNotificationKindRoundTripsOverControlProtocol() throws {
@@ -57,6 +89,18 @@ final class CoreLogicTests: XCTestCase {
         let encoded = try Wire.encodeLine(request)
         let decoded = try Wire.decode(ControlRequest.self, from: encoded)
         XCTAssertEqual(decoded.notification, .completed)
+    }
+
+    func testRemoteTranscriptRevisionRoundTrips() throws {
+        let revision = RemoteTranscriptRevision(
+            sessionId: "session",
+            generation: "inode:size:modified"
+        )
+        let decoded = try JSONDecoder().decode(
+            RemoteTranscriptRevision.self,
+            from: JSONEncoder().encode(revision)
+        )
+        XCTAssertEqual(decoded, revision)
     }
 
     func testCocoaLaunchArgumentsAreAcceptedButUnknownCLIFlagsAreNot() {

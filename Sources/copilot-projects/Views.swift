@@ -364,12 +364,27 @@ struct DetailView: View {
         // Empty / no-project states are drawn by the container's own cover view.
         // activeSessionId + hostedIds are passed so SwiftUI re-runs updateNSView when
         // the selection or the set of sessions changes.
-        TerminalsContainer(
-            model: model,
-            activeSessionId: model.globalSelectedSessionId,
-            hostedIds: model.hostedTerminals.map(\.id)
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ZStack(alignment: .trailing) {
+            TerminalsContainer(
+                model: model,
+                activeSessionId: model.globalSelectedSessionId,
+                hostedIds: model.hostedTerminals.map(\.id)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if let sessionId = model.globalSelectedSessionId,
+               let transcript = model.activeTranscriptController {
+                TranscriptOverlay(
+                    controller: transcript,
+                    isOpen: model.isTranscriptDrawerOpen(sessionId: sessionId),
+                    onClose: { model.closeTranscriptDrawer(sessionId: sessionId) },
+                    onOpen: { model.openTranscriptDrawer(sessionId: sessionId) }
+                )
+                .id(sessionId)
+                .animation(.easeOut(duration: 0.18), value:
+                    model.isTranscriptDrawerOpen(sessionId: sessionId))
+            }
+        }
     }
 }
 

@@ -34,6 +34,14 @@ private enum ScreenshotPreparation {
     case failure(String)
 }
 
+enum RemotePromptResult: Equatable {
+    case sent
+    case forbidden
+    case invalid
+    case busy
+    case noLiveCopilot
+}
+
 private enum WindowScreenshot {
     static func capture(_ request: ScreenshotCaptureRequest) -> ControlResponse {
         let result = ScreenshotCaptureBox()
@@ -105,8 +113,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var projects: [Project] = []
     @Published private(set) var selectedProjectId: String?
     @Published var numberHint: NumberHint = .none
+    @Published private(set) var transcriptClosedSessions: Set<String> = []
 
     private var controllers: [String: TerminalController] = [:]
+    private var selectedTranscriptController: TranscriptController?
     private let stateRepository: StateRepository
     private lazy var controlRouter = ControlCommandRouter(actions: .init(
         listProjects: { [unowned self] in self.renderProjects() },
@@ -267,6 +277,7 @@ final class AppModel: ObservableObject {
         // Start the whole selected project's sessions on launch (matches the prior
         // per-project eager start), not just the visible tab.
         ensureSelectedProjectControllers()
+        refreshSelectedTranscriptController()
     }
 
     @discardableResult
@@ -413,6 +424,35 @@ final class AppModel: ObservableObject {
         return projects[pi].selectedSessionId ?? projects[pi].sessions.first?.id
     }
 
+    var activeTranscriptController: TranscriptController? {
+        guard let sessionId = globalSelectedSessionId else { return nil }
+        guard selectedTranscriptController?.sessionId == sessionId else { return nil }
+        return selectedTranscriptController
+    }
+
+    private func refreshSelectedTranscriptController() {
+        guard let sessionId = globalSelectedSessionId else {
+            selectedTranscriptController = nil
+            return
+        }
+        guard selectedTranscriptController?.sessionId != sessionId else { return }
+        let controller = TranscriptController(sessionId: sessionId)
+        selectedTranscriptController = controller
+        controller.start()
+    }
+
+    func isTranscriptDrawerOpen(sessionId: String) -> Bool {
+        !transcriptClosedSessions.contains(sessionId)
+    }
+
+    func closeTranscriptDrawer(sessionId: String) {
+        transcriptClosedSessions.insert(sessionId)
+    }
+
+    func openTranscriptDrawer(sessionId: String) {
+        transcriptClosedSessions.remove(sessionId)
+    }
+
     /// Message + button title shown by the container when nothing is selected.
     var emptyContextHint: (message: String, button: String) {
         if let project = selectedProject {
@@ -491,6 +531,7 @@ final class AppModel: ObservableObject {
         projects[pi].sessions.append(session)
         projects[pi].selectedSessionId = session.id
         controller(for: session.id)
+        refreshSelectedTranscriptController()
         save()
         return session.id
     }
@@ -518,6 +559,10 @@ final class AppModel: ObservableObject {
         guard let pi = projectIndex(pid) else { return }
         controllers[sid]?.terminate()
         controllers[sid] = nil
+        if selectedTranscriptController?.sessionId == sid {
+            selectedTranscriptController = nil
+        }
+        transcriptClosedSessions.remove(sid)
         statusEventClock.reset(sessionId: sid)
         backgroundAgentsSuppressed.remove(sid)
         completionPending.remove(sid)
@@ -537,6 +582,7 @@ final class AppModel: ObservableObject {
                 projects[pi].selectedSessionId = projects[pi].sessions[newIndex].id
             }
         }
+        refreshSelectedTranscriptController()
         updateDockBadge()
         save()
     }
@@ -620,7 +666,14 @@ final class AppModel: ObservableObject {
                             unread: session.hasUnread,
                             ready: session.finishedUnseen,
                             background: session.hasBackgroundWork,
-                            scheduled: !session.schedules.isEmpty
+                            scheduled: !session.schedules.isEmpty,
+                            promptable: Self.remotePromptEligibility(
+                                status: session.status,
+                                hasBackgroundWork: session.hasBackgroundWork,
+                                hasLiveAgent: liveAgentSessions.contains(session.id),
+                                footerActivity: controllers[session.id]?.agentActivity
+                                    ?? .unknown
+                            ) == .sent
                         )
                     }
                 )
@@ -691,6 +744,40 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func sendRemotePrompt(sessionId: String, value: String) -> RemotePromptResult {
+        guard ProjectsTerminalView.remotePromptBytes(value) != nil,
+              let location = locateIndex(sessionId) else { return .invalid }
+        let session = projects[location.p].sessions[location.s]
+        let liveSessions = ProcessTree.agentSessions(
+            agentNames: agentProcessNames,
+            in: ProcessTree.snapshot()
+        )
+        let eligibility = Self.remotePromptEligibility(
+            status: session.status,
+            hasBackgroundWork: session.hasBackgroundWork,
+            hasLiveAgent: liveSessions.contains(sessionId),
+            footerActivity: controllers[sessionId]?.agentActivity ?? .unknown
+        )
+        if eligibility == .busy { return .busy }
+        guard liveSessions.contains(sessionId),
+              let controller = controllers[sessionId],
+              controller.agentActivity == .idle else {
+            return .noLiveCopilot
+        }
+        return controller.terminalView.sendRemotePrompt(value) ? .sent : .invalid
+    }
+
+    nonisolated static func remotePromptEligibility(
+        status: SessionStatus,
+        hasBackgroundWork: Bool,
+        hasLiveAgent: Bool,
+        footerActivity: FooterActivity
+    ) -> RemotePromptResult {
+        guard status == .idle, !hasBackgroundWork else { return .busy }
+        guard hasLiveAgent, footerActivity == .idle else { return .noLiveCopilot }
+        return .sent
+    }
+
     func closeProject(_ pid: String) {
         guard let pi = projectIndex(pid) else { return }
         let snapshot = Paths.dtachExecutable != nil ? ProcessTree.snapshot() : nil
@@ -698,6 +785,10 @@ final class AppModel: ObservableObject {
             SessionArtifacts.destroy(sessionId: session.id, snapshot: snapshot)
             controllers[session.id]?.terminate()
             controllers[session.id] = nil
+            if selectedTranscriptController?.sessionId == session.id {
+                selectedTranscriptController = nil
+            }
+            transcriptClosedSessions.remove(session.id)
             backgroundAgentsSuppressed.remove(session.id)
             completionPending.remove(session.id)
             scheduledSnapshotsSuppressed.remove(session.id)
@@ -708,6 +799,7 @@ final class AppModel: ObservableObject {
             selectedProjectId = projects.first?.id
             if let sid = currentSelectedSessionId { controller(for: sid) }
         }
+        refreshSelectedTranscriptController()
         updateDockBadge()
         save()
     }
@@ -747,6 +839,7 @@ final class AppModel: ObservableObject {
                 controller(for: session.id)
             }
         }
+        refreshSelectedTranscriptController()
         updateDockBadge()
         save()
     }
@@ -759,6 +852,7 @@ final class AppModel: ObservableObject {
         }
         projects[pi].selectedSessionId = sid
         controller(for: sid)
+        refreshSelectedTranscriptController()
         updateDockBadge()
         save()
     }
@@ -818,6 +912,7 @@ final class AppModel: ObservableObject {
         }
         projects[tpi].sessions.append(session)
         projects[tpi].selectedSessionId = session.id
+        refreshSelectedTranscriptController()
         updateDockBadge()
         save()
         return true
@@ -1318,6 +1413,7 @@ final class AppModel: ObservableObject {
             }
         }
         if let sid = currentSelectedSessionId { controller(for: sid) }
+        refreshSelectedTranscriptController()
         updateDockBadge()
         NSApp.activate(ignoringOtherApps: true)
     }
