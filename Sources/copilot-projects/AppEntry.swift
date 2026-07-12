@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import CopilotProjectsCore
+import CopilotProjectsProtocol
 
 struct CopilotProjectsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -37,7 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let nativeNotifications: NotificationManager
     private let webPushService: WebPushService?
     private let apnsService: APNsService?
-    private let notifications: CompositeNotificationPoster
+    private let notificationSync: NotificationSyncService
+    private let notifications: RoutedNotificationPoster
     private let instanceLock = AppInstanceLock()
     private var isPrimaryInstance = false
     private var eventMonitor: Any?
@@ -66,18 +68,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             apns = nil
             NSLog("copilot-projects: APNs unavailable: %@", "\(error)")
         }
-        var posters: [any NotificationPosting] = [native]
-        if let webPush {
-            posters.append(WebPushNotificationPoster(service: webPush))
-        }
-        if let apns {
-            posters.append(APNsNotificationPoster(service: apns))
-        }
         nativeNotifications = native
         webPushService = webPush
         apnsService = apns
-        notifications = CompositeNotificationPoster(posters)
-        model = AppModel(webPushService: webPush, apnsService: apns)
+        let sync = NotificationSyncService(
+            webPushService: webPush,
+            apnsService: apns
+        )
+        notificationSync = sync
+        notifications = RoutedNotificationPoster(native: native, sync: sync)
+        model = AppModel(
+            webPushService: webPush,
+            apnsService: apns,
+            notificationSync: sync
+        )
         super.init()
     }
 
@@ -94,6 +98,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         nativeNotifications.onActivate = { [weak self] projectId, sessionId in
             self?.model.focus(projectId: projectId, sessionId: sessionId)
+        }
+        let sync = notificationSync
+        nativeNotifications.onResolve = { [weak sync] id in
+            sync?.dismiss(NotificationDismissRequest(id: id))
+        }
+        notificationSync.clearLocalNotification = { [weak self] id in
+            self?.nativeNotifications.remove(id: id)
         }
         nativeNotifications.requestAuth()
 

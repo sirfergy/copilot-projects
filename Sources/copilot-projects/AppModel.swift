@@ -229,7 +229,8 @@ final class AppModel: ObservableObject {
         agentActivityDirectory: URL = Paths.sessionsDir,
         resumeMarkerDirectory: URL = Paths.sessionsDir,
         webPushService: WebPushService? = nil,
-        apnsService: APNsService? = nil
+        apnsService: APNsService? = nil,
+        notificationSync: NotificationSyncService? = nil
     ) {
         self.stateRepository = stateRepository
         self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
@@ -238,7 +239,8 @@ final class AppModel: ObservableObject {
         self.resumeMarkerDirectory = resumeMarkerDirectory
         remoteAccess = RemoteAccessController(
             webPushService: webPushService,
-            apnsService: apnsService
+            apnsService: apnsService,
+            notificationSync: notificationSync
         )
         load()
     }

@@ -116,7 +116,8 @@ final class RemoteGateway: @unchecked Sendable {
         verifier: CloudflareAccessVerifier,
         port: Int,
         webPushService: WebPushService? = nil,
-        apnsService: APNsService? = nil
+        apnsService: APNsService? = nil,
+        notificationSync: NotificationSyncService? = nil
     ) throws -> Int {
         if let boundPort = channel?.localAddress?.port { return boundPort }
         let auth = RemoteRequestAuth(
@@ -142,7 +143,8 @@ final class RemoteGateway: @unchecked Sendable {
                             bridge: bridge,
                             leases: leases,
                             webPushService: webPushService,
-                            apnsService: apnsService
+                            apnsService: apnsService,
+                            notificationSync: notificationSync
                         )
                     )
                 }
@@ -304,6 +306,7 @@ private final class RemoteHTTPHandler:
     private let leases: RemoteWriterLeases
     private let webPushService: WebPushService?
     private let apnsService: APNsService?
+    private let notificationSync: NotificationSyncService?
 
     private var head: HTTPRequestHead?
     private var body: [UInt8] = []
@@ -319,19 +322,22 @@ private final class RemoteHTTPHandler:
     private var lastScreenRevision: RemoteTerminalRevision?
     private var lastScreen: RemoteTerminalScreen?
     private var lastHistoryEndLine: Int?
+    private var lastDismissalSnapshot: NotificationDismissalSnapshot?
 
     init(
         auth: RemoteRequestAuth,
         bridge: RemoteModelBridge,
         leases: RemoteWriterLeases,
         webPushService: WebPushService?,
-        apnsService: APNsService?
+        apnsService: APNsService?,
+        notificationSync: NotificationSyncService?
     ) {
         self.auth = auth
         self.bridge = bridge
         self.leases = leases
         self.webPushService = webPushService
         self.apnsService = apnsService
+        self.notificationSync = notificationSync
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -383,6 +389,8 @@ private final class RemoteHTTPHandler:
                 handleAPNsRegistration(context: context, subscribe: true)
             case "/apns/unsubscribe":
                 handleAPNsRegistration(context: context, subscribe: false)
+            case "/\(NotificationSyncContract.dismissPath)":
+                handleNotificationDismissal(context: context)
             default:
                 respond(context: context, method: head.method, status: .notFound,
                         contentType: "text/plain", body: "Not found")
@@ -522,6 +530,7 @@ private final class RemoteHTTPHandler:
                     contentType: "text/plain", body: "too large")
             return
         }
+
         guard let apnsService else {
             respond(context: context, method: .POST, status: .serviceUnavailable,
                     contentType: "text/plain", body: "APNs unavailable")
@@ -542,6 +551,26 @@ private final class RemoteHTTPHandler:
             respond(context: context, method: .POST, status: .serviceUnavailable,
                     contentType: "text/plain", body: "APNs unavailable")
         }
+    }
+
+    private func handleNotificationDismissal(context: ChannelHandlerContext) {
+        guard !bodyTooLarge else {
+            respond(context: context, method: .POST, status: .payloadTooLarge,
+                    contentType: "text/plain", body: "too large")
+            return
+        }
+        guard let notificationSync,
+              let request = try? JSONDecoder().decode(
+                NotificationDismissRequest.self,
+                from: Data(body)
+              ) else {
+            respond(context: context, method: .POST, status: .badRequest,
+                    contentType: "text/plain", body: "Bad request")
+            return
+        }
+        notificationSync.dismiss(request)
+        respond(context: context, method: .POST, status: .noContent,
+                contentType: "text/plain", body: "")
     }
 
     private func handleControl(context: ChannelHandlerContext) {
@@ -685,6 +714,7 @@ private final class RemoteHTTPHandler:
                 >= remoteWorkspaceRefreshInterval
             let previousScreenRevision = self.lastScreenRevision
             let lastHistoryEndLine = self.lastHistoryEndLine
+            let dismissalSnapshot = self.notificationSync?.dismissalSnapshot()
             Task { @MainActor in
                 let workspace = refreshWorkspace ? self.bridge.workspace() : nil
                 let screenRevision = streamSessionId.flatMap {
@@ -718,6 +748,16 @@ private final class RemoteHTTPHandler:
                         guard self.emit(
                             type: "workspace",
                             value: workspace,
+                            channel: channel,
+                            authorizationExpiresAt: authorizationExpiresAt
+                        ) else { return }
+                    }
+                    if let dismissalSnapshot,
+                       dismissalSnapshot != self.lastDismissalSnapshot {
+                        self.lastDismissalSnapshot = dismissalSnapshot
+                        guard self.emit(
+                            type: "dismissed-notifications",
+                            value: dismissalSnapshot,
                             channel: channel,
                             authorizationExpiresAt: authorizationExpiresAt
                         ) else { return }

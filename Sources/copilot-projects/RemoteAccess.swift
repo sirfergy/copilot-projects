@@ -58,6 +58,7 @@ final class RemoteAccessController {
     private let defaults: UserDefaults
     private let webPushService: WebPushService?
     private let apnsService: APNsService?
+    private let notificationSync: NotificationSyncService?
     private var gateway: RemoteGateway?
     private var verifier: CloudflareAccessVerifier?
     private var activeConfiguration: RemoteAccessConfiguration?
@@ -71,11 +72,13 @@ final class RemoteAccessController {
     init(
         defaults: UserDefaults = .standard,
         webPushService: WebPushService? = nil,
-        apnsService: APNsService? = nil
+        apnsService: APNsService? = nil,
+        notificationSync: NotificationSyncService? = nil
     ) {
         self.defaults = defaults
         self.webPushService = webPushService
         self.apnsService = apnsService
+        self.notificationSync = notificationSync
     }
 
     var enabled: Bool {
@@ -192,6 +195,7 @@ final class RemoteAccessController {
             let bridge = RemoteModelBridge(model: model)
             let webPushService = self.webPushService
             let apnsService = self.apnsService
+            let notificationSync = self.notificationSync
             let startResult = await Task.detached {
                 Result {
                     try gateway.start(
@@ -201,7 +205,8 @@ final class RemoteAccessController {
                         verifier: verifier,
                         port: configuration.localPort,
                         webPushService: webPushService,
-                        apnsService: apnsService
+                        apnsService: apnsService,
+                        notificationSync: notificationSync
                     )
                 }
             }.value

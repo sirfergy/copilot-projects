@@ -515,6 +515,7 @@ final class AppLogicTests: XCTestCase {
 
     private actor APNsSenderSpy: APNsSending {
         private(set) var devices: [StoredAPNsDevice] = []
+        private(set) var payloads: [RemoteNotificationPayload] = []
         var result: APNsDelivery = .delivered
 
         func send(
@@ -522,10 +523,154 @@ final class AppLogicTests: XCTestCase {
             device: StoredAPNsDevice
         ) async -> APNsDelivery {
             devices.append(device)
+            payloads.append(payload)
             return result
         }
 
         func firstDevice() -> StoredAPNsDevice? { devices.first }
+        func sentPayloads() -> [RemoteNotificationPayload] { payloads }
+        func sentDevices() -> [StoredAPNsDevice] { devices }
+    }
+
+    func testDesktopActivityUsesTwoMinuteThreshold() {
+        XCTAssertTrue(DesktopActivity.wasRecentlyActive(
+            secondsSinceLastInput: { 119.9 }
+        ))
+        XCTAssertFalse(DesktopActivity.wasRecentlyActive(
+            secondsSinceLastInput: { 120 }
+        ))
+    }
+
+    @MainActor
+    func testRoutedNotificationsSuppressRemoteDeliveryWhileDesktopIsActive() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let webStore = WebPushSubscriptionStore(
+            url: root.appendingPathComponent("subscriptions.json")
+        )
+        try webStore.add(JSONDecoder().decode(
+            WebPushRegistration.self,
+            from: webPushRegistrationData(
+                endpoint: "https://wns2-by3p.notify.windows.com/sub/active"
+            )
+        ))
+        let webSender = WebPushSenderSpy()
+        let webPush = WebPushService(
+            publicKey: VAPID.Key().id.description,
+            store: webStore,
+            sender: webSender
+        )
+
+        let apnsStore = APNsDeviceStore(url: root.appendingPathComponent("devices.json"))
+        try apnsStore.add(APNsRegistration(
+            token: String(repeating: "ab", count: 32),
+            environment: .sandbox,
+            label: "Phone"
+        ))
+        let apnsSender = APNsSenderSpy()
+        let apns = APNsService(store: apnsStore, provider: apnsSender)
+        let sync = NotificationSyncService(
+            ledger: NotificationLedger(url: root.appendingPathComponent("ledger.json")),
+            webPushService: webPush,
+            apnsService: apns
+        )
+        let native = NotificationSpy()
+        var active = true
+        let router = RoutedNotificationPoster(
+            native: native,
+            sync: sync,
+            isDesktopRecentlyActive: { active }
+        )
+
+        router.post(NotificationEvent(
+            kind: .completed,
+            title: "Complete",
+            subtitle: "Project · Session",
+            body: nil,
+            projectId: "project",
+            sessionId: "session"
+        ))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(native.events.count, 1)
+        let suppressedWebPayload = await webSender.firstPayload()
+        let suppressedAPNsPayloads = await apnsSender.sentPayloads()
+        XCTAssertNil(suppressedWebPayload)
+        XCTAssertTrue(suppressedAPNsPayloads.isEmpty)
+
+        active = false
+        router.post(NotificationEvent(
+            kind: .permission,
+            title: "Permission",
+            subtitle: "Project · Session",
+            body: nil,
+            projectId: "project",
+            sessionId: "session"
+        ))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(native.events.count, 2)
+        let firstWebPayload = await webSender.firstPayload()
+        let webPayload = try XCTUnwrap(firstWebPayload)
+        let sentAPNsPayloads = await apnsSender.sentPayloads()
+        let payloadDecoder = JSONDecoder()
+        payloadDecoder.dateDecodingStrategy = .iso8601
+        XCTAssertEqual(
+            try payloadDecoder.decode(RemoteNotificationPayload.self, from: webPayload).action,
+            .show
+        )
+        XCTAssertEqual(sentAPNsPayloads.map(\.action), [.show])
+    }
+
+    func testNotificationDismissalFansOutOnceAndExcludesOriginDevice() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let firstToken = String(repeating: "ab", count: 32)
+        let secondToken = String(repeating: "cd", count: 32)
+        let apnsStore = APNsDeviceStore(url: root.appendingPathComponent("devices.json"))
+        for token in [firstToken, secondToken] {
+            try apnsStore.add(APNsRegistration(
+                token: token,
+                environment: .sandbox,
+                label: token == firstToken ? "First" : "Second"
+            ))
+        }
+        let sender = APNsSenderSpy()
+        let apns = APNsService(store: apnsStore, provider: sender)
+        let sync = NotificationSyncService(
+            ledger: NotificationLedger(url: root.appendingPathComponent("ledger.json")),
+            webPushService: nil,
+            apnsService: apns
+        )
+        let event = NotificationEvent(
+            kind: .elicitation,
+            title: "Question",
+            subtitle: "Project · Session",
+            body: nil,
+            projectId: "project",
+            sessionId: "session"
+        )
+        sync.post(event, sendRemote: true)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let request = NotificationDismissRequest(
+            id: event.id,
+            apnsToken: firstToken,
+            apnsEnvironment: .sandbox
+        )
+        sync.dismiss(request)
+        sync.dismiss(request)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let payloads = await sender.sentPayloads()
+        let devices = await sender.sentDevices()
+        XCTAssertEqual(payloads.map(\.action), [.show, .show, .clear])
+        XCTAssertEqual(devices.last?.token, secondToken)
+        XCTAssertEqual(sync.dismissalSnapshot().ids, [event.id])
     }
 
     func testFocusDeepLinkParsing() throws {
@@ -1659,6 +1804,11 @@ final class AppLogicTests: XCTestCase {
             ),
             provider: APNsSenderSpy()
         )
+        let notificationSync = NotificationSyncService(
+            ledger: NotificationLedger(url: root.appendingPathComponent("ledger.json")),
+            webPushService: webPushService,
+            apnsService: apnsService
+        )
 
         let gateway = RemoteGateway()
         let port = try gateway.start(
@@ -1668,7 +1818,8 @@ final class AppLogicTests: XCTestCase {
             verifier: verifier,
             port: 0,
             webPushService: webPushService,
-            apnsService: apnsService
+            apnsService: apnsService,
+            notificationSync: notificationSync
         )
         do {
             let missingToken = try await remoteHTTPStatus(port: port, path: "/")
@@ -1751,6 +1902,28 @@ final class AppLogicTests: XCTestCase {
                 body: controlBody
             )
             XCTAssertEqual(allowedControl, 204)
+            let notificationID = UUID()
+            let dismissalBody = try JSONEncoder().encode(
+                NotificationDismissRequest(id: notificationID)
+            )
+            let missingDismissOrigin = try await remoteHTTPStatus(
+                port: port,
+                path: "/\(NotificationSyncContract.dismissPath)",
+                method: "POST",
+                token: token,
+                body: dismissalBody
+            )
+            XCTAssertEqual(missingDismissOrigin, 403)
+            let dismissalStatus = try await remoteHTTPStatus(
+                port: port,
+                path: "/\(NotificationSyncContract.dismissPath)",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: dismissalBody
+            )
+            XCTAssertEqual(dismissalStatus, 204)
+            XCTAssertEqual(notificationSync.dismissalSnapshot().ids, [notificationID])
             let keyBody = try JSONEncoder().encode(RemoteClientMessage(
                 type: "key",
                 clientId: "phone",
@@ -2190,8 +2363,10 @@ final class AppLogicTests: XCTestCase {
             sessionId: "session"
         ))
         let device = await sender.firstDevice()
+        let payloads = await sender.sentPayloads()
         XCTAssertEqual(device?.environment, .production)
         XCTAssertEqual(device?.token, String(repeating: "ab", count: 32))
+        XCTAssertEqual(payloads.first?.action, .show)
         let permissions = try FileManager.default.attributesOfItem(
             atPath: root.appendingPathComponent("devices.json").path
         )[.posixPermissions] as? NSNumber
@@ -2209,6 +2384,12 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains("rel = 'noopener noreferrer'"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("push/subscribe"))
         XCTAssertTrue(RemoteWebAssets.serviceWorker.contains("notificationclick"))
+        XCTAssertTrue(RemoteWebAssets.serviceWorker.contains("notificationclose"))
+        XCTAssertTrue(RemoteWebAssets.serviceWorker.contains(
+            NotificationSyncContract.dismissPath
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("dismissed-notifications"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("clearDismissedNotifications"))
     }
 
     func testRemoteQueryItemsParsesSession() {

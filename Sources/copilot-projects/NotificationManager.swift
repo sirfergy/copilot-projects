@@ -1,6 +1,7 @@
 import Foundation
 import UserNotifications
 import CopilotProjectsCore
+import CopilotProjectsProtocol
 
 extension StatusNotificationKind {
     var title: String {
@@ -80,10 +81,19 @@ final class CompositeNotificationPoster: NotificationPosting {
 @MainActor
 final class NotificationManager: NSObject, NotificationPosting, UNUserNotificationCenterDelegate {
     var onActivate: ((String?, String?) -> Void)?
+    var onResolve: ((UUID) -> Void)?
 
     func requestAuth() {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
+        center.setNotificationCategories([
+            UNNotificationCategory(
+                identifier: NotificationSyncContract.categoryIdentifier,
+                actions: [],
+                intentIdentifiers: [],
+                options: [.customDismissAction]
+            ),
+        ])
         center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
             if let error = error {
                 NSLog("copilot-projects: notification auth error \(error)")
@@ -101,10 +111,12 @@ final class NotificationManager: NSObject, NotificationPosting, UNUserNotificati
         }
         content.body = event.displayedBody
         content.sound = .default
+        content.categoryIdentifier = NotificationSyncContract.categoryIdentifier
         var info: [String: String] = [:]
         if let projectId = event.projectId { info["projectId"] = projectId }
         if let sessionId = event.sessionId { info["sessionId"] = sessionId }
         info["sentAt"] = ISO8601DateFormatter().string(from: event.sentAt)
+        info[NotificationSyncContract.notificationIDKey] = event.id.uuidString
         content.userInfo = info
         let request = UNNotificationRequest(
             identifier: event.id.uuidString,
@@ -116,6 +128,16 @@ final class NotificationManager: NSObject, NotificationPosting, UNUserNotificati
                 NSLog("copilot-projects: failed to post notification \(error)")
             }
         }
+    }
+
+    func remove(id: UUID) {
+        let identifiers = [id.uuidString]
+        UNUserNotificationCenter.current().removeDeliveredNotifications(
+            withIdentifiers: identifiers
+        )
+        UNUserNotificationCenter.current().removePendingNotificationRequests(
+            withIdentifiers: identifiers
+        )
     }
 
     // MARK: - UNUserNotificationCenterDelegate
@@ -136,8 +158,17 @@ final class NotificationManager: NSObject, NotificationPosting, UNUserNotificati
         let info = response.notification.request.content.userInfo
         let projectId = info["projectId"] as? String
         let sessionId = info["sessionId"] as? String
+        let notificationID = (info[NotificationSyncContract.notificationIDKey] as? String)
+            .flatMap(UUID.init(uuidString:))
+        let shouldResolve = response.actionIdentifier == UNNotificationDefaultActionIdentifier
+            || response.actionIdentifier == UNNotificationDismissActionIdentifier
         Task { @MainActor in
-            self.onActivate?(projectId, sessionId)
+            if shouldResolve, let notificationID {
+                self.onResolve?(notificationID)
+            }
+            if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+                self.onActivate?(projectId, sessionId)
+            }
         }
         completionHandler()
     }

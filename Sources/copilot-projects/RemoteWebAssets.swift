@@ -1,4 +1,5 @@
 import Foundation
+import CopilotProjectsProtocol
 
 enum RemoteWebAssets {
     static let html = #"""
@@ -99,6 +100,7 @@ enum RemoteWebAssets {
           icon: '/icon-192.png',
           badge: '/icon-192.png',
           data: {
+            id: payload.id || null,
             projectId: payload.projectId || null,
             sessionId: payload.sessionId || null
           }
@@ -114,6 +116,13 @@ enum RemoteWebAssets {
       if (data.sessionId) query.set('session', data.sessionId);
       const url = new URL(`./?${query.toString()}`, self.registration.scope).href;
       event.waitUntil((async () => {
+        if (data.id) {
+          await fetch(new URL('\#(NotificationSyncContract.dismissPath)', self.registration.scope), {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({id: data.id})
+          }).catch(() => {});
+        }
         const windows = await clients.matchAll({
           type: 'window',
           includeUncontrolled: true
@@ -128,6 +137,19 @@ enum RemoteWebAssets {
         }
         return clients.openWindow(url);
       })());
+    });
+
+    self.addEventListener('notificationclose', (event) => {
+      const id = event.notification.data?.id;
+      if (!id) return;
+      event.waitUntil(fetch(
+        new URL('\#(NotificationSyncContract.dismissPath)', self.registration.scope),
+        {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({id})
+        }
+      ).catch(() => {}));
     });
     """#
 
@@ -538,6 +560,19 @@ enum RemoteWebAssets {
       if (message.type === 'screen' && message.data.sessionId === selected) {
         renderLines(message.data);
       }
+      if (message.type === 'dismissed-notifications') {
+        clearDismissedNotifications(message.data.ids || []);
+      }
+    }
+
+    async function clearDismissedNotifications(ids) {
+      if (!('serviceWorker' in navigator) || !ids.length) return;
+      const registration = await navigator.serviceWorker.ready;
+      const dismissed = new Set(ids);
+      const notifications = await registration.getNotifications();
+      notifications.forEach((notification) => {
+        if (dismissed.has(notification.tag)) notification.close();
+      });
     }
     terminal.addEventListener('keydown', (event) => {
       if (!writable) return;

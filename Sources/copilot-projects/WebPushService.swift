@@ -435,19 +435,3 @@ final class WebPushService: @unchecked Sendable {
         }
     }
 }
-
-@MainActor
-final class WebPushNotificationPoster: NotificationPosting {
-    private let service: WebPushService
-
-    init(service: WebPushService) {
-        self.service = service
-    }
-
-    func post(_ event: NotificationEvent) {
-        let service = self.service
-        Task.detached {
-            await service.send(event)
-        }
-    }
-}

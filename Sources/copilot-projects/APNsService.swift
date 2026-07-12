@@ -228,25 +228,34 @@ actor APNsProvider: APNsSending {
             return .failed(error.localizedDescription)
         }
         request.setValue(configuration.topic, forHTTPHeaderField: "apns-topic")
-        request.setValue("alert", forHTTPHeaderField: "apns-push-type")
-        request.setValue("10", forHTTPHeaderField: "apns-priority")
+        let isClear = payload.action == .clear
+        request.setValue(isClear ? "background" : "alert", forHTTPHeaderField: "apns-push-type")
+        request.setValue(isClear ? "5" : "10", forHTTPHeaderField: "apns-priority")
         request.setValue(
             payload.id.uuidString,
             forHTTPHeaderField: "apns-collapse-id"
         )
-        let sent = payload.sentAt.formatted(date: .omitted, time: .shortened)
-        let title = Self.truncatedUTF8(payload.title, maximumBytes: 512)
-        let body = Self.truncatedUTF8(
-            "\(payload.body)\nSent at \(sent)",
-            maximumBytes: 1_500
-        )
-        let aps: [String: Any] = [
-            "alert": ["title": title, "body": body],
-            "sound": "default",
-            "thread-id": payload.sessionId ?? "copilot-projects",
-        ]
+        let aps: [String: Any]
+        if isClear {
+            aps = ["content-available": 1]
+        } else {
+            let sent = payload.sentAt.formatted(date: .omitted, time: .shortened)
+            let title = Self.truncatedUTF8(payload.title, maximumBytes: 512)
+            let body = Self.truncatedUTF8(
+                "\(payload.body)\nSent at \(sent)",
+                maximumBytes: 1_500
+            )
+            aps = [
+                "alert": ["title": title, "body": body],
+                "sound": "default",
+                "thread-id": payload.sessionId ?? "copilot-projects",
+                "category": NotificationSyncContract.categoryIdentifier,
+                "mutable-content": 1,
+            ]
+        }
         var object: [String: Any] = [
             "aps": aps,
+            NotificationSyncContract.actionKey: payload.action.rawValue,
             "id": payload.id.uuidString,
             "sentAt": ISO8601DateFormatter().string(from: payload.sentAt),
         ]
@@ -352,6 +361,10 @@ final class APNsService: @unchecked Sendable {
         self.provider = provider
     }
 
+    var hasDevices: Bool {
+        !store.all().isEmpty
+    }
+
     func register(data: Data) throws {
         guard data.count <= 4_096,
               let registration = try? JSONDecoder().decode(
@@ -387,9 +400,42 @@ final class APNsService: @unchecked Sendable {
             sessionId: event.sessionId,
             sentAt: event.sentAt
         )
+        await send(payload: payload, excludingToken: nil, environment: nil)
+    }
+
+    func sendDismissal(
+        id: UUID,
+        excludingToken: String?,
+        environment: APNsEnvironment?
+    ) async {
+        await send(
+            payload: RemoteNotificationPayload(
+                action: .clear,
+                id: id,
+                kind: nil,
+                title: "",
+                body: "",
+                projectId: nil,
+                sessionId: nil,
+                sentAt: Date()
+            ),
+            excludingToken: excludingToken,
+            environment: environment
+        )
+    }
+
+    private func send(
+        payload: RemoteNotificationPayload,
+        excludingToken: String?,
+        environment: APNsEnvironment?
+    ) async {
         let provider = self.provider
         await withTaskGroup(of: (StoredAPNsDevice, APNsDelivery).self) { group in
-            for device in store.all() {
+            for device in store.all() where !Self.isExcluded(
+                device,
+                token: excludingToken,
+                environment: environment
+            ) {
                 group.addTask {
                     (device, await provider.send(payload: payload, device: device))
                 }
@@ -409,18 +455,13 @@ final class APNsService: @unchecked Sendable {
             }
         }
     }
-}
 
-@MainActor
-final class APNsNotificationPoster: NotificationPosting {
-    private let service: APNsService
-
-    init(service: APNsService) {
-        self.service = service
-    }
-
-    func post(_ event: NotificationEvent) {
-        let service = self.service
-        Task.detached { await service.send(event) }
+    private static func isExcluded(
+        _ device: StoredAPNsDevice,
+        token: String?,
+        environment: APNsEnvironment?
+    ) -> Bool {
+        guard let token, let environment else { return false }
+        return device.token == token.lowercased() && device.environment == environment
     }
 }
