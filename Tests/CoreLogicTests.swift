@@ -5,6 +5,27 @@ import CopilotProjectsProtocol
 import Darwin
 #endif
 
+func requireNodeForJavaScriptTests() throws {
+    let process = Process()
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["node", "--version"]
+    process.standardOutput = stdout
+    process.standardError = stderr
+    try process.run()
+    process.waitUntilExit()
+    if process.terminationStatus == 127 {
+        throw XCTSkip("Node.js is not installed")
+    }
+    let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+    XCTAssertEqual(
+        process.terminationStatus,
+        0,
+        String(data: errorOutput, encoding: .utf8) ?? "node --version failed"
+    )
+}
+
 final class CoreLogicTests: XCTestCase {
     func testNormalizedDirectoryDecodesFileURL() {
         XCTAssertEqual(
@@ -59,6 +80,7 @@ final class CoreLogicTests: XCTestCase {
     }
 
     func testCopilotExtensionJavaScriptSyntax() throws {
+        try requireNodeForJavaScriptTests()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -83,6 +105,7 @@ final class CoreLogicTests: XCTestCase {
     }
 
     func testCopilotExtensionTranscriptHarness() throws {
+        try requireNodeForJavaScriptTests()
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build/copilot-extension-harness-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

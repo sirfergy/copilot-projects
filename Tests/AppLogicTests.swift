@@ -35,6 +35,7 @@ final class AppLogicTests: XCTestCase {
             "\u{1b}\u{1b}\u{1b}[200~first line\nsecond line\u{1b}[201~\r"
         )
         XCTAssertNil(ProjectsTerminalView.remotePromptBytes("unsafe\u{1b}[201~input"))
+        XCTAssertNil(ProjectsTerminalView.remotePromptBytes("unsafe\u{009b}31m"))
         XCTAssertNil(ProjectsTerminalView.remotePromptBytes("unsafe\u{0}input"))
         XCTAssertNil(ProjectsTerminalView.remotePromptBytes("   \n"))
     }
@@ -2282,6 +2283,7 @@ final class AppLogicTests: XCTestCase {
     }
 
     func testRemoteWebJavaScriptSyntax() throws {
+        try requireNodeForJavaScriptTests()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

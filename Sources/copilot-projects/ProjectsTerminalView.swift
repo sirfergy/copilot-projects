@@ -50,7 +50,8 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
               normalized.utf8.count <= 8_192 else { return nil }
         for scalar in normalized.unicodeScalars {
             if scalar.value == 0x7f
-                || (scalar.value < 0x20 && scalar != "\n" && scalar != "\t") {
+                || (scalar.value < 0x20 && scalar != "\n" && scalar != "\t")
+                || (0x80 ... 0x9f).contains(scalar.value) {
                 return nil
             }
         }
