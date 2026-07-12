@@ -23,7 +23,9 @@ public enum CopilotExtension {
         || process.env.COPILOT_MUX_SESSION;
     const socketPath = process.env.COPILOT_PROJECTS_SOCKET
         || process.env.COPILOT_MUX_SOCKET;
+    const copilotSessionId = process.env.SESSION_ID;
     const validSessionId = /^[0-9A-Fa-f-]{36}$/.test(appSessionId || "");
+    const validCopilotSessionId = /^[0-9A-Fa-f-]{36}$/.test(copilotSessionId || "");
 
     const session = await joinSession();
 
@@ -31,6 +33,8 @@ public enum CopilotExtension {
         const sessionsDir = join(dirname(socketPath), "sessions");
         const snapshotPath = join(sessionsDir, `${appSessionId}.agent-activity.json`);
         const scheduledTurnPath = join(sessionsDir, `${appSessionId}.scheduled-turn`);
+        const copilotSessionPath = join(sessionsDir, `${appSessionId}.copilot-session`);
+        const allowAllPath = join(sessionsDir, `${appSessionId}.copilot-allow-all`);
         const activeSubagents = new Map();
         let foregroundTurnActive = false;
         let scheduledTurnActive = false;
@@ -46,6 +50,23 @@ public enum CopilotExtension {
             } catch {}
         }
 
+        function writeMarker(path, value) {
+            const temporaryPath = `${path}.${process.pid}.tmp`;
+            try {
+                writeFileSync(temporaryPath, value);
+                renameSync(temporaryPath, path);
+            } catch {
+                removeFile(temporaryPath);
+            }
+        }
+
+        function setAllowAllMarker(enabled) {
+            removeFile(allowAllPath);
+            if (enabled && validCopilotSessionId) {
+                writeMarker(allowAllPath, copilotSessionId);
+            }
+        }
+
         function setScheduledTurnMarker(active) {
             try {
                 if (active) {
@@ -59,6 +80,9 @@ public enum CopilotExtension {
         try {
             mkdirSync(sessionsDir, { recursive: true });
         } catch {}
+        if (validCopilotSessionId) {
+            writeMarker(copilotSessionPath, copilotSessionId);
+        }
 
         function publish(error) {
             const snapshot = {
@@ -90,6 +114,16 @@ public enum CopilotExtension {
             } catch (error) {
                 publish(error);
             }
+        }
+
+        async function refreshAllowAll() {
+            // Fail closed if the RPC is unavailable: a stale marker must never grant
+            // full permissions to a different session in the same tab.
+            removeFile(allowAllPath);
+            try {
+                const result = await session.rpc.permissions.getAllowAll();
+                setAllowAllMarker(result.enabled === true);
+            } catch {}
         }
 
         session.on("user.message", (event) => {
@@ -129,6 +163,15 @@ public enum CopilotExtension {
             setTimeout(() => setScheduledTurnMarker(false), 5_000);
         });
 
+        session.on("session.permissions_changed", (event) => {
+            if (event.agentId) return;
+            const mode = event.data.allowAllPermissionMode;
+            setAllowAllMarker(
+                mode === "on"
+                    || (mode == null && event.data.allowAllPermissions === true)
+            );
+        });
+
         session.on("subagent.started", (event) => {
             const id = event.agentId || event.data.toolCallId;
             activeSubagents.set(id, {
@@ -156,6 +199,7 @@ public enum CopilotExtension {
         session.on("subagent.completed", finishSubagent);
         session.on("subagent.failed", finishSubagent);
 
+        await refreshAllowAll();
         await refreshSchedules();
         const timer = setInterval(refreshSchedules, 5_000);
 

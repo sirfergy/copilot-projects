@@ -1279,9 +1279,30 @@ final class AppLogicTests: XCTestCase {
     }
 
     func testSessionIdAndShellQuoting() {
-        XCTAssertTrue(TerminalController.isSafeSessionId(UUID().uuidString))
+        let sessionId = UUID().uuidString
+        XCTAssertTrue(TerminalController.isSafeSessionId(sessionId))
         XCTAssertFalse(TerminalController.isSafeSessionId("../../bad"))
         XCTAssertEqual(TerminalController.shellSingleQuote("a'b"), "'a'\\''b'")
+        XCTAssertEqual(
+            TerminalController.resumeCommand(sessionId: sessionId, allowAll: false),
+            "copilot --resume=\(sessionId)"
+        )
+        XCTAssertEqual(
+            TerminalController.resumeCommand(sessionId: sessionId, allowAll: true),
+            "copilot --allow-all --resume=\(sessionId)"
+        )
+        XCTAssertTrue(AppModel.shouldResumeWithAllowAll(
+            copilotSessionId: sessionId,
+            allowAllSessionId: sessionId
+        ))
+        XCTAssertFalse(AppModel.shouldResumeWithAllowAll(
+            copilotSessionId: sessionId,
+            allowAllSessionId: UUID().uuidString
+        ))
+        XCTAssertFalse(AppModel.shouldResumeWithAllowAll(
+            copilotSessionId: nil,
+            allowAllSessionId: sessionId
+        ))
     }
 
     func testSessionStatusMarkersPersistAsAPair() throws {

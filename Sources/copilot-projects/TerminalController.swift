@@ -112,7 +112,8 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     }
 
     init(sessionId: String, cwd: String, extraEnvironment: [String: String],
-         dtachExecutable: String?, dtachSocket: String?, copilotSessionId: String? = nil) {
+         dtachExecutable: String?, dtachSocket: String?, copilotSessionId: String? = nil,
+         copilotSessionAllowAll: Bool = false) {
         self.sessionId = sessionId
         self.terminalView = ProjectsTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 480))
@@ -141,12 +142,14 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         terminalView.focusRingType = .none
         start(cwd: cwd, extraEnvironment: extraEnvironment,
               dtachExecutable: dtachExecutable, dtachSocket: dtachSocket,
-              copilotSessionId: copilotSessionId)
+              copilotSessionId: copilotSessionId,
+              copilotSessionAllowAll: copilotSessionAllowAll)
     }
 
     private func start(cwd: String, extraEnvironment: [String: String],
                        dtachExecutable: String?, dtachSocket: String?,
-                       copilotSessionId: String? = nil) {
+                       copilotSessionId: String? = nil,
+                       copilotSessionAllowAll: Bool = false) {
         let processEnv = ProcessInfo.processInfo.environment
         let shell = processEnv["SHELL"] ?? "/bin/zsh"
         let shellName = (shell as NSString).lastPathComponent
@@ -188,7 +191,10 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
             if let cid = copilotSessionId, Self.isSafeSessionId(cid) {
                 // Quote the shell path (spaces/apostrophes) and warn — without blocking
                 // the shell fallback — if the session can't be resumed (e.g. deleted).
-                let resume = "copilot --resume=\(cid)"
+                let resume = Self.resumeCommand(
+                    sessionId: cid,
+                    allowAll: copilotSessionAllowAll
+                )
                     + " || printf '\\n[Copilot Projects] could not resume Copilot session \(cid)\\n'"
                 program = [shell, "-l", "-c", "\(resume); exec \(Self.shellSingleQuote(shell)) -l"]
             }
@@ -230,6 +236,10 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     /// the hook's own validation.
     nonisolated static func isSafeSessionId(_ s: String) -> Bool {
         UUID(uuidString: s) != nil
+    }
+
+    nonisolated static func resumeCommand(sessionId: String, allowAll: Bool) -> String {
+        "copilot \(allowAll ? "--allow-all " : "")--resume=\(sessionId)"
     }
 
     /// POSIX single-quote a string for safe interpolation into a shell command:

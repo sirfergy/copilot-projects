@@ -363,16 +363,26 @@ final class AppModel: ObservableObject {
         // Last Copilot session id seen in this tab (written by the hook). If the
         // shell is created fresh after a reboot, the controller resumes this exact
         // agent session; on a normal relaunch dtach reattaches and ignores it.
-        let recordedCopilot = (try? String(contentsOfFile:
-            Paths.copilotSessionMarkerPath(sessionId: sessionId), encoding: .utf8))?
+        let recordedCopilot = (try? String(contentsOf:
+            resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session"),
+            encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let allowAllCopilot = (try? String(contentsOf:
+            resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-allow-all"),
+            encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resumeWithAllowAll = Self.shouldResumeWithAllowAll(
+            copilotSessionId: recordedCopilot,
+            allowAllSessionId: allowAllCopilot
+        )
         let c = TerminalController(
             sessionId: sessionId,
             cwd: session.cwd,
             extraEnvironment: environment(projectId: project.id, sessionId: sessionId),
             dtachExecutable: dtach,
             dtachSocket: socket,
-            copilotSessionId: (recordedCopilot?.isEmpty == false) ? recordedCopilot : nil
+            copilotSessionId: (recordedCopilot?.isEmpty == false) ? recordedCopilot : nil,
+            copilotSessionAllowAll: resumeWithAllowAll
         )
         c.onTitle = { [weak self] title in self?.updateTitle(sessionId: sessionId, title: title) }
         c.onDirectory = { [weak self] dir in self?.updateCwd(sessionId: sessionId, dir: dir) }
@@ -869,10 +879,11 @@ final class AppModel: ObservableObject {
         // sessionEnd is also emitted during graceful macOS shutdown. Only a live,
         // non-terminating app can treat it as an explicit user exit.
         if source == "session-end", !isTerminating, !isPoweringOff {
-            try? FileManager.default.removeItem(
-                at: resumeMarkerDirectory
-                    .appendingPathComponent("\(sessionId).copilot-session")
-            )
+            for suffix in ["copilot-session", "copilot-allow-all"] {
+                try? FileManager.default.removeItem(
+                    at: resumeMarkerDirectory.appendingPathComponent("\(sessionId).\(suffix)")
+                )
+            }
         }
         guard statusEventClock.shouldApply(sessionId: sessionId, timestamp: timestamp) else { return }
         let previous = projects[loc.p].sessions[loc.s].status
@@ -1435,6 +1446,14 @@ final class AppModel: ObservableObject {
         isPoweringOff: Bool
     ) -> Bool {
         isTerminating || isPoweringOff
+    }
+
+    nonisolated static func shouldResumeWithAllowAll(
+        copilotSessionId: String?,
+        allowAllSessionId: String?
+    ) -> Bool {
+        guard let copilotSessionId, !copilotSessionId.isEmpty else { return false }
+        return allowAllSessionId == copilotSessionId
     }
 
     // MARK: - control socket handler
