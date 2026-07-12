@@ -121,8 +121,6 @@ final class CoreLogicTests: XCTestCase {
          data:{messageId:"overlap-message",content:"one response"}}
         """
         let prelude = #"""
-        import { readFileSync } from "node:fs";
-
         let transcriptListener = null;
         const overlapUser = \#(overlapUser);
         const overlapAssistant = \#(overlapAssistant);
@@ -333,6 +331,97 @@ final class CoreLogicTests: XCTestCase {
             options: .regularExpression
         ))
         XCTAssertTrue(CopilotExtension.script.contains("transcriptEventIds.clear();"))
+    }
+
+    func testCopilotExtensionPreservesMatchingSnapshotWhenHistoryFails() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-history-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let appSessionId = "12345678-1234-1234-1234-123456789abc"
+        let snapshotURL = sessions.appendingPathComponent("\(appSessionId).transcript.json")
+        try Data("""
+        {
+          "schemaVersion": 1,
+          "updatedAt": "2026-07-12T03:00:00.000Z",
+          "copilotSessionId": "copilot-session",
+          "turns": [{
+            "id": "preserved-turn",
+            "startedAt": "2026-07-12T02:59:00.000Z",
+            "endedAt": "2026-07-12T02:59:01.000Z",
+            "kind": "foreground",
+            "userContent": "keep me",
+            "assistantMessages": [],
+            "tools": [],
+            "isAborted": false
+          }]
+        }
+        """.utf8).write(to: snapshotURL)
+
+        let prelude = #"""
+        let transcriptListener = null;
+        const fakeSession = {
+          sessionId: "copilot-session",
+          rpc: { schedule: { list: async () => ({entries:[]}) } },
+          on(name, handler) {
+            if (typeof name === "function") transcriptListener = name;
+          },
+          async getEvents() {
+            throw new Error("transient history failure");
+          }
+        };
+        """#
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: "const joinSession = async () => fakeSession;"
+        )
+        let epilogue = #"""
+
+        const snapshot = JSON.parse(readFileSync(
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+          "utf8"
+        ));
+        console.log(JSON.stringify({
+          copilotSessionId: snapshot.copilotSessionId,
+          turnIds: snapshot.turns.map((turn) => turn.id)
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("history-failure.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "COPILOT_PROJECTS_SESSION": appSessionId,
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
+        XCTAssertEqual(summary?["copilotSessionId"] as? String, "copilot-session")
+        XCTAssertEqual(summary?["turnIds"] as? [String], ["preserved-turn"])
     }
 
     func testStatusNotificationKindRoundTripsOverControlProtocol() throws {

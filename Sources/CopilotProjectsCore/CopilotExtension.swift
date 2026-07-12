@@ -16,7 +16,7 @@ public enum CopilotExtension {
 
     public static let script = #"""
     import { dirname, join } from "node:path";
-    import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+    import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
     import { joinSession } from "@github/copilot-sdk/extension";
 
     const appSessionId = process.env.COPILOT_PROJECTS_SESSION
@@ -72,6 +72,24 @@ public enum CopilotExtension {
 
         function boundedMetadataText(value) {
             return truncatedText(value, MAX_TRANSCRIPT_METADATA_TEXT);
+        }
+
+        function restoreMatchingTranscript() {
+            try {
+                const encoded = readFileSync(transcriptPath, "utf8");
+                if (Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES) return false;
+                const snapshot = JSON.parse(encoded);
+                if (snapshot.schemaVersion !== 1
+                        || snapshot.copilotSessionId
+                            !== boundedMetadataText(session.sessionId)
+                        || !Array.isArray(snapshot.turns)) return false;
+                transcriptTurns.push(
+                    ...snapshot.turns.slice(-MAX_TRANSCRIPT_TURNS)
+                );
+                return true;
+            } catch {
+                return false;
+            }
         }
 
         function normalizedTimestamp(value) {
@@ -399,13 +417,22 @@ public enum CopilotExtension {
         session.on("subagent.completed", finishSubagent);
         session.on("subagent.failed", finishSubagent);
 
-        // Clear a previous Copilot session's drawer immediately, then rebuild this
-        // session's completed history below.
-        publishTranscript();
+        // Keep this Copilot session's last good drawer visible while history is
+        // fetched, but clear a snapshot left by a different Copilot session.
+        const preservedTranscriptTurns = restoreMatchingTranscript()
+            ? [...transcriptTurns]
+            : [];
+        if (preservedTranscriptTurns.length === 0) publishTranscript();
         try {
             const history = await session.getEvents();
+            transcriptTurns.length = 0;
             for (const event of history) processTranscriptEvent(event, false, true);
-        } catch {}
+        } catch {
+            transcriptTurns.length = 0;
+            transcriptTurns.push(...preservedTranscriptTurns);
+            pendingTranscriptTurn = null;
+            transcriptEventIds.clear();
+        }
         transcriptInitialized = true;
         for (const event of queuedTranscriptEvents) {
             processTranscriptEvent(event, false, true);
