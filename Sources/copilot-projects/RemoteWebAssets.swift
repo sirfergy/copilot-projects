@@ -26,7 +26,7 @@ enum RemoteWebAssets {
       </header>
       <main>
         <nav id="sessions"></nav>
-        <section>
+        <section id="terminal-pane">
           <div id="toolbar">
             <button data-key="esc">Esc</button>
             <button data-key="ctrl-c">Ctrl-C</button>
@@ -45,6 +45,21 @@ enum RemoteWebAssets {
             <button>Send</button>
           </form>
         </section>
+        <aside id="transcript-pane">
+          <div id="transcript-header">
+            <strong>Completed turns</strong>
+            <span id="prompt-status" role="status" aria-live="polite" aria-atomic="true">
+              Select a Copilot session
+            </span>
+          </div>
+          <div id="transcript" aria-live="polite">Select a session</div>
+          <form id="prompt-form">
+            <textarea id="prompt" rows="3" maxlength="8192" aria-describedby="prompt-warning"
+              aria-label="Message Copilot" placeholder="Message Copilot"></textarea>
+            <div id="prompt-warning">Sending clears any unsent desktop draft.</div>
+            <button id="prompt-submit" disabled>Send message</button>
+          </form>
+        </aside>
       </main>
       <script src="app.js"></script>
     </body>
@@ -188,7 +203,7 @@ enum RemoteWebAssets {
     .visually-hidden { position:absolute; width:1px; height:1px; padding:0; margin:-1px;
       overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
     main { flex:1; min-height:0; display:grid;
-      grid-template-columns: minmax(180px, 260px) 1fr; }
+      grid-template-columns: minmax(180px, 260px) minmax(0, 1fr) minmax(320px, 420px); }
     nav { overflow:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain;
       border-right:1px solid #333; padding:8px; }
     nav h3 { color:#999; font-size:12px; margin:12px 6px 5px; }
@@ -196,7 +211,7 @@ enum RemoteWebAssets {
       border:0; border-radius:7px; background:transparent; color:#ddd; }
     nav button.active { background:#29334a; }
     nav small { display:block; color:#999; margin-top:3px; }
-    section { min-width:0; min-height:0; display:flex; flex-direction:column; }
+    #terminal-pane { min-width:0; min-height:0; display:flex; flex-direction:column; }
     #toolbar { flex:0 0 auto; display:flex; align-items:center; gap:6px; padding:5px 8px;
       border-bottom:1px solid #333; }
     button { background:#2c2c2c; color:#eee; border:1px solid #444; border-radius:6px;
@@ -215,8 +230,37 @@ enum RemoteWebAssets {
       padding-bottom:max(8px, env(safe-area-inset-bottom)); }
     #input { flex:1; min-width:0; background:#222; color:#fff; border:1px solid #555;
       border-radius:7px; padding:10px; font-size:16px; }
+    #transcript-pane { min-width:0; min-height:0; display:flex; flex-direction:column;
+      border-left:1px solid #333; background:#161616; }
+    #transcript-header { flex:0 0 auto; display:flex; align-items:baseline;
+      justify-content:space-between; gap:8px; padding:11px 12px; border-bottom:1px solid #333; }
+    #prompt-status { color:#999; font-size:11px; text-align:right; }
+    #transcript { flex:1; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch;
+      overscroll-behavior:contain; padding:10px; }
+    .transcript-empty { color:#888; padding:18px 8px; text-align:center; }
+    .turn { margin:0 0 12px; padding:10px; border:1px solid #333; border-radius:10px;
+      background:#1d1d1d; }
+    .turn-header { display:flex; justify-content:space-between; gap:8px;
+      color:#999; font-size:11px; margin-bottom:8px; }
+    .stopped { color:#d29922; }
+    .message { white-space:pre-wrap; overflow-wrap:anywhere; margin:6px 0;
+      padding:8px; border-radius:7px; background:#252525; }
+    .message.user { background:#1d3150; }
+    .message-label { display:block; color:#999; font-size:10px; font-weight:600;
+      margin-bottom:4px; text-transform:uppercase; }
+    .tools { color:#aaa; font-size:11px; margin-top:7px; }
+    #prompt-form { flex:0 0 auto; display:grid; gap:7px; padding:10px;
+      padding-bottom:max(10px, env(safe-area-inset-bottom)); border-top:1px solid #333; }
+    #prompt { width:100%; resize:none; background:#222; color:#fff; border:1px solid #555;
+      border-radius:7px; padding:9px; font:16px/1.3 -apple-system, BlinkMacSystemFont, sans-serif; }
+    #prompt-warning { color:#999; font-size:10px; }
+    #prompt-submit:disabled { opacity:.5; }
     @media (max-width: 700px) {
-      main { grid-template-columns: 118px 1fr; }
+      main { grid-template-columns: 105px minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr) minmax(260px, 46%); }
+      nav { grid-row:1 / 3; }
+      #terminal-pane { grid-column:2; grid-row:1; }
+      #transcript-pane { grid-column:2; grid-row:2; border-left:0; border-top:1px solid #333; }
       nav { padding:4px; }
       nav button { padding:7px 5px; font-size:12px; }
       #terminal { font-size:10px; padding:6px; }
@@ -231,6 +275,11 @@ enum RemoteWebAssets {
     const connection = document.querySelector('#connection');
     const lease = document.querySelector('#lease');
     const input = document.querySelector('#input');
+    const transcript = document.querySelector('#transcript');
+    const promptForm = document.querySelector('#prompt-form');
+    const prompt = document.querySelector('#prompt');
+    const promptStatus = document.querySelector('#prompt-status');
+    const promptSubmit = document.querySelector('#prompt-submit');
     const notifications = document.querySelector('#notifications');
     const base = location.pathname.endsWith('/')
       ? location.pathname : `${location.pathname}/`;
@@ -251,6 +300,12 @@ enum RemoteWebAssets {
     let scrollTimer = null;
     let touchY = null;
     let consecutiveStreamErrors = 0;
+    let promptSending = false;
+    let awaitingPromptStart = false;
+    let promptFallbackTimer = null;
+    let transcriptRequestId = 0;
+    let selectionGeneration = 0;
+    const sessionState = new Map();
     const requested = new URLSearchParams(location.search);
     let pendingFocusSession = requested.get('session');
 
@@ -306,6 +361,7 @@ enum RemoteWebAssets {
       if (response && response.ok) {
         writable = true;
         lease.textContent = 'control enabled';
+        updatePromptState();
       }
     }
     function selectSession(id) {
@@ -316,10 +372,17 @@ enum RemoteWebAssets {
       lastScreen = null;
       historyStartLine = 0;
       historyLines = [];
+      promptSending = false;
+      awaitingPromptStart = false;
+      transcriptRequestId += 1;
+      selectionGeneration += 1;
+      clearTimeout(promptFallbackTimer);
+      promptFallbackTimer = null;
       clearTimeout(scrollTimer);
       scrollTimer = null;
       lease.textContent = 'view only';
       terminal.textContent = 'Loading…';
+      transcript.innerHTML = '<div class="transcript-empty">Loading completed turns…</div>';
       terminal.classList.remove('terminal-scroll');
       document.querySelectorAll('nav button').forEach((button) => {
         button.classList.toggle('active', button.dataset.id === id);
@@ -327,6 +390,7 @@ enum RemoteWebAssets {
       openStream();
       acquire(id);
       terminal.focus();
+      updatePromptState();
     }
     // Buffer keystrokes and send them in order, one request in flight at a time,
     // so rapid typing can't arrive out of order over HTTP/2.
@@ -365,6 +429,7 @@ enum RemoteWebAssets {
             writable = false;
             pendingActions.length = 0;
             lease.textContent = 'view only';
+            updatePromptState();
             break;
           }
         }
@@ -372,14 +437,48 @@ enum RemoteWebAssets {
         flushing = false;
       }
     }
+    function updatePromptState(message) {
+      const state = selected && sessionState.get(selected);
+      if (awaitingPromptStart && state?.promptable === false) {
+        awaitingPromptStart = false;
+        clearTimeout(promptFallbackTimer);
+        promptFallbackTimer = null;
+      }
+      const enabled = Boolean(
+        selected && writable && state?.promptable === true
+          && !promptSending && !awaitingPromptStart
+      );
+      promptSubmit.disabled = !enabled;
+      if (message) {
+        promptStatus.textContent = message;
+      } else if (!selected) {
+        promptStatus.textContent = 'Select a Copilot session';
+      } else if (!writable) {
+        promptStatus.textContent = 'View only';
+      } else if (awaitingPromptStart) {
+        promptStatus.textContent = 'Sending…';
+      } else if (state?.background) {
+        promptStatus.textContent = 'Background work active';
+      } else if (state?.status === 'waiting') {
+        promptStatus.textContent = 'Use the terminal to answer Copilot';
+      } else if (state?.status === 'running') {
+        promptStatus.textContent = 'Copilot is working';
+      } else if (state?.promptable === true) {
+        promptStatus.textContent = 'Ready';
+      } else {
+        promptStatus.textContent = 'Start Copilot in this session';
+      }
+    }
     function renderWorkspace(data) {
       const active = selected;
+      sessionState.clear();
       sessions.replaceChildren();
       data.projects.forEach((project) => {
         const heading = document.createElement('h3');
         heading.textContent = project.name;
         sessions.append(heading);
         project.sessions.forEach((session) => {
+          sessionState.set(session.id, session);
           const button = document.createElement('button');
           button.dataset.id = session.id;
           button.className = session.id === active ? 'active' : '';
@@ -405,6 +504,7 @@ enum RemoteWebAssets {
           selectSession(sessionId);
         }
       }
+      updatePromptState();
     }
     const LINK_PATTERN = /\[[^\]\r\n]+\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s<>()\[\]]+/gi;
 
@@ -434,6 +534,88 @@ enum RemoteWebAssets {
       }
       if (cursor < text.length) {
         parent.append(document.createTextNode(text.slice(cursor)));
+      }
+    }
+
+    function transcriptMessage(label, text, className) {
+      const container = document.createElement('div');
+      container.className = `message ${className}`;
+      const heading = document.createElement('span');
+      heading.className = 'message-label';
+      heading.textContent = label;
+      container.append(heading);
+      appendLinkedText(container, text);
+      return container;
+    }
+
+    function renderTranscript(snapshot) {
+      const wasAtBottom =
+        transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 18;
+      const fragment = document.createDocumentFragment();
+      const turns = snapshot?.turns || [];
+      if (!turns.length) {
+        const empty = document.createElement('div');
+        empty.className = 'transcript-empty';
+        empty.textContent = 'Completed turns will appear here.';
+        fragment.append(empty);
+      }
+      turns.forEach((turn) => {
+        const card = document.createElement('article');
+        card.className = 'turn';
+        const header = document.createElement('div');
+        header.className = 'turn-header';
+        const kind = document.createElement('span');
+        kind.textContent = turn.kind === 'scheduled'
+          ? 'Scheduled' : turn.kind === 'automated' ? 'Automated' : 'You';
+        header.append(kind);
+        if (turn.isAborted) {
+          const stopped = document.createElement('span');
+          stopped.className = 'stopped';
+          stopped.textContent = 'Stopped';
+          header.append(stopped);
+        }
+        card.append(header);
+        if (turn.userContent) {
+          card.append(transcriptMessage('You', turn.userContent, 'user'));
+        }
+        (turn.assistantMessages || []).forEach((message) => {
+          card.append(transcriptMessage('Copilot', message.content, 'assistant'));
+        });
+        if (turn.tools?.length) {
+          const tools = document.createElement('div');
+          tools.className = 'tools';
+          const successful = turn.tools.filter((tool) => tool.success === true).length;
+          tools.textContent = `${turn.tools.length} tool${turn.tools.length === 1 ? '' : 's'}`
+            + (successful ? ` · ${successful} completed` : '');
+          card.append(tools);
+        }
+        fragment.append(card);
+      });
+      transcript.replaceChildren(fragment);
+      if (wasAtBottom) transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    async function fetchTranscript(revision) {
+      const sessionId = revision.sessionId;
+      const requestId = ++transcriptRequestId;
+      try {
+        const response = await fetch(
+          `${base}transcript?s=${encodeURIComponent(sessionId)}`,
+          { cache: 'no-store' }
+        );
+        if (!response.ok || selected !== sessionId
+            || requestId !== transcriptRequestId) return;
+        const snapshot = await response.json();
+        if (selected === sessionId && requestId === transcriptRequestId) {
+          renderTranscript(snapshot);
+        }
+      } catch {
+        if (selected === sessionId && requestId === transcriptRequestId) {
+          const empty = document.createElement('div');
+          empty.className = 'transcript-empty';
+          empty.textContent = 'Could not load completed turns.';
+          transcript.replaceChildren(empty);
+        }
       }
     }
 
@@ -525,6 +707,7 @@ enum RemoteWebAssets {
           if (response?.status === 403) {
             writable = false;
             lease.textContent = 'view only';
+            updatePromptState();
           }
         });
       }, 16);
@@ -562,6 +745,15 @@ enum RemoteWebAssets {
       }
       if (message.type === 'dismissed-notifications') {
         clearDismissedNotifications(message.data.ids || []);
+      }
+      if (message.type === 'transcript' && message.data.sessionId === selected) {
+        if (awaitingPromptStart) {
+          awaitingPromptStart = false;
+          clearTimeout(promptFallbackTimer);
+          promptFallbackTimer = null;
+          updatePromptState();
+        }
+        fetchTranscript(message.data);
       }
     }
 
@@ -608,6 +800,51 @@ enum RemoteWebAssets {
       }
       input.value = '';
       terminal.focus();
+    };
+    promptForm.onsubmit = async (event) => {
+      event.preventDefault();
+      const value = prompt.value;
+      if (!value.trim() || !selected || promptSubmit.disabled) return;
+      if (new TextEncoder().encode(value).length > 8192) {
+        updatePromptState('Message is too large (8 KB maximum)');
+        return;
+      }
+      const submittedSession = selected;
+      const submittedValue = value;
+      const submittedGeneration = selectionGeneration;
+      promptSending = true;
+      updatePromptState('Sending…');
+      const response = await control({
+        type: 'prompt',
+        sessionId: submittedSession,
+        data: submittedValue
+      });
+      if (selected !== submittedSession
+          || selectionGeneration !== submittedGeneration) return;
+      promptSending = false;
+      if (response?.ok) {
+        if (prompt.value === submittedValue) prompt.value = '';
+        awaitingPromptStart = true;
+        clearTimeout(promptFallbackTimer);
+        promptFallbackTimer = setTimeout(() => {
+          awaitingPromptStart = false;
+          promptFallbackTimer = null;
+          updatePromptState();
+        }, 5000);
+        updatePromptState();
+        return;
+      }
+      if (response?.status === 403) {
+        writable = false;
+        lease.textContent = 'view only';
+        updatePromptState('Control moved to another device');
+      } else if (response?.status === 409) {
+        updatePromptState('Copilot is still working');
+      } else if (response?.status === 422) {
+        updatePromptState('Copilot is not ready in this terminal');
+      } else {
+        updatePromptState('Message was not sent');
+      }
     };
 
     function base64URLToBytes(value) {

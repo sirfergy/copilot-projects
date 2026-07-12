@@ -1,8 +1,30 @@
 import XCTest
 @testable import CopilotProjectsCore
+import CopilotProjectsProtocol
 #if canImport(Darwin)
 import Darwin
 #endif
+
+func requireNodeForJavaScriptTests() throws {
+    let process = Process()
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["node", "--version"]
+    process.standardOutput = stdout
+    process.standardError = stderr
+    try process.run()
+    process.waitUntilExit()
+    if process.terminationStatus == 127 {
+        throw XCTSkip("Node.js is not installed")
+    }
+    let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+    XCTAssertEqual(
+        process.terminationStatus,
+        0,
+        String(data: errorOutput, encoding: .utf8) ?? "node --version failed"
+    )
+}
 
 final class CoreLogicTests: XCTestCase {
     func testNormalizedDirectoryDecodesFileURL() {
@@ -49,9 +71,454 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("session.permissions_changed""#))
         XCTAssertTrue(CopilotExtension.script.contains("writeMarker(copilotSessionPath, copilotSessionId)"))
         XCTAssertTrue(CopilotExtension.script.contains("writeMarker(allowAllPath, copilotSessionId)"))
+        XCTAssertTrue(CopilotExtension.script.contains("await session.getEvents()"))
+        XCTAssertTrue(CopilotExtension.script.contains(#"case "assistant.message":"#))
+        XCTAssertTrue(CopilotExtension.script.contains(#"case "tool.execution_complete":"#))
+        XCTAssertTrue(CopilotExtension.script.contains("isAborted"))
+        XCTAssertTrue(CopilotExtension.script.contains(".transcript.json"))
+        XCTAssertTrue(CopilotExtension.script.contains("parentAgentTaskId"))
+        XCTAssertTrue(CopilotExtension.script.contains("suppressedInteractionIds"))
+        XCTAssertTrue(CopilotExtension.script.contains("suppressedTurnIds"))
+        XCTAssertTrue(CopilotExtension.script.contains("schemaVersion: 2"))
+        XCTAssertTrue(CopilotExtension.script.contains("publishTranscript();"))
         XCTAssertTrue(CopilotExtension.script.contains("removeFile(temporaryPath)"))
         XCTAssertTrue(CopilotExtension.script.contains("setScheduledTurnMarker(false)"))
-        XCTAssertFalse(CopilotExtension.script.contains("tools:"))
+        XCTAssertFalse(CopilotExtension.script.contains("joinSession({"))
+        XCTAssertFalse(CopilotExtension.script.contains("removeFile(transcriptPath)"))
+    }
+
+    func testCopilotExtensionJavaScriptSyntax() throws {
+        try requireNodeForJavaScriptTests()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("extension.mjs")
+        try CopilotExtension.script.write(to: script, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", "--check", script.path]
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let output = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: output, encoding: .utf8) ?? "node --check failed"
+        )
+    }
+
+    func testCopilotExtensionTranscriptHarness() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-harness-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let overlapUser = """
+        {id:"overlap-user",type:"user.message",timestamp:"2026-07-12T03:00:01.123Z",
+         data:{source:null,content:"overlap prompt"}}
+        """
+        let overlapAssistant = """
+        {id:"overlap-assistant",type:"assistant.message",
+         timestamp:"2026-07-12T03:00:02.456Z",
+         data:{messageId:"overlap-message",content:"one response"}}
+        """
+        let prelude = #"""
+        let transcriptListener = null;
+        const overlapUser = \#(overlapUser);
+        const overlapAssistant = \#(overlapAssistant);
+        const overlapIdle = {
+          id:"overlap-idle",type:"session.idle",
+          timestamp:"2026-07-12T03:00:03.789Z",data:{aborted:true}
+        };
+        const history = [];
+        const timestamp = (offset) => new Date(1700000000000 + offset).toISOString();
+        for (let index = 0; index < 98; index += 1) {
+          history.push({
+            id:`filler-user-${index}`,type:"user.message",timestamp:timestamp(index * 2),
+            data:{source:null,content:`filler-${index}`}
+          });
+          history.push({
+            id:`filler-idle-${index}`,type:"session.idle",timestamp:timestamp(index * 2 + 1),
+            data:{aborted:false}
+          });
+        }
+        history.push(
+          {
+            id:"hidden-user",type:"user.message",timestamp:"2026-07-12T02:59:00.111Z",
+            data:{source:"internal-follow-up",content:"do not display"}
+          },
+          {
+            id:"hidden-assistant",type:"assistant.message",
+            timestamp:"2026-07-12T02:59:01.222Z",
+            data:{messageId:"hidden-message",content:"automated output"}
+          },
+          {
+            id:"hidden-idle",type:"session.idle",timestamp:"2026-07-12T02:59:02.333Z",
+            data:{aborted:false}
+          },
+          {
+            id:"classifier-user",type:"user.message",
+            timestamp:"2026-07-12T02:59:02.400Z",
+            data:{
+              source:null,
+              content:"internal classifier prompt",
+              interactionId:"classifier-interaction",
+              parentAgentTaskId:"parent-task"
+            }
+          },
+          {
+            id:"classifier-system",type:"user.message",
+            timestamp:"2026-07-12T02:59:02.450Z",
+            data:{
+              source:"system",
+              content:"",
+              interactionId:"classifier-interaction"
+            }
+          },
+          {
+            id:"classifier-turn-start",type:"assistant.turn_start",
+            timestamp:"2026-07-12T02:59:02.500Z",
+            data:{interactionId:"classifier-interaction",turnId:"classifier-turn"}
+          },
+          {
+            id:"classifier-assistant",type:"assistant.message",
+            timestamp:"2026-07-12T02:59:02.550Z",
+            data:{
+              messageId:"classifier-message",
+              interactionId:"classifier-interaction",
+              content:"internal classifier result"
+            }
+          },
+          {
+            id:"classifier-tool-start",type:"tool.execution_start",
+            timestamp:"2026-07-12T02:59:02.570Z",
+            data:{
+              turnId:"classifier-turn",
+              toolCallId:"classifier-tool",
+              toolName:"bash"
+            }
+          },
+          {
+            id:"classifier-tool-complete",type:"tool.execution_complete",
+            timestamp:"2026-07-12T02:59:02.580Z",
+            data:{
+              turnId:"classifier-turn",
+              toolCallId:"classifier-tool",
+              success:true
+            }
+          },
+          {
+            id:"classifier-turn-end",type:"assistant.turn_end",
+            timestamp:"2026-07-12T02:59:02.600Z",
+            data:{turnId:"classifier-turn"}
+          },
+          {
+            id:"scheduled-user",type:"user.message",timestamp:"2026-07-12T02:59:03.444Z",
+            data:{source:"schedule-nightly",content:"scheduled prompt"}
+          },
+          {
+            id:"scheduled-assistant",type:"assistant.message",
+            timestamp:"2026-07-12T02:59:04.555Z",
+            data:{messageId:"scheduled-message",content:"scheduled output"}
+          },
+          {
+            id:"scheduled-turn-end",type:"assistant.turn_end",
+            timestamp:"2026-07-12T02:59:05.666Z",data:{}
+          },
+          {
+            id:"scheduled-idle",type:"session.idle",timestamp:"2026-07-12T02:59:06.777Z",
+            data:{aborted:true}
+          },
+          overlapUser,
+          overlapAssistant,
+          {
+            id:"overlap-tool-start",type:"tool.execution_start",
+            timestamp:"2026-07-12T03:00:02.500Z",
+            data:{toolCallId:"tool-1",toolName:"bash",toolDescription:{name:"Run tests"}}
+          },
+          {
+            id:"overlap-tool-complete",type:"tool.execution_complete",
+            timestamp:"2026-07-12T03:00:02.600Z",
+            data:{toolCallId:"tool-1",success:true}
+          },
+          {
+            id:"overlap-turn-end",type:"assistant.turn_end",
+            timestamp:"2026-07-12T03:00:02.700Z",data:{}
+          }
+        );
+        const fakeSession = {
+          sessionId: "copilot-session",
+          rpc: { schedule: { list: async () => ({entries:[]}) } },
+          on(name, handler) {
+            if (typeof name === "function") transcriptListener = name;
+          },
+          async getEvents() {
+            transcriptListener(overlapUser);
+            transcriptListener(overlapAssistant);
+            setImmediate(() => transcriptListener(overlapIdle));
+            return history;
+          }
+        };
+        """#
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: "const joinSession = async () => fakeSession;"
+        )
+        let epilogue = #"""
+
+        await new Promise((resolve) => setImmediate(resolve));
+        const giantMetadata = "m".repeat(2_000_000);
+        transcriptListener({
+          id:"live-user",type:"user.message",timestamp:"2026-07-12T03:01:00.123Z",
+          data:{source:null,content:"x".repeat(49999) + "😀"}
+        });
+        transcriptListener({
+          id:"live-assistant",type:"assistant.message",
+          timestamp:"2026-07-12T03:01:01.456Z",
+          data:{messageId:"live-message",content:"live output"}
+        });
+        transcriptListener({
+          id:"live-tool-start",type:"tool.execution_start",
+          timestamp:"2026-07-12T03:01:01.500Z",
+          data:{
+            toolCallId:giantMetadata,
+            toolName:giantMetadata,
+            toolDescription:{name:giantMetadata}
+          }
+        });
+        transcriptListener({
+          id:"live-tool-complete",type:"tool.execution_complete",
+          timestamp:"2026-07-12T03:01:01.600Z",
+          data:{toolCallId:giantMetadata,success:true}
+        });
+        transcriptListener({
+          id:"live-idle",type:"session.idle",timestamp:"2026-07-12T03:01:02.789Z",
+          data:{aborted:false}
+        });
+
+        const encodedSnapshot = readFileSync(
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+          "utf8"
+        );
+        const snapshot = JSON.parse(encodedSnapshot);
+        const find = (id) => snapshot.turns.find((turn) => turn.id === id);
+        const hidden = find("hidden-user");
+        const classifierPayloadPresent = snapshot.turns.some((turn) =>
+          turn.userContent === "internal classifier prompt"
+            || turn.assistantMessages.some((message) =>
+              message.id === "classifier-message"
+                || message.content === "internal classifier result"
+            )
+        );
+        const classifierToolPresent = snapshot.turns.some((turn) =>
+          turn.tools.some((tool) => tool.id === "classifier-tool")
+        );
+        const scheduled = find("scheduled-user");
+        const overlap = find("overlap-user");
+        const live = find("live-user");
+        console.log(JSON.stringify({
+          turnCount: snapshot.turns.length,
+          firstId: snapshot.turns[0]?.id,
+          hiddenKind: hidden?.kind,
+          hiddenUserContent: hidden?.userContent,
+          classifierPayloadPresent,
+          classifierToolPresent,
+          scheduledKind: scheduled?.kind,
+          scheduledAborted: scheduled?.isAborted,
+          overlapAssistantCount: overlap?.assistantMessages.length,
+          overlapToolSuccess: overlap?.tools[0]?.success,
+          overlapAborted: overlap?.isAborted,
+          overlapEndedAt: overlap?.endedAt,
+          liveUserLength: live?.userContent.length,
+          liveTruncated: live?.userContent.endsWith("… truncated …"),
+          liveHasTrailingHighSurrogate: /[\uD800-\uDBFF]$/.test(
+            live?.userContent.split("\n")[0] || ""
+          ),
+          liveToolMetadataLength: live?.tools.reduce(
+            (total, tool) => total + tool.id.length + tool.name.length + tool.title.length,
+            0
+          ),
+          liveStartedAt: live?.startedAt,
+          liveAssistantAt: live?.assistantMessages[0]?.timestamp,
+          updatedAt: snapshot.updatedAt,
+          snapshotBytes: Buffer.byteLength(encodedSnapshot)
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("harness.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "COPILOT_PROJECTS_SESSION": "12345678-1234-1234-1234-123456789abc",
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
+        XCTAssertEqual(summary?["turnCount"] as? Int, 100)
+        XCTAssertEqual(summary?["firstId"] as? String, "filler-user-2")
+        XCTAssertEqual(summary?["hiddenKind"] as? String, "automated")
+        XCTAssertEqual(summary?["hiddenUserContent"] as? String, "")
+        XCTAssertEqual(summary?["classifierPayloadPresent"] as? Bool, false)
+        XCTAssertEqual(summary?["classifierToolPresent"] as? Bool, false)
+        XCTAssertEqual(summary?["scheduledKind"] as? String, "scheduled")
+        XCTAssertEqual(summary?["scheduledAborted"] as? Bool, true)
+        XCTAssertEqual(summary?["overlapAssistantCount"] as? Int, 1)
+        XCTAssertEqual(summary?["overlapToolSuccess"] as? Bool, true)
+        XCTAssertEqual(summary?["overlapAborted"] as? Bool, true)
+        XCTAssertEqual(summary?["overlapEndedAt"] as? String, "2026-07-12T03:00:03.789Z")
+        XCTAssertLessThanOrEqual(summary?["liveUserLength"] as? Int ?? .max, 50_020)
+        XCTAssertEqual(summary?["liveTruncated"] as? Bool, true)
+        XCTAssertEqual(summary?["liveHasTrailingHighSurrogate"] as? Bool, false)
+        XCTAssertLessThanOrEqual(summary?["liveToolMetadataLength"] as? Int ?? .max, 1_536)
+        XCTAssertLessThanOrEqual(
+            summary?["snapshotBytes"] as? Int ?? .max,
+            5 * 1_024 * 1_024
+        )
+        XCTAssertEqual(summary?["liveStartedAt"] as? String, "2026-07-12T03:01:00.123Z")
+        XCTAssertEqual(summary?["liveAssistantAt"] as? String, "2026-07-12T03:01:01.456Z")
+        XCTAssertNotNil((summary?["updatedAt"] as? String)?.range(
+            of: #"\.\d{3}Z$"#,
+            options: .regularExpression
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains("transcriptEventIds.clear();"))
+    }
+
+    func testCopilotExtensionPreservesMatchingSnapshotWhenHistoryFails() throws {
+        let summary = try copilotExtensionHistoryFailureSummary(schemaVersion: 2)
+
+        XCTAssertEqual(summary["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(summary["copilotSessionId"] as? String, "copilot-session")
+        XCTAssertEqual(summary["turnIds"] as? [String], ["preserved-turn"])
+    }
+
+    func testCopilotExtensionRejectsLegacySnapshotWhenHistoryFails() throws {
+        let summary = try copilotExtensionHistoryFailureSummary(schemaVersion: 1)
+
+        XCTAssertEqual(summary["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(summary["copilotSessionId"] as? String, "copilot-session")
+        XCTAssertEqual(summary["turnIds"] as? [String], [])
+    }
+
+    private func copilotExtensionHistoryFailureSummary(
+        schemaVersion: Int
+    ) throws -> [String: Any] {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-history-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let appSessionId = "12345678-1234-1234-1234-123456789abc"
+        let snapshotURL = sessions.appendingPathComponent("\(appSessionId).transcript.json")
+        try Data("""
+        {
+          "schemaVersion": \(schemaVersion),
+          "updatedAt": "2026-07-12T03:00:00.000Z",
+          "copilotSessionId": "copilot-session",
+          "turns": [{
+            "id": "preserved-turn",
+            "startedAt": "2026-07-12T02:59:00.000Z",
+            "endedAt": "2026-07-12T02:59:01.000Z",
+            "kind": "foreground",
+            "userContent": "keep me",
+            "assistantMessages": [],
+            "tools": [],
+            "isAborted": false
+          }]
+        }
+        """.utf8).write(to: snapshotURL)
+
+        let prelude = #"""
+        let transcriptListener = null;
+        const fakeSession = {
+          sessionId: "copilot-session",
+          rpc: { schedule: { list: async () => ({entries:[]}) } },
+          on(name, handler) {
+            if (typeof name === "function") transcriptListener = name;
+          },
+          async getEvents() {
+            throw new Error("transient history failure");
+          }
+        };
+        """#
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: "const joinSession = async () => fakeSession;"
+        )
+        let epilogue = #"""
+
+        const snapshot = JSON.parse(readFileSync(
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+          "utf8"
+        ));
+        console.log(JSON.stringify({
+          schemaVersion: snapshot.schemaVersion,
+          copilotSessionId: snapshot.copilotSessionId,
+          turnIds: snapshot.turns.map((turn) => turn.id)
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("history-failure.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "COPILOT_PROJECTS_SESSION": appSessionId,
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        return try XCTUnwrap(
+            JSONSerialization.jsonObject(with: output) as? [String: Any]
+        )
     }
 
     func testStatusNotificationKindRoundTripsOverControlProtocol() throws {
@@ -61,6 +528,18 @@ final class CoreLogicTests: XCTestCase {
         let encoded = try Wire.encodeLine(request)
         let decoded = try Wire.decode(ControlRequest.self, from: encoded)
         XCTAssertEqual(decoded.notification, .completed)
+    }
+
+    func testRemoteTranscriptRevisionRoundTrips() throws {
+        let revision = RemoteTranscriptRevision(
+            sessionId: "session",
+            generation: "inode:size:modified"
+        )
+        let decoded = try JSONDecoder().decode(
+            RemoteTranscriptRevision.self,
+            from: JSONEncoder().encode(revision)
+        )
+        XCTAssertEqual(decoded, revision)
     }
 
     func testCocoaLaunchArgumentsAreAcceptedButUnknownCLIFlagsAreNot() {

@@ -146,6 +146,10 @@ public enum Paths {
         sessionsDir.appendingPathComponent("\(sessionId).agent-activity.json").path
     }
 
+    public static func transcriptSnapshotPath(sessionId: String) -> String {
+        sessionsDir.appendingPathComponent("\(sessionId).transcript.json").path
+    }
+
     /// The bundled dtach helper (resumability backend), or an override, or nil.
     public static var dtachExecutable: String? {
         let env = ProcessInfo.processInfo.environment

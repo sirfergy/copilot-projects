@@ -5,7 +5,7 @@ import NIOPosix
 import NIOHTTP1
 import CopilotProjectsProtocol
 
-fileprivate struct RemoteTerminalRevision: Equatable {
+fileprivate struct RemoteTerminalRevision: Equatable, Sendable {
     let contentGeneration: UInt64
     let cols: Int
     let rows: Int
@@ -29,6 +29,12 @@ final class RemoteModelBridge: @unchecked Sendable {
 
     func workspace() -> RemoteWorkspaceSnapshot? {
         model?.remoteWorkspaceSnapshot()
+    }
+
+    func hasSession(_ sessionId: String) -> Bool {
+        model?.projects.contains {
+            $0.sessions.contains { $0.id == sessionId }
+        } == true
     }
 
     fileprivate func screenRevision(sessionId: String) -> RemoteTerminalRevision? {
@@ -75,6 +81,14 @@ final class RemoteModelBridge: @unchecked Sendable {
     func sendScroll(sessionId: String, delta: Int) {
         model?.sendRemoteScroll(sessionId: sessionId, delta: delta)
     }
+
+    nonisolated func transcriptRevision(sessionId: String) -> RemoteTranscriptRevision {
+        TranscriptController.remoteRevision(sessionId: sessionId)
+    }
+
+    func sendPrompt(sessionId: String, value: String) -> RemotePromptResult {
+        model?.sendRemotePrompt(sessionId: sessionId, value: value) ?? .invalid
+    }
 }
 
 /// Writer leases ensure only one remote client injects input into a given
@@ -82,17 +96,25 @@ final class RemoteModelBridge: @unchecked Sendable {
 /// so the most recently selected device wins and a vanished client can never
 /// block another device from taking control.
 final class RemoteWriterLeases: @unchecked Sendable {
+    private struct PromptSubmission {
+        let submittedAt: Date
+        let expiresAt: Date
+    }
+
     // Real sessions number in the dozens; the cap only bounds memory against a
     // buggy/hostile authenticated client POSTing many distinct session ids.
     private static let maxHolders = 512
+    private static let promptSubmissionTimeout: TimeInterval = 5
 
     private let lock = NSLock()
     private var holders: [String: String] = [:]
+    private var promptSubmissions: [String: PromptSubmission] = [:]
 
     func acquire(sessionId: String, clientId: String) {
         lock.lock()
         if holders[sessionId] == nil, holders.count >= Self.maxHolders {
             holders.removeAll(keepingCapacity: true)
+            promptSubmissions.removeAll(keepingCapacity: true)
         }
         holders[sessionId] = clientId
         lock.unlock()
@@ -102,6 +124,48 @@ final class RemoteWriterLeases: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return holders[sessionId] == clientId
+    }
+
+    func withHeldLease<Result>(
+        sessionId: String,
+        clientId: String,
+        perform: () -> Result
+    ) -> Result? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard holders[sessionId] == clientId else { return nil }
+        return perform()
+    }
+
+    func submitPrompt(
+        sessionId: String,
+        clientId: String,
+        now: Date = Date(),
+        perform: () -> RemotePromptResult
+    ) -> RemotePromptResult {
+        lock.lock()
+        defer { lock.unlock() }
+        guard holders[sessionId] == clientId else { return .forbidden }
+        if let submission = promptSubmissions[sessionId] {
+            guard submission.expiresAt <= now else { return .busy }
+            promptSubmissions[sessionId] = nil
+        }
+        let result = perform()
+        if result == .sent {
+            promptSubmissions[sessionId] = PromptSubmission(
+                submittedAt: now,
+                expiresAt: now.addingTimeInterval(Self.promptSubmissionTimeout)
+            )
+        }
+        return result
+    }
+
+    func observePromptUnavailable(sessionId: String, observedAt: Date = Date()) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let submission = promptSubmissions[sessionId],
+              submission.submittedAt <= observedAt else { return }
+        promptSubmissions[sessionId] = nil
     }
 }
 
@@ -292,7 +356,7 @@ private let remoteCSP =
     "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; "
     + "worker-src 'self'; manifest-src 'self'; img-src 'self'; "
     + "frame-ancestors 'none'; base-uri 'none'"
-private let remoteMaxBodyBytes = 16 * 1_024
+private let remoteMaxBodyBytes = 24 * 1_024
 private let remoteWorkspaceRefreshInterval: TimeInterval = 2
 
 private final class RemoteHTTPHandler:
@@ -323,6 +387,7 @@ private final class RemoteHTTPHandler:
     private var lastScreen: RemoteTerminalScreen?
     private var lastHistoryEndLine: Int?
     private var lastDismissalSnapshot: NotificationDismissalSnapshot?
+    private var lastTranscriptRevision: RemoteTranscriptRevision?
 
     init(
         auth: RemoteRequestAuth,
@@ -470,6 +535,8 @@ private final class RemoteHTTPHandler:
                 contentType: "image/png",
                 body: icon ?? Data()
             )
+        case "/transcript":
+            handleTranscript(context: context, head: head)
         case "/events":
             if head.method == .HEAD {
                 respond(context: context, method: .HEAD, status: .ok,
@@ -484,6 +551,63 @@ private final class RemoteHTTPHandler:
         default:
             respond(context: context, method: head.method, status: .notFound,
                     contentType: "text/plain", body: "Not found")
+        }
+    }
+
+    private func handleTranscript(
+        context: ChannelHandlerContext,
+        head: HTTPRequestHead
+    ) {
+        let query = RemoteRequestAuth.queryItems(head.uri)
+        guard let sessionId = query["s"],
+              !sessionId.isEmpty,
+              sessionId.utf8.count <= 64 else {
+            respond(context: context, method: head.method, status: .badRequest,
+                    contentType: "text/plain", body: "Bad request")
+            return
+        }
+        let channel = context.channel
+        let method = head.method
+        Task { @MainActor in
+            guard self.bridge.hasSession(sessionId) else {
+                channel.eventLoop.execute {
+                    self.respond(
+                        channel: channel,
+                        method: method,
+                        status: .notFound,
+                        contentType: "text/plain",
+                        body: Data("Not found".utf8)
+                    )
+                }
+                return
+            }
+            let encodedData = await Task.detached {
+                let snapshot = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                return try? encoder.encode(snapshot)
+            }.value
+            guard let data = encodedData else {
+                channel.eventLoop.execute {
+                    self.respond(
+                        channel: channel,
+                        method: method,
+                        status: .internalServerError,
+                        contentType: "text/plain",
+                        body: Data("Encoding failed".utf8)
+                    )
+                }
+                return
+            }
+            channel.eventLoop.execute {
+                self.respond(
+                    channel: channel,
+                    method: method,
+                    status: .ok,
+                    contentType: "application/json",
+                    body: data
+                )
+            }
         }
     }
 
@@ -595,6 +719,51 @@ private final class RemoteHTTPHandler:
             leases.acquire(sessionId: sessionId, clientId: clientId)
             respond(context: context, method: .POST, status: .noContent,
                     contentType: "text/plain", body: "")
+        case "prompt":
+            guard let value = message.data,
+                  value.utf8.count <= 8_192,
+                  ProjectsTerminalView.remotePromptBytes(value) != nil else {
+                respond(context: context, method: .POST, status: .badRequest,
+                        contentType: "text/plain", body: "Invalid prompt")
+                return
+            }
+            guard leases.holds(sessionId: sessionId, clientId: clientId) else {
+                respond(context: context, method: .POST, status: .forbidden,
+                        contentType: "text/plain", body: "view only")
+                return
+            }
+            let channel = context.channel
+            let leases = self.leases
+            Task { @MainActor in
+                let result = leases.submitPrompt(
+                    sessionId: sessionId,
+                    clientId: clientId
+                ) {
+                    self.bridge.sendPrompt(sessionId: sessionId, value: value)
+                }
+                channel.eventLoop.execute {
+                    let response: (HTTPResponseStatus, String)
+                    switch result {
+                    case .sent:
+                        response = (.noContent, "")
+                    case .forbidden:
+                        response = (.forbidden, "view only")
+                    case .invalid:
+                        response = (.badRequest, "Invalid prompt")
+                    case .busy:
+                        response = (.conflict, "Copilot is still working")
+                    case .noLiveCopilot:
+                        response = (.unprocessableEntity, "Copilot is not ready")
+                    }
+                    self.respond(
+                        channel: channel,
+                        method: .POST,
+                        status: response.0,
+                        contentType: "text/plain",
+                        body: Data(response.1.utf8)
+                    )
+                }
+            }
         case "input":
             guard let value = message.data else {
                 respond(context: context, method: .POST, status: .badRequest,
@@ -613,10 +782,9 @@ private final class RemoteHTTPHandler:
             }
             let leases = self.leases
             Task { @MainActor in
-                // Re-check under the lock right before injecting so a takeover
-                // between the check above and this hop can't leak a keystroke.
-                guard leases.holds(sessionId: sessionId, clientId: clientId) else { return }
-                self.bridge.sendInput(sessionId: sessionId, value: value)
+                _ = leases.withHeldLease(sessionId: sessionId, clientId: clientId) {
+                    self.bridge.sendInput(sessionId: sessionId, value: value)
+                }
             }
             respond(context: context, method: .POST, status: .noContent,
                     contentType: "text/plain", body: "")
@@ -635,10 +803,9 @@ private final class RemoteHTTPHandler:
             }
             let leases = self.leases
             Task { @MainActor in
-                guard leases.holds(sessionId: sessionId, clientId: clientId) else {
-                    return
+                _ = leases.withHeldLease(sessionId: sessionId, clientId: clientId) {
+                    self.bridge.sendKey(sessionId: sessionId, key: key)
                 }
-                self.bridge.sendKey(sessionId: sessionId, key: key)
             }
             respond(context: context, method: .POST, status: .noContent,
                     contentType: "text/plain", body: "")
@@ -657,10 +824,9 @@ private final class RemoteHTTPHandler:
             }
             let leases = self.leases
             Task { @MainActor in
-                guard leases.holds(sessionId: sessionId, clientId: clientId) else {
-                    return
+                _ = leases.withHeldLease(sessionId: sessionId, clientId: clientId) {
+                    self.bridge.sendScroll(sessionId: sessionId, delta: delta)
                 }
-                self.bridge.sendScroll(sessionId: sessionId, delta: delta)
             }
             respond(context: context, method: .POST, status: .noContent,
                     contentType: "text/plain", body: "")
@@ -713,65 +879,99 @@ private final class RemoteHTTPHandler:
                 now.timeIntervalSince(self.lastWorkspaceRefreshAt)
                 >= remoteWorkspaceRefreshInterval
             let previousScreenRevision = self.lastScreenRevision
+            let previousTranscriptRevision = self.lastTranscriptRevision
             let lastHistoryEndLine = self.lastHistoryEndLine
+            let bridge = self.bridge
             let dismissalSnapshot = self.notificationSync?.dismissalSnapshot()
-            Task { @MainActor in
-                let workspace = refreshWorkspace ? self.bridge.workspace() : nil
-                let screenRevision = streamSessionId.flatMap {
-                    self.bridge.screenRevision(sessionId: $0)
+            Task.detached {
+                let transcriptSessionId = await MainActor.run {
+                    streamSessionId.flatMap {
+                        bridge.hasSession($0) ? $0 : nil
+                    }
                 }
-                let screen: RemoteTerminalScreen?
-                if let streamSessionId, let screenRevision,
-                   screenRevision != previousScreenRevision {
-                    screen = self.bridge.screen(
-                        sessionId: streamSessionId,
-                        revision: screenRevision,
-                        afterLine: screenRevision.terminalScroll
-                            ? nil
-                            : lastHistoryEndLine
-                    )
-                } else {
-                    screen = nil
+                let transcriptRevision = transcriptSessionId.map {
+                    bridge.transcriptRevision(sessionId: $0)
                 }
-                channel.eventLoop.execute {
-                    self.refreshInFlight = false
-                    guard Date() < authorizationExpiresAt else {
-                        channel.close(promise: nil)
-                        return
+                await MainActor.run {
+                    let workspace = refreshWorkspace ? bridge.workspace() : nil
+                    let workspaceObservedAt = Date()
+                    if let workspace {
+                        for project in workspace.projects {
+                            for session in project.sessions
+                            where session.status != "idle" || session.promptable == false {
+                                self.leases.observePromptUnavailable(
+                                    sessionId: session.id,
+                                    observedAt: workspaceObservedAt
+                                )
+                            }
+                        }
                     }
-                    guard channel.isWritable else { return }
-                    if workspace != nil {
-                        self.lastWorkspaceRefreshAt = Date()
+                    let screenRevision = streamSessionId.flatMap {
+                        bridge.screenRevision(sessionId: $0)
                     }
-                    if let workspace, workspace != self.lastWorkspace {
-                        self.lastWorkspace = workspace
-                        guard self.emit(
-                            type: "workspace",
-                            value: workspace,
-                            channel: channel,
-                            authorizationExpiresAt: authorizationExpiresAt
-                        ) else { return }
+                    let screen: RemoteTerminalScreen?
+                    if let streamSessionId, let screenRevision,
+                       screenRevision != previousScreenRevision {
+                        screen = bridge.screen(
+                            sessionId: streamSessionId,
+                            revision: screenRevision,
+                            afterLine: screenRevision.terminalScroll
+                                ? nil
+                                : lastHistoryEndLine
+                        )
+                    } else {
+                        screen = nil
                     }
-                    if let dismissalSnapshot,
-                       dismissalSnapshot != self.lastDismissalSnapshot {
-                        self.lastDismissalSnapshot = dismissalSnapshot
-                        guard self.emit(
-                            type: "dismissed-notifications",
-                            value: dismissalSnapshot,
-                            channel: channel,
-                            authorizationExpiresAt: authorizationExpiresAt
-                        ) else { return }
-                    }
-                    if screenRevision != self.lastScreenRevision {
-                        self.lastScreenRevision = screenRevision
-                        if let screen, screen != self.lastScreen {
-                            self.lastScreen = screen
-                            self.lastHistoryEndLine = screen.scrollMode == .history
-                                ? screen.firstLine + screen.lines.count
-                                : nil
+                    channel.eventLoop.execute {
+                        self.refreshInFlight = false
+                        guard Date() < authorizationExpiresAt else {
+                            channel.close(promise: nil)
+                            return
+                        }
+                        guard channel.isWritable else { return }
+                        if workspace != nil {
+                            self.lastWorkspaceRefreshAt = Date()
+                        }
+                        if let workspace, workspace != self.lastWorkspace {
+                            self.lastWorkspace = workspace
                             guard self.emit(
-                                type: "screen",
-                                value: screen,
+                                type: "workspace",
+                                value: workspace,
+                                channel: channel,
+                                authorizationExpiresAt: authorizationExpiresAt
+                            ) else { return }
+                        }
+                        if let dismissalSnapshot,
+                           dismissalSnapshot != self.lastDismissalSnapshot {
+                            self.lastDismissalSnapshot = dismissalSnapshot
+                            guard self.emit(
+                                type: "dismissed-notifications",
+                                value: dismissalSnapshot,
+                                channel: channel,
+                                authorizationExpiresAt: authorizationExpiresAt
+                            ) else { return }
+                        }
+                        if screenRevision != self.lastScreenRevision {
+                            self.lastScreenRevision = screenRevision
+                            if let screen, screen != self.lastScreen {
+                                self.lastScreen = screen
+                                self.lastHistoryEndLine = screen.scrollMode == .history
+                                    ? screen.firstLine + screen.lines.count
+                                    : nil
+                                guard self.emit(
+                                    type: "screen",
+                                    value: screen,
+                                    channel: channel,
+                                    authorizationExpiresAt: authorizationExpiresAt
+                                ) else { return }
+                            }
+                        }
+                        if transcriptRevision != previousTranscriptRevision,
+                           let transcriptRevision {
+                            self.lastTranscriptRevision = transcriptRevision
+                            guard self.emit(
+                                type: "transcript",
+                                value: transcriptRevision,
                                 channel: channel,
                                 authorizationExpiresAt: authorizationExpiresAt
                             ) else { return }
@@ -863,5 +1063,35 @@ private final class RemoteHTTPHandler:
             context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
         }
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+    }
+
+    private func respond(
+        channel: Channel,
+        method: HTTPMethod,
+        status: HTTPResponseStatus,
+        contentType: String,
+        body: Data
+    ) {
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: contentType)
+        headers.add(name: "Content-Length", value: String(body.count))
+        headers.add(name: "Cache-Control", value: "no-store")
+        headers.add(name: "Referrer-Policy", value: "no-referrer")
+        headers.add(name: "Content-Security-Policy", value: remoteCSP)
+        let response = HTTPResponseHead(
+            version: .http1_1,
+            status: status,
+            headers: headers
+        )
+        channel.write(HTTPServerResponsePart.head(response), promise: nil)
+        if method != .HEAD && !body.isEmpty {
+            var buffer = channel.allocator.buffer(capacity: body.count)
+            buffer.writeBytes(body)
+            channel.write(
+                HTTPServerResponsePart.body(.byteBuffer(buffer)),
+                promise: nil
+            )
+        }
+        channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
     }
 }

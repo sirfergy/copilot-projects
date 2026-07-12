@@ -37,6 +37,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     public let ready: Bool
     public let background: Bool
     public let scheduled: Bool
+    public let promptable: Bool?
 
     public init(
         id: String,
@@ -46,7 +47,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         unread: Bool,
         ready: Bool,
         background: Bool,
-        scheduled: Bool
+        scheduled: Bool,
+        promptable: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -56,6 +58,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.ready = ready
         self.background = background
         self.scheduled = scheduled
+        self.promptable = promptable
     }
 }
 

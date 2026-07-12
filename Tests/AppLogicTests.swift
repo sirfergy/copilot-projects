@@ -23,6 +23,161 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(TerminalController.classifyFooter("ordinary output"), .unknown)
     }
 
+    func testRemotePromptBytesAreSanitizedAndSubmittedAtomically() throws {
+        let bytes = try XCTUnwrap(
+            ProjectsTerminalView.remotePromptBytes("first line\nsecond line")
+        )
+        XCTAssertEqual(Array(bytes.prefix(2)), [0x1b, 0x1b])
+        XCTAssertTrue(bytes.starts(with: [0x1b, 0x1b] + Array("\u{1b}[200~".utf8)))
+        XCTAssertEqual(bytes.last, 0x0d)
+        XCTAssertEqual(
+            String(decoding: bytes, as: UTF8.self),
+            "\u{1b}\u{1b}\u{1b}[200~first line\nsecond line\u{1b}[201~\r"
+        )
+        XCTAssertNil(ProjectsTerminalView.remotePromptBytes("unsafe\u{1b}[201~input"))
+        XCTAssertNil(ProjectsTerminalView.remotePromptBytes("unsafe\u{009b}31m"))
+        XCTAssertNil(ProjectsTerminalView.remotePromptBytes("unsafe\u{0}input"))
+        XCTAssertNil(ProjectsTerminalView.remotePromptBytes("   \n"))
+    }
+
+    func testRemotePromptEligibilityRequiresSettledLiveCopilot() {
+        XCTAssertEqual(
+            AppModel.remotePromptEligibility(
+                status: .idle,
+                hasBackgroundWork: false,
+                hasLiveAgent: true,
+                footerActivity: .idle
+            ),
+            .sent
+        )
+        XCTAssertEqual(
+            AppModel.remotePromptEligibility(
+                status: .idle,
+                hasBackgroundWork: true,
+                hasLiveAgent: true,
+                footerActivity: .idle
+            ),
+            .busy
+        )
+        XCTAssertEqual(
+            AppModel.remotePromptEligibility(
+                status: .running,
+                hasBackgroundWork: false,
+                hasLiveAgent: true,
+                footerActivity: .working
+            ),
+            .busy
+        )
+        XCTAssertEqual(
+            AppModel.remotePromptEligibility(
+                status: .idle,
+                hasBackgroundWork: false,
+                hasLiveAgent: false,
+                footerActivity: .idle
+            ),
+            .noLiveCopilot
+        )
+        XCTAssertEqual(
+            AppModel.remotePromptEligibility(
+                status: .idle,
+                hasBackgroundWork: false,
+                hasLiveAgent: true,
+                footerActivity: .unknown
+            ),
+            .noLiveCopilot
+        )
+    }
+
+    @MainActor
+    func testRemotePromptOrchestrationRechecksAndSendsExactlyOnce() throws {
+        _ = NSApplication.shared
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/remote-prompt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = Session(title: "prompt", cwd: root.path)
+        defer { SessionArtifacts.removeFiles(sessionId: session.id) }
+        let project = Project(
+            name: "project",
+            cwd: root.path,
+            sessions: [session],
+            selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+
+        var liveSessions: Set<String> = [session.id]
+        var activity = FooterActivity.idle
+        var sendSucceeds = true
+        var sentValues: [String] = []
+        let model = AppModel(
+            stateRepository: repository,
+            remotePromptLiveSessions: { _ in liveSessions },
+            remotePromptTarget: { requestedSessionId in
+                guard requestedSessionId == session.id else { return nil }
+                return RemotePromptTarget(
+                    activity: activity,
+                    send: { value in
+                        sentValues.append(value)
+                        return sendSucceeds
+                    }
+                )
+            }
+        )
+
+        XCTAssertEqual(model.sendRemotePrompt(sessionId: session.id, value: "hello"), .sent)
+        XCTAssertEqual(sentValues, ["hello"])
+
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: "missing", value: "ignored"),
+            .invalid
+        )
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: session.id, value: "bad\u{0}value"),
+            .invalid
+        )
+        XCTAssertEqual(sentValues, ["hello"])
+
+        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 1)
+        XCTAssertEqual(model.sendRemotePrompt(sessionId: session.id, value: "busy"), .busy)
+        XCTAssertEqual(sentValues, ["hello"])
+        model.setStatus(sessionId: session.id, status: .idle, text: nil, timestamp: 2)
+
+        model.setBackgroundAgentsActive(sessionId: session.id, active: true)
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: session.id, value: "background"),
+            .busy
+        )
+        XCTAssertEqual(sentValues, ["hello"])
+        model.setBackgroundAgentsActive(sessionId: session.id, active: false)
+
+        liveSessions = []
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: session.id, value: "no process"),
+            .noLiveCopilot
+        )
+        XCTAssertEqual(sentValues, ["hello"])
+        liveSessions = [session.id]
+
+        activity = .working
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: session.id, value: "working"),
+            .noLiveCopilot
+        )
+        XCTAssertEqual(sentValues, ["hello"])
+        activity = .idle
+
+        sendSucceeds = false
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: session.id, value: "not sent"),
+            .invalid
+        )
+        XCTAssertEqual(sentValues, ["hello", "not sent"])
+    }
+
     func testActivityTrackerRequiresObservedWorkAndTwoIdleTicks() {
         let sessionId = UUID().uuidString
         var tracker = ActivityTracker()
@@ -1499,6 +1654,159 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 
+    @MainActor
+    func testTranscriptControllerLoadsJavaScriptTimestampsForDesktopAndRemote() async throws {
+        let sessionId = UUID().uuidString
+        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
+        Paths.ensureStateDir()
+        let data = Data("""
+        {
+          "schemaVersion": 2,
+          "updatedAt": "2026-07-12T03:09:00.123Z",
+          "copilotSessionId": "copilot-session",
+          "turns": [{
+            "id": "turn-1",
+            "startedAt": "2026-07-12T03:09:01Z",
+            "endedAt": "2026-07-12T03:09:02.456Z",
+            "kind": "foreground",
+            "userContent": "Explain the failure",
+            "assistantMessages": [{
+              "id": "message-1",
+              "timestamp": "2026-07-12T03:09:01.789Z",
+              "content": "The failure is caused by the timeout."
+            }],
+            "tools": [{
+              "id": "tool-1",
+              "name": "bash",
+              "title": "Run tests",
+              "success": true
+            }],
+            "isAborted": true
+          }]
+        }
+        """.utf8)
+        try data.write(
+            to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)),
+            options: .atomic
+        )
+
+        let controller = TranscriptController(sessionId: sessionId)
+        controller.start()
+        for _ in 0 ..< 50 {
+            if controller.snapshot != nil { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        let loaded = try XCTUnwrap(controller.snapshot)
+        XCTAssertEqual(loaded.turns[0].userContent, "Explain the failure")
+        XCTAssertEqual(loaded.turns[0].assistantMessages[0].content,
+                       "The failure is caused by the timeout.")
+        XCTAssertEqual(loaded.turns[0].tools[0].success, true)
+        XCTAssertTrue(loaded.turns[0].isAborted)
+
+        let remote = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
+        XCTAssertEqual(remote, loaded)
+    }
+
+    @MainActor
+    func testTranscriptControllerRejectsLegacySchemaForDesktopAndRemote() async throws {
+        let sessionId = UUID().uuidString
+        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
+        Paths.ensureStateDir()
+        let snapshotURL = URL(
+            fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
+        )
+        let currentData = Data("""
+        {
+          "schemaVersion": 2,
+          "updatedAt": "2026-07-12T03:09:00.123Z",
+          "copilotSessionId": "copilot-session",
+          "turns": []
+        }
+        """.utf8)
+        try currentData.write(to: snapshotURL, options: .atomic)
+
+        let controller = TranscriptController(sessionId: sessionId)
+        controller.start()
+        for _ in 0 ..< 50 {
+            if controller.snapshot != nil { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertNotNil(controller.snapshot)
+
+        let legacyData = Data("""
+        {
+          "schemaVersion": 1,
+          "updatedAt": "2026-07-12T03:10:00.123Z",
+          "copilotSessionId": "legacy-copilot-session",
+          "turns": [{
+            "id": "legacy-turn",
+            "startedAt": "2026-07-12T03:10:01Z",
+            "endedAt": "2026-07-12T03:10:02Z",
+            "kind": "foreground",
+            "userContent": "legacy transcript content",
+            "assistantMessages": [],
+            "tools": [],
+            "isAborted": false
+          }]
+        }
+        """.utf8)
+        try legacyData.write(to: snapshotURL, options: .atomic)
+
+        for _ in 0 ..< 120 {
+            if controller.snapshot == nil { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertNil(controller.snapshot)
+
+        let remote = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
+        XCTAssertEqual(remote.schemaVersion, 2)
+        XCTAssertTrue(remote.copilotSessionId.isEmpty)
+        XCTAssertTrue(remote.turns.isEmpty)
+    }
+
+    func testSessionArtifactCleanupRemovesTranscriptSnapshot() throws {
+        let sessionId = UUID().uuidString
+        Paths.ensureStateDir()
+        let path = Paths.transcriptSnapshotPath(sessionId: sessionId)
+        try Data("{}".utf8).write(to: URL(fileURLWithPath: path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+
+        SessionArtifacts.removeFiles(sessionId: sessionId)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+    }
+
+    @MainActor
+    func testTranscriptDrawerRequiresExplicitOpen() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = Session(title: "shell", cwd: "/tmp")
+        let project = Project(
+            name: "test",
+            cwd: "/tmp",
+            sessions: [session],
+            selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: root
+        )
+
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: session.id))
+        model.openTranscriptDrawer(sessionId: session.id)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: session.id))
+        model.closeTranscriptDrawer(sessionId: session.id)
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: session.id))
+    }
+
     func testCompletionCoordinationStateIsNotPersisted() throws {
         let session = Session(title: "test", cwd: "/tmp")
         let object = try XCTUnwrap(
@@ -1757,6 +2065,100 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteGatewayTranscriptSuccess() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        let sessionId = UUID().uuidString
+        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
+        let session = Session(id: sessionId, title: "Test Session", cwd: "/")
+        let project = Project(id: "pid", name: "Project", cwd: "/", sessions: [session])
+        try repository.save(PersistedState(projects: [project], selectedProjectId: "pid"))
+
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root
+        )
+        let config = CloudflareAccessConfig(
+            teamDomain: "team.cloudflareaccess.com",
+            audTag: "expected-aud",
+            allowedEmail: "user@example.com"
+        )
+        let verifier = CloudflareAccessVerifier(
+            config: config,
+            now: { Date() },
+            fetch: { _ in nil }
+        )
+        let (privateKey, publicKey) = try makeRSAKeyPair()
+        verifier.installKey(kid: "test-key", key: publicKey)
+        let token = try accessToken(
+            kid: "test-key",
+            claims: [
+                "iss": config.issuer,
+                "aud": config.audTag,
+                "email": config.allowedEmail,
+                "exp": Date().timeIntervalSince1970 + 3_600,
+            ],
+            privateKey: privateKey
+        )
+        let gateway = RemoteGateway()
+        let port = try gateway.start(
+            bridge: RemoteModelBridge(model: model),
+            expectedHost: "127.0.0.1",
+            expectedOrigin: "https://projects.example.com",
+            verifier: verifier,
+            port: 0,
+            webPushService: nil,
+            apnsService: nil
+        )
+
+        let mockSnapshot = TranscriptSnapshot(
+            schemaVersion: 2,
+            updatedAt: Date(),
+            copilotSessionId: "test-copilot",
+            turns: []
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let mockData = try encoder.encode(mockSnapshot)
+        Paths.ensureStateDir()
+        try mockData.write(to: URL(
+            fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
+        ))
+
+        do {
+            let response = try await remoteHTTPResponse(
+                port: port,
+                path: "/transcript?s=\(sessionId)",
+                token: token
+            )
+            XCTAssertEqual(response.statusCode, 200)
+            XCTAssertEqual(
+                response.value(forHTTPHeaderField: "Content-Type"),
+                "application/json"
+            )
+
+            let bodyData = try await remoteHTTPData(
+                port: port,
+                path: "/transcript?s=\(sessionId)",
+                token: token
+            )
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let decoded = try decoder.decode(TranscriptSnapshot.self, from: bodyData)
+            XCTAssertEqual(decoded.copilotSessionId, "test-copilot")
+        } catch {
+            await gateway.stop()
+            throw error
+        }
+        await gateway.stop()
+    }
+
+    @MainActor
     func testRemoteGatewayRoutesFailClosed() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1924,6 +2326,28 @@ final class AppLogicTests: XCTestCase {
             )
             XCTAssertEqual(dismissalStatus, 204)
             XCTAssertEqual(notificationSync.dismissalSnapshot().ids, [notificationID])
+            let promptBody = try JSONEncoder().encode(RemoteClientMessage(
+                type: "prompt",
+                clientId: "phone",
+                sessionId: "session",
+                data: "Hello from the phone"
+            ))
+            let promptStatus = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: promptBody
+            )
+            XCTAssertEqual(promptStatus, 400)
+            let transcriptStatus = try await remoteHTTPStatus(
+                port: port,
+                path: "/transcript?s=session",
+                token: token
+            )
+            XCTAssertEqual(transcriptStatus, 404)
+
             let keyBody = try JSONEncoder().encode(RemoteClientMessage(
                 type: "key",
                 clientId: "phone",
@@ -2097,7 +2521,8 @@ final class AppLogicTests: XCTestCase {
                             unread: false,
                             ready: false,
                             background: true,
-                            scheduled: false
+                            scheduled: false,
+                            promptable: false
                         ),
                         RemoteSessionSnapshot(
                             id: completed.id,
@@ -2107,7 +2532,8 @@ final class AppLogicTests: XCTestCase {
                             unread: false,
                             ready: true,
                             background: false,
-                            scheduled: false
+                            scheduled: false,
+                            promptable: false
                         ),
                     ]
                 ),
@@ -2213,8 +2639,32 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(decoded.delta, -4)
     }
 
+    func testRemoteSessionSnapshotDecodesWithoutPromptableField() throws {
+        let data = Data("""
+        {
+          "id":"session",
+          "title":"shell",
+          "status":"idle",
+          "unread":false,
+          "ready":false,
+          "background":false,
+          "scheduled":false
+        }
+        """.utf8)
+        let snapshot = try JSONDecoder().decode(RemoteSessionSnapshot.self, from: data)
+        XCTAssertNil(snapshot.promptable)
+    }
+
     func testRemoteWebCommandInputHasAccessibleName() {
         XCTAssertTrue(RemoteWebAssets.html.contains("aria-label=\"Command input\""))
+        XCTAssertTrue(RemoteWebAssets.html.contains("aria-label=\"Message Copilot\""))
+        XCTAssertTrue(RemoteWebAssets.html.contains(#"aria-describedby="prompt-warning""#))
+        XCTAssertTrue(RemoteWebAssets.html.contains(
+            #"id="prompt-status" role="status" aria-live="polite" aria-atomic="true""#
+        ))
+        XCTAssertTrue(RemoteWebAssets.html.contains(
+            "Sending clears any unsent desktop draft."
+        ))
     }
 
     func testRemoteWebInputRequeuesAfterNetworkFailure() {
@@ -2227,6 +2677,51 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "pendingActions.push({type:'key', data:key});"
         ))
+    }
+
+    func testRemoteWebIgnoresStaleTranscriptAndPromptResponses() {
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "const requestId = ++transcriptRequestId;"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "requestId === transcriptRequestId"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "const submittedSession = selected;"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "selectionGeneration !== submittedGeneration"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (prompt.value === submittedValue) prompt.value = '';"
+        ))
+    }
+
+    func testRemoteWebJavaScriptSyntax() throws {
+        try requireNodeForJavaScriptTests()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("app.js")
+        try RemoteWebAssets.javascript.write(
+            to: script,
+            atomically: true,
+            encoding: .utf8
+        )
+        let process = Process()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", "--check", script.path]
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+        let output = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: output, encoding: .utf8) ?? "node --check failed"
+        )
     }
 
     func testWebPushStoreRejectsUnsafeEndpointsAndPersistsSubscriptions() throws {
@@ -2383,6 +2878,12 @@ final class AppLogicTests: XCTestCase {
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("rel = 'noopener noreferrer'"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("push/subscribe"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("type: 'prompt'"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "transcript?s=${encodeURIComponent(sessionId)}"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 409"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 422"))
         XCTAssertTrue(RemoteWebAssets.serviceWorker.contains("notificationclick"))
         XCTAssertTrue(RemoteWebAssets.serviceWorker.contains("notificationclose"))
         XCTAssertTrue(RemoteWebAssets.serviceWorker.contains(
@@ -2410,6 +2911,116 @@ final class AppLogicTests: XCTestCase {
         leases.acquire(sessionId: "other", clientId: "phone")
         XCTAssertTrue(leases.holds(sessionId: "other", clientId: "phone"))
         XCTAssertTrue(leases.holds(sessionId: "session", clientId: "laptop"))
+    }
+
+    func testRemoteWriterLeaseLinearizesInjectionAndTakeover() {
+        let leases = RemoteWriterLeases()
+        leases.acquire(sessionId: "session", clientId: "phone")
+        let injectionStarted = DispatchSemaphore(value: 0)
+        let finishInjection = DispatchSemaphore(value: 0)
+        let injectionFinished = DispatchSemaphore(value: 0)
+        let takeoverFinished = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global().async {
+            _ = leases.withHeldLease(
+                sessionId: "session",
+                clientId: "phone"
+            ) {
+                injectionStarted.signal()
+                finishInjection.wait()
+            }
+            injectionFinished.signal()
+        }
+        XCTAssertEqual(injectionStarted.wait(timeout: .now() + 1), .success)
+
+        DispatchQueue.global().async {
+            leases.acquire(sessionId: "session", clientId: "laptop")
+            takeoverFinished.signal()
+        }
+        XCTAssertEqual(
+            takeoverFinished.wait(timeout: .now() + 0.05),
+            .timedOut
+        )
+
+        finishInjection.signal()
+        XCTAssertEqual(injectionFinished.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(takeoverFinished.wait(timeout: .now() + 1), .success)
+        XCTAssertTrue(leases.holds(sessionId: "session", clientId: "laptop"))
+    }
+
+    func testRemoteWriterLeaseGatesPromptUntilTransitionOrTimeout() {
+        let leases = RemoteWriterLeases()
+        leases.acquire(sessionId: "session", clientId: "phone")
+        let submittedAt = Date(timeIntervalSince1970: 100)
+        var sentValues: [String] = []
+
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                now: submittedAt
+            ) {
+                sentValues.append("first")
+                return .sent
+            },
+            .sent
+        )
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                now: submittedAt.addingTimeInterval(1)
+            ) {
+                sentValues.append("duplicate")
+                return .sent
+            },
+            .busy
+        )
+        XCTAssertEqual(sentValues, ["first"])
+
+        leases.observePromptUnavailable(
+            sessionId: "session",
+            observedAt: submittedAt.addingTimeInterval(-1)
+        )
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                now: submittedAt.addingTimeInterval(2)
+            ) {
+                sentValues.append("stale-cleared")
+                return .sent
+            },
+            .busy
+        )
+
+        leases.observePromptUnavailable(
+            sessionId: "session",
+            observedAt: submittedAt.addingTimeInterval(2)
+        )
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                now: submittedAt.addingTimeInterval(2)
+            ) {
+                sentValues.append("after-transition")
+                return .sent
+            },
+            .sent
+        )
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                now: submittedAt.addingTimeInterval(8)
+            ) {
+                sentValues.append("after-timeout")
+                return .sent
+            },
+            .sent
+        )
+        XCTAssertEqual(sentValues, ["first", "after-transition", "after-timeout"])
     }
 
     func testCLIParsesStatusNotificationFlagIntoControlRequest() throws {
