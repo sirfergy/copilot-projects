@@ -1264,43 +1264,37 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
-    func testTranscriptControllerLoadsCompletedTurnsAndPreservesAbortedState() async throws {
+    func testTranscriptControllerLoadsJavaScriptTimestampsForDesktopAndRemote() async throws {
         let sessionId = UUID().uuidString
         defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
         Paths.ensureStateDir()
-        let snapshot = TranscriptSnapshot(
-            schemaVersion: 1,
-            updatedAt: Date(),
-            copilotSessionId: UUID().uuidString,
-            turns: [
-                TranscriptTurn(
-                    id: "turn-1",
-                    startedAt: Date(timeIntervalSince1970: 100),
-                    endedAt: Date(timeIntervalSince1970: 110),
-                    kind: "foreground",
-                    userContent: "Explain the failure",
-                    assistantMessages: [
-                        TranscriptAssistantMessage(
-                            id: "message-1",
-                            timestamp: Date(timeIntervalSince1970: 105),
-                            content: "The failure is caused by the timeout."
-                        ),
-                    ],
-                    tools: [
-                        TranscriptTool(
-                            id: "tool-1",
-                            name: "bash",
-                            title: "Run tests",
-                            success: true
-                        ),
-                    ],
-                    isAborted: true
-                ),
-            ]
-        )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(snapshot).write(
+        let data = Data("""
+        {
+          "schemaVersion": 1,
+          "updatedAt": "2026-07-12T03:09:00.123Z",
+          "copilotSessionId": "copilot-session",
+          "turns": [{
+            "id": "turn-1",
+            "startedAt": "2026-07-12T03:09:01Z",
+            "endedAt": "2026-07-12T03:09:02.456Z",
+            "kind": "foreground",
+            "userContent": "Explain the failure",
+            "assistantMessages": [{
+              "id": "message-1",
+              "timestamp": "2026-07-12T03:09:01.789Z",
+              "content": "The failure is caused by the timeout."
+            }],
+            "tools": [{
+              "id": "tool-1",
+              "name": "bash",
+              "title": "Run tests",
+              "success": true
+            }],
+            "isAborted": true
+          }]
+        }
+        """.utf8)
+        try data.write(
             to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)),
             options: .atomic
         )
@@ -1318,6 +1312,9 @@ final class AppLogicTests: XCTestCase {
                        "The failure is caused by the timeout.")
         XCTAssertEqual(loaded.turns[0].tools[0].success, true)
         XCTAssertTrue(loaded.turns[0].isAborted)
+
+        let remote = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
+        XCTAssertEqual(remote, loaded)
     }
 
     func testSessionArtifactCleanupRemovesTranscriptSnapshot() throws {
@@ -2169,6 +2166,24 @@ final class AppLogicTests: XCTestCase {
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "pendingActions.push({type:'key', data:key});"
+        ))
+    }
+
+    func testRemoteWebIgnoresStaleTranscriptAndPromptResponses() {
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "const requestId = ++transcriptRequestId;"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "requestId === transcriptRequestId"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "const submittedSession = selected;"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "selectionGeneration !== submittedGeneration"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (prompt.value === submittedValue) prompt.value = '';"
         ))
     }
 

@@ -279,6 +279,8 @@ enum RemoteWebAssets {
     let promptSending = false;
     let awaitingPromptStart = false;
     let promptFallbackTimer = null;
+    let transcriptRequestId = 0;
+    let selectionGeneration = 0;
     const sessionState = new Map();
     const requested = new URLSearchParams(location.search);
     let pendingFocusSession = requested.get('session');
@@ -348,6 +350,8 @@ enum RemoteWebAssets {
       historyLines = [];
       promptSending = false;
       awaitingPromptStart = false;
+      transcriptRequestId += 1;
+      selectionGeneration += 1;
       clearTimeout(promptFallbackTimer);
       promptFallbackTimer = null;
       clearTimeout(scrollTimer);
@@ -569,16 +573,20 @@ enum RemoteWebAssets {
 
     async function fetchTranscript(revision) {
       const sessionId = revision.sessionId;
+      const requestId = ++transcriptRequestId;
       try {
         const response = await fetch(
           `${base}transcript?s=${encodeURIComponent(sessionId)}`,
           { cache: 'no-store' }
         );
-        if (!response.ok || selected !== sessionId) return;
+        if (!response.ok || selected !== sessionId
+            || requestId !== transcriptRequestId) return;
         const snapshot = await response.json();
-        if (selected === sessionId) renderTranscript(snapshot);
+        if (selected === sessionId && requestId === transcriptRequestId) {
+          renderTranscript(snapshot);
+        }
       } catch {
-        if (selected === sessionId) {
+        if (selected === sessionId && requestId === transcriptRequestId) {
           const empty = document.createElement('div');
           empty.className = 'transcript-empty';
           empty.textContent = 'Could not load completed turns.';
@@ -764,16 +772,21 @@ enum RemoteWebAssets {
         updatePromptState('Message is too large (8 KB maximum)');
         return;
       }
+      const submittedSession = selected;
+      const submittedValue = value;
+      const submittedGeneration = selectionGeneration;
       promptSending = true;
       updatePromptState('Sending…');
       const response = await control({
         type: 'prompt',
-        sessionId: selected,
-        data: value
+        sessionId: submittedSession,
+        data: submittedValue
       });
+      if (selected !== submittedSession
+          || selectionGeneration !== submittedGeneration) return;
       promptSending = false;
       if (response?.ok) {
-        prompt.value = '';
+        if (prompt.value === submittedValue) prompt.value = '';
         awaitingPromptStart = true;
         clearTimeout(promptFallbackTimer);
         promptFallbackTimer = setTimeout(() => {

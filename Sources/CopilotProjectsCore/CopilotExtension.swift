@@ -187,9 +187,12 @@ public enum CopilotExtension {
                 || "Tool";
         }
 
-        function processTranscriptEvent(event, live) {
-            if (event.agentId || transcriptEventIds.has(event.id)) return;
-            transcriptEventIds.add(event.id);
+        function processTranscriptEvent(event, live, reconciling = false) {
+            if (event.agentId) return;
+            if (reconciling) {
+                if (transcriptEventIds.has(event.id)) return;
+                transcriptEventIds.add(event.id);
+            }
 
             switch (event.type) {
             case "user.message": {
@@ -348,16 +351,17 @@ public enum CopilotExtension {
         publishTranscript();
         try {
             const history = await session.getEvents();
-            for (const event of history) processTranscriptEvent(event, false);
+            for (const event of history) processTranscriptEvent(event, false, true);
             if (pendingTranscriptTurn?.hasTurnEnd) {
                 finishTranscriptTurn(false, null, false);
             }
         } catch {}
         transcriptInitialized = true;
         for (const event of queuedTranscriptEvents) {
-            processTranscriptEvent(event, false);
+            processTranscriptEvent(event, false, true);
         }
         queuedTranscriptEvents.length = 0;
+        transcriptEventIds.clear();
         publishTranscript();
 
         await refreshSchedules();

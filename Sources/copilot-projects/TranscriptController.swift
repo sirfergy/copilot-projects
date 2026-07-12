@@ -107,8 +107,7 @@ final class TranscriptController: ObservableObject {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
             return nil
         }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        let decoder = transcriptDecoder()
         guard let snapshot = try? decoder.decode(TranscriptSnapshot.self, from: data),
               snapshot.schemaVersion == 1 else {
             return LoadResult(signature: signature, snapshot: nil)
@@ -139,8 +138,7 @@ final class TranscriptController: ObservableObject {
               data.count <= 6 * 1_024 * 1_024 else {
             return emptyRemoteSnapshot()
         }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        let decoder = transcriptDecoder()
         guard let snapshot = try? decoder.decode(TranscriptSnapshot.self, from: data),
               snapshot.schemaVersion == 1 else {
             return emptyRemoteSnapshot()
@@ -155,5 +153,29 @@ final class TranscriptController: ObservableObject {
             copilotSessionId: "",
             turns: []
         )
+    }
+
+    nonisolated private static func transcriptDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let plain = Date.ISO8601FormatStyle()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let value = try container.decode(String.self)
+
+            if let date = try? fractional.parse(value) {
+                return date
+            }
+
+            if let date = try? plain.parse(value) {
+                return date
+            }
+
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid ISO-8601 timestamp: \(value)"
+            )
+        }
+        return decoder
     }
 }
