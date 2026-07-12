@@ -176,7 +176,7 @@ final class CoreLogicTests: XCTestCase {
           async getEvents() {
             transcriptListener(overlapUser);
             transcriptListener(overlapAssistant);
-            transcriptListener(overlapIdle);
+            setImmediate(() => transcriptListener(overlapIdle));
             return history;
           }
         };
@@ -187,6 +187,7 @@ final class CoreLogicTests: XCTestCase {
         )
         let epilogue = #"""
 
+        await new Promise((resolve) => setImmediate(resolve));
         const giantMetadata = "m".repeat(2_000_000);
         transcriptListener({
           id:"live-user",type:"user.message",timestamp:"2026-07-12T03:01:00.123Z",

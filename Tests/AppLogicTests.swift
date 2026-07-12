@@ -87,6 +87,96 @@ final class AppLogicTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testRemotePromptOrchestrationRechecksAndSendsExactlyOnce() throws {
+        _ = NSApplication.shared
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/remote-prompt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = Session(title: "prompt", cwd: root.path)
+        defer { SessionArtifacts.removeFiles(sessionId: session.id) }
+        let project = Project(
+            name: "project",
+            cwd: root.path,
+            sessions: [session],
+            selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+
+        var liveSessions: Set<String> = [session.id]
+        var activity = FooterActivity.idle
+        var sendSucceeds = true
+        var sentValues: [String] = []
+        let model = AppModel(
+            stateRepository: repository,
+            remotePromptLiveSessions: { _ in liveSessions },
+            remotePromptTarget: { requestedSessionId in
+                guard requestedSessionId == session.id else { return nil }
+                return RemotePromptTarget(
+                    activity: activity,
+                    send: { value in
+                        sentValues.append(value)
+                        return sendSucceeds
+                    }
+                )
+            }
+        )
+
+        XCTAssertEqual(model.sendRemotePrompt(sessionId: session.id, value: "hello"), .sent)
+        XCTAssertEqual(sentValues, ["hello"])
+
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: "missing", value: "ignored"),
+            .invalid
+        )
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: session.id, value: "bad\u{0}value"),
+            .invalid
+        )
+        XCTAssertEqual(sentValues, ["hello"])
+
+        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 1)
+        XCTAssertEqual(model.sendRemotePrompt(sessionId: session.id, value: "busy"), .busy)
+        XCTAssertEqual(sentValues, ["hello"])
+        model.setStatus(sessionId: session.id, status: .idle, text: nil, timestamp: 2)
+
+        model.setBackgroundAgentsActive(sessionId: session.id, active: true)
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: session.id, value: "background"),
+            .busy
+        )
+        XCTAssertEqual(sentValues, ["hello"])
+        model.setBackgroundAgentsActive(sessionId: session.id, active: false)
+
+        liveSessions = []
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: session.id, value: "no process"),
+            .noLiveCopilot
+        )
+        XCTAssertEqual(sentValues, ["hello"])
+        liveSessions = [session.id]
+
+        activity = .working
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: session.id, value: "working"),
+            .noLiveCopilot
+        )
+        XCTAssertEqual(sentValues, ["hello"])
+        activity = .idle
+
+        sendSucceeds = false
+        XCTAssertEqual(
+            model.sendRemotePrompt(sessionId: session.id, value: "not sent"),
+            .invalid
+        )
+        XCTAssertEqual(sentValues, ["hello", "not sent"])
+    }
+
     func testActivityTrackerRequiresObservedWorkAndTwoIdleTicks() {
         let sessionId = UUID().uuidString
         var tracker = ActivityTracker()
@@ -2152,6 +2242,7 @@ final class AppLogicTests: XCTestCase {
     func testRemoteWebCommandInputHasAccessibleName() {
         XCTAssertTrue(RemoteWebAssets.html.contains("aria-label=\"Command input\""))
         XCTAssertTrue(RemoteWebAssets.html.contains("aria-label=\"Message Copilot\""))
+        XCTAssertTrue(RemoteWebAssets.html.contains(#"aria-describedby="prompt-warning""#))
         XCTAssertTrue(RemoteWebAssets.html.contains(
             #"id="prompt-status" role="status" aria-live="polite" aria-atomic="true""#
         ))

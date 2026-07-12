@@ -53,7 +53,7 @@ enum RemoteWebAssets {
           </div>
           <div id="transcript" aria-live="polite">Select a session</div>
           <form id="prompt-form">
-            <textarea id="prompt" rows="3" maxlength="8192"
+            <textarea id="prompt" rows="3" maxlength="8192" aria-describedby="prompt-warning"
               aria-label="Message Copilot" placeholder="Message Copilot"></textarea>
             <div id="prompt-warning">Sending clears any unsent desktop draft.</div>
             <button id="prompt-submit" disabled>Send message</button>

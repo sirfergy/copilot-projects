@@ -45,11 +45,13 @@ public enum CopilotExtension {
         const queuedTranscriptEvents = [];
         let pendingTranscriptTurn = null;
         let transcriptInitialized = false;
+        let transcriptTurnEndTimer = null;
 
         const MAX_TRANSCRIPT_TURNS = 100;
         const MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024;
         const MAX_TRANSCRIPT_TEXT = 50_000;
         const MAX_TRANSCRIPT_METADATA_TEXT = 512;
+        const TRANSCRIPT_TURN_END_GRACE_MS = 1_000;
 
         function truncatedText(value, maximumLength) {
             const text = typeof value === "string" ? value : "";
@@ -157,6 +159,7 @@ public enum CopilotExtension {
                 tools: [],
                 isAborted: false,
                 hasTurnEnd: false,
+                turnEndAt: null,
             };
         }
 
@@ -172,18 +175,22 @@ public enum CopilotExtension {
                 tools: [],
                 isAborted: false,
                 hasTurnEnd: false,
+                turnEndAt: null,
             };
         }
 
         function finishTranscriptTurn(aborted, endedAt, publishNow) {
             const turn = pendingTranscriptTurn;
             pendingTranscriptTurn = null;
+            clearTimeout(transcriptTurnEndTimer);
+            transcriptTurnEndTimer = null;
             if (!turn) return;
             turn.isAborted = aborted === true;
             turn.endedAt = endedAt
                 ? normalizedTimestamp(endedAt)
-                : turn.startedAt;
+                : turn.turnEndAt || turn.startedAt;
             delete turn.hasTurnEnd;
+            delete turn.turnEndAt;
             if (!turn.userContent
                     && turn.assistantMessages.length === 0
                     && turn.tools.length === 0) return;
@@ -195,6 +202,19 @@ public enum CopilotExtension {
                 );
             }
             if (publishNow) publishTranscript();
+        }
+
+        function scheduleTranscriptTurnEndFallback() {
+            clearTimeout(transcriptTurnEndTimer);
+            transcriptTurnEndTimer = null;
+            const turn = pendingTranscriptTurn;
+            if (!turn?.hasTurnEnd) return;
+            transcriptTurnEndTimer = setTimeout(() => {
+                transcriptTurnEndTimer = null;
+                if (pendingTranscriptTurn?.id !== turn.id
+                        || !pendingTranscriptTurn.hasTurnEnd) return;
+                finishTranscriptTurn(false, turn.turnEndAt, true);
+            }, TRANSCRIPT_TURN_END_GRACE_MS);
         }
 
         function toolTitle(data) {
@@ -212,7 +232,11 @@ public enum CopilotExtension {
             if (pendingTranscriptTurn?.hasTurnEnd
                     && event.type !== "assistant.turn_end"
                     && event.type !== "session.idle") {
-                finishTranscriptTurn(false, event.timestamp, live);
+                finishTranscriptTurn(
+                    false,
+                    pendingTranscriptTurn.turnEndAt || event.timestamp,
+                    live
+                );
             }
 
             switch (event.type) {
@@ -277,7 +301,11 @@ public enum CopilotExtension {
                 break;
             }
             case "assistant.turn_end":
-                if (pendingTranscriptTurn) pendingTranscriptTurn.hasTurnEnd = true;
+                if (pendingTranscriptTurn) {
+                    pendingTranscriptTurn.hasTurnEnd = true;
+                    pendingTranscriptTurn.turnEndAt = normalizedTimestamp(event.timestamp);
+                    if (live) scheduleTranscriptTurnEndFallback();
+                }
                 break;
             case "session.idle":
                 finishTranscriptTurn(
@@ -382,18 +410,17 @@ public enum CopilotExtension {
         for (const event of queuedTranscriptEvents) {
             processTranscriptEvent(event, false, true);
         }
-        if (pendingTranscriptTurn?.hasTurnEnd) {
-            finishTranscriptTurn(false, null, false);
-        }
         queuedTranscriptEvents.length = 0;
         transcriptEventIds.clear();
         publishTranscript();
+        scheduleTranscriptTurnEndFallback();
 
         await refreshSchedules();
         const timer = setInterval(refreshSchedules, 5_000);
 
         function cleanup() {
             clearInterval(timer);
+            clearTimeout(transcriptTurnEndTimer);
             removeFile(snapshotPath);
             removeFile(scheduledTurnPath);
         }

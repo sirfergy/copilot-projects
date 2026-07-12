@@ -42,6 +42,11 @@ enum RemotePromptResult: Equatable {
     case noLiveCopilot
 }
 
+struct RemotePromptTarget {
+    let activity: FooterActivity
+    let send: (String) -> Bool
+}
+
 private enum WindowScreenshot {
     static func capture(_ request: ScreenshotCaptureRequest) -> ControlResponse {
         let result = ScreenshotCaptureBox()
@@ -204,6 +209,8 @@ final class AppModel: ObservableObject {
     private let completionNotificationDelayNanoseconds: UInt64
     private let isAppActive: @MainActor () -> Bool
     private let agentActivityDirectory: URL
+    private let remotePromptLiveSessions: ((Set<String>) -> Set<String>)?
+    private let remotePromptTarget: ((String) -> RemotePromptTarget?)?
 
     /// Sessions hosting a live agent (refreshed by the liveness reconciler). Used
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.
@@ -234,6 +241,8 @@ final class AppModel: ObservableObject {
         completionNotificationDelayNanoseconds: UInt64 = 1_000_000_000,
         isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive },
         agentActivityDirectory: URL = Paths.sessionsDir,
+        remotePromptLiveSessions: ((Set<String>) -> Set<String>)? = nil,
+        remotePromptTarget: ((String) -> RemotePromptTarget?)? = nil,
         webPushService: WebPushService? = nil,
         apnsService: APNsService? = nil
     ) {
@@ -241,6 +250,8 @@ final class AppModel: ObservableObject {
         self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
         self.isAppActive = isAppActive
         self.agentActivityDirectory = agentActivityDirectory
+        self.remotePromptLiveSessions = remotePromptLiveSessions
+        self.remotePromptTarget = remotePromptTarget
         remoteAccess = RemoteAccessController(
             webPushService: webPushService,
             apnsService: apnsService
@@ -748,23 +759,35 @@ final class AppModel: ObservableObject {
         guard ProjectsTerminalView.remotePromptBytes(value) != nil,
               let location = locateIndex(sessionId) else { return .invalid }
         let session = projects[location.p].sessions[location.s]
-        let liveSessions = ProcessTree.agentSessions(
-            agentNames: agentProcessNames,
-            in: ProcessTree.snapshot()
-        )
+        let liveSessions = remotePromptLiveSessions?(agentProcessNames)
+            ?? ProcessTree.agentSessions(
+                agentNames: agentProcessNames,
+                in: ProcessTree.snapshot()
+            )
+        let target: RemotePromptTarget?
+        if let remotePromptTarget {
+            target = remotePromptTarget(sessionId)
+        } else if let controller = controllers[sessionId] {
+            target = RemotePromptTarget(
+                activity: controller.agentActivity,
+                send: { controller.terminalView.sendRemotePrompt($0) }
+            )
+        } else {
+            target = nil
+        }
         let eligibility = Self.remotePromptEligibility(
             status: session.status,
             hasBackgroundWork: session.hasBackgroundWork,
             hasLiveAgent: liveSessions.contains(sessionId),
-            footerActivity: controllers[sessionId]?.agentActivity ?? .unknown
+            footerActivity: target?.activity ?? .unknown
         )
         if eligibility == .busy { return .busy }
         guard liveSessions.contains(sessionId),
-              let controller = controllers[sessionId],
-              controller.agentActivity == .idle else {
+              let target,
+              target.activity == .idle else {
             return .noLiveCopilot
         }
-        return controller.terminalView.sendRemotePrompt(value) ? .sent : .invalid
+        return target.send(value) ? .sent : .invalid
     }
 
     nonisolated static func remotePromptEligibility(
