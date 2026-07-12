@@ -104,6 +104,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         isPrimaryInstance = true
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(workspaceWillPowerOff(_:)),
+            name: NSWorkspace.willPowerOffNotification,
+            object: nil
+        )
         model.bootstrapIfNeeded()
         model.startLivenessReconciler()
         model.startAgentActivityTracking()
@@ -318,6 +324,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.detachAllClients()   // keep dtach masters alive for resume
         model.stopServer()
         model.save()
+    }
+
+    @objc private func workspaceWillPowerOff(_ notification: Notification) {
+        model.prepareForSystemPowerOff()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

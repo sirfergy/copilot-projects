@@ -252,18 +252,16 @@ public enum CopilotHooks {
         ;;
       end)
         payload="$(cat 2>/dev/null || true)"
-        # The agent session ENDED (user exited) — drop the resume marker so the tab
-        # doesn't boot back into a session the user already left ("zombie resume").
-        # Only sessionEnd maps here; agentStop (between-turn idle, session alive) uses
-        # `idle` and must NOT clear it. If a reboot kills the agent mid-session, this
-        # never fires, so the marker survives and the session resumes — as intended.
-        rm -f "$state_dir/sessions/$session_id.copilot-session" 2>/dev/null || true
+        # Copilot reports both an explicit exit and a graceful macOS shutdown as
+        # sessionEnd(reason=user_exit). Let the live app clear the resume marker only
+        # when it is not terminating; if the app is shutting down or unreachable, the
+        # marker survives for post-reboot resume.
         rm -f "$state_dir/sessions/$session_id.session-idle-hook" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null || true
         rm -f "$scheduled_turn" 2>/dev/null || true
-        status idle "$(payload_timestamp "$payload")"
+        status idle "$(payload_timestamp "$payload")" session-end
         ;;
     esac
     emit
@@ -274,7 +272,7 @@ public enum CopilotHooks {
     /// to idle so a fresh agent never reads as running; tool events keep it running;
     /// the notification hook surfaces "waiting" when the agent raises an ask_user /
     /// permission prompt (which fire no tool hook); sessionEnd (`end`) resets to idle
-    /// AND drops the resume marker so an exited session isn't auto-resumed on reboot.
+    /// and asks the live app to clear the resume marker unless the app is terminating.
     public static let config = #"""
     {
       "version": 1,

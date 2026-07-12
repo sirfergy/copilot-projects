@@ -126,6 +126,92 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testSessionEndClearsResumeMarkerOnlyWhileAppIsRunning() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(title: "target", cwd: "/tmp")
+        let project = Project(name: "target", cwd: "/tmp", sessions: [session])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let marker = sessions.appendingPathComponent("\(session.id).copilot-session")
+        try FileManager.default.createDirectory(
+            at: marker.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: marker) }
+
+        let model = AppModel(
+            stateRepository: repository,
+            resumeMarkerDirectory: sessions
+        )
+        try Data(UUID().uuidString.utf8).write(to: marker)
+        model.setStatus(
+            sessionId: session.id,
+            status: .idle,
+            text: nil,
+            timestamp: 100,
+            source: "session-end"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+
+        try Data(UUID().uuidString.utf8).write(to: marker)
+        model.prepareForSystemPowerOff()
+        model.setStatus(
+            sessionId: session.id,
+            status: .idle,
+            text: nil,
+            timestamp: 150,
+            source: "session-end"
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+
+        model.beginTermination()
+        model.setStatus(
+            sessionId: session.id,
+            status: .idle,
+            text: nil,
+            timestamp: 200,
+            source: "session-end"
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    @MainActor
+    func testPowerOffProtectionExpiresAfterCancelledShutdown() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let model = AppModel(
+            stateRepository: StateRepository(path: root.appendingPathComponent("state.json"))
+        )
+        model.prepareForSystemPowerOff(protectionInterval: 0)
+        XCTAssertTrue(model.isPoweringOff)
+        XCTAssertTrue(AppModel.shouldPreserveSessionAfterTerminalExit(
+            isTerminating: false,
+            isPoweringOff: true
+        ))
+        XCTAssertTrue(AppModel.shouldPreserveSessionAfterTerminalExit(
+            isTerminating: true,
+            isPoweringOff: false
+        ))
+        XCTAssertFalse(AppModel.shouldPreserveSessionAfterTerminalExit(
+            isTerminating: false,
+            isPoweringOff: false
+        ))
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(model.isPoweringOff)
+    }
+
+    @MainActor
     func testCompletionNotificationUsesAgentStopAndWaitsForBackgroundAgents() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory
@@ -557,6 +643,54 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: capability.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backgroundAgents.path))
+    }
+
+    func testCopilotHookDelegatesSessionEndResumeCleanupToApp() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let bin = root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let hookURL = root.appendingPathComponent("copilot-projects-hook.sh")
+        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: hookURL.path
+        )
+
+        let capture = root.appendingPathComponent("cli-args.txt")
+        let fakeCLI = bin.appendingPathComponent("copilot-projects")
+        try """
+        #!/bin/sh
+        printf '%s\n' "$*" >> "$CAPTURE_FILE"
+        """.write(to: fakeCLI, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: fakeCLI.path
+        )
+
+        let tabId = UUID().uuidString
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let marker = sessions.appendingPathComponent("\(tabId).copilot-session")
+        try Data(UUID().uuidString.utf8).write(to: marker)
+
+        try runHook(
+            hookURL: hookURL,
+            action: "end",
+            payload: #"{"timestamp":200,"reason":"user_exit"}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertEqual(
+            try cliCallLines(in: capture),
+            ["set-status idle --timestamp 200 --source session-end"]
+        )
     }
 
     func testCopilotHookRoutesNativeNotificationsForWaitingAndCompletedTurns() throws {

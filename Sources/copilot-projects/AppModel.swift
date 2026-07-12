@@ -194,6 +194,9 @@ final class AppModel: ObservableObject {
     private let completionNotificationDelayNanoseconds: UInt64
     private let isAppActive: @MainActor () -> Bool
     private let agentActivityDirectory: URL
+    private let resumeMarkerDirectory: URL
+    private var powerOffProtectionGeneration = 0
+    private(set) var isPoweringOff = false
 
     /// Sessions hosting a live agent (refreshed by the liveness reconciler). Used
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.
@@ -224,6 +227,7 @@ final class AppModel: ObservableObject {
         completionNotificationDelayNanoseconds: UInt64 = 1_000_000_000,
         isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive },
         agentActivityDirectory: URL = Paths.sessionsDir,
+        resumeMarkerDirectory: URL = Paths.sessionsDir,
         webPushService: WebPushService? = nil,
         apnsService: APNsService? = nil
     ) {
@@ -231,6 +235,7 @@ final class AppModel: ObservableObject {
         self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
         self.isAppActive = isAppActive
         self.agentActivityDirectory = agentActivityDirectory
+        self.resumeMarkerDirectory = resumeMarkerDirectory
         remoteAccess = RemoteAccessController(
             webPushService: webPushService,
             apnsService: apnsService
@@ -571,13 +576,27 @@ final class AppModel: ObservableObject {
     }
 
     func beginTermination() {
+        guard !isTerminating else { return }
         isTerminating = true
+        powerOffProtectionGeneration += 1
         footerTimer?.invalidate()
         livenessTimer?.invalidate()
         agentActivityTimer?.invalidate()
         agentActivitySource?.cancel()
         agentActivitySource = nil
         remoteAccess.stopGateway()
+    }
+
+    func prepareForSystemPowerOff(protectionInterval: TimeInterval = 300) {
+        isPoweringOff = true
+        powerOffProtectionGeneration += 1
+        let generation = powerOffProtectionGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + protectionInterval) { [weak self] in
+            guard let self,
+                  !self.isTerminating,
+                  self.powerOffProtectionGeneration == generation else { return }
+            self.isPoweringOff = false
+        }
     }
 
     func startRemoteAccessIfEnabled() {
@@ -847,6 +866,14 @@ final class AppModel: ObservableObject {
         notification: StatusNotificationKind? = nil
     ) {
         guard let loc = locateIndex(sessionId) else { return }
+        // sessionEnd is also emitted during graceful macOS shutdown. Only a live,
+        // non-terminating app can treat it as an explicit user exit.
+        if source == "session-end", !isTerminating, !isPoweringOff {
+            try? FileManager.default.removeItem(
+                at: resumeMarkerDirectory
+                    .appendingPathComponent("\(sessionId).copilot-session")
+            )
+        }
         guard statusEventClock.shouldApply(sessionId: sessionId, timestamp: timestamp) else { return }
         let previous = projects[loc.p].sessions[loc.s].status
         let startsScheduledTurn = source == "scheduled-start" || source == "scheduled-active"
@@ -1382,7 +1409,10 @@ final class AppModel: ObservableObject {
 
     private func handleExit(sessionId: String) {
         controllers[sessionId] = nil
-        guard !isTerminating else { return }   // app quitting → keep for resume
+        guard !Self.shouldPreserveSessionAfterTerminalExit(
+            isTerminating: isTerminating,
+            isPoweringOff: isPoweringOff
+        ) else { return }
 
         let socket = Paths.dtachSocketPath(sessionId: sessionId)
         // If a live dtach master still owns the socket, the shell is alive and
@@ -1398,6 +1428,13 @@ final class AppModel: ObservableObject {
         let projectId = projects[loc.p].id
         SessionArtifacts.removeFiles(sessionId: sessionId)
         closeSession(projectId: projectId, sessionId: sessionId)
+    }
+
+    nonisolated static func shouldPreserveSessionAfterTerminalExit(
+        isTerminating: Bool,
+        isPoweringOff: Bool
+    ) -> Bool {
+        isTerminating || isPoweringOff
     }
 
     // MARK: - control socket handler
