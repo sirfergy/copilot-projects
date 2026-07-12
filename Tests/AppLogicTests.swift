@@ -2523,6 +2523,81 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(leases.holds(sessionId: "session", clientId: "laptop"))
     }
 
+    func testRemoteWriterLeaseGatesPromptUntilTransitionOrTimeout() {
+        let leases = RemoteWriterLeases()
+        leases.acquire(sessionId: "session", clientId: "phone")
+        let submittedAt = Date(timeIntervalSince1970: 100)
+        var sentValues: [String] = []
+
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                now: submittedAt
+            ) {
+                sentValues.append("first")
+                return .sent
+            },
+            .sent
+        )
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                now: submittedAt.addingTimeInterval(1)
+            ) {
+                sentValues.append("duplicate")
+                return .sent
+            },
+            .busy
+        )
+        XCTAssertEqual(sentValues, ["first"])
+
+        leases.observePromptUnavailable(
+            sessionId: "session",
+            observedAt: submittedAt.addingTimeInterval(-1)
+        )
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                now: submittedAt.addingTimeInterval(2)
+            ) {
+                sentValues.append("stale-cleared")
+                return .sent
+            },
+            .busy
+        )
+
+        leases.observePromptUnavailable(
+            sessionId: "session",
+            observedAt: submittedAt.addingTimeInterval(2)
+        )
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                now: submittedAt.addingTimeInterval(2)
+            ) {
+                sentValues.append("after-transition")
+                return .sent
+            },
+            .sent
+        )
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                now: submittedAt.addingTimeInterval(8)
+            ) {
+                sentValues.append("after-timeout")
+                return .sent
+            },
+            .sent
+        )
+        XCTAssertEqual(sentValues, ["first", "after-transition", "after-timeout"])
+    }
+
     func testCLIParsesStatusNotificationFlagIntoControlRequest() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

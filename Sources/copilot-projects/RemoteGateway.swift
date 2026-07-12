@@ -96,17 +96,25 @@ final class RemoteModelBridge: @unchecked Sendable {
 /// so the most recently selected device wins and a vanished client can never
 /// block another device from taking control.
 final class RemoteWriterLeases: @unchecked Sendable {
+    private struct PromptSubmission {
+        let submittedAt: Date
+        let expiresAt: Date
+    }
+
     // Real sessions number in the dozens; the cap only bounds memory against a
     // buggy/hostile authenticated client POSTing many distinct session ids.
     private static let maxHolders = 512
+    private static let promptSubmissionTimeout: TimeInterval = 5
 
     private let lock = NSLock()
     private var holders: [String: String] = [:]
+    private var promptSubmissions: [String: PromptSubmission] = [:]
 
     func acquire(sessionId: String, clientId: String) {
         lock.lock()
         if holders[sessionId] == nil, holders.count >= Self.maxHolders {
             holders.removeAll(keepingCapacity: true)
+            promptSubmissions.removeAll(keepingCapacity: true)
         }
         holders[sessionId] = clientId
         lock.unlock()
@@ -127,6 +135,37 @@ final class RemoteWriterLeases: @unchecked Sendable {
         defer { lock.unlock() }
         guard holders[sessionId] == clientId else { return nil }
         return perform()
+    }
+
+    func submitPrompt(
+        sessionId: String,
+        clientId: String,
+        now: Date = Date(),
+        perform: () -> RemotePromptResult
+    ) -> RemotePromptResult {
+        lock.lock()
+        defer { lock.unlock() }
+        guard holders[sessionId] == clientId else { return .forbidden }
+        if let submission = promptSubmissions[sessionId] {
+            guard submission.expiresAt <= now else { return .busy }
+            promptSubmissions[sessionId] = nil
+        }
+        let result = perform()
+        if result == .sent {
+            promptSubmissions[sessionId] = PromptSubmission(
+                submittedAt: now,
+                expiresAt: now.addingTimeInterval(Self.promptSubmissionTimeout)
+            )
+        }
+        return result
+    }
+
+    func observePromptUnavailable(sessionId: String, observedAt: Date = Date()) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let submission = promptSubmissions[sessionId],
+              submission.submittedAt <= observedAt else { return }
+        promptSubmissions[sessionId] = nil
     }
 }
 
@@ -667,12 +706,12 @@ private final class RemoteHTTPHandler:
             let channel = context.channel
             let leases = self.leases
             Task { @MainActor in
-                let result = leases.withHeldLease(
+                let result = leases.submitPrompt(
                     sessionId: sessionId,
                     clientId: clientId
                 ) {
                     self.bridge.sendPrompt(sessionId: sessionId, value: value)
-                } ?? .forbidden
+                }
                 channel.eventLoop.execute {
                     let response: (HTTPResponseStatus, String)
                     switch result {
@@ -825,6 +864,18 @@ private final class RemoteHTTPHandler:
                 }
                 await MainActor.run {
                     let workspace = refreshWorkspace ? bridge.workspace() : nil
+                    let workspaceObservedAt = Date()
+                    if let workspace {
+                        for project in workspace.projects {
+                            for session in project.sessions
+                            where session.status != "idle" || session.promptable == false {
+                                self.leases.observePromptUnavailable(
+                                    sessionId: session.id,
+                                    observedAt: workspaceObservedAt
+                                )
+                            }
+                        }
+                    }
                     let screenRevision = streamSessionId.flatMap {
                         bridge.screenRevision(sessionId: $0)
                     }
