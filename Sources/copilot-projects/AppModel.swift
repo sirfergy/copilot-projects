@@ -118,7 +118,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var projects: [Project] = []
     @Published private(set) var selectedProjectId: String?
     @Published var numberHint: NumberHint = .none
-    @Published private(set) var transcriptClosedSessions: Set<String> = []
+    @Published private(set) var transcriptOpenSessions: Set<String> = []
 
     private var controllers: [String: TerminalController] = [:]
     private var selectedTranscriptController: TranscriptController?
@@ -453,15 +453,15 @@ final class AppModel: ObservableObject {
     }
 
     func isTranscriptDrawerOpen(sessionId: String) -> Bool {
-        !transcriptClosedSessions.contains(sessionId)
+        transcriptOpenSessions.contains(sessionId)
     }
 
     func closeTranscriptDrawer(sessionId: String) {
-        transcriptClosedSessions.insert(sessionId)
+        transcriptOpenSessions.remove(sessionId)
     }
 
     func openTranscriptDrawer(sessionId: String) {
-        transcriptClosedSessions.remove(sessionId)
+        transcriptOpenSessions.insert(sessionId)
     }
 
     /// Message + button title shown by the container when nothing is selected.
@@ -573,7 +573,7 @@ final class AppModel: ObservableObject {
         if selectedTranscriptController?.sessionId == sid {
             selectedTranscriptController = nil
         }
-        transcriptClosedSessions.remove(sid)
+        transcriptOpenSessions.remove(sid)
         statusEventClock.reset(sessionId: sid)
         backgroundAgentsSuppressed.remove(sid)
         completionPending.remove(sid)
@@ -811,7 +811,7 @@ final class AppModel: ObservableObject {
             if selectedTranscriptController?.sessionId == session.id {
                 selectedTranscriptController = nil
             }
-            transcriptClosedSessions.remove(session.id)
+            transcriptOpenSessions.remove(session.id)
             backgroundAgentsSuppressed.remove(session.id)
             completionPending.remove(session.id)
             scheduledSnapshotsSuppressed.remove(session.id)

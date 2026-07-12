@@ -42,6 +42,9 @@ public enum CopilotExtension {
         let schedules = [];
         const transcriptTurns = [];
         const transcriptEventIds = new Set();
+        const suppressedInteractionIds = new Set();
+        const suppressedTurnIds = new Set();
+        const suppressedTurnInteractions = new Map();
         const queuedTranscriptEvents = [];
         let pendingTranscriptTurn = null;
         let transcriptInitialized = false;
@@ -79,7 +82,7 @@ public enum CopilotExtension {
                 const encoded = readFileSync(transcriptPath, "utf8");
                 if (Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES) return false;
                 const snapshot = JSON.parse(encoded);
-                if (snapshot.schemaVersion !== 1
+                if (snapshot.schemaVersion !== 2
                         || snapshot.copilotSessionId
                             !== boundedMetadataText(session.sessionId)
                         || !Array.isArray(snapshot.turns)) return false;
@@ -143,7 +146,7 @@ public enum CopilotExtension {
 
         function publishTranscript() {
             const snapshot = {
-                schemaVersion: 1,
+                schemaVersion: 2,
                 updatedAt: new Date().toISOString(),
                 copilotSessionId: boundedMetadataText(session.sessionId),
                 turns: transcriptTurns,
@@ -241,11 +244,50 @@ public enum CopilotExtension {
                 || "Tool";
         }
 
+        function rememberBounded(set, value) {
+            if (!value) return;
+            set.add(value);
+            while (set.size > 500) {
+                set.delete(set.values().next().value);
+            }
+        }
+
         function processTranscriptEvent(event, live, reconciling = false) {
             if (event.agentId) return;
             if (reconciling) {
                 if (transcriptEventIds.has(event.id)) return;
                 transcriptEventIds.add(event.id);
+            }
+            if (event.type === "user.message" && event.data.parentAgentTaskId) {
+                rememberBounded(suppressedInteractionIds, event.data.interactionId);
+                return;
+            }
+            if (event.data?.interactionId
+                    && suppressedInteractionIds.has(event.data.interactionId)) {
+                if (event.type === "assistant.turn_start") {
+                    rememberBounded(suppressedTurnIds, event.data.turnId);
+                    if (event.data.turnId) {
+                        suppressedTurnInteractions.set(
+                            event.data.turnId,
+                            event.data.interactionId
+                        );
+                        while (suppressedTurnInteractions.size > 500) {
+                            suppressedTurnInteractions.delete(
+                                suppressedTurnInteractions.keys().next().value
+                            );
+                        }
+                    }
+                }
+                return;
+            }
+            if (event.data?.turnId && suppressedTurnIds.has(event.data.turnId)) {
+                if (event.type === "assistant.turn_end") {
+                    suppressedTurnIds.delete(event.data.turnId);
+                    const interactionId = suppressedTurnInteractions.get(event.data.turnId);
+                    suppressedTurnInteractions.delete(event.data.turnId);
+                    if (interactionId) suppressedInteractionIds.delete(interactionId);
+                }
+                return;
             }
             if (pendingTranscriptTurn?.hasTurnEnd
                     && event.type !== "assistant.turn_end"

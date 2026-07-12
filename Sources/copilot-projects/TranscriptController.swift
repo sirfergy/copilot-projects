@@ -110,7 +110,7 @@ final class TranscriptController: ObservableObject {
         }
         let decoder = transcriptDecoder()
         guard let snapshot = try? decoder.decode(TranscriptSnapshot.self, from: data),
-              snapshot.schemaVersion == 1 else {
+              snapshot.schemaVersion == 2 else {
             return LoadResult(signature: signature, snapshot: nil)
         }
         return LoadResult(signature: signature, snapshot: snapshot)
@@ -141,7 +141,7 @@ final class TranscriptController: ObservableObject {
         }
         let decoder = transcriptDecoder()
         guard let snapshot = try? decoder.decode(TranscriptSnapshot.self, from: data),
-              snapshot.schemaVersion == 1 else {
+              snapshot.schemaVersion == 2 else {
             return emptyRemoteSnapshot()
         }
         return snapshot
@@ -149,7 +149,7 @@ final class TranscriptController: ObservableObject {
 
     nonisolated private static func emptyRemoteSnapshot() -> TranscriptSnapshot {
         TranscriptSnapshot(
-            schemaVersion: 1,
+            schemaVersion: 2,
             updatedAt: Date(),
             copilotSessionId: "",
             turns: []

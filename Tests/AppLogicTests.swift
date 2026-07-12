@@ -1361,7 +1361,7 @@ final class AppLogicTests: XCTestCase {
         Paths.ensureStateDir()
         let data = Data("""
         {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "updatedAt": "2026-07-12T03:09:00.123Z",
           "copilotSessionId": "copilot-session",
           "turns": [{
@@ -1418,6 +1418,36 @@ final class AppLogicTests: XCTestCase {
         SessionArtifacts.removeFiles(sessionId: sessionId)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+    }
+
+    @MainActor
+    func testTranscriptDrawerRequiresExplicitOpen() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = Session(title: "shell", cwd: "/tmp")
+        let project = Project(
+            name: "test",
+            cwd: "/tmp",
+            sessions: [session],
+            selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: root
+        )
+
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: session.id))
+        model.openTranscriptDrawer(sessionId: session.id)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: session.id))
+        model.closeTranscriptDrawer(sessionId: session.id)
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: session.id))
     }
 
     func testCompletionCoordinationStateIsNotPersisted() throws {
@@ -1730,7 +1760,7 @@ final class AppLogicTests: XCTestCase {
         )
 
         let mockSnapshot = TranscriptSnapshot(
-            schemaVersion: 1,
+            schemaVersion: 2,
             updatedAt: Date(),
             copilotSessionId: "test-copilot",
             turns: []
