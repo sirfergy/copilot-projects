@@ -2153,6 +2153,9 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.html.contains("aria-label=\"Command input\""))
         XCTAssertTrue(RemoteWebAssets.html.contains("aria-label=\"Message Copilot\""))
         XCTAssertTrue(RemoteWebAssets.html.contains(
+            #"id="prompt-status" role="status" aria-live="polite" aria-atomic="true""#
+        ))
+        XCTAssertTrue(RemoteWebAssets.html.contains(
             "Sending clears any unsent desktop draft."
         ))
     }
@@ -2391,6 +2394,41 @@ final class AppLogicTests: XCTestCase {
         // Leases are scoped per session.
         leases.acquire(sessionId: "other", clientId: "phone")
         XCTAssertTrue(leases.holds(sessionId: "other", clientId: "phone"))
+        XCTAssertTrue(leases.holds(sessionId: "session", clientId: "laptop"))
+    }
+
+    func testRemoteWriterLeaseLinearizesInjectionAndTakeover() {
+        let leases = RemoteWriterLeases()
+        leases.acquire(sessionId: "session", clientId: "phone")
+        let injectionStarted = DispatchSemaphore(value: 0)
+        let finishInjection = DispatchSemaphore(value: 0)
+        let injectionFinished = DispatchSemaphore(value: 0)
+        let takeoverFinished = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global().async {
+            _ = leases.withHeldLease(
+                sessionId: "session",
+                clientId: "phone"
+            ) {
+                injectionStarted.signal()
+                finishInjection.wait()
+            }
+            injectionFinished.signal()
+        }
+        XCTAssertEqual(injectionStarted.wait(timeout: .now() + 1), .success)
+
+        DispatchQueue.global().async {
+            leases.acquire(sessionId: "session", clientId: "laptop")
+            takeoverFinished.signal()
+        }
+        XCTAssertEqual(
+            takeoverFinished.wait(timeout: .now() + 0.05),
+            .timedOut
+        )
+
+        finishInjection.signal()
+        XCTAssertEqual(injectionFinished.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(takeoverFinished.wait(timeout: .now() + 1), .success)
         XCTAssertTrue(leases.holds(sessionId: "session", clientId: "laptop"))
     }
 

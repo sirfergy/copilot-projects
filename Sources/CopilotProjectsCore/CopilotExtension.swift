@@ -209,6 +209,11 @@ public enum CopilotExtension {
                 if (transcriptEventIds.has(event.id)) return;
                 transcriptEventIds.add(event.id);
             }
+            if (pendingTranscriptTurn?.hasTurnEnd
+                    && event.type !== "assistant.turn_end"
+                    && event.type !== "session.idle") {
+                finishTranscriptTurn(false, event.timestamp, live);
+            }
 
             switch (event.type) {
             case "user.message": {
@@ -372,13 +377,13 @@ public enum CopilotExtension {
         try {
             const history = await session.getEvents();
             for (const event of history) processTranscriptEvent(event, false, true);
-            if (pendingTranscriptTurn?.hasTurnEnd) {
-                finishTranscriptTurn(false, null, false);
-            }
         } catch {}
         transcriptInitialized = true;
         for (const event of queuedTranscriptEvents) {
             processTranscriptEvent(event, false, true);
+        }
+        if (pendingTranscriptTurn?.hasTurnEnd) {
+            finishTranscriptTurn(false, null, false);
         }
         queuedTranscriptEvents.length = 0;
         transcriptEventIds.clear();

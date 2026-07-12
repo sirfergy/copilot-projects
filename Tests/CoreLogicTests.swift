@@ -105,7 +105,7 @@ final class CoreLogicTests: XCTestCase {
         const overlapAssistant = \#(overlapAssistant);
         const overlapIdle = {
           id:"overlap-idle",type:"session.idle",
-          timestamp:"2026-07-12T03:00:03.789Z",data:{aborted:false}
+          timestamp:"2026-07-12T03:00:03.789Z",data:{aborted:true}
         };
         const history = [];
         const timestamp = (offset) => new Date(1700000000000 + offset).toISOString();
@@ -161,6 +161,10 @@ final class CoreLogicTests: XCTestCase {
             id:"overlap-tool-complete",type:"tool.execution_complete",
             timestamp:"2026-07-12T03:00:02.600Z",
             data:{toolCallId:"tool-1",success:true}
+          },
+          {
+            id:"overlap-turn-end",type:"assistant.turn_end",
+            timestamp:"2026-07-12T03:00:02.700Z",data:{}
           }
         );
         const fakeSession = {
@@ -232,6 +236,8 @@ final class CoreLogicTests: XCTestCase {
           scheduledAborted: scheduled?.isAborted,
           overlapAssistantCount: overlap?.assistantMessages.length,
           overlapToolSuccess: overlap?.tools[0]?.success,
+          overlapAborted: overlap?.isAborted,
+          overlapEndedAt: overlap?.endedAt,
           liveUserLength: live?.userContent.length,
           liveTruncated: live?.userContent.endsWith("… truncated …"),
           liveHasTrailingHighSurrogate: /[\uD800-\uDBFF]$/.test(
@@ -286,6 +292,8 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary?["scheduledAborted"] as? Bool, true)
         XCTAssertEqual(summary?["overlapAssistantCount"] as? Int, 1)
         XCTAssertEqual(summary?["overlapToolSuccess"] as? Bool, true)
+        XCTAssertEqual(summary?["overlapAborted"] as? Bool, true)
+        XCTAssertEqual(summary?["overlapEndedAt"] as? String, "2026-07-12T03:00:03.789Z")
         XCTAssertLessThanOrEqual(summary?["liveUserLength"] as? Int ?? .max, 50_020)
         XCTAssertEqual(summary?["liveTruncated"] as? Bool, true)
         XCTAssertEqual(summary?["liveHasTrailingHighSurrogate"] as? Bool, false)

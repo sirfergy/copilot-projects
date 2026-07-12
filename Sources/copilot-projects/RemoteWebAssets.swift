@@ -47,7 +47,9 @@ enum RemoteWebAssets {
         <aside id="transcript-pane">
           <div id="transcript-header">
             <strong>Completed turns</strong>
-            <span id="prompt-status">Select a Copilot session</span>
+            <span id="prompt-status" role="status" aria-live="polite" aria-atomic="true">
+              Select a Copilot session
+            </span>
           </div>
           <div id="transcript" aria-live="polite">Select a session</div>
           <form id="prompt-form">

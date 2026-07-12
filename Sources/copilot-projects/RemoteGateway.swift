@@ -117,6 +117,17 @@ final class RemoteWriterLeases: @unchecked Sendable {
         defer { lock.unlock() }
         return holders[sessionId] == clientId
     }
+
+    func withHeldLease<Result>(
+        sessionId: String,
+        clientId: String,
+        perform: () -> Result
+    ) -> Result? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard holders[sessionId] == clientId else { return nil }
+        return perform()
+    }
 }
 
 final class RemoteGateway: @unchecked Sendable {
@@ -656,12 +667,12 @@ private final class RemoteHTTPHandler:
             let channel = context.channel
             let leases = self.leases
             Task { @MainActor in
-                let result: RemotePromptResult
-                if leases.holds(sessionId: sessionId, clientId: clientId) {
-                    result = self.bridge.sendPrompt(sessionId: sessionId, value: value)
-                } else {
-                    result = .forbidden
-                }
+                let result = leases.withHeldLease(
+                    sessionId: sessionId,
+                    clientId: clientId
+                ) {
+                    self.bridge.sendPrompt(sessionId: sessionId, value: value)
+                } ?? .forbidden
                 channel.eventLoop.execute {
                     let response: (HTTPResponseStatus, String)
                     switch result {
@@ -703,10 +714,9 @@ private final class RemoteHTTPHandler:
             }
             let leases = self.leases
             Task { @MainActor in
-                // Re-check under the lock right before injecting so a takeover
-                // between the check above and this hop can't leak a keystroke.
-                guard leases.holds(sessionId: sessionId, clientId: clientId) else { return }
-                self.bridge.sendInput(sessionId: sessionId, value: value)
+                _ = leases.withHeldLease(sessionId: sessionId, clientId: clientId) {
+                    self.bridge.sendInput(sessionId: sessionId, value: value)
+                }
             }
             respond(context: context, method: .POST, status: .noContent,
                     contentType: "text/plain", body: "")
@@ -725,10 +735,9 @@ private final class RemoteHTTPHandler:
             }
             let leases = self.leases
             Task { @MainActor in
-                guard leases.holds(sessionId: sessionId, clientId: clientId) else {
-                    return
+                _ = leases.withHeldLease(sessionId: sessionId, clientId: clientId) {
+                    self.bridge.sendKey(sessionId: sessionId, key: key)
                 }
-                self.bridge.sendKey(sessionId: sessionId, key: key)
             }
             respond(context: context, method: .POST, status: .noContent,
                     contentType: "text/plain", body: "")
@@ -747,10 +756,9 @@ private final class RemoteHTTPHandler:
             }
             let leases = self.leases
             Task { @MainActor in
-                guard leases.holds(sessionId: sessionId, clientId: clientId) else {
-                    return
+                _ = leases.withHeldLease(sessionId: sessionId, clientId: clientId) {
+                    self.bridge.sendScroll(sessionId: sessionId, delta: delta)
                 }
-                self.bridge.sendScroll(sessionId: sessionId, delta: delta)
             }
             respond(context: context, method: .POST, status: .noContent,
                     contentType: "text/plain", body: "")
