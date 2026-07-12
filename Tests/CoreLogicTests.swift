@@ -306,8 +306,16 @@ final class CoreLogicTests: XCTestCase {
         const snapshot = JSON.parse(encodedSnapshot);
         const find = (id) => snapshot.turns.find((turn) => turn.id === id);
         const hidden = find("hidden-user");
-        const classifier = find("classifier-user");
-        const classifierTool = find("classifier-tool-start");
+        const classifierPayloadPresent = snapshot.turns.some((turn) =>
+          turn.userContent === "internal classifier prompt"
+            || turn.assistantMessages.some((message) =>
+              message.id === "classifier-message"
+                || message.content === "internal classifier result"
+            )
+        );
+        const classifierToolPresent = snapshot.turns.some((turn) =>
+          turn.tools.some((tool) => tool.id === "classifier-tool")
+        );
         const scheduled = find("scheduled-user");
         const overlap = find("overlap-user");
         const live = find("live-user");
@@ -316,8 +324,8 @@ final class CoreLogicTests: XCTestCase {
           firstId: snapshot.turns[0]?.id,
           hiddenKind: hidden?.kind,
           hiddenUserContent: hidden?.userContent,
-          classifierPresent: classifier !== undefined,
-          classifierToolPresent: classifierTool !== undefined,
+          classifierPayloadPresent,
+          classifierToolPresent,
           scheduledKind: scheduled?.kind,
           scheduledAborted: scheduled?.isAborted,
           overlapAssistantCount: overlap?.assistantMessages.length,
@@ -374,7 +382,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary?["firstId"] as? String, "filler-user-2")
         XCTAssertEqual(summary?["hiddenKind"] as? String, "automated")
         XCTAssertEqual(summary?["hiddenUserContent"] as? String, "")
-        XCTAssertEqual(summary?["classifierPresent"] as? Bool, false)
+        XCTAssertEqual(summary?["classifierPayloadPresent"] as? Bool, false)
         XCTAssertEqual(summary?["classifierToolPresent"] as? Bool, false)
         XCTAssertEqual(summary?["scheduledKind"] as? String, "scheduled")
         XCTAssertEqual(summary?["scheduledAborted"] as? Bool, true)
@@ -400,6 +408,24 @@ final class CoreLogicTests: XCTestCase {
     }
 
     func testCopilotExtensionPreservesMatchingSnapshotWhenHistoryFails() throws {
+        let summary = try copilotExtensionHistoryFailureSummary(schemaVersion: 2)
+
+        XCTAssertEqual(summary["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(summary["copilotSessionId"] as? String, "copilot-session")
+        XCTAssertEqual(summary["turnIds"] as? [String], ["preserved-turn"])
+    }
+
+    func testCopilotExtensionRejectsLegacySnapshotWhenHistoryFails() throws {
+        let summary = try copilotExtensionHistoryFailureSummary(schemaVersion: 1)
+
+        XCTAssertEqual(summary["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(summary["copilotSessionId"] as? String, "copilot-session")
+        XCTAssertEqual(summary["turnIds"] as? [String], [])
+    }
+
+    private func copilotExtensionHistoryFailureSummary(
+        schemaVersion: Int
+    ) throws -> [String: Any] {
         try requireNodeForJavaScriptTests()
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build/copilot-extension-history-\(UUID().uuidString)")
@@ -410,7 +436,7 @@ final class CoreLogicTests: XCTestCase {
         let snapshotURL = sessions.appendingPathComponent("\(appSessionId).transcript.json")
         try Data("""
         {
-          "schemaVersion": 2,
+          "schemaVersion": \(schemaVersion),
           "updatedAt": "2026-07-12T03:00:00.000Z",
           "copilotSessionId": "copilot-session",
           "turns": [{
@@ -451,6 +477,7 @@ final class CoreLogicTests: XCTestCase {
           "utf8"
         ));
         console.log(JSON.stringify({
+          schemaVersion: snapshot.schemaVersion,
           copilotSessionId: snapshot.copilotSessionId,
           turnIds: snapshot.turns.map((turn) => turn.id)
         }));
@@ -485,9 +512,9 @@ final class CoreLogicTests: XCTestCase {
             String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
         )
         let output = stdout.fileHandleForReading.readDataToEndOfFile()
-        let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
-        XCTAssertEqual(summary?["copilotSessionId"] as? String, "copilot-session")
-        XCTAssertEqual(summary?["turnIds"] as? [String], ["preserved-turn"])
+        return try XCTUnwrap(
+            JSONSerialization.jsonObject(with: output) as? [String: Any]
+        )
     }
 
     func testStatusNotificationKindRoundTripsOverControlProtocol() throws {
