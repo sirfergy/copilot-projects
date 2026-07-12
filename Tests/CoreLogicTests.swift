@@ -426,6 +426,99 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary?["firstUserContent"] as? String, "OWNED")
     }
 
+    func testCopilotExtensionTranscriptByteBudgetPreservesForeground() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-bytes-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let prelude = #"""
+        let transcriptListener = null;
+        const history = [];
+        const chunk = "z".repeat(50000);
+        let clock = 0;
+        const ts = () => new Date(1700000000000 + (clock++) * 1000).toISOString();
+        // Interleave heavy foreground and scheduled turns so the total exceeds the
+        // 5MB budget; the byte trim must drop scheduled turns before foreground.
+        for (let index = 0; index < 40; index += 1) {
+          const scheduled = index % 2 === 1;
+          history.push({
+            id: `${scheduled ? "sched" : "fg"}-${index}`, type: "user.message",
+            timestamp: ts(),
+            data: { source: scheduled ? "schedule-x" : null, content: `turn ${index}` }
+          });
+          for (let m = 0; m < 4; m += 1) {
+            history.push({
+              id: `a-${index}-${m}`, type: "assistant.message", timestamp: ts(),
+              data: { messageId: `m-${index}-${m}`, content: chunk }
+            });
+          }
+          history.push({ id: `idle-${index}`, type: "session.idle", timestamp: ts(), data: {} });
+        }
+        const fakeSession = {
+          sessionId: "copilot-session",
+          rpc: { schedule: { list: async () => ({entries:[]}) } },
+          on(name, handler) { if (typeof name === "function") transcriptListener = name; },
+          async getEvents() { return history; }
+        };
+        """#
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: "const joinSession = async () => fakeSession;"
+        )
+        let epilogue = #"""
+
+        await new Promise((resolve) => setImmediate(resolve));
+        const encoded = readFileSync(
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+          "utf8"
+        );
+        const snapshot = JSON.parse(encoded);
+        const byKind = (kind) => snapshot.turns.filter((t) => t.kind === kind).length;
+        console.log(JSON.stringify({
+          bytes: Buffer.byteLength(encoded),
+          foreground: byKind("foreground"),
+          scheduled: byKind("scheduled")
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("bytes.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "COPILOT_PROJECTS_SESSION": "12345678-1234-1234-1234-123456789abc",
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
+        XCTAssertLessThanOrEqual(summary?["bytes"] as? Int ?? .max, 5 * 1_024 * 1_024)
+        // Foreground turns are preserved; scheduled turns absorb the byte pressure.
+        XCTAssertEqual(summary?["foreground"] as? Int, 20)
+        XCTAssertLessThan(summary?["scheduled"] as? Int ?? .max, 20)
+    }
 
     func testCopilotExtensionPreservesMatchingSnapshotWhenHistoryFails() throws {
         let summary = try copilotExtensionHistoryFailureSummary(schemaVersion: 3)

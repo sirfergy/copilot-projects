@@ -98,10 +98,11 @@ public enum CopilotExtension {
         // Several Copilot processes can share one app session id: a `copilot -p`
         // classifier (or any spawned CLI) inherits COPILOT_PROJECTS_SESSION from
         // the terminal and would otherwise clobber the interactive session's
-        // transcript with its own events. Only the process that owns the app
-        // session's shared files may write them. Ownership is re-evaluated per
-        // write and reclaimed whenever the recorded owner is gone, so the live
-        // interactive session recovers automatically after a restart.
+        // shared files (transcript, agent-activity, scheduled-turn marker) with
+        // its own events. Only the process that owns the app session may write
+        // them. Ownership is re-evaluated per write and reclaimed whenever the
+        // recorded owner is gone, so the live interactive session recovers
+        // automatically after a restart.
         function processAlive(pid) {
             if (!Number.isInteger(pid) || pid <= 0) return false;
             try {
@@ -112,23 +113,51 @@ public enum CopilotExtension {
             }
         }
 
+        function recordedOwner() {
+            try {
+                return JSON.parse(readFileSync(transcriptOwnerPath, "utf8"));
+            } catch {
+                return null;
+            }
+        }
+
+        // Read-only: are we the process currently recorded as owner? Never claims
+        // or writes, so it is safe to call from cleanup without a live different
+        // owner losing its marker to an exiting guest.
+        function isRecordedOwner() {
+            const owner = recordedOwner();
+            return Boolean(owner) && owner.copilotSessionId === session.sessionId;
+        }
+
+        // Claiming: returns true if this process may write shared files. Claims
+        // ownership atomically (exclusive create) when the marker is absent or
+        // held by a dead process, so two processes racing from a clean slate can
+        // never both win. Returns false if another live process owns it or the
+        // claim is lost.
         function ownsSharedFiles() {
-            try {
-                const owner = JSON.parse(readFileSync(transcriptOwnerPath, "utf8"));
-                if (owner.copilotSessionId === session.sessionId) return true;
-                if (processAlive(owner.pid)) return false;
-            } catch {}
-            try {
-                writeFileSync(
-                    transcriptOwnerPath,
-                    JSON.stringify({
-                        copilotSessionId: session.sessionId,
-                        pid: process.pid,
-                    }),
-                    { mode: 0o600 }
-                );
-            } catch {}
-            return true;
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+                const owner = recordedOwner();
+                if (owner) {
+                    if (owner.copilotSessionId === session.sessionId) return true;
+                    if (processAlive(owner.pid)) return false;
+                    try { rmSync(transcriptOwnerPath, { force: true }); } catch {}
+                }
+                try {
+                    writeFileSync(
+                        transcriptOwnerPath,
+                        JSON.stringify({
+                            copilotSessionId: session.sessionId,
+                            pid: process.pid,
+                        }),
+                        { flag: "wx", mode: 0o600 }
+                    );
+                    return true;
+                } catch {
+                    // Lost the create race; re-read and re-evaluate.
+                }
+            }
+            const owner = recordedOwner();
+            return Boolean(owner) && owner.copilotSessionId === session.sessionId;
         }
 
         function normalizedTimestamp(value) {
@@ -145,6 +174,7 @@ public enum CopilotExtension {
         }
 
         function setScheduledTurnMarker(active) {
+            if (!ownsSharedFiles()) return;
             try {
                 if (active) {
                     writeFileSync(scheduledTurnPath, "");
@@ -159,6 +189,7 @@ public enum CopilotExtension {
         } catch {}
 
         function publish(error) {
+            if (!ownsSharedFiles()) return;
             const snapshot = {
                 schemaVersion: 1,
                 updatedAt: new Date().toISOString(),
@@ -212,28 +243,75 @@ public enum CopilotExtension {
             };
         }
 
-        function publishTranscript() {
-            if (!ownsSharedFiles()) return;
-            clearTimeout(transcriptPublishTimer);
-            transcriptPublishTimer = null;
-            trimTranscriptTurns();
-            const pending = serializedPendingTurn();
-            const turns = pending
-                ? [...transcriptTurns, pending]
-                : transcriptTurns.slice();
-            const snapshot = {
+        // Serializes the transcript within the byte budget while protecting the
+        // human conversation. Reduction order sacrifices the least valuable
+        // content first: whole non-foreground turns, then non-foreground payload
+        // (including an in-progress scheduled/automated turn), then whole
+        // foreground turns, then foreground payload — never the in-progress
+        // turn as a whole. Whole-turn drops mutate transcriptTurns and payload
+        // shedding mutates the shared turn objects, so repeated publishes don't
+        // redo the work.
+        function encodedTranscriptWithinBudget(pending) {
+            const build = () => ({
                 schemaVersion: 3,
                 updatedAt: new Date().toISOString(),
                 copilotSessionId: boundedMetadataText(session.sessionId),
                 ownerPid: process.pid,
-                turns,
-            };
+                turns: pending ? [...transcriptTurns, pending] : transcriptTurns.slice(),
+            });
+            let snapshot = build();
             let encoded = JSON.stringify(snapshot);
-            while (Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES
-                    && snapshot.turns.length > 1) {
-                snapshot.turns.shift();
-                encoded = JSON.stringify(snapshot);
+            const overBudget = () => Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES;
+            const reencode = () => { encoded = JSON.stringify(snapshot); };
+            const shedOldestPayload = (predicate) => {
+                for (const turn of snapshot.turns) {
+                    if (!predicate(turn)) continue;
+                    if (turn.assistantMessages.length > 0) {
+                        turn.assistantMessages.shift();
+                        return true;
+                    }
+                    if (turn.tools.length > 0) {
+                        turn.tools.shift();
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            // Phase 1: drop whole non-foreground stored turns (oldest first).
+            while (overBudget()) {
+                const index = transcriptTurns.findIndex(
+                    (turn) => turn.kind !== "foreground"
+                );
+                if (index === -1) break;
+                transcriptTurns.splice(index, 1);
+                snapshot = build();
+                reencode();
             }
+            // Phase 2: shed payload from any remaining non-foreground turn (i.e. an
+            // in-progress scheduled/automated turn) before touching foreground.
+            while (overBudget()
+                    && shedOldestPayload((turn) => turn.kind !== "foreground")) {
+                reencode();
+            }
+            // Phase 3: drop whole foreground stored turns (oldest), never pending,
+            // leaving at least one turn for payload shedding below.
+            const minStored = pending ? 0 : 1;
+            while (overBudget() && transcriptTurns.length > minStored) {
+                transcriptTurns.splice(0, 1);
+                snapshot = build();
+                reencode();
+            }
+            // Phase 4: shed payload from the last remaining turn(s).
+            while (overBudget() && shedOldestPayload(() => true)) {
+                reencode();
+            }
+            return encoded;
+        }
+
+        function writeTranscriptSnapshot() {
+            trimTranscriptTurns();
+            const encoded = encodedTranscriptWithinBudget(serializedPendingTurn());
             const temporaryPath = `${transcriptPath}.${process.pid}.tmp`;
             try {
                 writeFileSync(temporaryPath, encoded, { mode: 0o600 });
@@ -241,6 +319,13 @@ public enum CopilotExtension {
             } catch {
                 removeFile(temporaryPath);
             }
+        }
+
+        function publishTranscript() {
+            if (!ownsSharedFiles()) return;
+            clearTimeout(transcriptPublishTimer);
+            transcriptPublishTimer = null;
+            writeTranscriptSnapshot();
         }
 
         function schedulePublishTranscript() {
@@ -282,9 +367,11 @@ public enum CopilotExtension {
             pendingTranscriptTurn = null;
             if (!turn) return;
             turn.isAborted = aborted === true;
-            turn.endedAt = endedAt
-                ? normalizedTimestamp(endedAt)
-                : turn.startedAt;
+            let end = endedAt ? normalizedTimestamp(endedAt) : turn.startedAt;
+            // A boundary event (e.g. a queued live idle) can carry a timestamp
+            // earlier than this turn's start; never record a negative duration.
+            if (end < turn.startedAt) end = turn.startedAt;
+            turn.endedAt = end;
             if (!turn.userContent
                     && turn.assistantMessages.length === 0
                     && turn.tools.length === 0) return;
@@ -514,9 +601,12 @@ public enum CopilotExtension {
         function cleanup() {
             clearInterval(timer);
             clearTimeout(transcriptPublishTimer);
-            // Only the owning process may remove the shared files, so a spawned
-            // helper exiting can't wipe the interactive session's markers.
-            if (ownsSharedFiles()) {
+            // Use the read-only ownership check (never claim during cleanup) so an
+            // exiting spawned helper can't wipe a live interactive session's
+            // markers. The owner flushes any progress buffered behind the publish
+            // throttle before releasing the shared files.
+            if (isRecordedOwner()) {
+                writeTranscriptSnapshot();
                 removeFile(snapshotPath);
                 removeFile(scheduledTurnPath);
                 removeFile(transcriptOwnerPath);
