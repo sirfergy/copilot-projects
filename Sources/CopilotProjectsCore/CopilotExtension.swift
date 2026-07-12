@@ -31,6 +31,7 @@ public enum CopilotExtension {
         const sessionsDir = join(dirname(socketPath), "sessions");
         const snapshotPath = join(sessionsDir, `${appSessionId}.agent-activity.json`);
         const transcriptPath = join(sessionsDir, `${appSessionId}.transcript.json`);
+        const transcriptOwnerPath = join(sessionsDir, `${appSessionId}.transcript-owner.json`);
         const scheduledTurnPath = join(sessionsDir, `${appSessionId}.scheduled-turn`);
         const activeSubagents = new Map();
         let foregroundTurnActive = false;
@@ -42,19 +43,18 @@ public enum CopilotExtension {
         let schedules = [];
         const transcriptTurns = [];
         const transcriptEventIds = new Set();
-        const suppressedInteractionIds = new Set();
-        const suppressedTurnIds = new Set();
-        const suppressedTurnInteractions = new Map();
         const queuedTranscriptEvents = [];
         let pendingTranscriptTurn = null;
         let transcriptInitialized = false;
-        let transcriptTurnEndTimer = null;
+        let transcriptPublishTimer = null;
 
-        const MAX_TRANSCRIPT_TURNS = 100;
+        const MAX_TRANSCRIPT_TURNS = 200;
         const MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024;
         const MAX_TRANSCRIPT_TEXT = 50_000;
         const MAX_TRANSCRIPT_METADATA_TEXT = 512;
-        const TRANSCRIPT_TURN_END_GRACE_MS = 1_000;
+        const MAX_TRANSCRIPT_ASSISTANT_MESSAGES = 250;
+        const MAX_TRANSCRIPT_TOOLS = 400;
+        const TRANSCRIPT_PUBLISH_THROTTLE_MS = 400;
 
         function truncatedText(value, maximumLength) {
             const text = typeof value === "string" ? value : "";
@@ -82,7 +82,7 @@ public enum CopilotExtension {
                 const encoded = readFileSync(transcriptPath, "utf8");
                 if (Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES) return false;
                 const snapshot = JSON.parse(encoded);
-                if (snapshot.schemaVersion !== 2
+                if (snapshot.schemaVersion !== 3
                         || snapshot.copilotSessionId
                             !== boundedMetadataText(session.sessionId)
                         || !Array.isArray(snapshot.turns)) return false;
@@ -93,6 +93,42 @@ public enum CopilotExtension {
             } catch {
                 return false;
             }
+        }
+
+        // Several Copilot processes can share one app session id: a `copilot -p`
+        // classifier (or any spawned CLI) inherits COPILOT_PROJECTS_SESSION from
+        // the terminal and would otherwise clobber the interactive session's
+        // transcript with its own events. Only the process that owns the app
+        // session's shared files may write them. Ownership is re-evaluated per
+        // write and reclaimed whenever the recorded owner is gone, so the live
+        // interactive session recovers automatically after a restart.
+        function processAlive(pid) {
+            if (!Number.isInteger(pid) || pid <= 0) return false;
+            try {
+                process.kill(pid, 0);
+                return true;
+            } catch (error) {
+                return Boolean(error) && error.code === "EPERM";
+            }
+        }
+
+        function ownsSharedFiles() {
+            try {
+                const owner = JSON.parse(readFileSync(transcriptOwnerPath, "utf8"));
+                if (owner.copilotSessionId === session.sessionId) return true;
+                if (processAlive(owner.pid)) return false;
+            } catch {}
+            try {
+                writeFileSync(
+                    transcriptOwnerPath,
+                    JSON.stringify({
+                        copilotSessionId: session.sessionId,
+                        pid: process.pid,
+                    }),
+                    { mode: 0o600 }
+                );
+            } catch {}
+            return true;
         }
 
         function normalizedTimestamp(value) {
@@ -144,17 +180,58 @@ public enum CopilotExtension {
             }
         }
 
+        function trimTranscriptTurns() {
+            // Keep the transcript bounded, but never let automated or scheduled
+            // activity evict the human conversation: drop the oldest non-foreground
+            // turn first, and only fall back to the oldest foreground turn once no
+            // other turns remain.
+            while (transcriptTurns.length > MAX_TRANSCRIPT_TURNS) {
+                let index = transcriptTurns.findIndex(
+                    (turn) => turn.kind !== "foreground"
+                );
+                if (index === -1) index = 0;
+                transcriptTurns.splice(index, 1);
+            }
+        }
+
+        function serializedPendingTurn() {
+            const turn = pendingTranscriptTurn;
+            if (!turn) return null;
+            if (!turn.userContent
+                    && turn.assistantMessages.length === 0
+                    && turn.tools.length === 0) return null;
+            return {
+                id: turn.id,
+                startedAt: turn.startedAt,
+                endedAt: null,
+                kind: turn.kind,
+                userContent: turn.userContent,
+                assistantMessages: turn.assistantMessages,
+                tools: turn.tools,
+                isAborted: false,
+            };
+        }
+
         function publishTranscript() {
+            if (!ownsSharedFiles()) return;
+            clearTimeout(transcriptPublishTimer);
+            transcriptPublishTimer = null;
+            trimTranscriptTurns();
+            const pending = serializedPendingTurn();
+            const turns = pending
+                ? [...transcriptTurns, pending]
+                : transcriptTurns.slice();
             const snapshot = {
-                schemaVersion: 2,
+                schemaVersion: 3,
                 updatedAt: new Date().toISOString(),
                 copilotSessionId: boundedMetadataText(session.sessionId),
-                turns: transcriptTurns,
+                ownerPid: process.pid,
+                turns,
             };
             let encoded = JSON.stringify(snapshot);
             while (Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES
-                    && transcriptTurns.length > 0) {
-                transcriptTurns.shift();
+                    && snapshot.turns.length > 1) {
+                snapshot.turns.shift();
                 encoded = JSON.stringify(snapshot);
             }
             const temporaryPath = `${transcriptPath}.${process.pid}.tmp`;
@@ -166,76 +243,68 @@ public enum CopilotExtension {
             }
         }
 
-        function startTranscriptTurn(event, visibleUser) {
-            const source = event.data.source || null;
+        function schedulePublishTranscript() {
+            if (transcriptPublishTimer) return;
+            transcriptPublishTimer = setTimeout(() => {
+                transcriptPublishTimer = null;
+                publishTranscript();
+            }, TRANSCRIPT_PUBLISH_THROTTLE_MS);
+        }
+
+        // A transcript turn spans a whole user request: the visible user message
+        // plus every agentic loop iteration (assistant.turn_start/turn_end fire
+        // many times per request) until the next visible user message or
+        // session.idle. `kind` is "foreground" (typed by a person), "scheduled"
+        // (a recurring prompt), or "automated" (assistant activity with no
+        // preceding visible message).
+        function startTranscriptTurn(event, kind) {
             pendingTranscriptTurn = {
                 id: boundedMetadataText(event.id),
                 startedAt: normalizedTimestamp(event.timestamp),
                 endedAt: null,
-                kind: source?.startsWith("schedule-")
-                    ? "scheduled"
-                    : visibleUser ? "foreground" : "automated",
-                userContent: visibleUser ? boundedText(event.data.content) : "",
+                kind,
+                userContent: kind === "automated"
+                    ? ""
+                    : boundedText(event.data.content),
                 assistantMessages: [],
                 tools: [],
                 isAborted: false,
-                hasTurnEnd: false,
-                turnEndAt: null,
             };
         }
 
         function ensureSyntheticTranscriptTurn(event) {
             if (pendingTranscriptTurn) return;
-            pendingTranscriptTurn = {
-                id: boundedMetadataText(event.id),
-                startedAt: normalizedTimestamp(event.timestamp),
-                endedAt: null,
-                kind: "automated",
-                userContent: "",
-                assistantMessages: [],
-                tools: [],
-                isAborted: false,
-                hasTurnEnd: false,
-                turnEndAt: null,
-            };
+            startTranscriptTurn(event, "automated");
         }
 
-        function finishTranscriptTurn(aborted, endedAt, publishNow) {
+        function finishTranscriptTurn(aborted, endedAt) {
             const turn = pendingTranscriptTurn;
             pendingTranscriptTurn = null;
-            clearTimeout(transcriptTurnEndTimer);
-            transcriptTurnEndTimer = null;
             if (!turn) return;
             turn.isAborted = aborted === true;
             turn.endedAt = endedAt
                 ? normalizedTimestamp(endedAt)
-                : turn.turnEndAt || turn.startedAt;
-            delete turn.hasTurnEnd;
-            delete turn.turnEndAt;
+                : turn.startedAt;
             if (!turn.userContent
                     && turn.assistantMessages.length === 0
                     && turn.tools.length === 0) return;
             transcriptTurns.push(turn);
-            if (transcriptTurns.length > MAX_TRANSCRIPT_TURNS) {
-                transcriptTurns.splice(
-                    0,
-                    transcriptTurns.length - MAX_TRANSCRIPT_TURNS
-                );
-            }
-            if (publishNow) publishTranscript();
+            trimTranscriptTurns();
         }
 
-        function scheduleTranscriptTurnEndFallback() {
-            clearTimeout(transcriptTurnEndTimer);
-            transcriptTurnEndTimer = null;
-            const turn = pendingTranscriptTurn;
-            if (!turn?.hasTurnEnd) return;
-            transcriptTurnEndTimer = setTimeout(() => {
-                transcriptTurnEndTimer = null;
-                if (pendingTranscriptTurn?.id !== turn.id
-                        || !pendingTranscriptTurn.hasTurnEnd) return;
-                finishTranscriptTurn(false, turn.turnEndAt, true);
-            }, TRANSCRIPT_TURN_END_GRACE_MS);
+        // Classifies a root-level user.message. Genuine human input arrives with
+        // no source; recurring prompts use "schedule-*". Every other source
+        // (skill context, system reminders) is injected machinery that must not
+        // become its own turn — its work folds into the current human turn.
+        // NB: parentAgentTaskId is set on real human messages too, so it must not
+        // be used to suppress input.
+        function classifyUserMessage(event) {
+            const source = event.data.source;
+            if (source === null || source === undefined) return "foreground";
+            if (typeof source === "string" && source.startsWith("schedule-")) {
+                return "scheduled";
+            }
+            return null;
         }
 
         function toolTitle(data) {
@@ -244,77 +313,30 @@ public enum CopilotExtension {
                 || "Tool";
         }
 
-        function rememberBounded(set, value) {
-            if (!value) return;
-            set.add(value);
-            while (set.size > 500) {
-                set.delete(set.values().next().value);
-            }
-        }
-
         function processTranscriptEvent(event, live, reconciling = false) {
             if (event.agentId) return;
             if (reconciling) {
                 if (transcriptEventIds.has(event.id)) return;
                 transcriptEventIds.add(event.id);
             }
-            if (event.type === "user.message" && event.data.parentAgentTaskId) {
-                rememberBounded(suppressedInteractionIds, event.data.interactionId);
-                return;
-            }
-            if (event.data?.interactionId
-                    && suppressedInteractionIds.has(event.data.interactionId)) {
-                if (event.type === "assistant.turn_start") {
-                    rememberBounded(suppressedTurnIds, event.data.turnId);
-                    if (event.data.turnId) {
-                        suppressedTurnInteractions.set(
-                            event.data.turnId,
-                            event.data.interactionId
-                        );
-                        while (suppressedTurnInteractions.size > 500) {
-                            suppressedTurnInteractions.delete(
-                                suppressedTurnInteractions.keys().next().value
-                            );
-                        }
-                    }
-                }
-                return;
-            }
-            if (event.data?.turnId && suppressedTurnIds.has(event.data.turnId)) {
-                if (event.type === "assistant.turn_end") {
-                    suppressedTurnIds.delete(event.data.turnId);
-                    const interactionId = suppressedTurnInteractions.get(event.data.turnId);
-                    suppressedTurnInteractions.delete(event.data.turnId);
-                    if (interactionId) suppressedInteractionIds.delete(interactionId);
-                }
-                return;
-            }
-            if (pendingTranscriptTurn?.hasTurnEnd
-                    && event.type !== "assistant.turn_end"
-                    && event.type !== "session.idle") {
-                finishTranscriptTurn(
-                    false,
-                    pendingTranscriptTurn.turnEndAt || event.timestamp,
-                    live
-                );
-            }
 
             switch (event.type) {
             case "user.message": {
-                const source = event.data.source || null;
-                const visibleUser = source === null || source.startsWith("schedule-");
-                if (visibleUser) {
-                    finishTranscriptTurn(false, event.timestamp, live);
-                    startTranscriptTurn(event, true);
-                } else if (!pendingTranscriptTurn) {
-                    startTranscriptTurn(event, false);
+                const kind = classifyUserMessage(event);
+                if (kind) {
+                    finishTranscriptTurn(false, event.timestamp);
+                    startTranscriptTurn(event, kind);
+                    if (live) publishTranscript();
                 }
+                // Injected context (skill/system) is not its own turn; the work
+                // it triggers folds into the current human turn.
                 break;
             }
             case "assistant.message":
                 ensureSyntheticTranscriptTurn(event);
                 if (event.data.content) {
-                    if (pendingTranscriptTurn.assistantMessages.length >= 20) {
+                    if (pendingTranscriptTurn.assistantMessages.length
+                            >= MAX_TRANSCRIPT_ASSISTANT_MESSAGES) {
                         pendingTranscriptTurn.assistantMessages.shift();
                     }
                     pendingTranscriptTurn.assistantMessages.push({
@@ -322,6 +344,7 @@ public enum CopilotExtension {
                         timestamp: normalizedTimestamp(event.timestamp),
                         content: boundedText(event.data.content),
                     });
+                    if (live) schedulePublishTranscript();
                 }
                 break;
             case "tool.execution_start": {
@@ -330,7 +353,9 @@ public enum CopilotExtension {
                 const existing = pendingTranscriptTurn.tools.find(
                     (tool) => tool.id === toolId
                 );
-                if (!existing && pendingTranscriptTurn.tools.length < 100) {
+                if (!existing
+                        && pendingTranscriptTurn.tools.length
+                            < MAX_TRANSCRIPT_TOOLS) {
                     pendingTranscriptTurn.tools.push({
                         id: toolId,
                         name: boundedMetadataText(event.data.toolName),
@@ -338,6 +363,7 @@ public enum CopilotExtension {
                         success: null,
                     });
                 }
+                if (live) schedulePublishTranscript();
                 break;
             }
             case "tool.execution_complete": {
@@ -346,7 +372,9 @@ public enum CopilotExtension {
                 let tool = pendingTranscriptTurn.tools.find(
                     (candidate) => candidate.id === toolId
                 );
-                if (!tool && pendingTranscriptTurn.tools.length < 100) {
+                if (!tool
+                        && pendingTranscriptTurn.tools.length
+                            < MAX_TRANSCRIPT_TOOLS) {
                     tool = {
                         id: toolId,
                         name: "tool",
@@ -358,21 +386,17 @@ public enum CopilotExtension {
                     pendingTranscriptTurn.tools.push(tool);
                 }
                 if (tool) tool.success = event.data.success === true;
+                if (live) schedulePublishTranscript();
                 break;
             }
             case "assistant.turn_end":
-                if (pendingTranscriptTurn) {
-                    pendingTranscriptTurn.hasTurnEnd = true;
-                    pendingTranscriptTurn.turnEndAt = normalizedTimestamp(event.timestamp);
-                    if (live) scheduleTranscriptTurnEndFallback();
-                }
+                // One agentic loop iteration finished, not the whole request.
+                // Do not end the transcript turn here; just flush progress.
+                if (live && pendingTranscriptTurn) schedulePublishTranscript();
                 break;
             case "session.idle":
-                finishTranscriptTurn(
-                    event.data.aborted === true,
-                    event.timestamp,
-                    live
-                );
+                finishTranscriptTurn(event.data.aborted === true, event.timestamp);
+                if (live) publishTranscript();
                 break;
             }
         }
@@ -468,6 +492,7 @@ public enum CopilotExtension {
         try {
             const history = await session.getEvents();
             transcriptTurns.length = 0;
+            pendingTranscriptTurn = null;
             for (const event of history) processTranscriptEvent(event, false, true);
         } catch {
             transcriptTurns.length = 0;
@@ -482,16 +507,20 @@ public enum CopilotExtension {
         queuedTranscriptEvents.length = 0;
         transcriptEventIds.clear();
         publishTranscript();
-        scheduleTranscriptTurnEndFallback();
 
         await refreshSchedules();
         const timer = setInterval(refreshSchedules, 5_000);
 
         function cleanup() {
             clearInterval(timer);
-            clearTimeout(transcriptTurnEndTimer);
-            removeFile(snapshotPath);
-            removeFile(scheduledTurnPath);
+            clearTimeout(transcriptPublishTimer);
+            // Only the owning process may remove the shared files, so a spawned
+            // helper exiting can't wipe the interactive session's markers.
+            if (ownsSharedFiles()) {
+                removeFile(snapshotPath);
+                removeFile(scheduledTurnPath);
+                removeFile(transcriptOwnerPath);
+            }
         }
         process.once("SIGTERM", cleanup);
         process.once("SIGINT", cleanup);
