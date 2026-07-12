@@ -87,6 +87,8 @@ enum SessionArtifacts {
             Paths.scheduledTurnMarkerPath(sessionId: sessionId),
             Paths.agentActivitySnapshotPath(sessionId: sessionId),
             Paths.transcriptSnapshotPath(sessionId: sessionId),
+            Paths.transcriptOwnerPath(sessionId: sessionId),
+            Paths.transcriptOwnerLockPath(sessionId: sessionId),
         ] {
             try? fm.removeItem(atPath: path)
         }

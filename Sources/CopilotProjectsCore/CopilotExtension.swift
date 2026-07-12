@@ -32,6 +32,7 @@ public enum CopilotExtension {
         const snapshotPath = join(sessionsDir, `${appSessionId}.agent-activity.json`);
         const transcriptPath = join(sessionsDir, `${appSessionId}.transcript.json`);
         const transcriptOwnerPath = join(sessionsDir, `${appSessionId}.transcript-owner.json`);
+        const transcriptOwnerLockPath = `${transcriptOwnerPath}.lock`;
         const scheduledTurnPath = join(sessionsDir, `${appSessionId}.scheduled-turn`);
         const activeSubagents = new Map();
         let foregroundTurnActive = false;
@@ -121,43 +122,93 @@ public enum CopilotExtension {
             }
         }
 
+        function ownerMatchesCurrentProcess(owner) {
+            return Boolean(owner)
+                && owner.copilotSessionId === session.sessionId
+                && owner.pid === process.pid;
+        }
+
+        function ownerMatches(left, right) {
+            return Boolean(left) && Boolean(right)
+                && left.copilotSessionId === right.copilotSessionId
+                && left.pid === right.pid;
+        }
+
         // Read-only: are we the process currently recorded as owner? Never claims
         // or writes, so it is safe to call from cleanup without a live different
         // owner losing its marker to an exiting guest.
         function isRecordedOwner() {
-            const owner = recordedOwner();
-            return Boolean(owner) && owner.copilotSessionId === session.sessionId;
+            return ownerMatchesCurrentProcess(recordedOwner());
+        }
+
+        function writeOwnerMarker() {
+            try {
+                writeFileSync(
+                    transcriptOwnerPath,
+                    JSON.stringify({
+                        copilotSessionId: session.sessionId,
+                        pid: process.pid,
+                    }),
+                    { flag: "wx", mode: 0o600 }
+                );
+                return true;
+            } catch {
+                return false;
+            }
+        }
+
+        function withTranscriptOwnerLock(action) {
+            try {
+                writeFileSync(
+                    transcriptOwnerLockPath,
+                    JSON.stringify({
+                        copilotSessionId: session.sessionId,
+                        pid: process.pid,
+                    }),
+                    { flag: "wx", mode: 0o600 }
+                );
+            } catch {
+                return false;
+            }
+            try {
+                return action();
+            } finally {
+                removeFile(transcriptOwnerLockPath);
+            }
+        }
+
+        function reclaimDeadOwner(expectedOwner) {
+            return withTranscriptOwnerLock(() => {
+                const owner = recordedOwner();
+                if (!owner) return writeOwnerMarker();
+                if (ownerMatchesCurrentProcess(owner)) return true;
+                if (processAlive(owner.pid)) return false;
+                if (!ownerMatches(owner, expectedOwner)) return false;
+                try { rmSync(transcriptOwnerPath, { force: true }); } catch {}
+                return writeOwnerMarker();
+            });
         }
 
         // Claiming: returns true if this process may write shared files. Claims
         // ownership atomically (exclusive create) when the marker is absent or
-        // held by a dead process, so two processes racing from a clean slate can
-        // never both win. Returns false if another live process owns it or the
-        // claim is lost.
+        // held by a dead process. Stale-owner reclamation is serialized so a
+        // process that read the stale marker cannot delete a fresh winner's
+        // marker. Returns false if another live process owns it or the claim is
+        // lost.
         function ownsSharedFiles() {
             for (let attempt = 0; attempt < 3; attempt += 1) {
                 const owner = recordedOwner();
                 if (owner) {
-                    if (owner.copilotSessionId === session.sessionId) return true;
+                    if (ownerMatchesCurrentProcess(owner)) return true;
                     if (processAlive(owner.pid)) return false;
-                    try { rmSync(transcriptOwnerPath, { force: true }); } catch {}
-                }
-                try {
-                    writeFileSync(
-                        transcriptOwnerPath,
-                        JSON.stringify({
-                            copilotSessionId: session.sessionId,
-                            pid: process.pid,
-                        }),
-                        { flag: "wx", mode: 0o600 }
-                    );
+                    if (reclaimDeadOwner(owner)) return true;
+                } else if (writeOwnerMarker()) {
                     return true;
-                } catch {
+                } else {
                     // Lost the create race; re-read and re-evaluate.
                 }
             }
-            const owner = recordedOwner();
-            return Boolean(owner) && owner.copilotSessionId === session.sessionId;
+            return ownerMatchesCurrentProcess(recordedOwner());
         }
 
         function normalizedTimestamp(value) {
@@ -211,12 +262,12 @@ public enum CopilotExtension {
             }
         }
 
-        function trimTranscriptTurns() {
+        function trimTranscriptTurns(maximumTurns = MAX_TRANSCRIPT_TURNS) {
             // Keep the transcript bounded, but never let automated or scheduled
             // activity evict the human conversation: drop the oldest non-foreground
             // turn first, and only fall back to the oldest foreground turn once no
             // other turns remain.
-            while (transcriptTurns.length > MAX_TRANSCRIPT_TURNS) {
+            while (transcriptTurns.length > maximumTurns) {
                 let index = transcriptTurns.findIndex(
                     (turn) => turn.kind !== "foreground"
                 );
@@ -310,8 +361,9 @@ public enum CopilotExtension {
         }
 
         function writeTranscriptSnapshot() {
-            trimTranscriptTurns();
-            const encoded = encodedTranscriptWithinBudget(serializedPendingTurn());
+            const pending = serializedPendingTurn();
+            trimTranscriptTurns(pending ? MAX_TRANSCRIPT_TURNS - 1 : MAX_TRANSCRIPT_TURNS);
+            const encoded = encodedTranscriptWithinBudget(pending);
             const temporaryPath = `${transcriptPath}.${process.pid}.tmp`;
             try {
                 writeFileSync(temporaryPath, encoded, { mode: 0o600 });

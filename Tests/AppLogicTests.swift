@@ -1465,16 +1465,24 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(remote.turns.isEmpty)
     }
 
-    func testSessionArtifactCleanupRemovesTranscriptSnapshot() throws {
+    func testSessionArtifactCleanupRemovesTranscriptArtifacts() throws {
         let sessionId = UUID().uuidString
         Paths.ensureStateDir()
-        let path = Paths.transcriptSnapshotPath(sessionId: sessionId)
-        try Data("{}".utf8).write(to: URL(fileURLWithPath: path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+        let paths = [
+            Paths.transcriptSnapshotPath(sessionId: sessionId),
+            Paths.transcriptOwnerPath(sessionId: sessionId),
+            Paths.transcriptOwnerLockPath(sessionId: sessionId),
+        ]
+        for path in paths {
+            try Data("{}".utf8).write(to: URL(fileURLWithPath: path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+        }
 
         SessionArtifacts.removeFiles(sessionId: sessionId)
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        for path in paths {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        }
     }
 
     @MainActor

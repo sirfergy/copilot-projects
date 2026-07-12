@@ -144,6 +144,14 @@ public enum Paths {
         sessionsDir.appendingPathComponent("\(sessionId).transcript.json").path
     }
 
+    public static func transcriptOwnerPath(sessionId: String) -> String {
+        sessionsDir.appendingPathComponent("\(sessionId).transcript-owner.json").path
+    }
+
+    public static func transcriptOwnerLockPath(sessionId: String) -> String {
+        sessionsDir.appendingPathComponent("\(sessionId).transcript-owner.json.lock").path
+    }
+
     /// The bundled dtach helper (resumability backend), or an override, or nil.
     public static var dtachExecutable: String? {
         let env = ProcessInfo.processInfo.environment

@@ -75,6 +75,8 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains("classifyUserMessage"))
         XCTAssertTrue(CopilotExtension.script.contains("ownsSharedFiles"))
         XCTAssertTrue(CopilotExtension.script.contains("transcript-owner.json"))
+        XCTAssertTrue(CopilotExtension.script.contains("transcriptOwnerLockPath"))
+        XCTAssertTrue(CopilotExtension.script.contains("owner.pid === process.pid"))
         XCTAssertTrue(CopilotExtension.script.contains("schemaVersion: 3"))
         XCTAssertTrue(CopilotExtension.script.contains("publishTranscript();"))
         XCTAssertTrue(CopilotExtension.script.contains("removeFile(temporaryPath)"))
@@ -263,6 +265,7 @@ final class CoreLogicTests: XCTestCase {
           skillCtxLeaked,
           livePendingPresent: Boolean(livePending),
           livePendingOpen: livePending ? livePending.endedAt === null : false,
+          livePendingTurnCount: afterLiveUser.turns.length,
           liveUserLength: live?.userContent.length,
           liveTruncated: live?.userContent.endsWith("… truncated …"),
           liveHasTrailingHighSurrogate: /[\uD800-\uDBFF]$/.test(
@@ -325,6 +328,7 @@ final class CoreLogicTests: XCTestCase {
         // A live human message shows immediately as an open (pending) turn.
         XCTAssertEqual(summary?["livePendingPresent"] as? Bool, true)
         XCTAssertEqual(summary?["livePendingOpen"] as? Bool, true)
+        XCTAssertLessThanOrEqual(summary?["livePendingTurnCount"] as? Int ?? .max, 200)
         XCTAssertLessThanOrEqual(summary?["liveUserLength"] as? Int ?? .max, 50_020)
         XCTAssertEqual(summary?["liveTruncated"] as? Bool, true)
         XCTAssertEqual(summary?["liveHasTrailingHighSurrogate"] as? Bool, false)
@@ -344,13 +348,14 @@ final class CoreLogicTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let appSessionId = "12345678-1234-1234-1234-123456789abc"
         // A live owner (pid 1 is always present; process.kill(1, 0) throws EPERM,
-        // which the guard treats as "alive") different from this Copilot session.
-        try Data(#"{"copilotSessionId":"other-live","pid":1}"#.utf8).write(
+        // which the guard treats as "alive") in a different process, even with
+        // the same Copilot session id.
+        try Data(#"{"copilotSessionId":"guest-session","pid":1}"#.utf8).write(
             to: sessions.appendingPathComponent("\(appSessionId).transcript-owner.json")
         )
         let transcriptURL = sessions.appendingPathComponent("\(appSessionId).transcript.json")
         try Data(#"""
-        {"schemaVersion":3,"copilotSessionId":"other-live","ownerPid":1,"turns":[{
+        {"schemaVersion":3,"copilotSessionId":"guest-session","ownerPid":1,"turns":[{
           "id":"owned","startedAt":"2026-07-12T00:00:00.000Z","endedAt":null,
           "kind":"foreground","userContent":"OWNED","assistantMessages":[],
           "tools":[],"isAborted":false}]}
@@ -422,7 +427,7 @@ final class CoreLogicTests: XCTestCase {
         let output = stdout.fileHandleForReading.readDataToEndOfFile()
         let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
         // The guest must not clobber the live owner's transcript.
-        XCTAssertEqual(summary?["copilotSessionId"] as? String, "other-live")
+        XCTAssertEqual(summary?["copilotSessionId"] as? String, "guest-session")
         XCTAssertEqual(summary?["firstUserContent"] as? String, "OWNED")
     }
 
