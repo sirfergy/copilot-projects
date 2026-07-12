@@ -250,7 +250,6 @@ actor APNsProvider: APNsSending {
                 "sound": "default",
                 "thread-id": payload.sessionId ?? "copilot-projects",
                 "category": NotificationSyncContract.categoryIdentifier,
-                "mutable-content": 1,
             ]
         }
         var object: [String: Any] = [
