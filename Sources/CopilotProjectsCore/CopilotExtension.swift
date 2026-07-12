@@ -49,11 +49,27 @@ public enum CopilotExtension {
         const MAX_TRANSCRIPT_TURNS = 100;
         const MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024;
         const MAX_TRANSCRIPT_TEXT = 50_000;
+        const MAX_TRANSCRIPT_METADATA_TEXT = 512;
+
+        function truncatedText(value, maximumLength) {
+            const text = typeof value === "string" ? value : "";
+            if (text.length <= maximumLength) return text;
+            let truncated = text.slice(0, maximumLength);
+            const finalCodeUnit = truncated.charCodeAt(truncated.length - 1);
+            if (finalCodeUnit >= 0xD800 && finalCodeUnit <= 0xDBFF) {
+                truncated = truncated.slice(0, -1);
+            }
+            return truncated;
+        }
 
         function boundedText(value) {
             const text = typeof value === "string" ? value : "";
             if (text.length <= MAX_TRANSCRIPT_TEXT) return text;
-            return `${text.slice(0, MAX_TRANSCRIPT_TEXT)}\n… truncated …`;
+            return `${truncatedText(text, MAX_TRANSCRIPT_TEXT)}\n… truncated …`;
+        }
+
+        function boundedMetadataText(value) {
+            return truncatedText(value, MAX_TRANSCRIPT_METADATA_TEXT);
         }
 
         function normalizedTimestamp(value) {
@@ -109,12 +125,12 @@ public enum CopilotExtension {
             const snapshot = {
                 schemaVersion: 1,
                 updatedAt: new Date().toISOString(),
-                copilotSessionId: session.sessionId,
+                copilotSessionId: boundedMetadataText(session.sessionId),
                 turns: transcriptTurns,
             };
             let encoded = JSON.stringify(snapshot);
             while (Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES
-                    && transcriptTurns.length > 1) {
+                    && transcriptTurns.length > 0) {
                 transcriptTurns.shift();
                 encoded = JSON.stringify(snapshot);
             }
@@ -130,7 +146,7 @@ public enum CopilotExtension {
         function startTranscriptTurn(event, visibleUser) {
             const source = event.data.source || null;
             pendingTranscriptTurn = {
-                id: event.id,
+                id: boundedMetadataText(event.id),
                 startedAt: normalizedTimestamp(event.timestamp),
                 endedAt: null,
                 kind: source?.startsWith("schedule-")
@@ -147,7 +163,7 @@ public enum CopilotExtension {
         function ensureSyntheticTranscriptTurn(event) {
             if (pendingTranscriptTurn) return;
             pendingTranscriptTurn = {
-                id: event.id,
+                id: boundedMetadataText(event.id),
                 startedAt: normalizedTimestamp(event.timestamp),
                 endedAt: null,
                 kind: "automated",
@@ -213,7 +229,7 @@ public enum CopilotExtension {
                         pendingTranscriptTurn.assistantMessages.shift();
                     }
                     pendingTranscriptTurn.assistantMessages.push({
-                        id: event.data.messageId || event.id,
+                        id: boundedMetadataText(event.data.messageId || event.id),
                         timestamp: normalizedTimestamp(event.timestamp),
                         content: boundedText(event.data.content),
                     });
@@ -221,14 +237,15 @@ public enum CopilotExtension {
                 break;
             case "tool.execution_start": {
                 ensureSyntheticTranscriptTurn(event);
+                const toolId = boundedMetadataText(event.data.toolCallId);
                 const existing = pendingTranscriptTurn.tools.find(
-                    (tool) => tool.id === event.data.toolCallId
+                    (tool) => tool.id === toolId
                 );
                 if (!existing && pendingTranscriptTurn.tools.length < 100) {
                     pendingTranscriptTurn.tools.push({
-                        id: event.data.toolCallId,
-                        name: event.data.toolName,
-                        title: toolTitle(event.data),
+                        id: toolId,
+                        name: boundedMetadataText(event.data.toolName),
+                        title: boundedMetadataText(toolTitle(event.data)),
                         success: null,
                     });
                 }
@@ -236,14 +253,17 @@ public enum CopilotExtension {
             }
             case "tool.execution_complete": {
                 ensureSyntheticTranscriptTurn(event);
+                const toolId = boundedMetadataText(event.data.toolCallId);
                 let tool = pendingTranscriptTurn.tools.find(
-                    (candidate) => candidate.id === event.data.toolCallId
+                    (candidate) => candidate.id === toolId
                 );
                 if (!tool && pendingTranscriptTurn.tools.length < 100) {
                     tool = {
-                        id: event.data.toolCallId,
+                        id: toolId,
                         name: "tool",
-                        title: event.data.toolDescription?.name || "Tool",
+                        title: boundedMetadataText(
+                            event.data.toolDescription?.name || "Tool"
+                        ),
                         success: null,
                     };
                     pendingTranscriptTurn.tools.push(tool);

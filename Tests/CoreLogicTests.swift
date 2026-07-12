@@ -183,9 +183,10 @@ final class CoreLogicTests: XCTestCase {
         )
         let epilogue = #"""
 
+        const giantMetadata = "m".repeat(2_000_000);
         transcriptListener({
           id:"live-user",type:"user.message",timestamp:"2026-07-12T03:01:00.123Z",
-          data:{source:null,content:"x".repeat(50010)}
+          data:{source:null,content:"x".repeat(49999) + "😀"}
         });
         transcriptListener({
           id:"live-assistant",type:"assistant.message",
@@ -193,15 +194,30 @@ final class CoreLogicTests: XCTestCase {
           data:{messageId:"live-message",content:"live output"}
         });
         transcriptListener({
+          id:"live-tool-start",type:"tool.execution_start",
+          timestamp:"2026-07-12T03:01:01.500Z",
+          data:{
+            toolCallId:giantMetadata,
+            toolName:giantMetadata,
+            toolDescription:{name:giantMetadata}
+          }
+        });
+        transcriptListener({
+          id:"live-tool-complete",type:"tool.execution_complete",
+          timestamp:"2026-07-12T03:01:01.600Z",
+          data:{toolCallId:giantMetadata,success:true}
+        });
+        transcriptListener({
           id:"live-idle",type:"session.idle",timestamp:"2026-07-12T03:01:02.789Z",
           data:{aborted:false}
         });
 
-        const snapshot = JSON.parse(readFileSync(
+        const encodedSnapshot = readFileSync(
           `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
             + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
           "utf8"
-        ));
+        );
+        const snapshot = JSON.parse(encodedSnapshot);
         const find = (id) => snapshot.turns.find((turn) => turn.id === id);
         const hidden = find("hidden-user");
         const scheduled = find("scheduled-user");
@@ -218,9 +234,17 @@ final class CoreLogicTests: XCTestCase {
           overlapToolSuccess: overlap?.tools[0]?.success,
           liveUserLength: live?.userContent.length,
           liveTruncated: live?.userContent.endsWith("… truncated …"),
+          liveHasTrailingHighSurrogate: /[\uD800-\uDBFF]$/.test(
+            live?.userContent.split("\n")[0] || ""
+          ),
+          liveToolMetadataLength: live?.tools.reduce(
+            (total, tool) => total + tool.id.length + tool.name.length + tool.title.length,
+            0
+          ),
           liveStartedAt: live?.startedAt,
           liveAssistantAt: live?.assistantMessages[0]?.timestamp,
-          updatedAt: snapshot.updatedAt
+          updatedAt: snapshot.updatedAt,
+          snapshotBytes: Buffer.byteLength(encodedSnapshot)
         }));
         process.exit(0);
         """#
@@ -264,6 +288,12 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary?["overlapToolSuccess"] as? Bool, true)
         XCTAssertLessThanOrEqual(summary?["liveUserLength"] as? Int ?? .max, 50_020)
         XCTAssertEqual(summary?["liveTruncated"] as? Bool, true)
+        XCTAssertEqual(summary?["liveHasTrailingHighSurrogate"] as? Bool, false)
+        XCTAssertLessThanOrEqual(summary?["liveToolMetadataLength"] as? Int ?? .max, 1_536)
+        XCTAssertLessThanOrEqual(
+            summary?["snapshotBytes"] as? Int ?? .max,
+            5 * 1_024 * 1_024
+        )
         XCTAssertEqual(summary?["liveStartedAt"] as? String, "2026-07-12T03:01:00.123Z")
         XCTAssertEqual(summary?["liveAssistantAt"] as? String, "2026-07-12T03:01:01.456Z")
         XCTAssertNotNil((summary?["updatedAt"] as? String)?.range(
