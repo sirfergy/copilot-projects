@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import Darwin
 import CopilotProjectsCore
 import CopilotProjectsProtocol
