@@ -78,6 +78,29 @@ struct RemotePromptTarget {
     let send: (String) -> Bool
 }
 
+/// Outcome of a remote `POST /sessions/create`. Each case maps to a distinct HTTP
+/// status at the gateway so the client can react precisely (select, retry, or show
+/// an unsupported/unavailable message).
+enum RemoteSessionCreationOutcome: Equatable {
+    /// A brand-new session was created and its controller launched. (201)
+    case created(RemoteCreateSessionResponse)
+    /// The deterministic session already exists in the requested project — the
+    /// idempotent replay of an earlier successful create. Nothing was created. (200)
+    case existing(RemoteCreateSessionResponse)
+    /// The requested project id is not known to the host. (422)
+    case unknownProject
+    /// The request is well-formed but cannot be honored — the required `$HOME/Repos`
+    /// working directory is missing. Nothing was created. (422)
+    case invalid
+    /// The deterministic session id already exists in a DIFFERENT project. (409)
+    case conflict
+    /// The ledger shows this request was already processed but the session is gone;
+    /// it is deliberately not recreated. (410)
+    case gone
+    /// The Copilot executable could not be resolved, so no session was created. (503)
+    case unavailable
+}
+
 private enum WindowScreenshot {
     static func capture(_ request: ScreenshotCaptureRequest) -> ControlResponse {
         let result = ScreenshotCaptureBox()
@@ -247,6 +270,19 @@ final class AppModel: ObservableObject {
     private let remotePromptLiveSessions: ((Set<String>) -> Set<String>)?
     private let remotePromptTarget: ((String) -> RemotePromptTarget?)?
 
+    /// Resolves the absolute Copilot executable for a remotely-created session, and
+    /// the absolute `$HOME/Repos` working directory. Injected so tests can drive the
+    /// unavailable/invalid outcomes without touching the real filesystem.
+    private let remoteCopilotExecutable: () -> String?
+    private let remoteReposDirectory: () -> String?
+    private let remoteSessionBackendAvailable: () -> Bool
+    /// Overrides the controller launch for a freshly-created remote session (tests
+    /// record it instead of spawning a real terminal). Nil in production, where the
+    /// real cached terminal controller is created with a one-shot Copilot launch.
+    private let remoteSessionLauncher: ((_ sessionId: String, _ copilotExecutable: String) -> Void)?
+    /// Persistent idempotency/tombstone store behind remote session creation.
+    private let sessionCreationLedger: SessionCreationLedger
+
     /// Sessions hosting a live agent (refreshed by the liveness reconciler). Used
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.
     private(set) var liveAgentSessions: Set<String> = []
@@ -279,6 +315,13 @@ final class AppModel: ObservableObject {
         resumeMarkerDirectory: URL = Paths.sessionsDir,
         remotePromptLiveSessions: ((Set<String>) -> Set<String>)? = nil,
         remotePromptTarget: ((String) -> RemotePromptTarget?)? = nil,
+        remoteCopilotExecutable: @escaping () -> String? = { Paths.copilotExecutable },
+        remoteReposDirectory: @escaping () -> String? = { Paths.reposDirectory },
+        remoteSessionBackendAvailable: @escaping () -> Bool = {
+            Paths.dtachExecutable != nil
+        },
+        remoteSessionLauncher: ((String, String) -> Void)? = nil,
+        sessionCreationLedger: SessionCreationLedger = SessionCreationLedger(),
         webPushService: WebPushService? = nil,
         apnsService: APNsService? = nil,
         notificationSync: NotificationSyncService? = nil
@@ -290,6 +333,11 @@ final class AppModel: ObservableObject {
         self.resumeMarkerDirectory = resumeMarkerDirectory
         self.remotePromptLiveSessions = remotePromptLiveSessions
         self.remotePromptTarget = remotePromptTarget
+        self.remoteCopilotExecutable = remoteCopilotExecutable
+        self.remoteReposDirectory = remoteReposDirectory
+        self.remoteSessionBackendAvailable = remoteSessionBackendAvailable
+        self.remoteSessionLauncher = remoteSessionLauncher
+        self.sessionCreationLedger = sessionCreationLedger
         remoteAccess = RemoteAccessController(
             webPushService: webPushService,
             apnsService: apnsService,
@@ -406,9 +454,17 @@ final class AppModel: ObservableObject {
 
     // MARK: - terminal controllers (lazy, cached, not observed)
 
-    /// Returns (creating if needed) the live terminal for a session.
+    /// Returns (creating if needed) the live terminal for a session. A cached
+    /// controller is always returned as-is, so a duplicate create request can never
+    /// relaunch an existing session. `launchCopilotIfCreated` + `copilotExecutable`
+    /// are honored ONLY when a controller is created here (a fresh remote session);
+    /// a recorded resume marker still takes precedence inside the controller.
     @discardableResult
-    func controller(for sessionId: String) -> TerminalController? {
+    func controller(
+        for sessionId: String,
+        launchCopilotIfCreated: Bool = false,
+        copilotExecutable: String? = nil
+    ) -> TerminalController? {
         if let c = controllers[sessionId] { return c }
         guard let loc = locateIndex(sessionId) else { return nil }
         let project = projects[loc.p]
@@ -438,7 +494,8 @@ final class AppModel: ObservableObject {
             dtachExecutable: dtach,
             dtachSocket: socket,
             copilotSessionId: (recordedCopilot?.isEmpty == false) ? recordedCopilot : nil,
-            copilotSessionAllowAll: resumeWithAllowAll
+            copilotSessionAllowAll: resumeWithAllowAll,
+            launchCopilotExecutable: launchCopilotIfCreated ? copilotExecutable : nil
         )
         c.onTitle = { [weak self] title in self?.updateTitle(sessionId: sessionId, title: title) }
         c.onDirectory = { [weak self] dir in self?.updateCwd(sessionId: sessionId, dir: dir) }
@@ -594,6 +651,84 @@ final class AppModel: ObservableObject {
         refreshSelectedTranscriptController()
         save()
         return session.id
+    }
+
+    /// Create (or idempotently resolve) a session for a remote `POST /sessions/create`.
+    /// Runs synchronously on the MainActor and mutates state directly.
+    ///
+    /// The session id is deterministically the request's canonical UUID string, so a
+    /// crash between appending the session and writing the ledger still lets a retry
+    /// find the existing session (returning `.existing`) rather than double-creating.
+    /// The ledger acts as a tombstone: once a request produced a session, a later
+    /// request whose session has since been closed returns `.gone` and never recreates.
+    /// The Mac's current selection is preserved — a new session only becomes the
+    /// project's selected tab when the project had no selection.
+    func createRemoteSession(
+        _ request: RemoteCreateSessionRequest,
+        now: Date = Date()
+    ) -> RemoteSessionCreationOutcome {
+        let sessionId = request.requestId.uuidString
+
+        // A live deterministic session answers replays directly and covers the
+        // crash window where the session was saved but the ledger wasn't yet written.
+        if let loc = locateIndex(sessionId) {
+            let owningProjectId = projects[loc.p].id
+            let response = RemoteCreateSessionResponse(
+                requestId: request.requestId,
+                projectId: owningProjectId,
+                sessionId: sessionId
+            )
+            return owningProjectId == request.projectId ? .existing(response) : .conflict
+        }
+
+        // Processed before, but the session is gone: it is a tombstone, never resurrect it.
+        if sessionCreationLedger.record(for: request.requestId, now: now) != nil {
+            return .gone
+        }
+
+        guard let pi = projectIndex(request.projectId) else { return .unknownProject }
+        guard remoteSessionBackendAvailable() else { return .unavailable }
+        guard let copilotExecutable = remoteCopilotExecutable() else { return .unavailable }
+        guard let cwd = remoteReposDirectory() else { return .invalid }
+
+        let session = Session(id: sessionId, title: "Copilot", cwd: cwd)
+        projects[pi].sessions.append(session)
+        // Do NOT steal the Mac's selected tab: only adopt the new session when the
+        // project currently has no selection.
+        if (projects[pi].selectedSessionId ?? "").isEmpty {
+            projects[pi].selectedSessionId = sessionId
+        }
+
+        // Bring up the terminal with a one-shot Copilot launch on its fresh master.
+        if let remoteSessionLauncher {
+            remoteSessionLauncher(sessionId, copilotExecutable)
+        } else {
+            controller(
+                for: sessionId,
+                launchCopilotIfCreated: true,
+                copilotExecutable: copilotExecutable
+            )
+        }
+        refreshSelectedTranscriptController()
+        save()
+
+        // Record the tombstone only AFTER the session is appended and persisted, so a
+        // crash can never leave a ledger entry for a session that was never created.
+        sessionCreationLedger.remember(
+            SessionCreationRecord(
+                requestId: sessionId,
+                projectId: request.projectId,
+                sessionId: sessionId,
+                createdAt: now
+            ),
+            now: now
+        )
+
+        return .created(RemoteCreateSessionResponse(
+            requestId: request.requestId,
+            projectId: request.projectId,
+            sessionId: sessionId
+        ))
     }
 
     /// Where a new session should start: inherit the active pane's directory

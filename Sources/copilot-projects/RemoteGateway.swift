@@ -37,6 +37,12 @@ final class RemoteModelBridge: @unchecked Sendable {
         } == true
     }
 
+    /// Create (or idempotently resolve) a remote session. `.unavailable` when the
+    /// model is gone so the gateway answers 503 rather than crashing.
+    func createSession(_ request: RemoteCreateSessionRequest) -> RemoteSessionCreationOutcome {
+        model?.createRemoteSession(request) ?? .unavailable
+    }
+
     fileprivate func screenRevision(sessionId: String) -> RemoteTerminalRevision? {
         guard let model,
               let view = model.controller(for: sessionId)?.terminalView,
@@ -463,6 +469,8 @@ private final class RemoteHTTPHandler:
             switch path {
             case "/control":
                 handleControl(context: context)
+            case "/\(RemoteSessionContract.createPath)":
+                handleCreateSession(context: context)
             case "/push/subscribe":
                 handlePushRegistration(context: context, subscribe: true)
             case "/push/unsubscribe":
@@ -712,6 +720,69 @@ private final class RemoteHTTPHandler:
         notificationSync.dismiss(request)
         respond(context: context, method: .POST, status: .noContent,
                 contentType: "text/plain", body: "")
+    }
+
+    /// Authenticated same-origin session creation, independent of the writer lease so
+    /// it works for empty projects. The AppModel mutation runs on the MainActor via a
+    /// hop off the NIO event loop; the reply is written back on the channel's loop.
+    private func handleCreateSession(context: ChannelHandlerContext) {
+        guard !bodyTooLarge else {
+            respond(context: context, method: .POST, status: .payloadTooLarge,
+                    contentType: "text/plain", body: "too large")
+            return
+        }
+        guard let request = try? JSONDecoder().decode(
+                RemoteCreateSessionRequest.self, from: Data(body)
+              ),
+              !request.projectId.isEmpty,
+              request.projectId.utf8.count <= 200 else {
+            respond(context: context, method: .POST, status: .badRequest,
+                    contentType: "text/plain", body: "Bad request")
+            return
+        }
+        let channel = context.channel
+        let bridge = self.bridge
+        Task { @MainActor in
+            let outcome = bridge.createSession(request)
+            channel.eventLoop.execute {
+                self.respondCreateSession(channel: channel, outcome: outcome)
+            }
+        }
+    }
+
+    private func respondCreateSession(
+        channel: Channel,
+        outcome: RemoteSessionCreationOutcome
+    ) {
+        func send(_ status: HTTPResponseStatus, json response: RemoteCreateSessionResponse) {
+            guard let data = try? JSONEncoder().encode(response) else {
+                respond(channel: channel, method: .POST, status: .internalServerError,
+                        contentType: "text/plain", body: Data("Encoding failed".utf8))
+                return
+            }
+            respond(channel: channel, method: .POST, status: status,
+                    contentType: "application/json", body: data)
+        }
+        func send(_ status: HTTPResponseStatus, text: String) {
+            respond(channel: channel, method: .POST, status: status,
+                    contentType: "text/plain", body: Data(text.utf8))
+        }
+        switch outcome {
+        case .created(let response):
+            send(.created, json: response)
+        case .existing(let response):
+            send(.ok, json: response)
+        case .conflict:
+            send(.conflict, text: "Session id already used in another project")
+        case .gone:
+            send(.gone, text: "Session was already created and has been closed")
+        case .unknownProject:
+            send(.unprocessableEntity, text: "Unknown project")
+        case .invalid:
+            send(.unprocessableEntity, text: "Repos working directory is unavailable")
+        case .unavailable:
+            send(.serviceUnavailable, text: "Copilot is unavailable")
+        }
     }
 
     private func handleControl(context: ChannelHandlerContext) {
