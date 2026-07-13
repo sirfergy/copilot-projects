@@ -119,6 +119,7 @@ final class CoreLogicTests: XCTestCase {
             #""user_input.requested", "elicitation.requested""#
         ))
         XCTAssertTrue(CopilotExtension.script.contains("await releaseEventInterests()"))
+        XCTAssertTrue(CopilotExtension.script.contains("result?.success === true"))
         XCTAssertTrue(CopilotExtension.script.contains(#"process.once("exit", cleanupSharedFiles)"#))
         XCTAssertTrue(CopilotExtension.script.contains(".elicitation-response.json"))
         XCTAssertTrue(CopilotExtension.script.contains(".user-input-response.json"))
@@ -1138,6 +1139,7 @@ final class CoreLogicTests: XCTestCase {
         const namedListeners = new Map();
         const eventInterestRegistrations = [];
         const eventInterestReleases = [];
+        const eventInterestReleaseAttempts = new Map();
         const handledElicitationCalls = [];
         const originalProcessExit = process.exit.bind(process);
         let requestedExitCode = null;
@@ -1164,7 +1166,12 @@ final class CoreLogicTests: XCTestCase {
                 return { handle: `handle-${eventType}` };
               },
               releaseInterest: async ({handle}) => {
-                eventInterestReleases.push(handle);
+                const attempt = (eventInterestReleaseAttempts.get(handle) || 0) + 1;
+                eventInterestReleaseAttempts.set(handle, attempt);
+                eventInterestReleases.push(`${handle}:${attempt}`);
+                if (handle === "handle-elicitation.requested" && attempt === 1) {
+                  return { success: false };
+                }
                 return { success: true };
               },
             },
@@ -1322,7 +1329,11 @@ final class CoreLogicTests: XCTestCase {
         )
         XCTAssertEqual(
             summary["releases"] as? [String],
-            ["handle-user_input.requested", "handle-elicitation.requested"]
+            [
+                "handle-user_input.requested:1",
+                "handle-elicitation.requested:1",
+                "handle-elicitation.requested:2",
+            ]
         )
         XCTAssertEqual(summary["requestedExitCode"] as? Int, 130)
         XCTAssertEqual(

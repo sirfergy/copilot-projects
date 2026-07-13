@@ -1058,8 +1058,12 @@ public enum CopilotExtension {
                 let released = false;
                 for (let attempt = 0; attempt < 2 && !released; attempt += 1) {
                     try {
-                        await session.rpc.eventLog.releaseInterest({ handle });
-                        released = true;
+                        const result = await session.rpc.eventLog.releaseInterest({ handle });
+                        if (result?.success === true) {
+                            released = true;
+                        } else {
+                            throw new Error("releaseInterest returned unsuccessful result");
+                        }
                     } catch (error) {
                         if (attempt === 1) {
                             console.error(
