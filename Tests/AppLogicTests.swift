@@ -2406,6 +2406,44 @@ final class AppLogicTests: XCTestCase {
         ))
     }
 
+    func testRemoteWebSessionPivotMirrorsIOS() {
+        // The web UI shows one pane at a time behind a Conversation/Terminal pivot,
+        // mirroring the iOS SessionScreenView segmented control.
+        XCTAssertTrue(RemoteWebAssets.html.contains(#"id="content" data-mode="conversation""#))
+        XCTAssertTrue(RemoteWebAssets.html.contains(
+            #"<div id="pivot-tabs" role="tablist" aria-label="Session view">"#
+        ))
+        XCTAssertTrue(RemoteWebAssets.html.contains(
+            #"data-mode="conversation">Conversation</button>"#
+        ))
+        XCTAssertTrue(RemoteWebAssets.html.contains(
+            #"data-mode="terminal">Terminal</button>"#
+        ))
+        // Panes are toggled purely by the content mode.
+        XCTAssertTrue(RemoteWebAssets.css.contains(
+            #"#content[data-mode="conversation"] #terminal-pane { display:none; }"#
+        ))
+        XCTAssertTrue(RemoteWebAssets.css.contains(
+            #"#content[data-mode="terminal"] #transcript-pane { display:none; }"#
+        ))
+        // Terminal frames are only rendered while the Terminal tab is active.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (viewMode === 'terminal') renderLines(message.data);"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("function setViewMode(mode"))
+    }
+
+    func testRemoteWebPromptSubmitsOnEnter() {
+        // Enter sends the Copilot prompt; Shift+Enter keeps inserting a newline.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "prompt.addEventListener('keydown', (event) => {"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("promptForm.requestSubmit();"))
+    }
+
     func testRemoteWebJavaScriptSyntax() throws {
         try requireNodeForJavaScriptTests()
         let root = FileManager.default.temporaryDirectory
