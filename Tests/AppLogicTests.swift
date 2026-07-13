@@ -1872,6 +1872,22 @@ final class AppLogicTests: XCTestCase {
                                     "type": .string("string"),
                                     "minLength": .number(2),
                                 ]),
+                                "email": .object([
+                                    "type": .string("string"),
+                                    "format": .string("email"),
+                                ]),
+                                "uri": .object([
+                                    "type": .string("string"),
+                                    "format": .string("uri"),
+                                ]),
+                                "date": .object([
+                                    "type": .string("string"),
+                                    "format": .string("date"),
+                                ]),
+                                "dateTime": .object([
+                                    "type": .string("string"),
+                                    "format": .string("date-time"),
+                                ]),
                                 "tokens": .object([
                                     "type": .string("array"),
                                     "minItems": .number(1e300),
@@ -1949,6 +1965,10 @@ final class AppLogicTests: XCTestCase {
             ["fruit": .string("apple"), "colors": .array([.string("blue")])],
             ["fruit": .string("apple"), "nickname": .string("a")],
             ["fruit": .string("apple"), "tokens": .array([])],
+            ["fruit": .string("apple"), "email": .string("not an email")],
+            ["fruit": .string("apple"), "uri": .string("not a uri")],
+            ["fruit": .string("apple"), "date": .string("2026-99-99")],
+            ["fruit": .string("apple"), "dateTime": .string("tomorrow")],
             ["fruit": .string("apple"), "extra": .string("x")],
         ]
         for unsupportedContent in unsupportedContents {
@@ -1977,6 +1997,10 @@ final class AppLogicTests: XCTestCase {
                         "count": .number(2),
                         "colors": .array([.string("red"), .string("green")]),
                         "emojiCodepoints": .string("👨‍👩‍👧‍👦"),
+                        "email": .string("user@example.com"),
+                        "uri": .string("https://example.com/elicit"),
+                        "date": .string("2026-07-13"),
+                        "dateTime": .string("2026-07-13T21:00:00Z"),
                     ]
                 )
             ),
@@ -2004,6 +2028,14 @@ final class AppLogicTests: XCTestCase {
             (written["content"] as? [String: Any])?["emojiCodepoints"] as? String,
             "👨‍👩‍👧‍👦"
         )
+        XCTAssertEqual((written["content"] as? [String: Any])?["email"] as? String,
+                       "user@example.com")
+        XCTAssertEqual((written["content"] as? [String: Any])?["uri"] as? String,
+                       "https://example.com/elicit")
+        XCTAssertEqual((written["content"] as? [String: Any])?["date"] as? String,
+                       "2026-07-13")
+        XCTAssertEqual((written["content"] as? [String: Any])?["dateTime"] as? String,
+                       "2026-07-13T21:00:00Z")
 
         // A second answer conflicts while the prior response awaits pickup.
         XCTAssertEqual(

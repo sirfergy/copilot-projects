@@ -1185,6 +1185,8 @@ final class AppModel: ObservableObject {
                Double(string.unicodeScalars.count) < minimum { return false }
             if let maximum = jsonNumber(schema["maxLength"]),
                Double(string.unicodeScalars.count) > maximum { return false }
+            if let format = jsonString(schema["format"]),
+               !stringMatchesFormat(string, format: format) { return false }
             return true
         case "number":
             guard case .number(let number) = value else { return false }
@@ -1218,6 +1220,33 @@ final class AppModel: ObservableObject {
         if let minimum = jsonNumber(schema["minimum"]), number < minimum { return false }
         if let maximum = jsonNumber(schema["maximum"]), number > maximum { return false }
         return true
+    }
+
+    private static func stringMatchesFormat(_ string: String, format: String) -> Bool {
+        switch format {
+        case "email":
+            return string.range(
+                of: #"^[^@\s]+@[^@\s]+\.[^@\s]+$"#,
+                options: .regularExpression
+            ) != nil
+        case "uri":
+            guard let components = URLComponents(string: string),
+                  let scheme = components.scheme,
+                  !scheme.isEmpty else { return false }
+            return true
+        case "date":
+            let formatter = DateFormatter()
+            formatter.calendar = Calendar(identifier: .iso8601)
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "yyyy-MM-dd"
+            formatter.isLenient = false
+            return formatter.date(from: string) != nil
+        case "date-time":
+            return ISO8601DateFormatter().date(from: string) != nil
+        default:
+            return true
+        }
     }
 
     private static func jsonString(_ value: RemoteJSONValue?) -> String? {

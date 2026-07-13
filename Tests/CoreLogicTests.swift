@@ -1214,6 +1214,12 @@ final class CoreLogicTests: XCTestCase {
           data:{requestId:"req-url",message:"Open docs",mode:"url",
             url:"https://example.com/elicit"}
         });
+        __fakeSession.emit({
+          id:"elicit-terminal",type:"elicitation.requested",agentId:"agent-7",
+          timestamp:"2026-07-12T04:00:02.500Z",
+          data:{requestId:"req-terminal",message:"Answer elsewhere",mode:"form",
+            requestedSchema:{type:"object",properties:{ok:{type:"string"}}}}
+        });
         await new Promise((resolve) => setImmediate(resolve));
 
         const firstSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
@@ -1271,6 +1277,15 @@ final class CoreLogicTests: XCTestCase {
           await new Promise((resolve) => setTimeout(resolve, 80));
           waited += 80;
         }
+        const handledAfterResponses = handledElicitationCalls.length;
+
+        // A question answered through the terminal clears via the SDK completion event.
+        __fakeSession.emit({
+          id:"elicit-terminal-complete",type:"elicitation.completed",agentId:"agent-7",
+          timestamp:"2026-07-12T04:00:03.000Z",
+          data:{requestId:"req-terminal",action:"decline"}
+        });
+        await new Promise((resolve) => setImmediate(resolve));
         const afterSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
         process.emit("SIGINT");
         waited = 0;
@@ -1295,6 +1310,7 @@ final class CoreLogicTests: XCTestCase {
           staleStillPending,
           handledPayload: handledElicitationCalls[0],
           urlHandledPayload: handledElicitationCalls[1],
+          handledAfterResponses,
           pendingAfter: afterSnapshot.trackedElicitations.map((e) => e.requestId),
           responseRemoved: existsSync(responsePath) === false
         }));
@@ -1347,7 +1363,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["requestedExitCode"] as? Int, 130)
         XCTAssertEqual(
             (summary["pendingBefore"] as? [String])?.sorted(),
-            ["req-form", "req-url"]
+            ["req-form", "req-terminal", "req-url"]
         )
         XCTAssertEqual(summary["formMessage"] as? String, "Pick a fruit")
         XCTAssertEqual(summary["formSchemaType"] as? String, "object")
@@ -1368,6 +1384,7 @@ final class CoreLogicTests: XCTestCase {
         let urlResult = urlHandledPayload?["result"] as? [String: Any]
         XCTAssertEqual(urlResult?["action"] as? String, "accept")
         XCTAssertNil(urlResult?["content"])
+        XCTAssertEqual(summary["handledAfterResponses"] as? Int, 2)
         XCTAssertEqual(summary["pendingAfter"] as? [String], [])
         XCTAssertEqual(summary["responseRemoved"] as? Bool, true)
     }
