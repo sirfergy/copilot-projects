@@ -3441,6 +3441,10 @@ final class AppLogicTests: XCTestCase {
             "sessionHasUserInput(submittedSession, requestId)"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("if (!ids.has(requestId)) {"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("entry.token !== token"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "latestUserInputAttempts.get(requestId) !== token"
+        ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 403"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "if (!selected || !writable || submittingUserInputs.has(requestId)) return;"

@@ -381,10 +381,12 @@ enum RemoteWebAssets {
     const promptQueues = new Map();
     let flushingQueue = false;
     const sessionState = new Map();
-    // requestId -> card element, and requestId -> { timer } while an answer is
-    // awaiting confirmation from the workspace snapshot.
+    // requestId -> card element, and requestId -> { timer, token } while an answer
+    // is awaiting confirmation from the workspace snapshot.
     const userInputCards = new Map();
     const submittingUserInputs = new Map();
+    const latestUserInputAttempts = new Map();
+    let userInputAttemptSequence = 0;
     const requested = new URLSearchParams(location.search);
     let pendingFocusSession = requested.get('session');
 
@@ -831,6 +833,7 @@ enum RemoteWebAssets {
             clearTimeout(entry.timer);
             submittingUserInputs.delete(requestId);
           }
+          latestUserInputAttempts.delete(requestId);
         }
       }
       pending.forEach((request) => {
@@ -851,9 +854,13 @@ enum RemoteWebAssets {
       }
       const submittedSession = selected;
       const submittedGeneration = selectionGeneration;
+      const token = ++userInputAttemptSequence;
+      latestUserInputAttempts.set(requestId, token);
       // Retryable fallback: if the workspace still shows the question 15s later,
       // re-enable the controls so the answer can be tried again.
       const timer = setTimeout(() => {
+        const entry = submittingUserInputs.get(requestId);
+        if (!entry || entry.token !== token) return;
         submittingUserInputs.delete(requestId);
         if (selected === submittedSession
             && sessionHasUserInput(submittedSession, requestId)) {
@@ -861,7 +868,7 @@ enum RemoteWebAssets {
           setCardStatus(requestId, 'Still waiting \u2014 you can try again.');
         }
       }, 15000);
-      submittingUserInputs.set(requestId, { timer });
+      submittingUserInputs.set(requestId, { timer, token });
       setCardSubmitting(requestId, true);
       setCardStatus(requestId, 'Sending\u2026');
       const response = await control({
@@ -871,6 +878,7 @@ enum RemoteWebAssets {
       });
       if (selected !== submittedSession
           || selectionGeneration !== submittedGeneration) return;
+      if (latestUserInputAttempts.get(requestId) !== token) return;
       if (response?.ok) {
         // Keep the card disabled until the workspace snapshot drops the request
         // (card removed) or the 15s fallback re-enables it.
@@ -878,7 +886,7 @@ enum RemoteWebAssets {
         return;
       }
       const entry = submittingUserInputs.get(requestId);
-      if (entry) {
+      if (entry?.token === token) {
         clearTimeout(entry.timer);
         submittingUserInputs.delete(requestId);
       }
