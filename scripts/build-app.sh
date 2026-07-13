@@ -55,6 +55,10 @@ git_describe_version_tag() {
   printf '%s\n' "$best_describe"
 }
 
+git_worktree_is_dirty() {
+  ! git diff --quiet --ignore-submodules -- || ! git diff --cached --quiet --ignore-submodules --
+}
+
 # Version: an explicit VERSION (e.g. from release.sh) wins for both strings.
 # Otherwise derive from the latest git tag so local/dev builds are versioned
 # correctly instead of silently falling back to 0.1.0. The marketing string is
@@ -66,12 +70,17 @@ if [ -n "${VERSION:-}" ]; then
 elif DESCRIBE="$(git_describe_version_tag)"; then
   SHORT_VERSION="${DESCRIBE#v}"; SHORT_VERSION="${SHORT_VERSION%%-*}"   # e.g. 0.8.3
   COMMITS="${DESCRIBE#*-}"; COMMITS="${COMMITS%%-*}"                    # e.g. 3
-  if [ "${COMMITS:-0}" -gt 0 ] 2>/dev/null; then
-    if [ "$COMMITS" -gt 255 ]; then
-      echo "error: $COMMITS commits since v$SHORT_VERSION exceeds CFBundleVersion's development suffix limit; set VERSION explicitly." >&2
+  DIRTY_OFFSET=0
+  if git_worktree_is_dirty; then
+    DIRTY_OFFSET=1
+  fi
+  DEV_COUNT=$((COMMITS + DIRTY_OFFSET))
+  if [ "${DEV_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+    if [ "$DEV_COUNT" -gt 255 ]; then
+      echo "error: $DEV_COUNT development versions since v$SHORT_VERSION exceeds CFBundleVersion's development suffix limit; set VERSION explicitly." >&2
       exit 1
     fi
-    BUILD_VERSION="${SHORT_VERSION}d${COMMITS}"                        # e.g. 0.8.3d3
+    BUILD_VERSION="${SHORT_VERSION}d${DEV_COUNT}"                      # e.g. 0.8.3d3
   else
     BUILD_VERSION="$SHORT_VERSION"
   fi
