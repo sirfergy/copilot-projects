@@ -469,6 +469,124 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary?["firstUserContent"] as? String, "OWNED")
     }
 
+    func testCopilotExtensionRefreshesSessionMarkersWhenReclaimingOwnership() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-reclaim-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let appSessionId = "12345678-1234-1234-1234-123456789abc"
+        let copilotSessionId = "11111111-1111-4111-8111-111111111111"
+
+        let prelude = #"""
+        const namedListeners = new Map();
+        let allowAllChecks = 0;
+        const fakeSession = {
+          sessionId: "__COPILOT_SESSION_ID__",
+          rpc: {
+            schedule: { list: async () => ({entries:[]}) },
+            permissions: {
+              getAllowAll: async () => {
+                allowAllChecks += 1;
+                return { enabled: true };
+              }
+            }
+          },
+          on(name, handler) {
+            if (typeof name !== "function") namedListeners.set(name, handler);
+          },
+          async getEvents() { return []; }
+        };
+        """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: "const joinSession = async () => fakeSession;"
+        )
+        let epilogue = #"""
+
+        const sessionsDir = `${process.env.COPILOT_PROJECTS_ROOT}/sessions`;
+        const base = `${sessionsDir}/${process.env.COPILOT_PROJECTS_SESSION}`;
+        const ownerPath = `${base}.transcript-owner.json`;
+        const copilotSessionPath = `${base}.copilot-session`;
+        const allowAllPath = `${base}.copilot-allow-all`;
+        await new Promise((resolve) => setImmediate(resolve));
+
+        writeFileSync(copilotSessionPath, "old-session");
+        writeFileSync(allowAllPath, "old-session");
+        writeFileSync(ownerPath, JSON.stringify({
+          copilotSessionId: "old-session",
+          pid: 0
+        }));
+
+        namedListeners.get("assistant.turn_start")({
+          id: "turn",
+          type: "assistant.turn_start",
+          timestamp: "2026-07-12T04:00:00.000Z",
+          data: {}
+        });
+
+        let waited = 0;
+        while (waited < 4000) {
+          let sessionMarker = "";
+          let allowAllMarker = "";
+          try { sessionMarker = readFileSync(copilotSessionPath, "utf8"); } catch {}
+          try { allowAllMarker = readFileSync(allowAllPath, "utf8"); } catch {}
+          if (sessionMarker === "__COPILOT_SESSION_ID__"
+              && allowAllMarker === "__COPILOT_SESSION_ID__") break;
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          waited += 80;
+        }
+
+        const owner = JSON.parse(readFileSync(ownerPath, "utf8"));
+        console.log(JSON.stringify({
+          ownerSessionId: owner.copilotSessionId,
+          ownerPidIsCurrent: owner.pid === process.pid,
+          copilotSessionMarker: readFileSync(copilotSessionPath, "utf8"),
+          allowAllMarker: readFileSync(allowAllPath, "utf8"),
+          allowAllChecks
+        }));
+        process.exit(0);
+        """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
+        let scriptURL = root.appendingPathComponent("reclaim.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "COPILOT_PROJECTS_SESSION": appSessionId,
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let summary = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: output) as? [String: Any]
+        )
+        XCTAssertEqual(summary["ownerSessionId"] as? String, copilotSessionId)
+        XCTAssertEqual(summary["ownerPidIsCurrent"] as? Bool, true)
+        XCTAssertEqual(summary["copilotSessionMarker"] as? String, copilotSessionId)
+        XCTAssertEqual(summary["allowAllMarker"] as? String, copilotSessionId)
+        XCTAssertGreaterThan(summary["allowAllChecks"] as? Int ?? 0, 0)
+    }
+
     func testCopilotExtensionTranscriptByteBudgetPreservesForeground() throws {
         try requireNodeForJavaScriptTests()
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)

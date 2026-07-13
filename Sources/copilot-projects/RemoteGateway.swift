@@ -363,7 +363,10 @@ private let remoteCSP =
     "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; "
     + "worker-src 'self'; manifest-src 'self'; img-src 'self'; "
     + "frame-ancestors 'none'; base-uri 'none'"
-private let remoteMaxBodyBytes = 24 * 1_024
+// Remote answers are nested JSON; an 8 KiB raw answer can expand substantially
+// when control characters are escaped in the inner payload and outer envelope.
+private let remoteMaxBodyBytes = 80 * 1_024
+private let remoteMaxEncodedUserInputAnswerBytes = 64 * 1_024
 private let remoteWorkspaceRefreshInterval: TimeInterval = 2
 
 private final class RemoteHTTPHandler:
@@ -773,7 +776,7 @@ private final class RemoteHTTPHandler:
             }
         case "answer-user-input":
             guard let payload = message.data,
-                  payload.utf8.count <= 16_384,
+                  payload.utf8.count <= remoteMaxEncodedUserInputAnswerBytes,
                   let answer = try? JSONDecoder().decode(
                     RemoteUserInputAnswer.self, from: Data(payload.utf8)
                   ),

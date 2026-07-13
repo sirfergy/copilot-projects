@@ -2677,6 +2677,14 @@ final class AppLogicTests: XCTestCase {
                         requestedAt: ISO8601DateFormatter().string(from: Date()),
                         agentId: nil
                     ),
+                    TrackedUserInput(
+                        requestId: "req-escaped",
+                        question: "Explain?",
+                        choices: [],
+                        allowFreeform: true,
+                        requestedAt: ISO8601DateFormatter().string(from: Date()),
+                        agentId: nil
+                    ),
                 ]
             )
             try JSONEncoder().encode(snapshot).write(
@@ -2684,6 +2692,26 @@ final class AppLogicTests: XCTestCase {
             )
             try Data("copilot-session".utf8).write(
                 to: root.appendingPathComponent("\(sessionId).copilot-session")
+            )
+
+            let escapedAnswer = String(repeating: "\u{1}", count: 8_192)
+            let escapedAnswerBody = try answerBody(
+                requestId: "req-escaped",
+                answer: escapedAnswer,
+                wasFreeform: true
+            )
+            XCTAssertGreaterThan(escapedAnswerBody.count, 24 * 1_024)
+            let escapedAccepted = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: escapedAnswerBody
+            )
+            XCTAssertEqual(escapedAccepted, 204)
+            try FileManager.default.removeItem(
+                at: root.appendingPathComponent("\(sessionId).user-input-response.json")
             )
 
             let accepted = try await remoteHTTPStatus(

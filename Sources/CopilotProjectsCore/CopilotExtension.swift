@@ -63,6 +63,8 @@ public enum CopilotExtension {
         let pendingTranscriptTurn = null;
         let transcriptInitialized = false;
         let transcriptPublishTimer = null;
+        let sharedFilesOwnershipInitializedFor = null;
+        let allowAllRefreshQueued = false;
 
         const MAX_TRANSCRIPT_TURNS = 200;
         const MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024;
@@ -221,16 +223,25 @@ public enum CopilotExtension {
             for (let attempt = 0; attempt < 3; attempt += 1) {
                 const owner = recordedOwner();
                 if (owner) {
-                    if (ownerMatchesCurrentProcess(owner)) return true;
+                    if (ownerMatchesCurrentProcess(owner)) {
+                        activateSharedFilesOwnership();
+                        return true;
+                    }
                     if (processAlive(owner.pid)) return false;
-                    if (reclaimDeadOwner(owner)) return true;
+                    if (reclaimDeadOwner(owner)) {
+                        activateSharedFilesOwnership(true);
+                        return true;
+                    }
                 } else if (writeOwnerMarker()) {
+                    activateSharedFilesOwnership(true);
                     return true;
                 } else {
                     // Lost the create race; re-read and re-evaluate.
                 }
             }
-            return ownerMatchesCurrentProcess(recordedOwner());
+            const owns = ownerMatchesCurrentProcess(recordedOwner());
+            if (owns) activateSharedFilesOwnership();
+            return owns;
         }
 
         function normalizedTimestamp(value) {
@@ -254,6 +265,25 @@ public enum CopilotExtension {
             } catch {
                 removeFile(temporaryPath);
             }
+        }
+
+        function refreshAllowAllSoon() {
+            if (allowAllRefreshQueued) return;
+            allowAllRefreshQueued = true;
+            Promise.resolve()
+                .then(() => refreshAllowAll())
+                .catch(() => {})
+                .finally(() => { allowAllRefreshQueued = false; });
+        }
+
+        function activateSharedFilesOwnership(force = false) {
+            const ownershipKey = `${copilotSessionId}:${process.pid}`;
+            if (!force && sharedFilesOwnershipInitializedFor === ownershipKey) return;
+            sharedFilesOwnershipInitializedFor = ownershipKey;
+            if (validCopilotSessionId) {
+                writeMarker(copilotSessionPath, copilotSessionId);
+            }
+            refreshAllowAllSoon();
         }
 
         function setAllowAllMarker(enabled) {
