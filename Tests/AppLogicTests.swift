@@ -1755,7 +1755,10 @@ final class AppLogicTests: XCTestCase {
             timestamp: 200,
             source: "agent-stop"
         )
-        try await Task.sleep(nanoseconds: 50_000_000)
+        for _ in 0 ..< 50 {
+            if notifications.calls.count == 1 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
 
         XCTAssertEqual(notifications.calls.count, 1)
         XCTAssertEqual(
