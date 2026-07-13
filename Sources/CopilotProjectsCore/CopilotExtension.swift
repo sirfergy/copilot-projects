@@ -255,6 +255,7 @@ public enum CopilotExtension {
         }
 
         function setAllowAllMarker(enabled) {
+            if (!ownsSharedFiles()) return;
             removeFile(allowAllPath);
             if (enabled && validCopilotSessionId) {
                 writeMarker(allowAllPath, copilotSessionId);
@@ -275,7 +276,7 @@ public enum CopilotExtension {
         try {
             mkdirSync(sessionsDir, { recursive: true });
         } catch {}
-        if (validCopilotSessionId) {
+        if (validCopilotSessionId && ownsSharedFiles()) {
             writeMarker(copilotSessionPath, copilotSessionId);
         }
 
@@ -358,6 +359,11 @@ public enum CopilotExtension {
         // exact terminal fallback are preserved. `user_input.completed` stays
         // authoritative for removing a question.
         async function processUserInputResponse() {
+            // Only the owner reconciles remote answers: a spawned classifier helper
+            // shares this session dir and would otherwise delete the owner's pending
+            // response (its session id / pending set won't match), stranding the
+            // answer and forcing the terminal fallback.
+            if (!ownsSharedFiles()) return;
             let encoded;
             try {
                 encoded = readFileSync(userInputResponsePath, "utf8");
@@ -721,6 +727,7 @@ public enum CopilotExtension {
         }
 
         async function refreshAllowAll() {
+            if (!ownsSharedFiles()) return;
             // Fail closed if the RPC is unavailable: a stale marker must never grant
             // full permissions to a different session in the same tab.
             removeFile(allowAllPath);
