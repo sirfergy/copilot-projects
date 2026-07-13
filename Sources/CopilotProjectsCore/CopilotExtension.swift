@@ -93,6 +93,7 @@ public enum CopilotExtension {
 
         const MAX_ELICITATION_MESSAGE_BYTES = 16_384;
         const MAX_ELICITATION_SCHEMA_BYTES = 32_768;
+        const MAX_ELICITATION_SCHEMA_DEPTH = 8;
         const MAX_ELICITATION_URL_BYTES = 4_096;
         const MAX_ELICITATION_CONTENT_BYTES = 32_768;
         const MAX_ELICITATIONS = 50;
@@ -483,6 +484,27 @@ public enum CopilotExtension {
         // exposure (the terminal keeps handling it). The requestedSchema is passed
         // through verbatim within a byte budget so the client renders exactly what
         // the agent asked; oversized/complex schemas fall back to the terminal.
+        function jsonDepth(value, limit = MAX_ELICITATION_SCHEMA_DEPTH + 1) {
+            if (limit <= 0) return Infinity;
+            if (Array.isArray(value)) {
+                let max = 0;
+                for (const item of value) {
+                    max = Math.max(max, jsonDepth(item, limit - 1));
+                    if (max === Infinity) return Infinity;
+                }
+                return max + 1;
+            }
+            if (value && typeof value === "object") {
+                let max = 0;
+                for (const key of Object.keys(value)) {
+                    max = Math.max(max, jsonDepth(value[key], limit - 1));
+                    if (max === Infinity) return Infinity;
+                }
+                return max + 1;
+            }
+            return 0;
+        }
+
         function elicitationEntry(event) {
             const data = event?.data;
             if (!data || typeof data !== "object") return null;
@@ -509,6 +531,11 @@ public enum CopilotExtension {
                     return null;
                 }
                 if (Buffer.byteLength(serialized) > MAX_ELICITATION_SCHEMA_BYTES) return null;
+                // Reject pathologically nested schemas: they can pass the byte
+                // budget yet exceed the host JSON decoder's nesting limit, which
+                // would fail the whole heartbeat decode and drop every pending
+                // question. The remote form only renders a flat schema anyway.
+                if (jsonDepth(data.requestedSchema) > MAX_ELICITATION_SCHEMA_DEPTH) return null;
                 schema = data.requestedSchema;
             }
             // A form-mode elicitation with neither a schema nor a url isn't
