@@ -1793,6 +1793,167 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testAnswerElicitationValidatesActionContentAndSession() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(id: "session-elicit", title: "target", cwd: "/tmp")
+        let project = Project(name: "target", cwd: "/tmp", sessions: [session])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+        let snapshotURL = directory.appendingPathComponent("\(session.id).agent-activity.json")
+        let responseURL = directory
+            .appendingPathComponent("\(session.id).elicitation-response.json")
+        let markerURL = directory.appendingPathComponent("\(session.id).copilot-session")
+
+        func writeSnapshot(updatedAt: Date) throws {
+            let snapshot = AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: ISO8601DateFormatter().string(from: updatedAt),
+                foregroundTurnActive: false,
+                scheduledTurnActive: false,
+                activeSubagents: [],
+                schedules: [],
+                idleGeneration: 0,
+                lastIdleAborted: false,
+                lastIdleTurnKind: nil,
+                error: nil,
+                trackedUserInputs: nil,
+                trackedElicitations: [
+                    TrackedElicitation(
+                        requestId: "req-form",
+                        message: "Pick a fruit",
+                        mode: "form",
+                        url: nil,
+                        schema: .object([
+                            "type": .string("object"),
+                            "properties": .object([
+                                "fruit": .object(["type": .string("string")])
+                            ]),
+                        ]),
+                        elicitationSource: nil,
+                        requestedAt: ISO8601DateFormatter().string(from: updatedAt),
+                        agentId: nil
+                    )
+                ]
+            )
+            try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        }
+        try writeSnapshot(updatedAt: Date())
+        try Data("copilot-session".utf8).write(to: markerURL)
+
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: directory,
+            resumeMarkerDirectory: directory
+        )
+
+        // Unknown request id → invalid.
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(
+                    requestId: "missing", action: .accept,
+                    content: ["fruit": .string("apple")]
+                )
+            ),
+            .invalid
+        )
+        // accept without content → invalid.
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(requestId: "req-form", action: .accept)
+            ),
+            .invalid
+        )
+        // decline WITH content → invalid.
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(
+                    requestId: "req-form", action: .decline,
+                    content: ["fruit": .string("apple")]
+                )
+            ),
+            .invalid
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
+
+        // Valid accept with content is written 0600 with the expected payload.
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(
+                    requestId: "req-form", action: .accept,
+                    content: ["fruit": .string("apple")]
+                )
+            ),
+            .accepted
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: responseURL.path))
+        let attributes = try FileManager.default.attributesOfItem(atPath: responseURL.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let written = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: responseURL))
+                as? [String: Any]
+        )
+        XCTAssertEqual(written["schemaVersion"] as? Int, 1)
+        XCTAssertEqual(written["copilotSessionId"] as? String, "copilot-session")
+        XCTAssertEqual(written["requestId"] as? String, "req-form")
+        XCTAssertEqual(written["action"] as? String, "accept")
+        XCTAssertEqual((written["content"] as? [String: Any])?["fruit"] as? String, "apple")
+
+        // A second answer conflicts while the prior response awaits pickup.
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(requestId: "req-form", action: .cancel)
+            ),
+            .conflict
+        )
+
+        // After the extension consumes it, a decline (no content) is accepted.
+        try FileManager.default.removeItem(at: responseURL)
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(requestId: "req-form", action: .decline)
+            ),
+            .accepted
+        )
+        try FileManager.default.removeItem(at: responseURL)
+
+        // A stale heartbeat can no longer be answered.
+        try writeSnapshot(updatedAt: Date(timeIntervalSince1970: 0))
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(requestId: "req-form", action: .cancel)
+            ),
+            .invalid
+        )
+
+        // Without a live Copilot session marker the answer cannot be bound.
+        try writeSnapshot(updatedAt: Date())
+        try FileManager.default.removeItem(at: markerURL)
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(requestId: "req-form", action: .cancel)
+            ),
+            .invalid
+        )
+    }
+
+    @MainActor
     func testScheduledIdleTurnDoesNotPostCompletionNotification() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory

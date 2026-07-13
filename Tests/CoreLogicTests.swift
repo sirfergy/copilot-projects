@@ -98,6 +98,27 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains(
             "trackedUserInputs: [...pendingUserInputs.values()]"
         ))
+        // Elicitation support: gated events need registerInterest, and the
+        // extension must observe + expose + resolve elicitation.requested.
+        XCTAssertTrue(CopilotExtension.script.contains(
+            #"session.on("elicitation.requested""#
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains(
+            #"session.on("elicitation.completed""#
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains(
+            "session.rpc.ui.handlePendingElicitation"
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains(
+            "trackedElicitations: [...pendingElicitations.values()]"
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains(
+            "registerInterest({ eventType })"
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains(
+            #""user_input.requested", "elicitation.requested""#
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains(".elicitation-response.json"))
         XCTAssertTrue(CopilotExtension.script.contains(".user-input-response.json"))
         XCTAssertTrue(CopilotExtension.script.contains("watch(sessionsDir"))
         // The heartbeat now carries question text, so it must be written 0600.

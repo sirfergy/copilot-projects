@@ -96,6 +96,13 @@ final class RemoteModelBridge: @unchecked Sendable {
     ) -> RemoteUserInputResult {
         model?.answerUserInput(sessionId: sessionId, answer: answer) ?? .invalid
     }
+
+    func answerElicitation(
+        sessionId: String,
+        answer: RemoteElicitationAnswer
+    ) -> RemoteUserInputResult {
+        model?.answerElicitation(sessionId: sessionId, answer: answer) ?? .invalid
+    }
 }
 
 /// Writer leases ensure only one remote client injects input into a given
@@ -799,6 +806,52 @@ private final class RemoteHTTPHandler:
                     clientId: clientId
                 ) {
                     self.bridge.answerUserInput(sessionId: sessionId, answer: answer)
+                }
+                channel.eventLoop.execute {
+                    let response: (HTTPResponseStatus, String)
+                    switch result {
+                    case .some(.accepted):
+                        response = (.noContent, "")
+                    case .some(.conflict):
+                        response = (.conflict, "Another answer is still processing")
+                    case .some(.invalid):
+                        response = (.unprocessableEntity, "Answer was not accepted")
+                    case .none:
+                        response = (.forbidden, "view only")
+                    }
+                    self.respond(
+                        channel: channel,
+                        method: .POST,
+                        status: response.0,
+                        contentType: "text/plain",
+                        body: Data(response.1.utf8)
+                    )
+                }
+            }
+        case "answer-elicitation":
+            guard let payload = message.data,
+                  payload.utf8.count <= remoteMaxEncodedUserInputAnswerBytes,
+                  let answer = try? JSONDecoder().decode(
+                    RemoteElicitationAnswer.self, from: Data(payload.utf8)
+                  ),
+                  answer.requestId.utf8.count <= 200 else {
+                respond(context: context, method: .POST, status: .badRequest,
+                        contentType: "text/plain", body: "Bad request")
+                return
+            }
+            guard leases.holds(sessionId: sessionId, clientId: clientId) else {
+                respond(context: context, method: .POST, status: .forbidden,
+                        contentType: "text/plain", body: "view only")
+                return
+            }
+            let channel = context.channel
+            let leases = self.leases
+            Task { @MainActor in
+                let result = leases.withHeldLease(
+                    sessionId: sessionId,
+                    clientId: clientId
+                ) {
+                    self.bridge.answerElicitation(sessionId: sessionId, answer: answer)
                 }
                 channel.eventLoop.execute {
                     let response: (HTTPResponseStatus, String)

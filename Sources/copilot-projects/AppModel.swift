@@ -63,6 +63,16 @@ private struct UserInputResponseFile: Codable {
     let wasFreeform: Bool
 }
 
+/// On-disk shape of the host-written elicitation response file. The extension
+/// re-validates against the live pending elicitation before replying over RPC.
+private struct ElicitationResponseFile: Codable {
+    let schemaVersion: Int
+    let copilotSessionId: String
+    let requestId: String
+    let action: String
+    let content: [String: RemoteJSONValue]?
+}
+
 struct RemotePromptTarget {
     let activity: FooterActivity
     let send: (String) -> Bool
@@ -739,7 +749,9 @@ final class AppModel: ObservableObject {
                                     ?? .unknown
                             ) == .sent,
                             pendingUserInputs: session.agentActivity?
-                                .remoteUserInputRequests()
+                                .remoteUserInputRequests(),
+                            pendingElicitations: session.agentActivity?
+                                .remoteElicitationRequests()
                         )
                     }
                 )
@@ -914,7 +926,61 @@ final class AppModel: ObservableObject {
         return .accepted
     }
 
-    /// Atomically publish `data` at `url` with 0600 permissions by writing a private
+    /// Submit a remote answer to a pending elicitation. Mirrors `answerUserInput`:
+    /// re-reads the fresh heartbeat snapshot from disk, validates the request is
+    /// still live, binds to the tab's Copilot session, and writes an atomic
+    /// single-outstanding response file the extension consumes over RPC.
+    func answerElicitation(
+        sessionId: String,
+        answer: RemoteElicitationAnswer,
+        now: Date = Date()
+    ) -> RemoteUserInputResult {
+        guard locateIndex(sessionId) != nil else { return .invalid }
+
+        let snapshotURL = agentActivityDirectory
+            .appendingPathComponent("\(sessionId).agent-activity.json")
+        guard let data = try? Data(contentsOf: snapshotURL),
+              let snapshot = try? JSONDecoder().decode(
+                AgentActivitySnapshot.self, from: data
+              ),
+              snapshot.isFresh(at: now),
+              (snapshot.trackedElicitations?
+                .contains(where: { $0.requestId == answer.requestId }) ?? false)
+        else { return .invalid }
+
+        // Accept must carry content; decline/cancel must not.
+        switch answer.action {
+        case .accept:
+            guard let content = answer.content,
+                  let encoded = try? JSONEncoder().encode(content),
+                  encoded.count <= 32_768 else { return .invalid }
+        case .decline, .cancel:
+            guard answer.content == nil else { return .invalid }
+        }
+
+        let markerURL = resumeMarkerDirectory
+            .appendingPathComponent("\(sessionId).copilot-session")
+        guard let copilotSessionId = (try? String(contentsOf: markerURL, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !copilotSessionId.isEmpty else { return .invalid }
+
+        let responseURL = agentActivityDirectory
+            .appendingPathComponent("\(sessionId).elicitation-response.json")
+        if FileManager.default.fileExists(atPath: responseURL.path) { return .conflict }
+
+        let payload = ElicitationResponseFile(
+            schemaVersion: 1,
+            copilotSessionId: copilotSessionId,
+            requestId: answer.requestId,
+            action: answer.action.rawValue,
+            content: answer.action == .accept ? answer.content : nil
+        )
+        guard let encoded = try? JSONEncoder().encode(payload),
+              Self.atomicallyWrite0600(encoded, to: responseURL) else {
+            return .invalid
+        }
+        return .accepted
+    }
     /// temp file and renaming it into place.
     private static func atomicallyWrite0600(_ data: Data, to url: URL) -> Bool {
         let directory = url.deletingLastPathComponent()

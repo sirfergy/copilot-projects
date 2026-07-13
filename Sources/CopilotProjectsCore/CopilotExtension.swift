@@ -44,12 +44,21 @@ public enum CopilotExtension {
             sessionsDir, `${appSessionId}.user-input-response.json`
         );
         const userInputResponseName = `${appSessionId}.user-input-response.json`;
+        const elicitationResponsePath = join(
+            sessionsDir, `${appSessionId}.elicitation-response.json`
+        );
+        const elicitationResponseName = `${appSessionId}.elicitation-response.json`;
         const activeSubagents = new Map();
         // All outstanding structured questions (root and subagent), keyed by
         // requestId. Starts empty every launch: stale question state is never
         // resurrected from disk, only rebuilt from live events.
         const pendingUserInputs = new Map();
         const inFlightUserInputResponses = new Set();
+        // Outstanding elicitations (schema-form / url questions), keyed by
+        // requestId. Same lifecycle as pendingUserInputs: rebuilt from live
+        // events, never resurrected from disk.
+        const pendingElicitations = new Map();
+        const inFlightElicitationResponses = new Set();
         let foregroundTurnActive = false;
         let scheduledTurnActive = false;
         let currentTurnKind = null;
@@ -81,6 +90,12 @@ public enum CopilotExtension {
         const MAX_USER_INPUT_TOTAL_BYTES = 32_768;
         const MAX_USER_INPUT_ANSWER_BYTES = 8_192;
         const MAX_USER_INPUTS = 50;
+
+        const MAX_ELICITATION_MESSAGE_BYTES = 16_384;
+        const MAX_ELICITATION_SCHEMA_BYTES = 32_768;
+        const MAX_ELICITATION_URL_BYTES = 4_096;
+        const MAX_ELICITATION_CONTENT_BYTES = 32_768;
+        const MAX_ELICITATIONS = 50;
 
         function truncatedText(value, maximumLength) {
             const text = typeof value === "string" ? value : "";
@@ -326,6 +341,7 @@ public enum CopilotExtension {
                 lastIdleAborted,
                 lastIdleTurnKind,
                 trackedUserInputs: [...pendingUserInputs.values()],
+                trackedElicitations: [...pendingElicitations.values()],
                 ...(error ? { error: String(error) } : {}),
             };
             const temporaryPath = `${snapshotPath}.${process.pid}.tmp`;
@@ -460,6 +476,145 @@ public enum CopilotExtension {
                 removeFile(userInputResponsePath);
             } finally {
                 inFlightUserInputResponses.delete(requestId);
+            }
+        }
+
+        // Build a bounded elicitation record or return null to reject remote
+        // exposure (the terminal keeps handling it). The requestedSchema is passed
+        // through verbatim within a byte budget so the client renders exactly what
+        // the agent asked; oversized/complex schemas fall back to the terminal.
+        function elicitationEntry(event) {
+            const data = event?.data;
+            if (!data || typeof data !== "object") return null;
+            const requestId = data.requestId;
+            if (typeof requestId !== "string" || !requestId
+                    || requestId.length > 200) return null;
+            const message = data.message;
+            if (typeof message !== "string") return null;
+            if (userInputByteLength(message) > MAX_ELICITATION_MESSAGE_BYTES) return null;
+            const mode = typeof data.mode === "string" ? data.mode : null;
+            let url = null;
+            if (data.url != null) {
+                if (typeof data.url !== "string") return null;
+                if (userInputByteLength(data.url) > MAX_ELICITATION_URL_BYTES) return null;
+                url = data.url;
+            }
+            let schema = null;
+            if (data.requestedSchema != null) {
+                if (typeof data.requestedSchema !== "object") return null;
+                let serialized;
+                try {
+                    serialized = JSON.stringify(data.requestedSchema);
+                } catch {
+                    return null;
+                }
+                if (Buffer.byteLength(serialized) > MAX_ELICITATION_SCHEMA_BYTES) return null;
+                schema = data.requestedSchema;
+            }
+            // A form-mode elicitation with neither a schema nor a url isn't
+            // remotely answerable; leave it to the terminal.
+            if (!schema && !url) return null;
+            const agentId = typeof event.agentId === "string" && event.agentId
+                ? boundedMetadataText(event.agentId)
+                : null;
+            return {
+                requestId,
+                message,
+                mode,
+                url,
+                schema,
+                elicitationSource: typeof data.elicitationSource === "string"
+                    ? boundedMetadataText(data.elicitationSource)
+                    : null,
+                requestedAt: normalizedTimestamp(event.timestamp),
+                agentId,
+            };
+        }
+
+        function boundPendingElicitations() {
+            while (pendingElicitations.size > MAX_ELICITATIONS) {
+                pendingElicitations.delete(pendingElicitations.keys().next().value);
+            }
+        }
+
+        // Answer a pending elicitation from the host-written response file. Mirrors
+        // processUserInputResponse: owner-only, validates against the pending record,
+        // and keeps the elicitation retryable when a response is rejected.
+        async function processElicitationResponse() {
+            if (!ownsSharedFiles()) return;
+            let encoded;
+            try {
+                encoded = readFileSync(elicitationResponsePath, "utf8");
+            } catch {
+                return;
+            }
+            let response;
+            try {
+                response = JSON.parse(encoded);
+            } catch {
+                removeFile(elicitationResponsePath);
+                return;
+            }
+            if (!response || typeof response !== "object"
+                    || response.schemaVersion !== 1
+                    || typeof response.requestId !== "string") {
+                removeFile(elicitationResponsePath);
+                return;
+            }
+            const requestId = response.requestId;
+            if (inFlightElicitationResponses.has(requestId)) return;
+            if (response.copilotSessionId !== session.sessionId) {
+                removeFile(elicitationResponsePath);
+                return;
+            }
+            if (!pendingElicitations.has(requestId)) {
+                removeFile(elicitationResponsePath);
+                return;
+            }
+            const action = response.action;
+            if (action !== "accept" && action !== "decline" && action !== "cancel") {
+                removeFile(elicitationResponsePath);
+                return;
+            }
+            const result = { action };
+            if (action === "accept") {
+                const content = response.content;
+                if (!content || typeof content !== "object" || Array.isArray(content)) {
+                    removeFile(elicitationResponsePath);
+                    return;
+                }
+                let serialized;
+                try {
+                    serialized = JSON.stringify(content);
+                } catch {
+                    removeFile(elicitationResponsePath);
+                    return;
+                }
+                if (Buffer.byteLength(serialized) > MAX_ELICITATION_CONTENT_BYTES) {
+                    removeFile(elicitationResponsePath);
+                    return;
+                }
+                result.content = content;
+            }
+            inFlightElicitationResponses.add(requestId);
+            try {
+                const rpcResult = await session.rpc.ui.handlePendingElicitation({
+                    requestId,
+                    result,
+                });
+                if (rpcResult?.success === true) {
+                    pendingElicitations.delete(requestId);
+                    removeFile(elicitationResponsePath);
+                    publish();
+                } else {
+                    // Resolved elsewhere (terminal / another client) or expired;
+                    // drop only the response. elicitation.completed clears the card.
+                    removeFile(elicitationResponsePath);
+                }
+            } catch {
+                removeFile(elicitationResponsePath);
+            } finally {
+                inFlightElicitationResponses.delete(requestId);
             }
         }
 
@@ -852,6 +1007,7 @@ public enum CopilotExtension {
         // cannot be stranded during startup.
         if (ownsSharedFiles()) {
             removeFile(userInputResponsePath);
+            removeFile(elicitationResponsePath);
         }
         let userInputWatcher = null;
         try {
@@ -859,8 +1015,28 @@ public enum CopilotExtension {
                 if (!filename || filename === userInputResponseName) {
                     processUserInputResponse();
                 }
+                if (!filename || filename === elicitationResponseName) {
+                    processElicitationResponse();
+                }
             });
         } catch {}
+
+        // Both user_input.requested and elicitation.requested are gated events: the
+        // runtime only delivers them to consumers that register interest, otherwise
+        // it keeps its default terminal-only handling. Register AFTER attaching the
+        // listeners so a question dispatched immediately can't slip past them.
+        const eventInterestHandles = [];
+        for (const eventType of ["user_input.requested", "elicitation.requested"]) {
+            try {
+                const interest = await session.rpc.eventLog.registerInterest({ eventType });
+                if (interest?.handle) eventInterestHandles.push(interest.handle);
+            } catch (error) {
+                console.error(
+                    "[copilot-projects] failed to register interest in " + eventType + ":",
+                    error
+                );
+            }
+        }
 
         session.on("user_input.requested", (event) => {
             const entry = userInputEntry(event);
@@ -875,6 +1051,21 @@ public enum CopilotExtension {
         session.on("user_input.completed", (event) => {
             const requestId = event.data?.requestId;
             if (typeof requestId === "string" && pendingUserInputs.delete(requestId)) {
+                publish();
+            }
+        });
+
+        session.on("elicitation.requested", (event) => {
+            const entry = elicitationEntry(event);
+            if (!entry) return;
+            pendingElicitations.set(entry.requestId, entry);
+            boundPendingElicitations();
+            publish();
+        });
+
+        session.on("elicitation.completed", (event) => {
+            const requestId = event.data?.requestId;
+            if (typeof requestId === "string" && pendingElicitations.delete(requestId)) {
                 publish();
             }
         });
@@ -908,15 +1099,21 @@ public enum CopilotExtension {
         await refreshSchedules();
 
         processUserInputResponse();
+        processElicitationResponse();
 
         const timer = setInterval(() => {
             refreshSchedules();
             processUserInputResponse();
+            processElicitationResponse();
         }, 5_000);
 
         function cleanup() {
             clearInterval(timer);
             clearTimeout(transcriptPublishTimer);
+            for (const handle of eventInterestHandles) {
+                session.rpc.eventLog.releaseInterest({ handle }).catch(() => {});
+            }
+            eventInterestHandles.length = 0;
             if (userInputWatcher) {
                 try { userInputWatcher.close(); } catch {}
                 userInputWatcher = null;
@@ -931,6 +1128,7 @@ public enum CopilotExtension {
                 removeFile(scheduledTurnPath);
                 removeFile(transcriptOwnerPath);
                 removeFile(userInputResponsePath);
+                removeFile(elicitationResponsePath);
             }
         }
         process.once("SIGTERM", cleanup);

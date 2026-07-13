@@ -41,6 +41,9 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     /// Structured `ask_user` questions currently awaiting an answer. Optional (and
     /// omitted when absent) so older clients decode snapshots without this field.
     public let pendingUserInputs: [RemoteUserInputRequest]?
+    /// Schema-form `elicitation.requested` questions awaiting an answer. Optional
+    /// (omitted when absent) for backward-compatible decoding.
+    public let pendingElicitations: [RemoteElicitationRequest]?
 
     public init(
         id: String,
@@ -52,7 +55,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         background: Bool,
         scheduled: Bool,
         promptable: Bool? = nil,
-        pendingUserInputs: [RemoteUserInputRequest]? = nil
+        pendingUserInputs: [RemoteUserInputRequest]? = nil,
+        pendingElicitations: [RemoteElicitationRequest]? = nil
     ) {
         self.id = id
         self.title = title
@@ -64,6 +68,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.scheduled = scheduled
         self.promptable = promptable
         self.pendingUserInputs = pendingUserInputs
+        self.pendingElicitations = pendingElicitations
     }
 }
 
@@ -109,6 +114,114 @@ public struct RemoteUserInputAnswer: Codable, Equatable, Sendable {
         self.requestId = requestId
         self.answer = answer
         self.wasFreeform = wasFreeform
+    }
+}
+
+/// A minimal JSON value used to carry an elicitation's `requestedSchema` and a
+/// client's answer `content` verbatim across the wire, so the client renders
+/// exactly what the agent asked and the host forwards exactly what the user gave.
+public enum RemoteJSONValue: Codable, Equatable, Sendable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([RemoteJSONValue])
+    case object([String: RemoteJSONValue])
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([RemoteJSONValue].self) {
+            self = .array(value)
+        } else if let value = try? container.decode([String: RemoteJSONValue].self) {
+            self = .object(value)
+        } else {
+            throw DecodingError.dataCorruptedError(
+                in: container, debugDescription: "Unsupported JSON value"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .null: try container.encodeNil()
+        case .bool(let value): try container.encode(value)
+        case .number(let value): try container.encode(value)
+        case .string(let value): try container.encode(value)
+        case .array(let value): try container.encode(value)
+        case .object(let value): try container.encode(value)
+        }
+    }
+}
+
+/// The action a remote client took on an elicitation, matching the SDK's
+/// `UIElicitationResponseAction`.
+public enum RemoteElicitationAction: String, Codable, Equatable, Sendable {
+    case accept
+    case decline
+    case cancel
+}
+
+/// A schema-form (or url-mode) question surfaced by the agent's
+/// `elicitation.requested` event. `schema` is the verbatim `requestedSchema` the
+/// client renders as a form; `url` is set for url-mode requests instead.
+public struct RemoteElicitationRequest: Codable, Equatable, Sendable, Identifiable {
+    public let requestId: String
+    public let message: String
+    public let mode: String?
+    public let url: String?
+    public let schema: RemoteJSONValue?
+    public let elicitationSource: String?
+    public let requestedAt: Date
+    public let agentId: String?
+
+    public var id: String { requestId }
+
+    public init(
+        requestId: String,
+        message: String,
+        mode: String? = nil,
+        url: String? = nil,
+        schema: RemoteJSONValue? = nil,
+        elicitationSource: String? = nil,
+        requestedAt: Date,
+        agentId: String? = nil
+    ) {
+        self.requestId = requestId
+        self.message = message
+        self.mode = mode
+        self.url = url
+        self.schema = schema
+        self.elicitationSource = elicitationSource
+        self.requestedAt = requestedAt
+        self.agentId = agentId
+    }
+}
+
+/// A remote client's answer to a `RemoteElicitationRequest`. `content` carries the
+/// submitted form values (keyed by field name) and is only meaningful for the
+/// `accept` action.
+public struct RemoteElicitationAnswer: Codable, Equatable, Sendable {
+    public let requestId: String
+    public let action: RemoteElicitationAction
+    public let content: [String: RemoteJSONValue]?
+
+    public init(
+        requestId: String,
+        action: RemoteElicitationAction,
+        content: [String: RemoteJSONValue]? = nil
+    ) {
+        self.requestId = requestId
+        self.action = action
+        self.content = content
     }
 }
 

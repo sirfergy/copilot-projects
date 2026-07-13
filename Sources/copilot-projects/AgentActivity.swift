@@ -17,6 +17,9 @@ struct AgentActivitySnapshot: Codable, Equatable {
     /// Structured `ask_user` questions currently awaiting an answer. Optional (with a
     /// nil default) so older heartbeat snapshots that predate this field still decode.
     var trackedUserInputs: [TrackedUserInput]? = nil
+    /// Schema-form `elicitation.requested` questions awaiting an answer. Optional
+    /// (nil default) for backward-compatible decoding of older heartbeats.
+    var trackedElicitations: [TrackedElicitation]? = nil
 
     func isFresh(at now: Date = Date(), ttl: TimeInterval = 15) -> Bool {
         guard schemaVersion == Self.currentSchemaVersion,
@@ -29,6 +32,13 @@ struct AgentActivitySnapshot: Codable, Equatable {
     func remoteUserInputRequests() -> [RemoteUserInputRequest]? {
         guard let trackedUserInputs, !trackedUserInputs.isEmpty else { return nil }
         return trackedUserInputs.map { $0.remoteRequest() }
+    }
+
+    /// Convert the tracked elicitations into the shared remote model. Returns nil
+    /// when there are none so the field is omitted entirely.
+    func remoteElicitationRequests() -> [RemoteElicitationRequest]? {
+        guard let trackedElicitations, !trackedElicitations.isEmpty else { return nil }
+        return trackedElicitations.map { $0.remoteRequest() }
     }
 
     private static func date(from value: String) -> Date? {
@@ -56,6 +66,40 @@ struct TrackedUserInput: Codable, Equatable, Identifiable {
             question: question,
             choices: choices,
             allowFreeform: allowFreeform,
+            requestedAt: Self.date(from: requestedAt) ?? Date(),
+            agentId: agentId
+        )
+    }
+
+    private static func date(from value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
+}
+
+/// One outstanding elicitation, mirrored from the extension's heartbeat. `schema`
+/// is carried verbatim so the client renders the exact form the agent requested.
+struct TrackedElicitation: Codable, Equatable, Identifiable {
+    var requestId: String
+    var message: String
+    var mode: String?
+    var url: String?
+    var schema: RemoteJSONValue?
+    var elicitationSource: String?
+    var requestedAt: String
+    var agentId: String?
+
+    var id: String { requestId }
+
+    func remoteRequest() -> RemoteElicitationRequest {
+        RemoteElicitationRequest(
+            requestId: requestId,
+            message: message,
+            mode: mode,
+            url: url,
+            schema: schema,
+            elicitationSource: elicitationSource,
             requestedAt: Self.date(from: requestedAt) ?? Date(),
             agentId: agentId
         )
