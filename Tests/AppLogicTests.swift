@@ -1868,6 +1868,10 @@ final class AppLogicTests: XCTestCase {
                                     "type": .string("string"),
                                     "minLength": .number(1e300),
                                 ]),
+                                "emojiCodepoints": .object([
+                                    "type": .string("string"),
+                                    "minLength": .number(2),
+                                ]),
                                 "tokens": .object([
                                     "type": .string("array"),
                                     "minItems": .number(1e300),
@@ -1972,6 +1976,7 @@ final class AppLogicTests: XCTestCase {
                         "ripe": .bool(true),
                         "count": .number(2),
                         "colors": .array([.string("red"), .string("green")]),
+                        "emojiCodepoints": .string("👨‍👩‍👧‍👦"),
                     ]
                 )
             ),
@@ -1994,6 +1999,10 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(
             (written["content"] as? [String: Any])?["colors"] as? [String],
             ["red", "green"]
+        )
+        XCTAssertEqual(
+            (written["content"] as? [String: Any])?["emojiCodepoints"] as? String,
+            "👨‍👩‍👧‍👦"
         )
 
         // A second answer conflicts while the prior response awaits pickup.

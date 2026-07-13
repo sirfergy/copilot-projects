@@ -1182,9 +1182,9 @@ final class AppModel: ObservableObject {
         case "string":
             guard case .string(let string) = value else { return false }
             if let minimum = jsonNumber(schema["minLength"]),
-               Double(string.count) < minimum { return false }
+               Double(string.unicodeScalars.count) < minimum { return false }
             if let maximum = jsonNumber(schema["maxLength"]),
-               Double(string.count) > maximum { return false }
+               Double(string.unicodeScalars.count) > maximum { return false }
             return true
         case "number":
             guard case .number(let number) = value else { return false }
