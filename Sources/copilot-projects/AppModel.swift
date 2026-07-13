@@ -1086,7 +1086,7 @@ final class AppModel: ObservableObject {
         // Accept must carry content; decline/cancel must not.
         switch answer.action {
         case .accept:
-            if request.mode == "url" {
+            if request.mode == "url" || request.url != nil {
                 guard answer.content == nil else { return .invalid }
             } else {
                 guard let content = answer.content,

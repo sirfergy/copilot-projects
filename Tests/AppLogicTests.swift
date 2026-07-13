@@ -1901,7 +1901,7 @@ final class AppLogicTests: XCTestCase {
                     TrackedElicitation(
                         requestId: "req-url",
                         message: "Open this URL?",
-                        mode: "url",
+                        mode: nil,
                         url: "https://example.com/elicit",
                         schema: nil,
                         elicitationSource: nil,
@@ -3337,7 +3337,7 @@ final class AppLogicTests: XCTestCase {
                     TrackedElicitation(
                         requestId: "req-url",
                         message: "Open this URL?",
-                        mode: "url",
+                        mode: nil,
                         url: "https://example.com/elicit",
                         schema: nil,
                         elicitationSource: nil,

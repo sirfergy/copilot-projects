@@ -1211,8 +1211,7 @@ final class CoreLogicTests: XCTestCase {
         __fakeSession.emit({
           id:"elicit-url",type:"elicitation.requested",agentId:"agent-7",
           timestamp:"2026-07-12T04:00:02.000Z",
-          data:{requestId:"req-url",message:"Open docs",mode:"url",
-            url:"https://example.com/elicit"}
+          data:{requestId:"req-url",message:"Open docs",url:"https://example.com/elicit"}
         });
         __fakeSession.emit({
           id:"elicit-terminal",type:"elicitation.requested",agentId:"agent-7",
@@ -1368,7 +1367,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["formMessage"] as? String, "Pick a fruit")
         XCTAssertEqual(summary["formSchemaType"] as? String, "object")
         XCTAssertEqual(summary["formSource"] as? String, "unit-test")
-        XCTAssertEqual(summary["urlMode"] as? String, "url")
+        XCTAssertTrue(summary["urlMode"] == nil || summary["urlMode"] is NSNull)
         XCTAssertEqual(summary["url"] as? String, "https://example.com/elicit")
         XCTAssertEqual(summary["urlAgentId"] as? String, "agent-7")
         XCTAssertEqual(summary["snapshotMode"] as? String, "600")

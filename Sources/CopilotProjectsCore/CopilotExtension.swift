@@ -606,7 +606,7 @@ public enum CopilotExtension {
             }
             const result = { action };
             if (action === "accept") {
-                if (pending.mode === "url") {
+                if (pending.mode === "url" || typeof pending.url === "string") {
                     if (response.content != null) {
                         removeFile(elicitationResponsePath);
                         return;
