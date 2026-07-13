@@ -856,8 +856,11 @@ public enum CopilotExtension {
         await refreshSchedules();
 
         // A fresh session must never inherit a stale answer from a prior launch, and
-        // pending questions are rebuilt from live events — never from disk.
-        removeFile(userInputResponsePath);
+        // pending questions are rebuilt from live events — never from disk. Only the
+        // owner clears it, so a spawned helper can't wipe the owner's live response.
+        if (ownsSharedFiles()) {
+            removeFile(userInputResponsePath);
+        }
         let userInputWatcher = null;
         try {
             userInputWatcher = watch(sessionsDir, (_eventType, filename) => {
