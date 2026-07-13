@@ -387,6 +387,7 @@ enum RemoteWebAssets {
     const submittingUserInputs = new Map();
     const latestUserInputAttempts = new Map();
     let userInputAttemptSequence = 0;
+    let userInputCardSequence = 0;
     const requested = new URLSearchParams(location.search);
     let pendingFocusSession = requested.get('session');
 
@@ -605,6 +606,7 @@ enum RemoteWebAssets {
       const q = promptQueues.get(id);
       if (!q || !q.length) return;
       const state = sessionState.get(id);
+      if ((state?.pendingUserInputs || []).length > 0) return;
       if (!(writable && state?.promptable === true
           && !promptSending && !awaitingPromptStart)) return;
       flushingQueue = true;
@@ -737,6 +739,7 @@ enum RemoteWebAssets {
     function resetUserInputCards() {
       submittingUserInputs.forEach((entry) => clearTimeout(entry.timer));
       submittingUserInputs.clear();
+      latestUserInputAttempts.clear();
       userInputCards.clear();
       userInput.replaceChildren();
     }
@@ -761,6 +764,8 @@ enum RemoteWebAssets {
       const card = document.createElement('article');
       card.className = 'user-input-card';
       card.dataset.requestId = request.requestId;
+      const questionId = `user-input-question-${++userInputCardSequence}`;
+      card.setAttribute('aria-labelledby', questionId);
       const head = document.createElement('div');
       head.className = 'user-input-head';
       const heading = document.createElement('span');
@@ -775,17 +780,21 @@ enum RemoteWebAssets {
       card.append(head);
       const question = document.createElement('div');
       question.className = 'user-input-question';
+      question.id = questionId;
       question.textContent = request.question;
       card.append(question);
       const choices = Array.isArray(request.choices) ? request.choices : [];
       if (choices.length) {
         const group = document.createElement('div');
         group.className = 'user-input-choices';
+        group.setAttribute('role', 'group');
+        group.setAttribute('aria-labelledby', questionId);
         choices.forEach((choice) => {
           const button = document.createElement('button');
           button.type = 'button';
           button.className = 'user-input-choice';
           button.textContent = choice;
+          button.setAttribute('aria-describedby', questionId);
           button.onclick = () => submitUserInput(request.requestId, choice, false);
           group.append(button);
         });
@@ -794,15 +803,21 @@ enum RemoteWebAssets {
       if (request.allowFreeform) {
         const freeform = document.createElement('form');
         freeform.className = 'user-input-freeform';
+        freeform.setAttribute('aria-labelledby', questionId);
+        const fieldLabel = document.createElement('span');
+        fieldLabel.className = 'visually-hidden';
+        fieldLabel.id = `${questionId}-answer-label`;
+        fieldLabel.textContent = 'Type an answer';
         const field = document.createElement('textarea');
         field.rows = 2;
         field.maxLength = 8192;
-        field.setAttribute('aria-label', 'Type an answer');
+        field.setAttribute('aria-labelledby', `${fieldLabel.id} ${questionId}`);
         field.placeholder = 'Type an answer';
         const submit = document.createElement('button');
         submit.type = 'submit';
         submit.textContent = 'Send answer';
-        freeform.append(field, submit);
+        submit.setAttribute('aria-describedby', questionId);
+        freeform.append(fieldLabel, field, submit);
         freeform.onsubmit = (event) => {
           event.preventDefault();
           const value = field.value;

@@ -3411,6 +3411,9 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "if (selected !== id || selectionGeneration !== submittedGeneration) return;"
         ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if ((state?.pendingUserInputs || []).length > 0) return;"
+        ))
     }
 
     func testRemoteWebSurfacesUserInputCardsSafely() {
@@ -3449,6 +3452,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "if (!selected || !writable || submittingUserInputs.has(requestId)) return;"
         ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("aria-labelledby"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("aria-describedby"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("refreshUserInputCardStates();"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 409"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 422"))

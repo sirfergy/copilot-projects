@@ -952,6 +952,11 @@ final class CoreLogicTests: XCTestCase {
           timestamp:"2026-07-12T03:00:02.000Z",
           data:{requestId:"req-sub",question:"Name it",choices:[],allowFreeform:true}
         });
+        __fakeSession.emit({
+          id:"ui-default-freeform",type:"user_input.requested",
+          timestamp:"2026-07-12T03:00:02.500Z",
+          data:{requestId:"req-default",question:"Omitted allowFreeform?",choices:[]}
+        });
         // Oversized choice: rejected entirely, never truncated or exposed.
         __fakeSession.emit({
           id:"ui-big",type:"user_input.requested",
@@ -967,6 +972,9 @@ final class CoreLogicTests: XCTestCase {
         );
         const subRequest = firstSnapshot.trackedUserInputs.find(
           (u) => u.requestId === "req-sub"
+        );
+        const defaultRequest = firstSnapshot.trackedUserInputs.find(
+          (u) => u.requestId === "req-default"
         );
         const snapshotMode = (statSync(snapshotPath).mode & 0o777).toString(8);
 
@@ -1008,6 +1016,11 @@ final class CoreLogicTests: XCTestCase {
           timestamp:"2026-07-12T03:00:04.000Z",
           data:{requestId:"req-sub",answer:"A name",wasFreeform:true}
         });
+        __fakeSession.emit({
+          id:"ui-default-complete",type:"user_input.completed",
+          timestamp:"2026-07-12T03:00:05.000Z",
+          data:{requestId:"req-default",answer:"Done",wasFreeform:true}
+        });
         await new Promise((resolve) => setImmediate(resolve));
         const afterSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
 
@@ -1017,6 +1030,7 @@ final class CoreLogicTests: XCTestCase {
           rootChoices: rootRequest?.choices,
           rootAllowFreeform: rootRequest?.allowFreeform,
           subAgentId: subRequest?.agentId,
+          defaultAllowFreeform: defaultRequest?.allowFreeform,
           snapshotMode,
           staleHandled,
           staleStillPending,
@@ -1060,12 +1074,13 @@ final class CoreLogicTests: XCTestCase {
         )
         XCTAssertEqual(
             (summary["pendingBefore"] as? [String])?.sorted(),
-            ["req-root", "req-sub"]
+            ["req-default", "req-root", "req-sub"]
         )
         XCTAssertEqual(summary["rejectedBigChoice"] as? Bool, false)
         XCTAssertEqual(summary["rootChoices"] as? [String], ["Yes, deploy", "No, cancel"])
         XCTAssertEqual(summary["rootAllowFreeform"] as? Bool, false)
         XCTAssertEqual(summary["subAgentId"] as? String, "agent-7")
+        XCTAssertEqual(summary["defaultAllowFreeform"] as? Bool, true)
         XCTAssertEqual(summary["snapshotMode"] as? String, "600")
         XCTAssertEqual(summary["staleHandled"] as? Int, 0)
         XCTAssertEqual(summary["staleStillPending"] as? Bool, true)

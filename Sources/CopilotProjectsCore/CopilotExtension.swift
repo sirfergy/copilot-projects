@@ -375,7 +375,7 @@ public enum CopilotExtension {
                 requestId,
                 question,
                 choices,
-                allowFreeform: data.allowFreeform === true,
+                allowFreeform: data.allowFreeform !== false,
                 requestedAt: normalizedTimestamp(event.timestamp),
                 agentId,
             };
