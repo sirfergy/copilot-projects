@@ -1834,8 +1834,22 @@ final class AppLogicTests: XCTestCase {
                         url: nil,
                         schema: .object([
                             "type": .string("object"),
+                            "required": .array([.string("fruit")]),
                             "properties": .object([
-                                "fruit": .object(["type": .string("string")])
+                                "fruit": .object([
+                                    "type": .string("string"),
+                                    "enum": .array([.string("apple"), .string("pear")]),
+                                ]),
+                                "ripe": .object(["type": .string("boolean")]),
+                                "count": .object([
+                                    "type": .string("number"),
+                                    "minimum": .number(1),
+                                    "maximum": .number(3),
+                                ]),
+                                "colors": .object([
+                                    "type": .string("array"),
+                                    "items": .object(["type": .string("string")]),
+                                ]),
                             ]),
                         ]),
                         elicitationSource: nil,
@@ -1889,9 +1903,14 @@ final class AppLogicTests: XCTestCase {
 
         let unsupportedContents: [[String: RemoteJSONValue]] = [
             ["fruit": .null],
+            ["fruit": .number(2)],
+            ["fruit": .string("banana")],
             ["fruit": .object(["name": .string("apple")])],
             ["fruit": .array([.number(1)])],
             ["fruit": .array([.array([.string("apple")])])],
+            ["ripe": .bool(true)],
+            ["fruit": .string("apple"), "count": .number(4)],
+            ["fruit": .string("apple"), "extra": .string("x")],
         ]
         for unsupportedContent in unsupportedContents {
             XCTAssertEqual(
@@ -3230,7 +3249,7 @@ final class AppLogicTests: XCTestCase {
                 origin: "https://projects.example.com",
                 body: try answerBody(
                     requestId: "req-form", action: .accept,
-                    content: ["fruit": .object(["name": .string("apple")])]
+                    content: ["fruit": .number(2)]
                 )
             )
             XCTAssertEqual(unsupportedContent, 422)

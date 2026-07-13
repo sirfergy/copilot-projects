@@ -1079,8 +1079,8 @@ final class AppModel: ObservableObject {
                 AgentActivitySnapshot.self, from: data
               ),
               snapshot.isFresh(at: now),
-              (snapshot.trackedElicitations?
-                .contains(where: { $0.requestId == answer.requestId }) ?? false)
+              let request = snapshot.trackedElicitations?
+                .first(where: { $0.requestId == answer.requestId })
         else { return .invalid }
 
         // Accept must carry content; decline/cancel must not.
@@ -1088,6 +1088,7 @@ final class AppModel: ObservableObject {
         case .accept:
             guard let content = answer.content,
                   Self.isValidElicitationContent(content),
+                  Self.elicitationContent(content, satisfies: request.schema),
                   let encoded = try? JSONEncoder().encode(content),
                   encoded.count <= 32_768 else { return .invalid }
         case .decline, .cancel:
@@ -1134,6 +1135,106 @@ final class AppModel: ObservableObject {
                 return false
             }
         }
+    }
+
+    private static func elicitationContent(
+        _ content: [String: RemoteJSONValue],
+        satisfies schema: RemoteJSONValue?
+    ) -> Bool {
+        guard let schema else { return true }
+        guard case .object(let root) = schema else { return false }
+        if let type = jsonString(root["type"]), type != "object" { return false }
+        guard let propertiesValue = root["properties"],
+              case .object(let properties) = propertiesValue else { return content.isEmpty }
+        let required = jsonStringArray(root["required"]) ?? []
+        guard required.allSatisfy({ content[$0] != nil }) else { return false }
+        for (key, value) in content {
+            guard let fieldSchema = properties[key],
+                  elicitationValue(value, satisfies: fieldSchema) else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func elicitationValue(
+        _ value: RemoteJSONValue,
+        satisfies schema: RemoteJSONValue
+    ) -> Bool {
+        guard case .object(let schema) = schema else { return true }
+        if let enumValues = jsonArray(schema["enum"]),
+           !enumValues.contains(value) {
+            return false
+        }
+        guard let type = jsonString(schema["type"]) else { return true }
+        switch type {
+        case "string":
+            guard case .string(let string) = value else { return false }
+            if let minimum = jsonNumber(schema["minLength"]),
+               string.count < Int(minimum) { return false }
+            if let maximum = jsonNumber(schema["maxLength"]),
+               string.count > Int(maximum) { return false }
+            return true
+        case "number":
+            guard case .number(let number) = value else { return false }
+            return numberSatisfiesBounds(number, schema: schema)
+        case "integer":
+            guard case .number(let number) = value,
+                  number.rounded() == number else { return false }
+            return numberSatisfiesBounds(number, schema: schema)
+        case "boolean":
+            guard case .bool = value else { return false }
+            return true
+        case "array":
+            guard case .array(let values) = value else { return false }
+            if let minimum = jsonNumber(schema["minItems"]),
+               values.count < Int(minimum) { return false }
+            if let maximum = jsonNumber(schema["maxItems"]),
+               values.count > Int(maximum) { return false }
+            if let items = schema["items"] {
+                return values.allSatisfy { elicitationValue($0, satisfies: items) }
+            }
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func numberSatisfiesBounds(
+        _ number: Double,
+        schema: [String: RemoteJSONValue]
+    ) -> Bool {
+        if let minimum = jsonNumber(schema["minimum"]), number < minimum { return false }
+        if let maximum = jsonNumber(schema["maximum"]), number > maximum { return false }
+        return true
+    }
+
+    private static func jsonString(_ value: RemoteJSONValue?) -> String? {
+        guard let value else { return nil }
+        if case .string(let string) = value { return string }
+        return nil
+    }
+
+    private static func jsonNumber(_ value: RemoteJSONValue?) -> Double? {
+        guard let value else { return nil }
+        if case .number(let number) = value { return number }
+        return nil
+    }
+
+    private static func jsonArray(_ value: RemoteJSONValue?) -> [RemoteJSONValue]? {
+        guard let value else { return nil }
+        if case .array(let values) = value { return values }
+        return nil
+    }
+
+    private static func jsonStringArray(_ value: RemoteJSONValue?) -> [String]? {
+        guard let value, case .array(let values) = value else { return nil }
+        var strings: [String] = []
+        for value in values {
+            guard case .string(let string) = value else { return nil }
+            strings.append(string)
+        }
+        return strings
     }
 
     /// temp file and renaming it into place.
