@@ -117,6 +117,7 @@ public enum CLIMain {
                 req.timestamp = timestamp
             }
             req.source = parsed.flags["source"]
+            req.copilotSessionId = parsed.flags["copilot-session"]
             if let rawNotification = parsed.flags["notification"] {
                 guard let notification = StatusNotificationKind(rawValue: rawNotification) else {
                     fail("--notification must be elicitation, permission, or completed")

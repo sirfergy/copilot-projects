@@ -155,6 +155,7 @@ final class AppModel: ObservableObject {
                 text: text,
                 timestamp: request.timestamp,
                 source: request.source,
+                copilotSessionId: request.copilotSessionId,
                 notification: request.notification
             )
             return .success()
@@ -1097,13 +1098,15 @@ final class AppModel: ObservableObject {
         text: String?,
         timestamp: Int64? = nil,
         source: String? = nil,
+        copilotSessionId: String? = nil,
         notification: StatusNotificationKind? = nil
     ) {
         guard let loc = locateIndex(sessionId) else { return }
         guard statusEventClock.shouldApply(sessionId: sessionId, timestamp: timestamp) else { return }
         // sessionEnd is also emitted during graceful macOS shutdown. Only a live,
         // non-terminating app can treat it as an explicit user exit.
-        if source == "session-end", !isTerminating, !isPoweringOff {
+        if source == "session-end", !isTerminating, !isPoweringOff,
+           shouldClearResumeMarkers(sessionId: sessionId, copilotSessionId: copilotSessionId) {
             for suffix in ["copilot-session", "copilot-allow-all"] {
                 try? FileManager.default.removeItem(
                     at: resumeMarkerDirectory.appendingPathComponent("\(sessionId).\(suffix)")
@@ -1206,6 +1209,24 @@ final class AppModel: ObservableObject {
                 body: nil
             )
         }
+    }
+
+    private func shouldClearResumeMarkers(
+        sessionId: String,
+        copilotSessionId: String?
+    ) -> Bool {
+        guard let copilotSessionId, !copilotSessionId.isEmpty else { return false }
+        let recorded = resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session")
+        let allowAll = resumeMarkerValue(sessionId: sessionId, suffix: "copilot-allow-all")
+        return recorded == copilotSessionId
+            || (recorded == nil && allowAll == copilotSessionId)
+    }
+
+    private func resumeMarkerValue(sessionId: String, suffix: String) -> String? {
+        (try? String(
+            contentsOf: resumeMarkerDirectory.appendingPathComponent("\(sessionId).\(suffix)"),
+            encoding: .utf8
+        ))?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Whether a session is the one on screen right now (app active + its project and

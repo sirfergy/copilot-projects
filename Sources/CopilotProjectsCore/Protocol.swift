@@ -19,6 +19,7 @@ public struct ControlRequest: Codable, Sendable {
     public var status: String?
     public var timestamp: Int64?
     public var source: String?
+    public var copilotSessionId: String?
     public var text: String?
     public var notification: StatusNotificationKind?
     public var title: String?

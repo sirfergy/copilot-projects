@@ -334,24 +334,28 @@ final class AppLogicTests: XCTestCase {
             stateRepository: repository,
             resumeMarkerDirectory: sessions
         )
-        try Data(UUID().uuidString.utf8).write(to: marker)
+        let firstCopilotSession = UUID().uuidString
+        try Data(firstCopilotSession.utf8).write(to: marker)
         model.setStatus(
             sessionId: session.id,
             status: .idle,
             text: nil,
             timestamp: 100,
-            source: "session-end"
+            source: "session-end",
+            copilotSessionId: firstCopilotSession
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
 
-        try Data(UUID().uuidString.utf8).write(to: marker)
+        let powerOffCopilotSession = UUID().uuidString
+        try Data(powerOffCopilotSession.utf8).write(to: marker)
         model.prepareForSystemPowerOff()
         model.setStatus(
             sessionId: session.id,
             status: .idle,
             text: nil,
             timestamp: 150,
-            source: "session-end"
+            source: "session-end",
+            copilotSessionId: powerOffCopilotSession
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
 
@@ -361,7 +365,8 @@ final class AppLogicTests: XCTestCase {
             status: .idle,
             text: nil,
             timestamp: 200,
-            source: "session-end"
+            source: "session-end",
+            copilotSessionId: powerOffCopilotSession
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
     }
@@ -384,8 +389,9 @@ final class AppLogicTests: XCTestCase {
         let markers = ["copilot-session", "copilot-allow-all"].map {
             sessions.appendingPathComponent("\(session.id).\($0)")
         }
+        let ownerCopilotSession = UUID().uuidString
         for marker in markers {
-            try Data(UUID().uuidString.utf8).write(to: marker)
+            try Data(ownerCopilotSession.utf8).write(to: marker)
         }
 
         let model = AppModel(
@@ -398,7 +404,21 @@ final class AppLogicTests: XCTestCase {
             status: .idle,
             text: nil,
             timestamp: 100,
-            source: "session-end"
+            source: "session-end",
+            copilotSessionId: ownerCopilotSession
+        )
+
+        for marker in markers {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        }
+
+        model.setStatus(
+            sessionId: session.id,
+            status: .idle,
+            text: nil,
+            timestamp: 300,
+            source: "session-end",
+            copilotSessionId: UUID().uuidString
         )
 
         for marker in markers {
@@ -1133,6 +1153,62 @@ final class AppLogicTests: XCTestCase {
             try cliCallLines(in: capture),
             ["set-status idle --timestamp 200 --source session-end"]
         )
+
+        let copilotSessionId = UUID().uuidString
+        try runHook(
+            hookURL: hookURL,
+            action: "end",
+            payload: #"{"timestamp":210,"reason":"user_exit","sessionId":"\#(copilotSessionId)"}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertEqual(
+            try cliCallLines(in: capture).last,
+            "set-status idle --timestamp 210 --source session-end --copilot-session \(copilotSessionId)"
+        )
+    }
+
+    func testCopilotHookDoesNotOverwriteResumeMarkerFromInheritedHelper() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let bin = root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let hookURL = root.appendingPathComponent("copilot-projects-hook.sh")
+        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookURL.path)
+
+        let capture = root.appendingPathComponent("cli-args.txt")
+        let fakeCLI = bin.appendingPathComponent("copilot-projects")
+        try """
+        #!/bin/sh
+        printf '%s\n' "$*" >> "$CAPTURE_FILE"
+        """.write(to: fakeCLI, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
+
+        let tabId = UUID().uuidString
+        let ownerCopilotSession = UUID().uuidString
+        let helperCopilotSession = UUID().uuidString
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let marker = sessions.appendingPathComponent("\(tabId).copilot-session")
+        try Data(ownerCopilotSession.utf8).write(to: marker)
+
+        try runHook(
+            hookURL: hookURL,
+            action: "pre",
+            payload: #"{"timestamp":200,"sessionId":"\#(helperCopilotSession)"}"#,
+            tabId: tabId,
+            root: root,
+            bin: bin,
+            capture: capture
+        )
+
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), ownerCopilotSession)
     }
 
     func testCopilotHookRoutesNativeNotificationsForWaitingAndCompletedTurns() throws {
@@ -3690,10 +3766,12 @@ final class AppLogicTests: XCTestCase {
             "set-status", "waiting",
             "--notification", "permission",
             "--session", "session-1",
+            "--copilot-session", "copilot-session-1",
         ], environment: environment), 0)
         XCTAssertEqual(received?.status, "waiting")
         XCTAssertEqual(received?.notification, .permission)
         XCTAssertEqual(received?.sessionId, "session-1")
+        XCTAssertEqual(received?.copilotSessionId, "copilot-session-1")
     }
 
     func testControlServerSurvivesClientDisconnectBeforeResponse() throws {
