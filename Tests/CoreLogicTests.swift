@@ -1256,13 +1256,21 @@ final class CoreLogicTests: XCTestCase {
           waited += 80;
         }
 
-        // A question answered through the terminal clears via the SDK completion event.
-        __fakeSession.emit({
-          id:"elicit-url-complete",type:"elicitation.completed",agentId:"agent-7",
-          timestamp:"2026-07-12T04:00:03.000Z",
-          data:{requestId:"req-url",action:"decline"}
-        });
-        await new Promise((resolve) => setImmediate(resolve));
+        // URL-mode accept has no form content, but still answers over RPC.
+        writeFileSync(responsePath, JSON.stringify({
+          schemaVersion:1,copilotSessionId:"copilot-session",requestId:"req-url",
+          action:"accept"
+        }));
+        waited = 0;
+        while (waited < 6000 && handledElicitationCalls.length < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          waited += 80;
+        }
+        waited = 0;
+        while (waited < 3000 && existsSync(responsePath)) {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          waited += 80;
+        }
         const afterSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
         process.emit("SIGINT");
         waited = 0;
@@ -1286,6 +1294,7 @@ final class CoreLogicTests: XCTestCase {
           staleHandled,
           staleStillPending,
           handledPayload: handledElicitationCalls[0],
+          urlHandledPayload: handledElicitationCalls[1],
           pendingAfter: afterSnapshot.trackedElicitations.map((e) => e.requestId),
           responseRemoved: existsSync(responsePath) === false
         }));
@@ -1354,6 +1363,11 @@ final class CoreLogicTests: XCTestCase {
         let result = handledPayload?["result"] as? [String: Any]
         XCTAssertEqual(result?["action"] as? String, "accept")
         XCTAssertEqual((result?["content"] as? [String: Any])?["fruit"] as? String, "apple")
+        let urlHandledPayload = summary["urlHandledPayload"] as? [String: Any]
+        XCTAssertEqual(urlHandledPayload?["requestId"] as? String, "req-url")
+        let urlResult = urlHandledPayload?["result"] as? [String: Any]
+        XCTAssertEqual(urlResult?["action"] as? String, "accept")
+        XCTAssertNil(urlResult?["content"])
         XCTAssertEqual(summary["pendingAfter"] as? [String], [])
         XCTAssertEqual(summary["responseRemoved"] as? Bool, true)
     }

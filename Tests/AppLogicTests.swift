@@ -1838,7 +1838,16 @@ final class AppLogicTests: XCTestCase {
                             "properties": .object([
                                 "fruit": .object([
                                     "type": .string("string"),
-                                    "enum": .array([.string("apple"), .string("pear")]),
+                                    "oneOf": .array([
+                                        .object([
+                                            "const": .string("apple"),
+                                            "title": .string("Apple"),
+                                        ]),
+                                        .object([
+                                            "const": .string("pear"),
+                                            "title": .string("Pear"),
+                                        ]),
+                                    ]),
                                 ]),
                                 "ripe": .object(["type": .string("boolean")]),
                                 "count": .object([
@@ -1848,10 +1857,33 @@ final class AppLogicTests: XCTestCase {
                                 ]),
                                 "colors": .object([
                                     "type": .string("array"),
-                                    "items": .object(["type": .string("string")]),
+                                    "items": .object([
+                                        "anyOf": .array([
+                                            .object(["const": .string("red")]),
+                                            .object(["const": .string("green")]),
+                                        ]),
+                                    ]),
+                                ]),
+                                "nickname": .object([
+                                    "type": .string("string"),
+                                    "minLength": .number(1e300),
+                                ]),
+                                "tokens": .object([
+                                    "type": .string("array"),
+                                    "minItems": .number(1e300),
                                 ]),
                             ]),
                         ]),
+                        elicitationSource: nil,
+                        requestedAt: ISO8601DateFormatter().string(from: updatedAt),
+                        agentId: nil
+                    ),
+                    TrackedElicitation(
+                        requestId: "req-url",
+                        message: "Open this URL?",
+                        mode: "url",
+                        url: "https://example.com/elicit",
+                        schema: nil,
                         elicitationSource: nil,
                         requestedAt: ISO8601DateFormatter().string(from: updatedAt),
                         agentId: nil
@@ -1910,6 +1942,9 @@ final class AppLogicTests: XCTestCase {
             ["fruit": .array([.array([.string("apple")])])],
             ["ripe": .bool(true)],
             ["fruit": .string("apple"), "count": .number(4)],
+            ["fruit": .string("apple"), "colors": .array([.string("blue")])],
+            ["fruit": .string("apple"), "nickname": .string("a")],
+            ["fruit": .string("apple"), "tokens": .array([])],
             ["fruit": .string("apple"), "extra": .string("x")],
         ]
         for unsupportedContent in unsupportedContents {
@@ -1979,6 +2014,32 @@ final class AppLogicTests: XCTestCase {
             ),
             .accepted
         )
+        try FileManager.default.removeItem(at: responseURL)
+
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(
+                    requestId: "req-url", action: .accept,
+                    content: ["ignored": .string("value")]
+                )
+            ),
+            .invalid
+        )
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(requestId: "req-url", action: .accept)
+            ),
+            .accepted
+        )
+        let writtenURLAccept = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: responseURL))
+                as? [String: Any]
+        )
+        XCTAssertEqual(writtenURLAccept["requestId"] as? String, "req-url")
+        XCTAssertEqual(writtenURLAccept["action"] as? String, "accept")
+        XCTAssertNil(writtenURLAccept["content"])
         try FileManager.default.removeItem(at: responseURL)
 
         // A stale heartbeat can no longer be answered.
@@ -3231,6 +3292,16 @@ final class AppLogicTests: XCTestCase {
                         elicitationSource: nil,
                         requestedAt: ISO8601DateFormatter().string(from: Date()),
                         agentId: nil
+                    ),
+                    TrackedElicitation(
+                        requestId: "req-url",
+                        message: "Open this URL?",
+                        mode: "url",
+                        url: "https://example.com/elicit",
+                        schema: nil,
+                        elicitationSource: nil,
+                        requestedAt: ISO8601DateFormatter().string(from: Date()),
+                        agentId: nil
                     )
                 ]
             )
@@ -3253,6 +3324,32 @@ final class AppLogicTests: XCTestCase {
                 )
             )
             XCTAssertEqual(unsupportedContent, 422)
+
+            let urlWithContent = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: try answerBody(
+                    requestId: "req-url", action: .accept,
+                    content: ["ignored": .string("value")]
+                )
+            )
+            XCTAssertEqual(urlWithContent, 422)
+
+            let urlAccepted = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: try answerBody(requestId: "req-url", action: .accept)
+            )
+            XCTAssertEqual(urlAccepted, 204)
+            try FileManager.default.removeItem(
+                at: root.appendingPathComponent("\(sessionId).elicitation-response.json")
+            )
 
             let accepted = try await remoteHTTPStatus(
                 port: port,

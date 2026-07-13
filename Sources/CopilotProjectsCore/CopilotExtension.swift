@@ -594,7 +594,8 @@ public enum CopilotExtension {
                 removeFile(elicitationResponsePath);
                 return;
             }
-            if (!pendingElicitations.has(requestId)) {
+            const pending = pendingElicitations.get(requestId);
+            if (!pending) {
                 removeFile(elicitationResponsePath);
                 return;
             }
@@ -605,23 +606,30 @@ public enum CopilotExtension {
             }
             const result = { action };
             if (action === "accept") {
-                const content = response.content;
-                if (!content || typeof content !== "object" || Array.isArray(content)) {
-                    removeFile(elicitationResponsePath);
-                    return;
+                if (pending.mode === "url") {
+                    if (response.content != null) {
+                        removeFile(elicitationResponsePath);
+                        return;
+                    }
+                } else {
+                    const content = response.content;
+                    if (!content || typeof content !== "object" || Array.isArray(content)) {
+                        removeFile(elicitationResponsePath);
+                        return;
+                    }
+                    let serialized;
+                    try {
+                        serialized = JSON.stringify(content);
+                    } catch {
+                        removeFile(elicitationResponsePath);
+                        return;
+                    }
+                    if (Buffer.byteLength(serialized) > MAX_ELICITATION_CONTENT_BYTES) {
+                        removeFile(elicitationResponsePath);
+                        return;
+                    }
+                    result.content = content;
                 }
-                let serialized;
-                try {
-                    serialized = JSON.stringify(content);
-                } catch {
-                    removeFile(elicitationResponsePath);
-                    return;
-                }
-                if (Buffer.byteLength(serialized) > MAX_ELICITATION_CONTENT_BYTES) {
-                    removeFile(elicitationResponsePath);
-                    return;
-                }
-                result.content = content;
             }
             inFlightElicitationResponses.add(requestId);
             try {

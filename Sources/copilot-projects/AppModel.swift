@@ -1086,11 +1086,15 @@ final class AppModel: ObservableObject {
         // Accept must carry content; decline/cancel must not.
         switch answer.action {
         case .accept:
-            guard let content = answer.content,
-                  Self.isValidElicitationContent(content),
-                  Self.elicitationContent(content, satisfies: request.schema),
-                  let encoded = try? JSONEncoder().encode(content),
-                  encoded.count <= 32_768 else { return .invalid }
+            if request.mode == "url" {
+                guard answer.content == nil else { return .invalid }
+            } else {
+                guard let content = answer.content,
+                      Self.isValidElicitationContent(content),
+                      Self.elicitationContent(content, satisfies: request.schema),
+                      let encoded = try? JSONEncoder().encode(content),
+                      encoded.count <= 32_768 else { return .invalid }
+            }
         case .decline, .cancel:
             guard answer.content == nil else { return .invalid }
         }
@@ -1162,6 +1166,13 @@ final class AppModel: ObservableObject {
         satisfies schema: RemoteJSONValue
     ) -> Bool {
         guard case .object(let schema) = schema else { return true }
+        if let alternatives = jsonArray(schema["oneOf"]) ?? jsonArray(schema["anyOf"]) {
+            guard alternatives.contains(where: { alternative in
+                guard case .object(let option) = alternative,
+                      let expected = option["const"] else { return false }
+                return expected == value
+            }) else { return false }
+        }
         if let enumValues = jsonArray(schema["enum"]),
            !enumValues.contains(value) {
             return false
@@ -1171,9 +1182,9 @@ final class AppModel: ObservableObject {
         case "string":
             guard case .string(let string) = value else { return false }
             if let minimum = jsonNumber(schema["minLength"]),
-               string.count < Int(minimum) { return false }
+               Double(string.count) < minimum { return false }
             if let maximum = jsonNumber(schema["maxLength"]),
-               string.count > Int(maximum) { return false }
+               Double(string.count) > maximum { return false }
             return true
         case "number":
             guard case .number(let number) = value else { return false }
@@ -1188,9 +1199,9 @@ final class AppModel: ObservableObject {
         case "array":
             guard case .array(let values) = value else { return false }
             if let minimum = jsonNumber(schema["minItems"]),
-               values.count < Int(minimum) { return false }
+               Double(values.count) < minimum { return false }
             if let maximum = jsonNumber(schema["maxItems"]),
-               values.count > Int(maximum) { return false }
+               Double(values.count) > maximum { return false }
             if let items = schema["items"] {
                 return values.allSatisfy { elicitationValue($0, satisfies: items) }
             }
