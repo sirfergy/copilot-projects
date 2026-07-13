@@ -2069,6 +2069,106 @@ final class AppLogicTests: XCTestCase {
         ))
     }
 
+    func testStartupProgramPrecedenceAndLaunchCommand() {
+        let shell = "/bin/zsh"
+        let executable = "/opt/my copilot/copilot"
+        // Local sessions (addSession, CLI new-session, the Mac UI) pass no launch
+        // executable, so their dtach program stays a plain login shell.
+        XCTAssertEqual(
+            TerminalController.startupProgram(
+                shell: shell,
+                copilotSessionId: nil,
+                copilotSessionAllowAll: false,
+                launchCopilotExecutable: nil
+            ),
+            [shell, "-l"]
+        )
+        // A freshly-created remote session launches the quoted absolute executable once.
+        XCTAssertEqual(
+            TerminalController.startupProgram(
+                shell: shell,
+                copilotSessionId: nil,
+                copilotSessionAllowAll: false,
+                launchCopilotExecutable: executable
+            ),
+            [shell, "-l", "-c",
+             TerminalController.launchCommand(executable: executable, shell: shell)]
+        )
+        XCTAssertEqual(
+            TerminalController.launchCommand(executable: executable, shell: shell),
+            "'/opt/my copilot/copilot'"
+                + " || printf '\\n[Copilot Projects] could not launch Copilot\\n';"
+                + " exec '/bin/zsh' -l"
+        )
+        // A recorded resume session ALWAYS wins over a one-shot launch executable.
+        let sessionId = UUID().uuidString
+        let resumeProgram = TerminalController.startupProgram(
+            shell: shell,
+            copilotSessionId: sessionId,
+            copilotSessionAllowAll: false,
+            launchCopilotExecutable: executable
+        )
+        let joined = resumeProgram.joined(separator: " ")
+        XCTAssertTrue(joined.contains("copilot --resume=\(sessionId)"))
+        XCTAssertFalse(joined.contains("my copilot/copilot"))
+    }
+
+    func testSessionCreationLedgerIdempotencyTombstoneAndPersistence() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("nested/session-creation-ledger.json")
+
+        let ledger = SessionCreationLedger(url: url)
+        let requestId = UUID()
+        XCTAssertNil(ledger.record(for: requestId))
+
+        let created = Date(timeIntervalSince1970: 1_900_000_000)
+        ledger.remember(SessionCreationRecord(
+            requestId: requestId.uuidString,
+            projectId: "project-1",
+            sessionId: requestId.uuidString,
+            createdAt: created
+        ))
+
+        // Tombstone survives a fresh ledger instance (persisted to disk).
+        let reopened = SessionCreationLedger(url: url)
+        let record = try XCTUnwrap(reopened.record(for: requestId))
+        XCTAssertEqual(record.projectId, "project-1")
+        XCTAssertEqual(record.sessionId, requestId.uuidString)
+
+        // Atomic persistence must land at 0600.
+        let permissions = try FileManager.default.attributesOfItem(atPath: url.path)[
+            .posixPermissions
+        ] as? NSNumber
+        XCTAssertEqual(permissions?.int16Value, 0o600)
+    }
+
+    func testSessionCreationLedgerPrunesByTTLAndBound() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        func record(_ id: String, _ createdAt: Date) -> SessionCreationRecord {
+            SessionCreationRecord(
+                requestId: id, projectId: "p", sessionId: id, createdAt: createdAt)
+        }
+        // TTL: anything older than a week is dropped, fresher entries kept.
+        let fresh = record("fresh", now.addingTimeInterval(-60))
+        let expired = record("expired", now.addingTimeInterval(-SessionCreationLedger.ttl - 60))
+        XCTAssertEqual(
+            SessionCreationLedger.prune([expired, fresh], now: now).map(\.requestId),
+            ["fresh"]
+        )
+        // Bound: only the most recent maxRecords survive.
+        let overflow = SessionCreationLedger.maxRecords + 10
+        let many = (0 ..< overflow).map { index in
+            record("r\(index)", now.addingTimeInterval(Double(index)))
+        }
+        let bounded = SessionCreationLedger.prune(many, now: now.addingTimeInterval(Double(overflow)))
+        XCTAssertEqual(bounded.count, SessionCreationLedger.maxRecords)
+        XCTAssertFalse(bounded.contains { $0.requestId == "r0" })
+        XCTAssertTrue(bounded.contains { $0.requestId == "r\(overflow - 1)" })
+    }
+
     func testSessionStatusMarkersPersistAsAPair() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -3140,6 +3240,371 @@ final class AppLogicTests: XCTestCase {
         await gateway.stop()
     }
 
+    // MARK: - Remote session creation (AppModel)
+
+    @MainActor
+    private func makeRemoteCreateModel(
+        root: URL,
+        projects: [Project],
+        selectedProjectId: String?,
+        copilotExecutable: @escaping () -> String? = { "/opt/copilot/bin/copilot" },
+        reposDirectory: @escaping () -> String?,
+        backendAvailable: @escaping () -> Bool = { true },
+        ledger: SessionCreationLedger,
+        onLaunch: @escaping (String, String) -> Void
+    ) throws -> AppModel {
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: projects, selectedProjectId: selectedProjectId))
+        return AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root,
+            remoteCopilotExecutable: copilotExecutable,
+            remoteReposDirectory: reposDirectory,
+            remoteSessionBackendAvailable: backendAvailable,
+            remoteSessionLauncher: onLaunch,
+            sessionCreationLedger: ledger
+        )
+    }
+
+    @MainActor
+    func testCreateRemoteSessionCreatesLaunchesAndIsIdempotent() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // The Mac already has a selected tab in this project; it must be preserved.
+        let existing = Session(id: "existing", title: "shell", cwd: "/tmp")
+        let project = Project(
+            id: "p1", name: "First", cwd: "/tmp",
+            sessions: [existing], selectedSessionId: "existing")
+        let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        var launches: [(sessionId: String, executable: String)] = []
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [project],
+            selectedProjectId: "p1",
+            reposDirectory: { repos.path },
+            ledger: ledger,
+            onLaunch: { launches.append(($0, $1)) }
+        )
+
+        let requestId = UUID()
+        let request = RemoteCreateSessionRequest(requestId: requestId, projectId: "p1")
+        let outcome = model.createRemoteSession(request)
+
+        let expected = RemoteCreateSessionResponse(
+            requestId: requestId, projectId: "p1", sessionId: requestId.uuidString)
+        XCTAssertEqual(outcome, .created(expected))
+
+        let created = try XCTUnwrap(
+            model.project("p1")?.sessions.first { $0.id == requestId.uuidString })
+        XCTAssertEqual(created.title, "Copilot")
+        XCTAssertEqual(created.cwd, repos.path)
+        XCTAssertTrue(created.cwd.hasPrefix("/"))
+        // Mac selection is not stolen.
+        XCTAssertEqual(model.project("p1")?.selectedSessionId, "existing")
+        XCTAssertEqual(launches.map(\.sessionId), [requestId.uuidString])
+        XCTAssertEqual(launches.first?.executable, "/opt/copilot/bin/copilot")
+        XCTAssertNotNil(ledger.record(for: requestId))
+
+        // Idempotent replay: existing, no new session, no relaunch.
+        XCTAssertEqual(model.createRemoteSession(request), .existing(expected))
+        XCTAssertEqual(
+            model.project("p1")?.sessions.filter { $0.id == requestId.uuidString }.count, 1)
+        XCTAssertEqual(launches.count, 1)
+    }
+
+    @MainActor
+    func testCreateRemoteSessionSelectsOnlyWhenProjectEmpty() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let project = Project(id: "p1", name: "Empty", cwd: "/tmp", sessions: [])
+        let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        let model = try makeRemoteCreateModel(
+            root: root, projects: [project], selectedProjectId: "p1",
+            reposDirectory: { repos.path }, ledger: ledger, onLaunch: { _, _ in })
+
+        let requestId = UUID()
+        _ = model.createRemoteSession(
+            RemoteCreateSessionRequest(requestId: requestId, projectId: "p1"))
+        // An empty project adopts the new session as its selection.
+        XCTAssertEqual(model.project("p1")?.selectedSessionId, requestId.uuidString)
+    }
+
+    @MainActor
+    func testCreateRemoteSessionCrossProjectConflict() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [
+                Project(id: "p1", name: "First", cwd: "/tmp", sessions: []),
+                Project(id: "p2", name: "Second", cwd: "/tmp", sessions: []),
+            ],
+            selectedProjectId: "p1",
+            reposDirectory: { repos.path },
+            ledger: ledger,
+            onLaunch: { _, _ in })
+
+        let requestId = UUID()
+        _ = model.createRemoteSession(
+            RemoteCreateSessionRequest(requestId: requestId, projectId: "p1"))
+        // The same deterministic id requested for a different project collides.
+        XCTAssertEqual(
+            model.createRemoteSession(
+                RemoteCreateSessionRequest(requestId: requestId, projectId: "p2")),
+            .conflict
+        )
+        XCTAssertTrue(model.project("p2")?.sessions.isEmpty == true)
+    }
+
+    @MainActor
+    func testCreateRemoteSessionGoneTombstoneNeverRecreates() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        let requestId = UUID()
+        // A tombstone exists but the session is gone from the workspace.
+        ledger.remember(SessionCreationRecord(
+            requestId: requestId.uuidString, projectId: "p1",
+            sessionId: requestId.uuidString, createdAt: Date()))
+
+        var launches = 0
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [Project(id: "p1", name: "First", cwd: "/tmp", sessions: [])],
+            selectedProjectId: "p1",
+            reposDirectory: { repos.path },
+            ledger: ledger,
+            onLaunch: { _, _ in launches += 1 })
+
+        XCTAssertEqual(
+            model.createRemoteSession(
+                RemoteCreateSessionRequest(requestId: requestId, projectId: "p1")),
+            .gone
+        )
+        XCTAssertTrue(model.project("p1")?.sessions.isEmpty == true)
+        XCTAssertEqual(launches, 0)
+    }
+
+    @MainActor
+    func testCreateRemoteSessionUnknownUnavailableAndInvalid() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var copilot: String? = "/opt/copilot/bin/copilot"
+        var reposPath: String? = repos.path
+        let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        var launches = 0
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [Project(id: "p1", name: "First", cwd: "/tmp", sessions: [])],
+            selectedProjectId: "p1",
+            copilotExecutable: { copilot },
+            reposDirectory: { reposPath },
+            ledger: ledger,
+            onLaunch: { _, _ in launches += 1 })
+
+        // Unknown project → nothing created.
+        XCTAssertEqual(
+            model.createRemoteSession(
+                RemoteCreateSessionRequest(requestId: UUID(), projectId: "nope")),
+            .unknownProject)
+
+        // Copilot unresolved → service unavailable, nothing created, no tombstone.
+        copilot = nil
+        let unavailableId = UUID()
+        XCTAssertEqual(
+            model.createRemoteSession(
+                RemoteCreateSessionRequest(requestId: unavailableId, projectId: "p1")),
+            .unavailable)
+        XCTAssertNil(ledger.record(for: unavailableId))
+
+        // Missing dtach backend also fails closed instead of returning a shell-only
+        // session that violated the automatic-Copilot contract.
+        copilot = "/opt/copilot/bin/copilot"
+        let noBackendId = UUID()
+        let noBackendModel = try makeRemoteCreateModel(
+            root: root,
+            projects: [Project(id: "p1", name: "First", cwd: "/tmp", sessions: [])],
+            selectedProjectId: "p1",
+            copilotExecutable: { copilot },
+            reposDirectory: { reposPath },
+            backendAvailable: { false },
+            ledger: ledger,
+            onLaunch: { _, _ in }
+        )
+        XCTAssertEqual(
+            noBackendModel.createRemoteSession(
+                RemoteCreateSessionRequest(requestId: noBackendId, projectId: "p1")),
+            .unavailable
+        )
+        XCTAssertNil(ledger.record(for: noBackendId))
+
+        // Repos missing → unprocessable, nothing created.
+        reposPath = nil
+        let invalidId = UUID()
+        XCTAssertEqual(
+            model.createRemoteSession(
+                RemoteCreateSessionRequest(requestId: invalidId, projectId: "p1")),
+            .invalid)
+        XCTAssertNil(ledger.record(for: invalidId))
+
+        XCTAssertTrue(model.project("p1")?.sessions.isEmpty == true)
+        XCTAssertEqual(launches, 0)
+    }
+
+    @MainActor
+    func testRemoteGatewayCreateSessionMapsOutcomes() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var copilot: String? = "/opt/copilot/bin/copilot"
+        var reposPath: String? = repos.path
+        let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        var launched: [String] = []
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [
+                Project(id: "p1", name: "First", cwd: "/tmp", sessions: []),
+                Project(id: "p2", name: "Second", cwd: "/tmp", sessions: []),
+            ],
+            selectedProjectId: "p1",
+            copilotExecutable: { copilot },
+            reposDirectory: { reposPath },
+            ledger: ledger,
+            onLaunch: { sessionId, _ in launched.append(sessionId) })
+
+        let config = CloudflareAccessConfig(
+            teamDomain: "team.cloudflareaccess.com",
+            audTag: "expected-aud",
+            allowedEmail: "user@example.com"
+        )
+        let verifier = CloudflareAccessVerifier(
+            config: config, now: { Date() }, fetch: { _ in nil })
+        let (privateKey, publicKey) = try makeRSAKeyPair()
+        verifier.installKey(kid: "test-key", key: publicKey)
+        let token = try accessToken(
+            kid: "test-key",
+            claims: [
+                "iss": config.issuer,
+                "aud": config.audTag,
+                "email": config.allowedEmail,
+                "exp": Date().timeIntervalSince1970 + 3_600,
+            ],
+            privateKey: privateKey
+        )
+        let gateway = RemoteGateway()
+        let port = try gateway.start(
+            bridge: RemoteModelBridge(model: model),
+            expectedHost: "127.0.0.1",
+            expectedOrigin: "https://projects.example.com",
+            verifier: verifier,
+            port: 0
+        )
+        let origin = "https://projects.example.com"
+        func createBody(_ requestId: UUID, _ projectId: String) throws -> Data {
+            try JSONEncoder().encode(
+                RemoteCreateSessionRequest(requestId: requestId, projectId: projectId))
+        }
+        do {
+            // Same-origin is required for the write.
+            let noOrigin = try await remoteHTTPStatus(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, body: try createBody(UUID(), "p1"))
+            XCTAssertEqual(noOrigin, 403)
+            // Malformed body → bad request.
+            let badBody = try await remoteHTTPStatus(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, origin: origin, body: Data("{".utf8))
+            XCTAssertEqual(badBody, 400)
+            // Unknown project → 422.
+            let unknown = try await remoteHTTPStatus(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, origin: origin, body: try createBody(UUID(), "nope"))
+            XCTAssertEqual(unknown, 422)
+            // Created → 201 with a JSON response echoing the deterministic id.
+            let requestId = UUID()
+            let created = try await remoteHTTPResponseWithBody(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, origin: origin, body: try createBody(requestId, "p1"))
+            XCTAssertEqual(created.0.statusCode, 201)
+            let response = try JSONDecoder().decode(
+                RemoteCreateSessionResponse.self, from: created.1)
+            XCTAssertEqual(response.requestId, requestId)
+            XCTAssertEqual(response.projectId, "p1")
+            XCTAssertEqual(response.sessionId, requestId.uuidString)
+            XCTAssertEqual(launched, [requestId.uuidString])
+            // Idempotent replay → 200, never relaunched.
+            let replay = try await remoteHTTPStatus(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, origin: origin, body: try createBody(requestId, "p1"))
+            XCTAssertEqual(replay, 200)
+            XCTAssertEqual(launched, [requestId.uuidString])
+            // Same id, different project → 409.
+            let conflict = try await remoteHTTPStatus(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, origin: origin, body: try createBody(requestId, "p2"))
+            XCTAssertEqual(conflict, 409)
+            // Copilot unavailable → 503.
+            copilot = nil
+            let unavailable = try await remoteHTTPStatus(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, origin: origin, body: try createBody(UUID(), "p1"))
+            XCTAssertEqual(unavailable, 503)
+            copilot = "/opt/copilot/bin/copilot"
+            // Repos unavailable → 422.
+            reposPath = nil
+            let invalid = try await remoteHTTPStatus(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, origin: origin, body: try createBody(UUID(), "p1"))
+            XCTAssertEqual(invalid, 422)
+            reposPath = repos.path
+            // Processed-but-closed tombstone → 410, never recreated.
+            let goneId = UUID()
+            ledger.remember(SessionCreationRecord(
+                requestId: goneId.uuidString, projectId: "p1",
+                sessionId: goneId.uuidString, createdAt: Date()))
+            let gone = try await remoteHTTPStatus(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, origin: origin, body: try createBody(goneId, "p1"))
+            XCTAssertEqual(gone, 410)
+            // An unrelated POST route (as an old host would treat create) is 404.
+            let unsupported = try await remoteHTTPStatus(
+                port: port, path: "/sessions/other", method: "POST",
+                token: token, origin: origin, body: Data("{}".utf8))
+            XCTAssertEqual(unsupported, 404)
+        } catch {
+            await gateway.stop()
+            throw error
+        }
+        await gateway.stop()
+    }
+
     @MainActor
     func testRemoteWorkspaceSnapshotPreservesModelContract() throws {
         let root = FileManager.default.temporaryDirectory
@@ -3523,6 +3988,40 @@ final class AppLogicTests: XCTestCase {
         // Per-session removal from the queue.
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "sessionQueue(selected).splice(index, 1);"
+        ))
+    }
+
+    func testRemoteWebNewSessionButtonCreatesInHostSelectedProject() {
+        // The button and its status live in the header.
+        XCTAssertTrue(RemoteWebAssets.html.contains(#"id="new-session""#))
+        XCTAssertTrue(RemoteWebAssets.html.contains(#"id="create-status""#))
+        // Track the host's selected project and create only there.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "hostSelectedProjectId = data.selectedProjectId || null;"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "body: JSON.stringify({ requestId: createRequestId, projectId })"
+        ))
+        // Disable without a selected project or while a request is active; double
+        // clicks are blocked by the same guard.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "newSessionButton.disabled = !hostSelectedProjectId || creating;"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (creating || !hostSelectedProjectId) return;"
+        ))
+        // Retain one request id across network/5xx retries.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("if (!createRequestId) {"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("if (response.status >= 500) {"))
+        // Clear the request id on 410 (and on success) so the next click is fresh.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("if (response.status === 410) {"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("createRequestId = null;"))
+        // Concise, specific messaging including unsupported (404) and 422.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("if (response.status === 404) {"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("if (response.status === 422) {"))
+        // Select the created session once the host snapshot includes it.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (pendingCreatedSessionId && sessionState.has(pendingCreatedSessionId)) {"
         ))
     }
 
@@ -4140,6 +4639,38 @@ final class AppLogicTests: XCTestCase {
         }
         let (_, response) = try await session.data(for: request)
         return try XCTUnwrap(response as? HTTPURLResponse)
+    }
+
+    private func remoteHTTPResponseWithBody(
+        port: Int,
+        path: String,
+        method: String = "GET",
+        token: String? = nil,
+        origin: String? = nil,
+        body: Data? = nil
+    ) async throws -> (HTTPURLResponse, Data) {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 5
+        configuration.timeoutIntervalForResource = 5
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)\(path)"))
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.setValue("close", forHTTPHeaderField: "Connection")
+        if let token {
+            request.setValue(token, forHTTPHeaderField: "Cf-Access-Jwt-Assertion")
+        }
+        if let origin {
+            request.setValue(origin, forHTTPHeaderField: "Origin")
+        }
+        if body != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        let (data, response) = try await session.data(for: request)
+        return (try XCTUnwrap(response as? HTTPURLResponse), data)
     }
 
     private func remoteHTTPData(

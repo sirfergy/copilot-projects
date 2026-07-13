@@ -1114,6 +1114,116 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(decoded, revision)
     }
 
+    func testRemoteCreateSessionContractRoundTrips() throws {
+        XCTAssertEqual(RemoteSessionContract.createPath, "sessions/create")
+        let requestId = UUID()
+        let request = RemoteCreateSessionRequest(requestId: requestId, projectId: "project-1")
+        let decodedRequest = try JSONDecoder().decode(
+            RemoteCreateSessionRequest.self,
+            from: JSONEncoder().encode(request)
+        )
+        XCTAssertEqual(decodedRequest, request)
+
+        let response = RemoteCreateSessionResponse(
+            requestId: requestId,
+            projectId: "project-1",
+            sessionId: requestId.uuidString
+        )
+        let decodedResponse = try JSONDecoder().decode(
+            RemoteCreateSessionResponse.self,
+            from: JSONEncoder().encode(response)
+        )
+        XCTAssertEqual(decodedResponse, response)
+        XCTAssertEqual(decodedResponse.sessionId, requestId.uuidString)
+    }
+
+    func testResolveCopilotExecutablePrefersOverrideThenLocalThenPath() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let localBin = home.appendingPathComponent(".local/bin", isDirectory: true)
+        let overrideDir = root.appendingPathComponent("override", isDirectory: true)
+        let pathDir = root.appendingPathComponent("bin", isDirectory: true)
+        let emptyDir = root.appendingPathComponent("empty", isDirectory: true)
+        for directory in [localBin, overrideDir, pathDir, emptyDir] {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        func makeExecutable(_ url: URL) {
+            FileManager.default.createFile(
+                atPath: url.path,
+                contents: Data("#!/bin/sh\n".utf8),
+                attributes: [.posixPermissions: 0o755]
+            )
+        }
+        let override = overrideDir.appendingPathComponent("copilot")
+        let local = localBin.appendingPathComponent("copilot")
+        let onPath = pathDir.appendingPathComponent("copilot")
+        makeExecutable(override)
+        makeExecutable(local)
+        makeExecutable(onPath)
+
+        // Explicit override wins over everything else.
+        XCTAssertEqual(
+            Paths.resolveCopilotExecutable(
+                environment: [
+                    "COPILOT_PROJECTS_COPILOT": override.path,
+                    "PATH": pathDir.path,
+                ],
+                home: home
+            ),
+            override.path
+        )
+        // No override → the documented ~/.local/bin/copilot.
+        XCTAssertEqual(
+            Paths.resolveCopilotExecutable(
+                environment: ["PATH": pathDir.path],
+                home: home
+            ),
+            local.path
+        )
+        // No override, no local → the first executable on PATH.
+        try FileManager.default.removeItem(at: local)
+        XCTAssertEqual(
+            Paths.resolveCopilotExecutable(
+                environment: ["PATH": "relative:\(pathDir.path)"],
+                home: home
+            ),
+            onPath.path
+        )
+        // None reachable → nil (fail closed).
+        XCTAssertNil(
+            Paths.resolveCopilotExecutable(
+                environment: ["PATH": emptyDir.path],
+                home: home
+            )
+        )
+    }
+
+    func testResolveReposDirectoryRequiresExistingDirectory() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Missing Repos → nil (never a home fallback).
+        XCTAssertNil(Paths.resolveReposDirectory(home: home))
+
+        let repos = home.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        XCTAssertEqual(Paths.resolveReposDirectory(home: home), repos.path)
+
+        // A regular file named Repos must not satisfy the requirement.
+        let fileHome = root.appendingPathComponent("filehome", isDirectory: true)
+        try FileManager.default.createDirectory(at: fileHome, withIntermediateDirectories: true)
+        FileManager.default.createFile(
+            atPath: fileHome.appendingPathComponent("Repos").path, contents: Data())
+        XCTAssertNil(Paths.resolveReposDirectory(home: fileHome))
+    }
+
     func testCocoaLaunchArgumentsAreAcceptedButUnknownCLIFlagsAreNot() {
         XCTAssertTrue(CLIMain.isCocoaLaunchArguments([
             "-NSDocumentRevisionsDebugMode", "YES", "-psn_0_12345",
