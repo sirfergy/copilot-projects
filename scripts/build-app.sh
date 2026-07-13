@@ -56,7 +56,7 @@ git_describe_version_tag() {
 }
 
 git_worktree_is_dirty() {
-  ! git diff --quiet --ignore-submodules -- || ! git diff --cached --quiet --ignore-submodules --
+  [ -n "$(git status --porcelain --untracked-files=normal --ignore-submodules 2>/dev/null)" ]
 }
 
 # Version: an explicit VERSION (e.g. from release.sh) wins for both strings.
