@@ -1134,13 +1134,33 @@ public enum CopilotExtension {
             processElicitationResponse();
         }, 5_000);
 
-        function cleanup() {
+        async function releaseEventInterests() {
+            const handles = [...eventInterestHandles];
+            for (const handle of handles) {
+                let released = false;
+                for (let attempt = 0; attempt < 2 && !released; attempt += 1) {
+                    try {
+                        await session.rpc.eventLog.releaseInterest({ handle });
+                        released = true;
+                    } catch (error) {
+                        if (attempt === 1) {
+                            console.error(
+                                "[copilot-projects] failed to release event interest:",
+                                error
+                            );
+                        }
+                    }
+                }
+                if (released) {
+                    const index = eventInterestHandles.indexOf(handle);
+                    if (index !== -1) eventInterestHandles.splice(index, 1);
+                }
+            }
+        }
+
+        function cleanupSharedFiles() {
             clearInterval(timer);
             clearTimeout(transcriptPublishTimer);
-            for (const handle of eventInterestHandles) {
-                session.rpc.eventLog.releaseInterest({ handle }).catch(() => {});
-            }
-            eventInterestHandles.length = 0;
             if (userInputWatcher) {
                 try { userInputWatcher.close(); } catch {}
                 userInputWatcher = null;
@@ -1158,9 +1178,17 @@ public enum CopilotExtension {
                 removeFile(elicitationResponsePath);
             }
         }
-        process.once("SIGTERM", cleanup);
-        process.once("SIGINT", cleanup);
-        process.once("exit", cleanup);
+        let shuttingDown = false;
+        async function shutdown(signal) {
+            if (shuttingDown) return;
+            shuttingDown = true;
+            cleanupSharedFiles();
+            await releaseEventInterests();
+            process.exit(signal === "SIGINT" ? 130 : 143);
+        }
+        process.once("SIGTERM", () => { shutdown("SIGTERM").catch(() => process.exit(143)); });
+        process.once("SIGINT", () => { shutdown("SIGINT").catch(() => process.exit(130)); });
+        process.once("exit", cleanupSharedFiles);
     }
     """#
 

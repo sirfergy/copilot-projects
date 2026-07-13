@@ -1887,13 +1887,38 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
 
+        let unsupportedContents: [[String: RemoteJSONValue]] = [
+            ["fruit": .null],
+            ["fruit": .object(["name": .string("apple")])],
+            ["fruit": .array([.number(1)])],
+            ["fruit": .array([.array([.string("apple")])])],
+        ]
+        for unsupportedContent in unsupportedContents {
+            XCTAssertEqual(
+                model.answerElicitation(
+                    sessionId: session.id,
+                    answer: RemoteElicitationAnswer(
+                        requestId: "req-form", action: .accept,
+                        content: unsupportedContent
+                    )
+                ),
+                .invalid
+            )
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
+
         // Valid accept with content is written 0600 with the expected payload.
         XCTAssertEqual(
             model.answerElicitation(
                 sessionId: session.id,
                 answer: RemoteElicitationAnswer(
                     requestId: "req-form", action: .accept,
-                    content: ["fruit": .string("apple")]
+                    content: [
+                        "fruit": .string("apple"),
+                        "ripe": .bool(true),
+                        "count": .number(2),
+                        "colors": .array([.string("red"), .string("green")]),
+                    ]
                 )
             ),
             .accepted
@@ -1910,6 +1935,12 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(written["requestId"] as? String, "req-form")
         XCTAssertEqual(written["action"] as? String, "accept")
         XCTAssertEqual((written["content"] as? [String: Any])?["fruit"] as? String, "apple")
+        XCTAssertEqual((written["content"] as? [String: Any])?["ripe"] as? Bool, true)
+        XCTAssertEqual((written["content"] as? [String: Any])?["count"] as? Double, 2)
+        XCTAssertEqual(
+            (written["content"] as? [String: Any])?["colors"] as? [String],
+            ["red", "green"]
+        )
 
         // A second answer conflicts while the prior response awaits pickup.
         XCTAssertEqual(
@@ -3171,6 +3202,19 @@ final class AppLogicTests: XCTestCase {
             try Data("copilot-session".utf8).write(
                 to: root.appendingPathComponent("\(sessionId).copilot-session")
             )
+
+            let unsupportedContent = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: try answerBody(
+                    requestId: "req-form", action: .accept,
+                    content: ["fruit": .object(["name": .string("apple")])]
+                )
+            )
+            XCTAssertEqual(unsupportedContent, 422)
 
             let accepted = try await remoteHTTPStatus(
                 port: port,

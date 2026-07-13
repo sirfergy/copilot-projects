@@ -1087,6 +1087,7 @@ final class AppModel: ObservableObject {
         switch answer.action {
         case .accept:
             guard let content = answer.content,
+                  Self.isValidElicitationContent(content),
                   let encoded = try? JSONEncoder().encode(content),
                   encoded.count <= 32_768 else { return .invalid }
         case .decline, .cancel:
@@ -1116,6 +1117,25 @@ final class AppModel: ObservableObject {
         }
         return .accepted
     }
+
+    private static func isValidElicitationContent(_ content: [String: RemoteJSONValue]) -> Bool {
+        content.values.allSatisfy { value in
+            switch value {
+            case .bool, .string:
+                return true
+            case .number(let number):
+                return number.isFinite
+            case .array(let values):
+                return values.allSatisfy {
+                    if case .string = $0 { return true }
+                    return false
+                }
+            case .null, .object:
+                return false
+            }
+        }
+    }
+
     /// temp file and renaming it into place.
     private static func atomicallyWrite0600(_ data: Data, to url: URL) -> Bool {
         let directory = url.deletingLastPathComponent()

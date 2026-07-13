@@ -118,6 +118,8 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains(
             #""user_input.requested", "elicitation.requested""#
         ))
+        XCTAssertTrue(CopilotExtension.script.contains("await releaseEventInterests()"))
+        XCTAssertTrue(CopilotExtension.script.contains(#"process.once("exit", cleanupSharedFiles)"#))
         XCTAssertTrue(CopilotExtension.script.contains(".elicitation-response.json"))
         XCTAssertTrue(CopilotExtension.script.contains(".user-input-response.json"))
         XCTAssertTrue(CopilotExtension.script.contains("watch(sessionsDir"))
@@ -1133,6 +1135,11 @@ final class CoreLogicTests: XCTestCase {
         const eventInterestRegistrations = [];
         const eventInterestReleases = [];
         const handledElicitationCalls = [];
+        const originalProcessExit = process.exit.bind(process);
+        let requestedExitCode = null;
+        process.exit = (code) => {
+          requestedExitCode = code;
+        };
         const fakeSession = {
           sessionId: "copilot-session",
           rpc: {
@@ -1246,9 +1253,17 @@ final class CoreLogicTests: XCTestCase {
         });
         await new Promise((resolve) => setImmediate(resolve));
         const afterSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
+        process.emit("SIGINT");
+        waited = 0;
+        while (waited < 6000 && requestedExitCode == null) {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          waited += 80;
+        }
 
         console.log(JSON.stringify({
           registrations: eventInterestRegistrations,
+          releases: eventInterestReleases,
+          requestedExitCode,
           pendingBefore,
           formMessage: formRequest?.message,
           formSchemaType: formRequest?.schema?.type,
@@ -1263,7 +1278,7 @@ final class CoreLogicTests: XCTestCase {
           pendingAfter: afterSnapshot.trackedElicitations.map((e) => e.requestId),
           responseRemoved: existsSync(responsePath) === false
         }));
-        process.exit(0);
+        originalProcessExit(0);
         """#
         let scriptURL = root.appendingPathComponent("elicitation.mjs")
         try (prelude + extensionScript + epilogue).write(
@@ -1301,6 +1316,11 @@ final class CoreLogicTests: XCTestCase {
             summary["registrations"] as? [String],
             ["user_input.requested", "elicitation.requested"]
         )
+        XCTAssertEqual(
+            summary["releases"] as? [String],
+            ["handle-user_input.requested", "handle-elicitation.requested"]
+        )
+        XCTAssertEqual(summary["requestedExitCode"] as? Int, 130)
         XCTAssertEqual(
             (summary["pendingBefore"] as? [String])?.sorted(),
             ["req-form", "req-url"]
