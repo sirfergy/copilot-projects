@@ -65,6 +65,7 @@ public enum CopilotExtension {
         let transcriptPublishTimer = null;
         let sharedFilesOwnershipInitializedFor = null;
         let allowAllRefreshQueued = false;
+        let allowAllUpdateGeneration = 0;
 
         const MAX_TRANSCRIPT_TURNS = 200;
         const MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024;
@@ -286,7 +287,7 @@ public enum CopilotExtension {
             refreshAllowAllSoon();
         }
 
-        function setAllowAllMarker(enabled) {
+        function applyAllowAllMarker(enabled) {
             if (!ownsSharedFiles()) return;
             removeFile(allowAllPath);
             if (enabled && validCopilotSessionId) {
@@ -760,12 +761,15 @@ public enum CopilotExtension {
 
         async function refreshAllowAll() {
             if (!ownsSharedFiles()) return;
+            const generation = ++allowAllUpdateGeneration;
             // Fail closed if the RPC is unavailable: a stale marker must never grant
             // full permissions to a different session in the same tab.
             removeFile(allowAllPath);
             try {
                 const result = await session.rpc.permissions.getAllowAll();
-                setAllowAllMarker(result.enabled === true);
+                if (generation === allowAllUpdateGeneration) {
+                    applyAllowAllMarker(result.enabled === true);
+                }
             } catch {}
         }
 
@@ -809,7 +813,8 @@ public enum CopilotExtension {
         session.on("session.permissions_changed", (event) => {
             if (event.agentId) return;
             const mode = event.data.allowAllPermissionMode;
-            setAllowAllMarker(
+            allowAllUpdateGeneration += 1;
+            applyAllowAllMarker(
                 mode === "on"
                     || (mode == null && event.data.allowAllPermissions === true)
             );

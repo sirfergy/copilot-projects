@@ -587,6 +587,103 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertGreaterThan(summary["allowAllChecks"] as? Int ?? 0, 0)
     }
 
+    func testCopilotExtensionDiscardsStaleAllowAllRefreshResult() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-allowall-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let appSessionId = "12345678-1234-1234-1234-123456789abc"
+        let copilotSessionId = "22222222-2222-4222-8222-222222222222"
+        try Data("old-session".utf8).write(
+            to: sessions.appendingPathComponent("\(appSessionId).copilot-allow-all")
+        )
+
+        let prelude = #"""
+        const namedListeners = new Map();
+        let allowAllChecks = 0;
+        let permissionsEvents = 0;
+        const fakeSession = {
+          sessionId: "__COPILOT_SESSION_ID__",
+          rpc: {
+            schedule: { list: async () => ({entries:[]}) },
+            permissions: {
+              getAllowAll: async () => {
+                allowAllChecks += 1;
+                const listener = namedListeners.get("session.permissions_changed");
+                if (listener) {
+                  permissionsEvents += 1;
+                  listener({
+                    id: `permissions-off-${allowAllChecks}`,
+                    type: "session.permissions_changed",
+                    data: { allowAllPermissionMode: "off" }
+                  });
+                }
+                return { enabled: true };
+              }
+            }
+          },
+          on(name, handler) {
+            if (typeof name !== "function") namedListeners.set(name, handler);
+          },
+          async getEvents() { return []; }
+        };
+        """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: "const joinSession = async () => fakeSession;"
+        )
+        let epilogue = #"""
+
+        const { existsSync } = await import("node:fs");
+        const allowAllPath = `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+          + `${process.env.COPILOT_PROJECTS_SESSION}.copilot-allow-all`;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        console.log(JSON.stringify({
+          allowAllExists: existsSync(allowAllPath),
+          allowAllChecks,
+          permissionsEvents
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("allowall.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "COPILOT_PROJECTS_SESSION": appSessionId,
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let summary = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: output) as? [String: Any]
+        )
+        XCTAssertEqual(summary["allowAllExists"] as? Bool, false)
+        XCTAssertGreaterThan(summary["allowAllChecks"] as? Int ?? 0, 0)
+        XCTAssertGreaterThan(summary["permissionsEvents"] as? Int ?? 0, 0)
+    }
+
     func testCopilotExtensionTranscriptByteBudgetPreservesForeground() throws {
         try requireNodeForJavaScriptTests()
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
