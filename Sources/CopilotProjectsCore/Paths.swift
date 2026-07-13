@@ -156,6 +156,73 @@ public enum Paths {
         sessionsDir.appendingPathComponent("\(sessionId).transcript.json").path
     }
 
+    /// Absolute path to the `copilot` CLI, resolved without relying on an
+    /// interactive login shell's rc files. Honors an explicit override
+    /// (`COPILOT_PROJECTS_COPILOT`, or the legacy `COPILOT_MUX_COPILOT`), then
+    /// `$HOME/.local/bin/copilot` (the documented install location), then the
+    /// first executable named `copilot` on the app process `PATH`. Returns `nil`
+    /// when none exists so remote session creation fails closed instead of
+    /// launching a session that can never start Copilot.
+    public static var copilotExecutable: String? {
+        resolveCopilotExecutable()
+    }
+
+    static func resolveCopilotExecutable(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) -> String? {
+        if let override = environment["COPILOT_PROJECTS_COPILOT"]
+            ?? environment["COPILOT_MUX_COPILOT"],
+           !override.isEmpty,
+           fileManager.isExecutableFile(atPath: override) {
+            return override
+        }
+        let local = home.appendingPathComponent(".local/bin/copilot").path
+        if fileManager.isExecutableFile(atPath: local) {
+            return local
+        }
+        // Scan the process PATH — the environment the app was launched with, not a
+        // freshly sourced shell — for an absolute directory containing `copilot`.
+        let pathValue = environment["PATH"] ?? ""
+        for entry in pathValue.split(separator: ":", omittingEmptySubsequences: true) {
+            let directory = String(entry)
+            guard directory.hasPrefix("/") else { continue }
+            let candidate = (directory as NSString).appendingPathComponent("copilot")
+            if fileManager.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    /// Absolute `$HOME/Repos`, but only when it already exists and is a directory.
+    /// Remote session creation requires this exact folder (never the literal
+    /// `~/Repos`, and never a home-directory fallback), so a missing Repos fails
+    /// closed instead of dropping a session at an unexpected working directory.
+    public static var reposDirectory: String? {
+        resolveReposDirectory()
+    }
+
+    static func resolveReposDirectory(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) -> String? {
+        let repos = home.appendingPathComponent("Repos", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: repos.path, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            return repos.path
+        }
+        return nil
+    }
+
+    /// Persisted idempotency ledger for remote session creation (requestId →
+    /// created session), kept beside the rest of the private app state.
+    public static var sessionCreationLedgerPath: URL {
+        stateDir.appendingPathComponent("session-creation-ledger.json")
+    }
+
     /// The bundled dtach helper (resumability backend), or an override, or nil.
     public static var dtachExecutable: String? {
         let env = ProcessInfo.processInfo.environment

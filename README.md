@@ -157,6 +157,17 @@ through the native CLI input path. The full terminal remains available for permi
 TUI interactions. Remote clients do not resize the PTY because dtach shares one terminal size with
 the desktop.
 
+The header's **New Session** button creates a session in the host's currently selected project
+(and only there, so it never steals the Mac's selected tab). Creation is idempotent: the client
+generates one request id, retained across a network/5xx retry and cleared on success or when the
+host reports the earlier session was already created and closed. The new session opens `$HOME/Repos`
+and launches Copilot once on its fresh dtach master (resolving the CLI from an explicit override,
+then `$HOME/.local/bin/copilot`, then the app's `PATH`). The host records each creation in a
+private, bounded ledger so a retried or replayed request is answered — 201 created, 200 existing,
+409 collision, 410 already-closed, 422 unknown project or missing Repos, 503 Copilot unavailable —
+without ever creating (or resurrecting) a second session. Hosts without this endpoint return 404,
+which the client surfaces as unsupported.
+
 When Copilot asks a structured `ask_user` question, the extension heartbeat surfaces it (with its
 verbatim choices) as a native question card in the remote client, temporarily replacing the
 message composer. Choosing an option — or typing free-form text when the question allows it — is

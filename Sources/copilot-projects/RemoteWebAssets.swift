@@ -18,6 +18,11 @@ enum RemoteWebAssets {
     <body>
       <header>
         <strong>Copilot Projects</strong>
+        <button id="new-session" aria-label="New session" title="New session" disabled>
+          New Session
+        </button>
+        <span id="create-status" class="create-status" role="status" aria-live="polite"
+          aria-atomic="true"></span>
         <span id="connection" class="connection connecting" role="status"
           aria-label="Connecting" title="Connecting">
           <span class="connection-dot" aria-hidden="true"></span>
@@ -191,8 +196,14 @@ enum RemoteWebAssets {
     html, body { margin: 0; background: #111; color: #eee; overscroll-behavior:none; }
     body { position:fixed; inset:0; width:100%; height: 100vh; height: 100dvh; overflow: hidden;
       display: flex; flex-direction: column; }
-    header { flex: 0 0 48px; display:flex; align-items:center; justify-content:space-between;
+    header { flex: 0 0 48px; display:flex; align-items:center; gap:10px;
       padding: 0 14px; border-bottom: 1px solid #333; }
+    header strong { margin-right:auto; }
+    #new-session { padding:5px 10px; font-size:12px; border:1px solid #444;
+      border-radius:6px; background:#1f6feb; color:#fff; cursor:pointer; }
+    #new-session:disabled { background:#30363d; color:#7d8590; cursor:default; }
+    .create-status { font-size:11px; color:#8b949e; max-width:220px;
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .connection { display:inline-flex; align-items:center; justify-content:center;
       width:24px; height:24px; }
     .connection-dot { width:9px; height:9px; border-radius:50%; background:#d29922;
@@ -306,6 +317,8 @@ enum RemoteWebAssets {
     const promptSubmit = document.querySelector('#prompt-submit');
     const userInput = document.querySelector('#user-input');
     const notifications = document.querySelector('#notifications');
+    const newSessionButton = document.querySelector('#new-session');
+    const createStatus = document.querySelector('#create-status');
     const base = location.pathname.endsWith('/')
       ? location.pathname : `${location.pathname}/`;
     const clientId = (crypto.randomUUID && crypto.randomUUID()) ||
@@ -330,6 +343,13 @@ enum RemoteWebAssets {
     let promptFallbackTimer = null;
     let transcriptRequestId = 0;
     let selectionGeneration = 0;
+    // The host's currently selected project — the only place a remote New Session
+    // creates. A single retained request id makes a retried create idempotent; a new
+    // explicit click generates a fresh one.
+    let hostSelectedProjectId = null;
+    let createRequestId = null;
+    let creating = false;
+    let pendingCreatedSessionId = null;
     const sessionState = new Map();
     // requestId -> card element, and requestId -> { timer } while an answer is
     // awaiting confirmation from the workspace snapshot.
@@ -382,6 +402,94 @@ enum RemoteWebAssets {
       } catch (error) {
         setConnection('error', 'Connection error');
         return null;
+      }
+    }
+    function setCreateStatus(text) {
+      createStatus.textContent = text || '';
+    }
+    function updateNewSessionState() {
+      newSessionButton.disabled = !hostSelectedProjectId || creating;
+    }
+    async function createSession() {
+      // A double click is blocked while a request is active, and the button stays
+      // disabled without a host-selected project.
+      if (creating || !hostSelectedProjectId) return;
+      // Retain one request id across retries so a network/5xx retry is idempotent.
+      if (!createRequestId) {
+        createRequestId = (crypto.randomUUID && crypto.randomUUID()) ||
+          `r-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      }
+      const projectId = hostSelectedProjectId;
+      creating = true;
+      updateNewSessionState();
+      setCreateStatus('Creating session…');
+      let response;
+      try {
+        response = await fetch(`${base}sessions/create`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requestId: createRequestId, projectId })
+        });
+      } catch (error) {
+        // Network failure: keep the request id so a retry reuses it.
+        creating = false;
+        updateNewSessionState();
+        setCreateStatus('Network error — tap New Session to retry');
+        return;
+      }
+      creating = false;
+      updateNewSessionState();
+      if (response.status >= 500) {
+        // 5xx (incl. 503 Copilot unavailable): retain the id for an idempotent retry.
+        setCreateStatus(
+          response.status === 503
+            ? 'Copilot is unavailable — tap to retry'
+            : 'Host error — tap New Session to retry'
+        );
+        return;
+      }
+      if (response.status === 410) {
+        // Processed-but-closed: a new explicit click should be a new attempt.
+        createRequestId = null;
+        setCreateStatus('That session was already created and closed');
+        return;
+      }
+      if (response.status === 404) {
+        createRequestId = null;
+        setCreateStatus('New sessions are not supported by this host');
+        return;
+      }
+      if (response.status === 409) {
+        createRequestId = null;
+        setCreateStatus('That session id is already in use');
+        return;
+      }
+      if (response.status === 422) {
+        createRequestId = null;
+        setCreateStatus('Cannot create a session (no project or Repos unavailable)');
+        return;
+      }
+      if (!response.ok) {
+        createRequestId = null;
+        setCreateStatus('Could not create a session');
+        return;
+      }
+      let payload = null;
+      try { payload = await response.json(); } catch (error) { payload = null; }
+      // On success clear the request id and remember the created session so it can be
+      // selected once the workspace snapshot includes it. Host Mac selection is left
+      // untouched.
+      createRequestId = null;
+      if (payload && payload.sessionId) {
+        pendingCreatedSessionId = payload.sessionId;
+        setCreateStatus('Session ready');
+        if (sessionState.has(pendingCreatedSessionId)) {
+          const sessionId = pendingCreatedSessionId;
+          pendingCreatedSessionId = null;
+          selectSession(sessionId);
+        }
+      } else {
+        setCreateStatus('Session ready');
       }
     }
     async function acquire(id) {
@@ -511,6 +619,7 @@ enum RemoteWebAssets {
     }
     function renderWorkspace(data) {
       const active = selected;
+      hostSelectedProjectId = data.selectedProjectId || null;
       sessionState.clear();
       sessions.replaceChildren();
       data.projects.forEach((project) => {
@@ -534,6 +643,14 @@ enum RemoteWebAssets {
           sessions.append(button);
         });
       });
+      updateNewSessionState();
+      // Select a just-created session once the host's snapshot includes it, without
+      // ever changing the host Mac's own selection.
+      if (pendingCreatedSessionId && sessionState.has(pendingCreatedSessionId)) {
+        const sessionId = pendingCreatedSessionId;
+        pendingCreatedSessionId = null;
+        selectSession(sessionId);
+      }
       if (pendingFocusSession) {
         const target = document.querySelector(
           `nav button[data-id="${CSS.escape(pendingFocusSession)}"]`
@@ -997,6 +1114,8 @@ enum RemoteWebAssets {
         else sendKey(TOOLBAR_KEYS[button.dataset.key]);
       };
     });
+    newSessionButton.onclick = () => { createSession(); };
+    updateNewSessionState();
     document.querySelector('#input-form').onsubmit = (event) => {
       event.preventDefault();
       if (input.value) {

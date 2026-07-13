@@ -113,7 +113,7 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
 
     init(sessionId: String, cwd: String, extraEnvironment: [String: String],
          dtachExecutable: String?, dtachSocket: String?, copilotSessionId: String? = nil,
-         copilotSessionAllowAll: Bool = false) {
+         copilotSessionAllowAll: Bool = false, launchCopilotExecutable: String? = nil) {
         self.sessionId = sessionId
         self.terminalView = ProjectsTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 480))
@@ -143,13 +143,15 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         start(cwd: cwd, extraEnvironment: extraEnvironment,
               dtachExecutable: dtachExecutable, dtachSocket: dtachSocket,
               copilotSessionId: copilotSessionId,
-              copilotSessionAllowAll: copilotSessionAllowAll)
+              copilotSessionAllowAll: copilotSessionAllowAll,
+              launchCopilotExecutable: launchCopilotExecutable)
     }
 
     private func start(cwd: String, extraEnvironment: [String: String],
                        dtachExecutable: String?, dtachSocket: String?,
                        copilotSessionId: String? = nil,
-                       copilotSessionAllowAll: Bool = false) {
+                       copilotSessionAllowAll: Bool = false,
+                       launchCopilotExecutable: String? = nil) {
         let processEnv = ProcessInfo.processInfo.environment
         let shell = processEnv["SHELL"] ?? "/bin/zsh"
         let shellName = (shell as NSString).lastPathComponent
@@ -185,19 +187,15 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
             // reattach (app quit→relaunch with the master still alive) it's ignored,
             // so a normal relaunch never re-runs it. After a reboot kills the master,
             // dtach -A recreates it and the program runs — so an agent tab with a
-            // recorded Copilot session id auto-resumes THAT exact session, then drops
-            // to a normal login shell when the agent exits.
-            var program = [shell, "-l"]
-            if let cid = copilotSessionId, Self.isSafeSessionId(cid) {
-                // Quote the shell path (spaces/apostrophes) and warn — without blocking
-                // the shell fallback — if the session can't be resumed (e.g. deleted).
-                let resume = Self.resumeCommand(
-                    sessionId: cid,
-                    allowAll: copilotSessionAllowAll
-                )
-                    + " || printf '\\n[Copilot Projects] could not resume Copilot session \(cid)\\n'"
-                program = [shell, "-l", "-c", "\(resume); exec \(Self.shellSingleQuote(shell)) -l"]
-            }
+            // recorded Copilot session id auto-resumes THAT exact session, and a
+            // freshly-created remote session launches Copilot once, then both drop to
+            // a normal login shell when the agent exits.
+            let program = Self.startupProgram(
+                shell: shell,
+                copilotSessionId: copilotSessionId,
+                copilotSessionAllowAll: copilotSessionAllowAll,
+                launchCopilotExecutable: launchCopilotExecutable
+            )
             terminalView.startProcess(
                 executable: dtach,
                 args: ["-A", socket, "-r", "winch", "-z", "-E"] + program,
@@ -240,6 +238,40 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
 
     nonisolated static func resumeCommand(sessionId: String, allowAll: Bool) -> String {
         "copilot \(allowAll ? "--allow-all " : "")--resume=\(sessionId)"
+    }
+
+    /// The dtach `-E` program: the argv run only when dtach creates a FRESH master.
+    /// A recorded Copilot session id always wins (resume takes precedence over a
+    /// one-shot launch), so a resumed tab never double-launches; otherwise a valid
+    /// absolute launch executable starts Copilot once; otherwise a plain login shell.
+    /// Pure/static so precedence can be unit-tested without spawning anything.
+    nonisolated static func startupProgram(
+        shell: String,
+        copilotSessionId: String?,
+        copilotSessionAllowAll: Bool,
+        launchCopilotExecutable: String?
+    ) -> [String] {
+        if let cid = copilotSessionId, isSafeSessionId(cid) {
+            // Quote the shell path (spaces/apostrophes) and warn — without blocking
+            // the shell fallback — if the session can't be resumed (e.g. deleted).
+            let resume = resumeCommand(sessionId: cid, allowAll: copilotSessionAllowAll)
+                + " || printf '\\n[Copilot Projects] could not resume Copilot session \(cid)\\n'"
+            return [shell, "-l", "-c", "\(resume); exec \(shellSingleQuote(shell)) -l"]
+        }
+        if let executable = launchCopilotExecutable, !executable.isEmpty {
+            return [shell, "-l", "-c", launchCommand(executable: executable, shell: shell)]
+        }
+        return [shell, "-l"]
+    }
+
+    /// One-shot launch of the absolute Copilot executable, then drop to a login
+    /// shell. The executable is shell-single-quoted so spaces/apostrophes in the
+    /// path can't break the command; a launch failure prints a message but still
+    /// hands the tab a usable shell. Pure/static for command-building tests.
+    nonisolated static func launchCommand(executable: String, shell: String) -> String {
+        "\(shellSingleQuote(executable))"
+            + " || printf '\\n[Copilot Projects] could not launch Copilot\\n';"
+            + " exec \(shellSingleQuote(shell)) -l"
     }
 
     /// POSIX single-quote a string for safe interpolation into a shell command:
