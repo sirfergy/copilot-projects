@@ -321,8 +321,28 @@ enum RemoteWebAssets {
     const createStatus = document.querySelector('#create-status');
     const base = location.pathname.endsWith('/')
       ? location.pathname : `${location.pathname}/`;
-    const clientId = (crypto.randomUUID && crypto.randomUUID()) ||
-      `c-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    function newUUID() {
+      if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+      const bytes = new Uint8Array(16);
+      if (globalThis.crypto?.getRandomValues) {
+        globalThis.crypto.getRandomValues(bytes);
+      } else {
+        for (let index = 0; index < bytes.length; index += 1) {
+          bytes[index] = Math.floor(Math.random() * 256);
+        }
+      }
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'));
+      return [
+        hex.slice(0, 4).join(''),
+        hex.slice(4, 6).join(''),
+        hex.slice(6, 8).join(''),
+        hex.slice(8, 10).join(''),
+        hex.slice(10).join('')
+      ].join('-');
+    }
+    const clientId = newUUID();
     const TOOLBAR_KEYS = {
       'esc': 'escape', 'tab': 'tab', 'up': 'up', 'down': 'down'
     };
@@ -348,6 +368,7 @@ enum RemoteWebAssets {
     // explicit click generates a fresh one.
     let hostSelectedProjectId = null;
     let createRequestId = null;
+    let createRequestProjectId = null;
     let creating = false;
     let pendingCreatedSessionId = null;
     const sessionState = new Map();
@@ -410,14 +431,18 @@ enum RemoteWebAssets {
     function updateNewSessionState() {
       newSessionButton.disabled = !hostSelectedProjectId || creating;
     }
+    function clearCreateRequest() {
+      createRequestId = null;
+      createRequestProjectId = null;
+    }
     async function createSession() {
       // A double click is blocked while a request is active, and the button stays
       // disabled without a host-selected project.
       if (creating || !hostSelectedProjectId) return;
       // Retain one request id across retries so a network/5xx retry is idempotent.
-      if (!createRequestId) {
-        createRequestId = (crypto.randomUUID && crypto.randomUUID()) ||
-          `r-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      if (!createRequestId || createRequestProjectId !== hostSelectedProjectId) {
+        createRequestId = newUUID();
+        createRequestProjectId = hostSelectedProjectId;
       }
       const projectId = hostSelectedProjectId;
       creating = true;
@@ -450,27 +475,27 @@ enum RemoteWebAssets {
       }
       if (response.status === 410) {
         // Processed-but-closed: a new explicit click should be a new attempt.
-        createRequestId = null;
+        clearCreateRequest();
         setCreateStatus('That session was already created and closed');
         return;
       }
       if (response.status === 404) {
-        createRequestId = null;
+        clearCreateRequest();
         setCreateStatus('New sessions are not supported by this host');
         return;
       }
       if (response.status === 409) {
-        createRequestId = null;
+        clearCreateRequest();
         setCreateStatus('That session id is already in use');
         return;
       }
       if (response.status === 422) {
-        createRequestId = null;
+        clearCreateRequest();
         setCreateStatus('Cannot create a session (no project or Repos unavailable)');
         return;
       }
       if (!response.ok) {
-        createRequestId = null;
+        clearCreateRequest();
         setCreateStatus('Could not create a session');
         return;
       }
@@ -479,7 +504,7 @@ enum RemoteWebAssets {
       // On success clear the request id and remember the created session so it can be
       // selected once the workspace snapshot includes it. Host Mac selection is left
       // untouched.
-      createRequestId = null;
+      clearCreateRequest();
       if (payload && payload.sessionId) {
         pendingCreatedSessionId = payload.sessionId;
         setCreateStatus('Session ready');
@@ -619,7 +644,12 @@ enum RemoteWebAssets {
     }
     function renderWorkspace(data) {
       const active = selected;
-      hostSelectedProjectId = data.selectedProjectId || null;
+      const nextProjectId = data.selectedProjectId || null;
+      if (hostSelectedProjectId !== nextProjectId && !creating) {
+        clearCreateRequest();
+        setCreateStatus('');
+      }
+      hostSelectedProjectId = nextProjectId;
       sessionState.clear();
       sessions.replaceChildren();
       data.projects.forEach((project) => {

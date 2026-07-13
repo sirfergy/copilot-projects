@@ -3597,7 +3597,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.html.contains(#"id="create-status""#))
         // Track the host's selected project and create only there.
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "hostSelectedProjectId = data.selectedProjectId || null;"
+            "const nextProjectId = data.selectedProjectId || null;"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "body: JSON.stringify({ requestId: createRequestId, projectId })"
@@ -3611,11 +3611,26 @@ final class AppLogicTests: XCTestCase {
             "if (creating || !hostSelectedProjectId) return;"
         ))
         // Retain one request id across network/5xx retries.
-        XCTAssertTrue(RemoteWebAssets.javascript.contains("if (!createRequestId) {"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (!createRequestId || createRequestProjectId !== hostSelectedProjectId) {"
+        ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("if (response.status >= 500) {"))
         // Clear the request id on 410 (and on success) so the next click is fresh.
         XCTAssertTrue(RemoteWebAssets.javascript.contains("if (response.status === 410) {"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("createRequestId = null;"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("createRequestProjectId = null;"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (hostSelectedProjectId !== nextProjectId && !creating) {"
+        ))
+        // In insecure browser contexts randomUUID may be unavailable. The fallback
+        // must still satisfy the host's UUID-decoded request contract.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("function newUUID() {"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "bytes[6] = (bytes[6] & 0x0f) | 0x40;"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "bytes[8] = (bytes[8] & 0x3f) | 0x80;"
+        ))
         // Concise, specific messaging including unsupported (404) and 422.
         XCTAssertTrue(RemoteWebAssets.javascript.contains("if (response.status === 404) {"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("if (response.status === 422) {"))
