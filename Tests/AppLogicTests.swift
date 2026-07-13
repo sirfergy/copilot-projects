@@ -2396,13 +2396,13 @@ final class AppLogicTests: XCTestCase {
             "requestId === transcriptRequestId"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "const submittedSession = selected;"
+            "const submittedGeneration = selectionGeneration;"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "selectionGeneration !== submittedGeneration"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "if (prompt.value === submittedValue) prompt.value = '';"
+            "if (selected !== id || selectionGeneration !== submittedGeneration) return;"
         ))
     }
 
@@ -2442,6 +2442,27 @@ final class AppLogicTests: XCTestCase {
             "if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("promptForm.requestSubmit();"))
+    }
+
+    func testRemoteWebConversationQueuesPromptsWhileBusy() {
+        // Conversation mode queues messages per session and flushes them in
+        // order once Copilot is promptable again.
+        XCTAssertTrue(RemoteWebAssets.html.contains(
+            #"<div id="prompt-queue" role="list" aria-label="Queued messages" hidden></div>"#
+        ))
+        XCTAssertTrue(RemoteWebAssets.css.contains(".queue-item {"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("const QUEUE_CAP = 25;"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("const promptQueues = new Map();"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("function enqueuePrompt(value)"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("async function flushQueue()"))
+        // Only releases the next message when the session is idle/promptable.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (!(writable && state?.promptable === true"
+        ))
+        // Per-session removal from the queue.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "sessionQueue(selected).splice(index, 1);"
+        ))
     }
 
     func testRemoteWebJavaScriptSyntax() throws {

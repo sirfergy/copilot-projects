@@ -46,6 +46,7 @@ enum RemoteWebAssets {
               </span>
             </div>
             <div id="transcript" aria-live="polite">Select a session</div>
+            <div id="prompt-queue" role="list" aria-label="Queued messages" hidden></div>
             <form id="prompt-form">
               <textarea id="prompt" rows="3" maxlength="8192" aria-describedby="prompt-warning"
                 aria-label="Message Copilot" placeholder="Message Copilot"></textarea>
@@ -250,6 +251,16 @@ enum RemoteWebAssets {
     .message-label { display:block; color:#999; font-size:10px; font-weight:600;
       margin-bottom:4px; text-transform:uppercase; }
     .tools { color:#aaa; font-size:11px; margin-top:7px; }
+    #prompt-queue { flex:0 0 auto; max-height:32%; overflow:auto;
+      -webkit-overflow-scrolling:touch; overscroll-behavior:contain;
+      display:flex; flex-direction:column; gap:5px; padding:8px 10px 0; }
+    .queue-item { display:flex; align-items:flex-start; gap:8px; background:#22262e;
+      border:1px solid #333; border-radius:8px; padding:7px 9px; }
+    .queue-text { flex:1; min-width:0; white-space:pre-wrap; overflow-wrap:anywhere;
+      font-size:13px; color:#ddd; }
+    .queue-remove { flex:0 0 auto; background:transparent; border:0; color:#999;
+      padding:2px 6px; font-size:12px; line-height:1; }
+    .queue-remove:hover { color:#f85149; }
     #prompt-form { flex:0 0 auto; display:grid; gap:7px; padding:10px;
       padding-bottom:max(10px, env(safe-area-inset-bottom)); border-top:1px solid #333; }
     #prompt { width:100%; resize:none; background:#222; color:#fff; border:1px solid #555;
@@ -278,6 +289,7 @@ enum RemoteWebAssets {
     const prompt = document.querySelector('#prompt');
     const promptStatus = document.querySelector('#prompt-status');
     const promptSubmit = document.querySelector('#prompt-submit');
+    const promptQueue = document.querySelector('#prompt-queue');
     const notifications = document.querySelector('#notifications');
     const content = document.querySelector('#content');
     const pivotTabs = Array.from(document.querySelectorAll('.pivot-tab'));
@@ -306,6 +318,11 @@ enum RemoteWebAssets {
     let transcriptRequestId = 0;
     let selectionGeneration = 0;
     let viewMode = 'conversation';
+    // Per-session queue of Copilot prompts. Conversation mode lets you stack
+    // multiple messages while the agent is busy; they flush in order as it frees.
+    const QUEUE_CAP = 25;
+    const promptQueues = new Map();
+    let flushingQueue = false;
     const sessionState = new Map();
     const requested = new URLSearchParams(location.search);
     let pendingFocusSession = requested.get('session');
@@ -419,6 +436,7 @@ enum RemoteWebAssets {
       openStream();
       acquire(id);
       if (viewMode === 'terminal') terminal.focus();
+      renderQueue();
       updatePromptState();
     }
     // Buffer keystrokes and send them in order, one request in flight at a time,
@@ -466,6 +484,104 @@ enum RemoteWebAssets {
         flushing = false;
       }
     }
+    function sessionQueue(id, create) {
+      let q = promptQueues.get(id);
+      if (!q && create) { q = []; promptQueues.set(id, q); }
+      return q || [];
+    }
+    function renderQueue() {
+      const q = selected ? sessionQueue(selected) : [];
+      promptQueue.replaceChildren();
+      promptQueue.hidden = q.length === 0;
+      q.forEach((message, index) => {
+        const item = document.createElement('div');
+        item.className = 'queue-item';
+        item.setAttribute('role', 'listitem');
+        const text = document.createElement('span');
+        text.className = 'queue-text';
+        text.textContent = message;
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'queue-remove';
+        remove.setAttribute('aria-label', 'Remove queued message');
+        remove.textContent = '✕';
+        remove.onclick = () => {
+          sessionQueue(selected).splice(index, 1);
+          renderQueue();
+          updatePromptState();
+        };
+        item.append(text, remove);
+        promptQueue.append(item);
+      });
+    }
+    function enqueuePrompt(value) {
+      if (!value.trim() || !selected || !writable) return false;
+      if (new TextEncoder().encode(value).length > 8192) {
+        updatePromptState('Message is too large (8 KB maximum)');
+        return false;
+      }
+      const q = sessionQueue(selected, true);
+      if (q.length >= QUEUE_CAP) {
+        updatePromptState(`Queue is full (${QUEUE_CAP} max)`);
+        return false;
+      }
+      q.push(value);
+      renderQueue();
+      updatePromptState();
+      return true;
+    }
+    // Send the head of the selected session's queue when Copilot is idle, then
+    // wait for the turn to land before releasing the next one.
+    async function flushQueue() {
+      if (flushingQueue) return;
+      const id = selected;
+      if (!id) return;
+      const q = promptQueues.get(id);
+      if (!q || !q.length) return;
+      const state = sessionState.get(id);
+      if (!(writable && state?.promptable === true
+          && !promptSending && !awaitingPromptStart)) return;
+      flushingQueue = true;
+      try {
+        const value = q[0];
+        const submittedGeneration = selectionGeneration;
+        promptSending = true;
+        promptStatus.textContent = 'Sending…';
+        const response = await control({ type: 'prompt', sessionId: id, data: value });
+        promptSending = false;
+        if (selected !== id || selectionGeneration !== submittedGeneration) return;
+        if (response?.ok) {
+          if (q[0] === value) q.shift();
+          renderQueue();
+          awaitingPromptStart = true;
+          clearTimeout(promptFallbackTimer);
+          promptFallbackTimer = setTimeout(() => {
+            awaitingPromptStart = false;
+            promptFallbackTimer = null;
+            updatePromptState();
+          }, 5000);
+          updatePromptState();
+        } else if (response?.status === 403) {
+          writable = false;
+          lease.textContent = 'view only';
+          updatePromptState('Control moved to another device');
+        } else if (response?.status === 409) {
+          // Copilot is still working; keep queued and retry shortly.
+          updatePromptState('Copilot is still working');
+          setTimeout(flushQueue, 3000);
+        } else if (response?.status === 422) {
+          // Not ready in this terminal; keep queued and retry shortly.
+          updatePromptState('Copilot is not ready in this terminal');
+          setTimeout(flushQueue, 3000);
+        } else {
+          // Network or unexpected error: keep queued and retry shortly.
+          updatePromptState('Message not sent — will retry');
+          setTimeout(flushQueue, 3000);
+        }
+      } finally {
+        flushingQueue = false;
+      }
+    }
     function updatePromptState(message) {
       const state = selected && sessionState.get(selected);
       if (awaitingPromptStart && state?.promptable === false) {
@@ -473,17 +589,17 @@ enum RemoteWebAssets {
         clearTimeout(promptFallbackTimer);
         promptFallbackTimer = null;
       }
-      const enabled = Boolean(
-        selected && writable && state?.promptable === true
-          && !promptSending && !awaitingPromptStart
-      );
-      promptSubmit.disabled = !enabled;
+      const q = selected ? (promptQueues.get(selected) || []) : [];
+      promptSubmit.disabled = !(selected && writable
+        && prompt.value.trim() && q.length < QUEUE_CAP);
       if (message) {
         promptStatus.textContent = message;
       } else if (!selected) {
         promptStatus.textContent = 'Select a Copilot session';
       } else if (!writable) {
         promptStatus.textContent = 'View only';
+      } else if (q.length) {
+        promptStatus.textContent = `${q.length} queued`;
       } else if (awaitingPromptStart) {
         promptStatus.textContent = 'Sending…';
       } else if (state?.background) {
@@ -497,6 +613,7 @@ enum RemoteWebAssets {
       } else {
         promptStatus.textContent = 'Start Copilot in this session';
       }
+      flushQueue();
     }
     function renderWorkspace(data) {
       const active = selected;
@@ -837,49 +954,12 @@ enum RemoteWebAssets {
         promptForm.requestSubmit();
       }
     });
-    promptForm.onsubmit = async (event) => {
+    prompt.addEventListener('input', () => updatePromptState());
+    promptForm.onsubmit = (event) => {
       event.preventDefault();
-      const value = prompt.value;
-      if (!value.trim() || !selected || promptSubmit.disabled) return;
-      if (new TextEncoder().encode(value).length > 8192) {
-        updatePromptState('Message is too large (8 KB maximum)');
-        return;
-      }
-      const submittedSession = selected;
-      const submittedValue = value;
-      const submittedGeneration = selectionGeneration;
-      promptSending = true;
-      updatePromptState('Sending…');
-      const response = await control({
-        type: 'prompt',
-        sessionId: submittedSession,
-        data: submittedValue
-      });
-      if (selected !== submittedSession
-          || selectionGeneration !== submittedGeneration) return;
-      promptSending = false;
-      if (response?.ok) {
-        if (prompt.value === submittedValue) prompt.value = '';
-        awaitingPromptStart = true;
-        clearTimeout(promptFallbackTimer);
-        promptFallbackTimer = setTimeout(() => {
-          awaitingPromptStart = false;
-          promptFallbackTimer = null;
-          updatePromptState();
-        }, 5000);
+      if (enqueuePrompt(prompt.value)) {
+        prompt.value = '';
         updatePromptState();
-        return;
-      }
-      if (response?.status === 403) {
-        writable = false;
-        lease.textContent = 'view only';
-        updatePromptState('Control moved to another device');
-      } else if (response?.status === 409) {
-        updatePromptState('Copilot is still working');
-      } else if (response?.status === 422) {
-        updatePromptState('Copilot is not ready in this terminal');
-      } else {
-        updatePromptState('Message was not sent');
       }
     };
 
