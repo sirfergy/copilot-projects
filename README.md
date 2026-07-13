@@ -157,6 +157,14 @@ through the native CLI input path. The full terminal remains available for permi
 TUI interactions. Remote clients do not resize the PTY because dtach shares one terminal size with
 the desktop.
 
+When Copilot asks a structured `ask_user` question, the extension heartbeat surfaces it (with its
+verbatim choices) as a native question card in the remote client, temporarily replacing the
+message composer. Choosing an option — or typing free-form text when the question allows it — is
+delivered back to the exact live Copilot session over a lease-gated control message; a question
+whose choices or payload are too large is never exposed remotely so the terminal fallback stays
+exact. Answers are re-validated host-side against the fresh heartbeat before an atomic, private
+response file hands them to the extension.
+
 Normal-buffer sessions expose a bounded, independently scrollable history without moving the
 desktop terminal viewport. Active Copilot/full-screen sessions forward web wheel gestures to the
 existing TUI only while the remote client holds the writer lease. Terminal `http://`/`https://`

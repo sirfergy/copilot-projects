@@ -146,6 +146,12 @@ public enum Paths {
         sessionsDir.appendingPathComponent("\(sessionId).agent-activity.json").path
     }
 
+    /// Response file the host atomically writes to answer a structured `ask_user`
+    /// question; the extension watches for it, replies over RPC, then removes it.
+    public static func userInputResponsePath(sessionId: String) -> String {
+        sessionsDir.appendingPathComponent("\(sessionId).user-input-response.json").path
+    }
+
     public static func transcriptSnapshotPath(sessionId: String) -> String {
         sessionsDir.appendingPathComponent("\(sessionId).transcript.json").path
     }

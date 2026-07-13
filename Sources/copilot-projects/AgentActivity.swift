@@ -1,4 +1,5 @@
 import Foundation
+import CopilotProjectsProtocol
 
 struct AgentActivitySnapshot: Codable, Equatable {
     static let currentSchemaVersion = 1
@@ -13,11 +14,51 @@ struct AgentActivitySnapshot: Codable, Equatable {
     var lastIdleAborted: Bool
     var lastIdleTurnKind: String?
     var error: String?
+    /// Structured `ask_user` questions currently awaiting an answer. Optional (with a
+    /// nil default) so older heartbeat snapshots that predate this field still decode.
+    var trackedUserInputs: [TrackedUserInput]? = nil
 
     func isFresh(at now: Date = Date(), ttl: TimeInterval = 15) -> Bool {
         guard schemaVersion == Self.currentSchemaVersion,
               let updated = Self.date(from: updatedAt) else { return false }
         return now.timeIntervalSince(updated) <= ttl
+    }
+
+    /// Convert the tracked questions into the shared remote model for workspace
+    /// snapshots. Returns nil when there are none so the field is omitted entirely.
+    func remoteUserInputRequests() -> [RemoteUserInputRequest]? {
+        guard let trackedUserInputs, !trackedUserInputs.isEmpty else { return nil }
+        return trackedUserInputs.map { $0.remoteRequest() }
+    }
+
+    private static func date(from value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
+}
+
+/// One outstanding structured question, mirrored from the extension's heartbeat.
+/// `choices` are stored verbatim so a selectable answer can be matched exactly.
+struct TrackedUserInput: Codable, Equatable, Identifiable {
+    var requestId: String
+    var question: String
+    var choices: [String]
+    var allowFreeform: Bool
+    var requestedAt: String
+    var agentId: String?
+
+    var id: String { requestId }
+
+    func remoteRequest() -> RemoteUserInputRequest {
+        RemoteUserInputRequest(
+            requestId: requestId,
+            question: question,
+            choices: choices,
+            allowFreeform: allowFreeform,
+            requestedAt: Self.date(from: requestedAt) ?? Date(),
+            agentId: agentId
+        )
     }
 
     private static func date(from value: String) -> Date? {

@@ -89,6 +89,13 @@ final class RemoteModelBridge: @unchecked Sendable {
     func sendPrompt(sessionId: String, value: String) -> RemotePromptResult {
         model?.sendRemotePrompt(sessionId: sessionId, value: value) ?? .invalid
     }
+
+    func answerUserInput(
+        sessionId: String,
+        answer: RemoteUserInputAnswer
+    ) -> RemoteUserInputResult {
+        model?.answerUserInput(sessionId: sessionId, answer: answer) ?? .invalid
+    }
 }
 
 /// Writer leases ensure only one remote client injects input into a given
@@ -754,6 +761,53 @@ private final class RemoteHTTPHandler:
                         response = (.conflict, "Copilot is still working")
                     case .noLiveCopilot:
                         response = (.unprocessableEntity, "Copilot is not ready")
+                    }
+                    self.respond(
+                        channel: channel,
+                        method: .POST,
+                        status: response.0,
+                        contentType: "text/plain",
+                        body: Data(response.1.utf8)
+                    )
+                }
+            }
+        case "answer-user-input":
+            guard let payload = message.data,
+                  payload.utf8.count <= 16_384,
+                  let answer = try? JSONDecoder().decode(
+                    RemoteUserInputAnswer.self, from: Data(payload.utf8)
+                  ),
+                  answer.requestId.utf8.count <= 200,
+                  answer.answer.utf8.count <= 8_192 else {
+                respond(context: context, method: .POST, status: .badRequest,
+                        contentType: "text/plain", body: "Bad request")
+                return
+            }
+            guard leases.holds(sessionId: sessionId, clientId: clientId) else {
+                respond(context: context, method: .POST, status: .forbidden,
+                        contentType: "text/plain", body: "view only")
+                return
+            }
+            let channel = context.channel
+            let leases = self.leases
+            Task { @MainActor in
+                let result = leases.withHeldLease(
+                    sessionId: sessionId,
+                    clientId: clientId
+                ) {
+                    self.bridge.answerUserInput(sessionId: sessionId, answer: answer)
+                }
+                channel.eventLoop.execute {
+                    let response: (HTTPResponseStatus, String)
+                    switch result {
+                    case .some(.accepted):
+                        response = (.noContent, "")
+                    case .some(.conflict):
+                        response = (.conflict, "Question already answered")
+                    case .some(.invalid):
+                        response = (.unprocessableEntity, "Answer was not accepted")
+                    case .none:
+                        response = (.forbidden, "view only")
                     }
                     self.respond(
                         channel: channel,

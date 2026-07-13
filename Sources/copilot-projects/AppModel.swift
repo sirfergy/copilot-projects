@@ -42,6 +42,27 @@ enum RemotePromptResult: Equatable {
     case noLiveCopilot
 }
 
+/// Outcome of accepting a remote answer to a structured `ask_user` question.
+enum RemoteUserInputResult: Equatable {
+    /// The answer passed validation and a response file was written for the extension.
+    case accepted
+    /// A response for this tab is already awaiting the extension, or the question
+    /// context changed underneath the answer.
+    case conflict
+    /// No matching live question, or the answer failed the choice/freeform/size rules.
+    case invalid
+}
+
+/// On-disk shape of the host-written user-input response file. The extension
+/// validates every field again before replying over RPC.
+private struct UserInputResponseFile: Codable {
+    let schemaVersion: Int
+    let copilotSessionId: String
+    let requestId: String
+    let answer: String
+    let wasFreeform: Bool
+}
+
 struct RemotePromptTarget {
     let activity: FooterActivity
     let send: (String) -> Bool
@@ -715,7 +736,9 @@ final class AppModel: ObservableObject {
                                 hasLiveAgent: liveAgentSessions.contains(session.id),
                                 footerActivity: controllers[session.id]?.agentActivity
                                     ?? .unknown
-                            ) == .sent
+                            ) == .sent,
+                            pendingUserInputs: session.agentActivity?
+                                .remoteUserInputRequests()
                         )
                     }
                 )
@@ -830,6 +853,87 @@ final class AppModel: ObservableObject {
         guard status == .idle, !hasBackgroundWork else { return .busy }
         guard hasLiveAgent, footerActivity == .idle else { return .noLiveCopilot }
         return .sent
+    }
+
+    /// Accept a remote answer to a structured `ask_user` question and hand it to the
+    /// extension via an atomically-written response file. Validation re-reads the
+    /// fresh heartbeat snapshot from disk (never trusting in-memory state) so a stale
+    /// or superseded question can't be answered, and the exact choice/freeform/size
+    /// rules are enforced host-side before anything is written.
+    func answerUserInput(
+        sessionId: String,
+        answer: RemoteUserInputAnswer,
+        now: Date = Date()
+    ) -> RemoteUserInputResult {
+        guard locateIndex(sessionId) != nil else { return .invalid }
+
+        let snapshotURL = agentActivityDirectory
+            .appendingPathComponent("\(sessionId).agent-activity.json")
+        guard let data = try? Data(contentsOf: snapshotURL),
+              let snapshot = try? JSONDecoder().decode(
+                AgentActivitySnapshot.self, from: data
+              ),
+              snapshot.isFresh(at: now),
+              let request = snapshot.trackedUserInputs?
+                .first(where: { $0.requestId == answer.requestId })
+        else { return .invalid }
+
+        guard answer.answer.utf8.count <= 8_192 else { return .invalid }
+        if answer.wasFreeform {
+            guard request.allowFreeform else { return .invalid }
+        } else {
+            guard request.choices.contains(answer.answer) else { return .invalid }
+        }
+
+        // Bind the answer to the tab's live Copilot session so a response written for
+        // an old (pre-resume) agent session is rejected by the extension.
+        let markerURL = resumeMarkerDirectory
+            .appendingPathComponent("\(sessionId).copilot-session")
+        guard let copilotSessionId = (try? String(contentsOf: markerURL, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !copilotSessionId.isEmpty else { return .invalid }
+
+        // One outstanding response per tab: refuse while a prior answer is still being
+        // consumed by the extension, which serializes retries.
+        let responseURL = agentActivityDirectory
+            .appendingPathComponent("\(sessionId).user-input-response.json")
+        if FileManager.default.fileExists(atPath: responseURL.path) { return .conflict }
+
+        let payload = UserInputResponseFile(
+            schemaVersion: 1,
+            copilotSessionId: copilotSessionId,
+            requestId: request.requestId,
+            answer: answer.answer,
+            wasFreeform: answer.wasFreeform
+        )
+        guard let encoded = try? JSONEncoder().encode(payload),
+              Self.atomicallyWrite0600(encoded, to: responseURL) else {
+            return .invalid
+        }
+        return .accepted
+    }
+
+    /// Atomically publish `data` at `url` with 0600 permissions by writing a private
+    /// temp file and renaming it into place.
+    private static func atomicallyWrite0600(_ data: Data, to url: URL) -> Bool {
+        let directory = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let temporary = directory
+            .appendingPathComponent(".\(UUID().uuidString).user-input.tmp")
+        guard FileManager.default.createFile(
+            atPath: temporary.path,
+            contents: data,
+            attributes: [.posixPermissions: 0o600]
+        ) else { return false }
+        if rename(temporary.path, url.path) != 0 {
+            try? FileManager.default.removeItem(at: temporary)
+            return false
+        }
+        return true
     }
 
     func closeProject(_ pid: String) {

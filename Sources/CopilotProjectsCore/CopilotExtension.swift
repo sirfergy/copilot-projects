@@ -16,7 +16,7 @@ public enum CopilotExtension {
 
     public static let script = #"""
     import { dirname, join } from "node:path";
-    import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+    import { mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync } from "node:fs";
     import { joinSession } from "@github/copilot-sdk/extension";
 
     const appSessionId = process.env.COPILOT_PROJECTS_SESSION
@@ -36,7 +36,16 @@ public enum CopilotExtension {
         const scheduledTurnPath = join(sessionsDir, `${appSessionId}.scheduled-turn`);
         const copilotSessionPath = join(sessionsDir, `${appSessionId}.copilot-session`);
         const allowAllPath = join(sessionsDir, `${appSessionId}.copilot-allow-all`);
+        const userInputResponsePath = join(
+            sessionsDir, `${appSessionId}.user-input-response.json`
+        );
+        const userInputResponseName = `${appSessionId}.user-input-response.json`;
         const activeSubagents = new Map();
+        // All outstanding structured questions (root and subagent), keyed by
+        // requestId. Starts empty every launch: stale question state is never
+        // resurrected from disk, only rebuilt from live events.
+        const pendingUserInputs = new Map();
+        const inFlightUserInputResponses = new Set();
         let foregroundTurnActive = false;
         let scheduledTurnActive = false;
         let currentTurnKind = null;
@@ -59,6 +68,13 @@ public enum CopilotExtension {
         const MAX_TRANSCRIPT_TEXT = 50_000;
         const MAX_TRANSCRIPT_METADATA_TEXT = 512;
         const TRANSCRIPT_TURN_END_GRACE_MS = 1_000;
+
+        const MAX_USER_INPUT_QUESTION_BYTES = 16_384;
+        const MAX_USER_INPUT_CHOICE_BYTES = 8_192;
+        const MAX_USER_INPUT_CHOICES = 50;
+        const MAX_USER_INPUT_TOTAL_BYTES = 32_768;
+        const MAX_USER_INPUT_ANSWER_BYTES = 8_192;
+        const MAX_USER_INPUTS = 50;
 
         function truncatedText(value, maximumLength) {
             const text = typeof value === "string" ? value : "";
@@ -157,14 +173,136 @@ public enum CopilotExtension {
                 idleGeneration,
                 lastIdleAborted,
                 lastIdleTurnKind,
+                trackedUserInputs: [...pendingUserInputs.values()],
                 ...(error ? { error: String(error) } : {}),
             };
             const temporaryPath = `${snapshotPath}.${process.pid}.tmp`;
             try {
-                writeFileSync(temporaryPath, JSON.stringify(snapshot));
+                // Mode 0600 because the snapshot now carries question text.
+                writeFileSync(temporaryPath, JSON.stringify(snapshot), { mode: 0o600 });
                 renameSync(temporaryPath, snapshotPath);
             } catch {
                 removeFile(temporaryPath);
+            }
+        }
+
+        function userInputByteLength(value) {
+            return typeof value === "string" ? Buffer.byteLength(value) : Infinity;
+        }
+
+        // Build a bounded, verbatim question record or return null to reject remote
+        // exposure entirely — never truncating a selectable choice, so the terminal
+        // fallback stays exact.
+        function userInputEntry(event) {
+            const data = event?.data;
+            if (!data || typeof data !== "object") return null;
+            const requestId = data.requestId;
+            if (typeof requestId !== "string" || !requestId
+                    || requestId.length > 200) return null;
+            const question = data.question;
+            if (typeof question !== "string") return null;
+            let totalBytes = userInputByteLength(question);
+            if (totalBytes > MAX_USER_INPUT_QUESTION_BYTES) return null;
+            const choices = [];
+            if (data.choices != null) {
+                if (!Array.isArray(data.choices)) return null;
+                if (data.choices.length > MAX_USER_INPUT_CHOICES) return null;
+                for (const choice of data.choices) {
+                    if (typeof choice !== "string") return null;
+                    const bytes = userInputByteLength(choice);
+                    if (bytes > MAX_USER_INPUT_CHOICE_BYTES) return null;
+                    totalBytes += bytes;
+                    if (totalBytes > MAX_USER_INPUT_TOTAL_BYTES) return null;
+                    choices.push(choice);
+                }
+            }
+            const agentId = typeof event.agentId === "string" && event.agentId
+                ? boundedMetadataText(event.agentId)
+                : null;
+            return {
+                requestId,
+                question,
+                choices,
+                allowFreeform: data.allowFreeform === true,
+                requestedAt: normalizedTimestamp(event.timestamp),
+                agentId,
+            };
+        }
+
+        function boundPendingUserInputs() {
+            while (pendingUserInputs.size > MAX_USER_INPUTS) {
+                pendingUserInputs.delete(pendingUserInputs.keys().next().value);
+            }
+        }
+
+        // Answer a pending question from the host-written response file. Invalid or
+        // stale responses only remove the response file; the pending question and its
+        // exact terminal fallback are preserved. `user_input.completed` stays
+        // authoritative for removing a question.
+        async function processUserInputResponse() {
+            let encoded;
+            try {
+                encoded = readFileSync(userInputResponsePath, "utf8");
+            } catch {
+                return;
+            }
+            let response;
+            try {
+                response = JSON.parse(encoded);
+            } catch {
+                removeFile(userInputResponsePath);
+                return;
+            }
+            if (!response || typeof response !== "object"
+                    || response.schemaVersion !== 1
+                    || typeof response.requestId !== "string") {
+                removeFile(userInputResponsePath);
+                return;
+            }
+            const requestId = response.requestId;
+            if (inFlightUserInputResponses.has(requestId)) return;
+            if (response.copilotSessionId !== session.sessionId) {
+                removeFile(userInputResponsePath);
+                return;
+            }
+            const pending = pendingUserInputs.get(requestId);
+            if (!pending) {
+                removeFile(userInputResponsePath);
+                return;
+            }
+            const answer = response.answer;
+            if (typeof answer !== "string"
+                    || userInputByteLength(answer) > MAX_USER_INPUT_ANSWER_BYTES) {
+                removeFile(userInputResponsePath);
+                return;
+            }
+            const wasFreeform = response.wasFreeform === true;
+            if (wasFreeform && !pending.allowFreeform) {
+                removeFile(userInputResponsePath);
+                return;
+            }
+            if (!wasFreeform && !pending.choices.includes(answer)) {
+                removeFile(userInputResponsePath);
+                return;
+            }
+            inFlightUserInputResponses.add(requestId);
+            try {
+                const result = await session.rpc.ui.handlePendingUserInput({
+                    requestId,
+                    response: { answer, wasFreeform },
+                });
+                if (result?.success === true) {
+                    pendingUserInputs.delete(requestId);
+                    removeFile(userInputResponsePath);
+                    publish();
+                } else {
+                    // Keep the question retryable; drop only the rejected response.
+                    removeFile(userInputResponsePath);
+                }
+            } catch {
+                removeFile(userInputResponsePath);
+            } finally {
+                inFlightUserInputResponses.delete(requestId);
             }
         }
 
@@ -502,6 +640,23 @@ public enum CopilotExtension {
         session.on("subagent.completed", finishSubagent);
         session.on("subagent.failed", finishSubagent);
 
+        session.on("user_input.requested", (event) => {
+            const entry = userInputEntry(event);
+            // A rejected entry is never exposed remotely; the terminal keeps the
+            // exact prompt so nothing is lost.
+            if (!entry) return;
+            pendingUserInputs.set(entry.requestId, entry);
+            boundPendingUserInputs();
+            publish();
+        });
+
+        session.on("user_input.completed", (event) => {
+            const requestId = event.data?.requestId;
+            if (typeof requestId === "string" && pendingUserInputs.delete(requestId)) {
+                publish();
+            }
+        });
+
         await refreshAllowAll();
         // Keep this Copilot session's last good drawer visible while history is
         // fetched, but clear a snapshot left by a different Copilot session.
@@ -529,13 +684,35 @@ public enum CopilotExtension {
         scheduleTranscriptTurnEndFallback();
 
         await refreshSchedules();
-        const timer = setInterval(refreshSchedules, 5_000);
+
+        // A fresh session must never inherit a stale answer from a prior launch, and
+        // pending questions are rebuilt from live events — never from disk.
+        removeFile(userInputResponsePath);
+        let userInputWatcher = null;
+        try {
+            userInputWatcher = watch(sessionsDir, (_eventType, filename) => {
+                if (!filename || filename === userInputResponseName) {
+                    processUserInputResponse();
+                }
+            });
+        } catch {}
+        processUserInputResponse();
+
+        const timer = setInterval(() => {
+            refreshSchedules();
+            processUserInputResponse();
+        }, 5_000);
 
         function cleanup() {
             clearInterval(timer);
             clearTimeout(transcriptTurnEndTimer);
+            if (userInputWatcher) {
+                try { userInputWatcher.close(); } catch {}
+                userInputWatcher = null;
+            }
             removeFile(snapshotPath);
             removeFile(scheduledTurnPath);
+            removeFile(userInputResponsePath);
         }
         process.once("SIGTERM", cleanup);
         process.once("SIGINT", cleanup);

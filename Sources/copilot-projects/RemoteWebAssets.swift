@@ -53,6 +53,7 @@ enum RemoteWebAssets {
             </span>
           </div>
           <div id="transcript" aria-live="polite">Select a session</div>
+          <div id="user-input" role="group" aria-label="Copilot questions"></div>
           <form id="prompt-form">
             <textarea id="prompt" rows="3" maxlength="8192" aria-describedby="prompt-warning"
               aria-label="Message Copilot" placeholder="Message Copilot"></textarea>
@@ -255,6 +256,29 @@ enum RemoteWebAssets {
       border-radius:7px; padding:9px; font:16px/1.3 -apple-system, BlinkMacSystemFont, sans-serif; }
     #prompt-warning { color:#999; font-size:10px; }
     #prompt-submit:disabled { opacity:.5; }
+    #prompt-form.hidden { display:none; }
+    #user-input { flex:0 0 auto; display:grid; gap:10px; padding:10px;
+      border-top:1px solid #333; max-height:55%; overflow:auto;
+      -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+    #user-input:empty { display:none; }
+    .user-input-card { display:grid; gap:9px; padding:11px; border:1px solid #3a4a63;
+      border-radius:10px; background:#182236; }
+    .user-input-head { display:flex; align-items:center; justify-content:space-between;
+      gap:8px; color:#9fb4d6; font-size:11px; font-weight:600; text-transform:uppercase; }
+    .user-input-agent { color:#c9a227; font-size:10px; font-weight:600;
+      text-transform:none; }
+    .user-input-question { white-space:pre-wrap; overflow-wrap:anywhere; color:#eee;
+      font-size:14px; }
+    .user-input-choices { display:grid; gap:7px; }
+    .user-input-choice { width:100%; text-align:left; white-space:pre-wrap;
+      overflow-wrap:anywhere; padding:9px; border-radius:7px; background:#243350;
+      border:1px solid #3a4a63; color:#eaf1ff; }
+    .user-input-choice:disabled { opacity:.5; }
+    .user-input-freeform { display:grid; gap:7px; }
+    .user-input-freeform textarea { width:100%; resize:none; background:#222; color:#fff;
+      border:1px solid #555; border-radius:7px; padding:9px;
+      font:16px/1.3 -apple-system, BlinkMacSystemFont, sans-serif; }
+    .user-input-status { color:#c9a227; font-size:11px; min-height:1em; }
     @media (max-width: 700px) {
       main { grid-template-columns: 105px minmax(0, 1fr);
         grid-template-rows: minmax(0, 1fr) minmax(260px, 46%); }
@@ -280,6 +304,7 @@ enum RemoteWebAssets {
     const prompt = document.querySelector('#prompt');
     const promptStatus = document.querySelector('#prompt-status');
     const promptSubmit = document.querySelector('#prompt-submit');
+    const userInput = document.querySelector('#user-input');
     const notifications = document.querySelector('#notifications');
     const base = location.pathname.endsWith('/')
       ? location.pathname : `${location.pathname}/`;
@@ -306,6 +331,10 @@ enum RemoteWebAssets {
     let transcriptRequestId = 0;
     let selectionGeneration = 0;
     const sessionState = new Map();
+    // requestId -> card element, and requestId -> { timer } while an answer is
+    // awaiting confirmation from the workspace snapshot.
+    const userInputCards = new Map();
+    const submittingUserInputs = new Map();
     const requested = new URLSearchParams(location.search);
     let pendingFocusSession = requested.get('session');
 
@@ -380,6 +409,7 @@ enum RemoteWebAssets {
       promptFallbackTimer = null;
       clearTimeout(scrollTimer);
       scrollTimer = null;
+      resetUserInputCards();
       lease.textContent = 'view only';
       terminal.textContent = 'Loading…';
       transcript.innerHTML = '<div class="transcript-empty">Loading completed turns…</div>';
@@ -390,6 +420,7 @@ enum RemoteWebAssets {
       openStream();
       acquire(id);
       terminal.focus();
+      syncUserInputCards();
       updatePromptState();
     }
     // Buffer keystrokes and send them in order, one request in flight at a time,
@@ -439,6 +470,14 @@ enum RemoteWebAssets {
     }
     function updatePromptState(message) {
       const state = selected && sessionState.get(selected);
+      const pendingInputs = (state && state.pendingUserInputs) || [];
+      const hasQuestions = pendingInputs.length > 0;
+      promptForm.classList.toggle('hidden', hasQuestions);
+      if (hasQuestions) {
+        promptSubmit.disabled = true;
+        promptStatus.textContent = message || 'Answer Copilot\u2019s question below';
+        return;
+      }
       if (awaitingPromptStart && state?.promptable === false) {
         awaitingPromptStart = false;
         clearTimeout(promptFallbackTimer);
@@ -504,10 +543,175 @@ enum RemoteWebAssets {
           selectSession(sessionId);
         }
       }
+      syncUserInputCards();
       updatePromptState();
     }
+    function currentUserInputs() {
+      return (selected && sessionState.get(selected)?.pendingUserInputs) || [];
+    }
+    function sessionHasUserInput(sessionId, requestId) {
+      return (sessionState.get(sessionId)?.pendingUserInputs || [])
+        .some((request) => request.requestId === requestId);
+    }
+    function resetUserInputCards() {
+      submittingUserInputs.forEach((entry) => clearTimeout(entry.timer));
+      submittingUserInputs.clear();
+      userInputCards.clear();
+      userInput.replaceChildren();
+    }
+    function setCardStatus(requestId, text) {
+      const status = userInputCards.get(requestId)?.querySelector('.user-input-status');
+      if (status) status.textContent = text || '';
+    }
+    function setCardSubmitting(requestId, submitting) {
+      const card = userInputCards.get(requestId);
+      if (!card) return;
+      card.querySelectorAll('button, textarea').forEach((element) => {
+        element.disabled = submitting;
+      });
+    }
+    // Untrusted question/choice text is only ever inserted with textContent.
+    function buildUserInputCard(request) {
+      const card = document.createElement('article');
+      card.className = 'user-input-card';
+      card.dataset.requestId = request.requestId;
+      const head = document.createElement('div');
+      head.className = 'user-input-head';
+      const heading = document.createElement('span');
+      heading.textContent = 'Copilot needs your input';
+      head.append(heading);
+      if (request.agentId) {
+        const agent = document.createElement('span');
+        agent.className = 'user-input-agent';
+        agent.textContent = 'Subagent';
+        head.append(agent);
+      }
+      card.append(head);
+      const question = document.createElement('div');
+      question.className = 'user-input-question';
+      question.textContent = request.question;
+      card.append(question);
+      const choices = Array.isArray(request.choices) ? request.choices : [];
+      if (choices.length) {
+        const group = document.createElement('div');
+        group.className = 'user-input-choices';
+        choices.forEach((choice) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'user-input-choice';
+          button.textContent = choice;
+          button.onclick = () => submitUserInput(request.requestId, choice, false);
+          group.append(button);
+        });
+        card.append(group);
+      }
+      if (request.allowFreeform) {
+        const freeform = document.createElement('form');
+        freeform.className = 'user-input-freeform';
+        const field = document.createElement('textarea');
+        field.rows = 2;
+        field.maxLength = 8192;
+        field.setAttribute('aria-label', 'Type an answer');
+        field.placeholder = 'Type an answer';
+        const submit = document.createElement('button');
+        submit.type = 'submit';
+        submit.textContent = 'Send answer';
+        freeform.append(field, submit);
+        freeform.onsubmit = (event) => {
+          event.preventDefault();
+          const value = field.value;
+          if (!value.trim()) return;
+          submitUserInput(request.requestId, value, true);
+        };
+        card.append(freeform);
+      }
+      const status = document.createElement('div');
+      status.className = 'user-input-status';
+      status.setAttribute('role', 'status');
+      status.setAttribute('aria-live', 'polite');
+      card.append(status);
+      return card;
+    }
+    // Only rebuild when the set of request IDs changes so a half-typed freeform
+    // answer isn't wiped by an unrelated workspace update. A card is removed only
+    // once the workspace snapshot no longer includes its request.
+    function syncUserInputCards() {
+      const pending = currentUserInputs();
+      const ids = new Set(pending.map((request) => request.requestId));
+      for (const [requestId, card] of [...userInputCards]) {
+        if (!ids.has(requestId)) {
+          card.remove();
+          userInputCards.delete(requestId);
+          const entry = submittingUserInputs.get(requestId);
+          if (entry) {
+            clearTimeout(entry.timer);
+            submittingUserInputs.delete(requestId);
+          }
+        }
+      }
+      pending.forEach((request) => {
+        let card = userInputCards.get(request.requestId);
+        if (!card) {
+          card = buildUserInputCard(request);
+          userInputCards.set(request.requestId, card);
+          userInput.append(card);
+        }
+        setCardSubmitting(request.requestId, submittingUserInputs.has(request.requestId));
+      });
+    }
+    async function submitUserInput(requestId, answer, wasFreeform) {
+      if (!selected || submittingUserInputs.has(requestId)) return;
+      if (new TextEncoder().encode(answer).length > 8192) {
+        setCardStatus(requestId, 'Answer is too large (8 KB maximum)');
+        return;
+      }
+      const submittedSession = selected;
+      const submittedGeneration = selectionGeneration;
+      // Retryable fallback: if the workspace still shows the question 15s later,
+      // re-enable the controls so the answer can be tried again.
+      const timer = setTimeout(() => {
+        submittingUserInputs.delete(requestId);
+        if (selected === submittedSession
+            && sessionHasUserInput(submittedSession, requestId)) {
+          setCardSubmitting(requestId, false);
+          setCardStatus(requestId, 'Still waiting \u2014 you can try again.');
+        }
+      }, 15000);
+      submittingUserInputs.set(requestId, { timer });
+      setCardSubmitting(requestId, true);
+      setCardStatus(requestId, 'Sending\u2026');
+      const response = await control({
+        type: 'answer-user-input',
+        sessionId: submittedSession,
+        data: JSON.stringify({ requestId, answer, wasFreeform })
+      });
+      if (selected !== submittedSession
+          || selectionGeneration !== submittedGeneration) return;
+      if (response?.ok) {
+        // Keep the card disabled until the workspace snapshot drops the request
+        // (card removed) or the 15s fallback re-enables it.
+        setCardStatus(requestId, 'Waiting for Copilot\u2026');
+        return;
+      }
+      const entry = submittingUserInputs.get(requestId);
+      if (entry) {
+        clearTimeout(entry.timer);
+        submittingUserInputs.delete(requestId);
+      }
+      setCardSubmitting(requestId, false);
+      if (response?.status === 403) {
+        writable = false;
+        lease.textContent = 'view only';
+        setCardStatus(requestId, 'Control moved to another device');
+      } else if (response?.status === 409) {
+        setCardStatus(requestId, 'This question was already answered');
+      } else if (response?.status === 422) {
+        setCardStatus(requestId, 'Answer was not accepted');
+      } else {
+        setCardStatus(requestId, 'Answer was not sent');
+      }
+    }
     const LINK_PATTERN = /\[[^\]\r\n]+\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s<>()\[\]]+/gi;
-
     function appendLinkedText(parent, text) {
       let cursor = 0;
       for (const match of text.matchAll(LINK_PATTERN)) {

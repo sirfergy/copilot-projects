@@ -38,6 +38,9 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     public let background: Bool
     public let scheduled: Bool
     public let promptable: Bool?
+    /// Structured `ask_user` questions currently awaiting an answer. Optional (and
+    /// omitted when absent) so older clients decode snapshots without this field.
+    public let pendingUserInputs: [RemoteUserInputRequest]?
 
     public init(
         id: String,
@@ -48,7 +51,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         ready: Bool,
         background: Bool,
         scheduled: Bool,
-        promptable: Bool? = nil
+        promptable: Bool? = nil,
+        pendingUserInputs: [RemoteUserInputRequest]? = nil
     ) {
         self.id = id
         self.title = title
@@ -59,6 +63,52 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.background = background
         self.scheduled = scheduled
         self.promptable = promptable
+        self.pendingUserInputs = pendingUserInputs
+    }
+}
+
+/// A structured question surfaced by the agent's `ask_user`/`user_input.requested`
+/// event, exposed to remote clients so they can answer without the terminal. The
+/// `choices` are carried verbatim: a selectable answer must match one exactly.
+public struct RemoteUserInputRequest: Codable, Equatable, Sendable, Identifiable {
+    public let requestId: String
+    public let question: String
+    public let choices: [String]
+    public let allowFreeform: Bool
+    public let requestedAt: Date
+    public let agentId: String?
+
+    public var id: String { requestId }
+
+    public init(
+        requestId: String,
+        question: String,
+        choices: [String],
+        allowFreeform: Bool,
+        requestedAt: Date,
+        agentId: String? = nil
+    ) {
+        self.requestId = requestId
+        self.question = question
+        self.choices = choices
+        self.allowFreeform = allowFreeform
+        self.requestedAt = requestedAt
+        self.agentId = agentId
+    }
+}
+
+/// A remote client's answer to a `RemoteUserInputRequest`. `wasFreeform` is only
+/// valid when the originating request allowed free-form text; otherwise `answer`
+/// must equal one of the request's verbatim choices.
+public struct RemoteUserInputAnswer: Codable, Equatable, Sendable {
+    public let requestId: String
+    public let answer: String
+    public let wasFreeform: Bool
+
+    public init(requestId: String, answer: String, wasFreeform: Bool) {
+        self.requestId = requestId
+        self.answer = answer
+        self.wasFreeform = wasFreeform
     }
 }
 
