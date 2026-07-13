@@ -2000,7 +2000,7 @@ final class AppLogicTests: XCTestCase {
                         "email": .string("user@example.com"),
                         "uri": .string("https://example.com/elicit"),
                         "date": .string("2026-07-13"),
-                        "dateTime": .string("2026-07-13T21:00:00Z"),
+                        "dateTime": .string("2026-07-13T21:00:00.123Z"),
                     ]
                 )
             ),
@@ -2035,7 +2035,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual((written["content"] as? [String: Any])?["date"] as? String,
                        "2026-07-13")
         XCTAssertEqual((written["content"] as? [String: Any])?["dateTime"] as? String,
-                       "2026-07-13T21:00:00Z")
+                       "2026-07-13T21:00:00.123Z")
 
         // A second answer conflicts while the prior response awaits pickup.
         XCTAssertEqual(

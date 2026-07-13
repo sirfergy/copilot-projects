@@ -1243,7 +1243,10 @@ final class AppModel: ObservableObject {
             formatter.isLenient = false
             return formatter.date(from: string) != nil
         case "date-time":
-            return ISO8601DateFormatter().date(from: string) != nil
+            let fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return fractional.date(from: string) != nil
+                || ISO8601DateFormatter().date(from: string) != nil
         default:
             return true
         }
