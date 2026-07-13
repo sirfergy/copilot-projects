@@ -3007,6 +3007,203 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteGatewayAnswerElicitationRequiresLeaseAndReportsStatuses() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        let sessionId = "session-elicit-gateway"
+        let session = Session(id: sessionId, title: "Test Session", cwd: "/")
+        let project = Project(id: "pid", name: "Project", cwd: "/", sessions: [session])
+        try repository.save(PersistedState(projects: [project], selectedProjectId: "pid"))
+
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root
+        )
+        let config = CloudflareAccessConfig(
+            teamDomain: "team.cloudflareaccess.com",
+            audTag: "expected-aud",
+            allowedEmail: "user@example.com"
+        )
+        let verifier = CloudflareAccessVerifier(
+            config: config,
+            now: { Date() },
+            fetch: { _ in nil }
+        )
+        let (privateKey, publicKey) = try makeRSAKeyPair()
+        verifier.installKey(kid: "test-key", key: publicKey)
+        let token = try accessToken(
+            kid: "test-key",
+            claims: [
+                "iss": config.issuer,
+                "aud": config.audTag,
+                "email": config.allowedEmail,
+                "exp": Date().timeIntervalSince1970 + 3_600,
+            ],
+            privateKey: privateKey
+        )
+        let gateway = RemoteGateway()
+        let port = try gateway.start(
+            bridge: RemoteModelBridge(model: model),
+            expectedHost: "127.0.0.1",
+            expectedOrigin: "https://projects.example.com",
+            verifier: verifier,
+            port: 0
+        )
+
+        func answerBody(
+            requestId: String,
+            action: RemoteElicitationAction,
+            content: [String: RemoteJSONValue]? = nil,
+            rawData: String? = nil
+        ) throws -> Data {
+            let payload: String
+            if let rawData {
+                payload = rawData
+            } else {
+                payload = String(
+                    decoding: try JSONEncoder().encode(RemoteElicitationAnswer(
+                        requestId: requestId, action: action, content: content
+                    )),
+                    as: UTF8.self
+                )
+            }
+            return try JSONEncoder().encode(RemoteClientMessage(
+                type: "answer-elicitation",
+                clientId: "phone",
+                sessionId: sessionId,
+                data: payload
+            ))
+        }
+
+        do {
+            // No writer lease yet → forbidden.
+            let withoutLease = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: try answerBody(
+                    requestId: "req-form", action: .accept,
+                    content: ["fruit": .string("apple")]
+                )
+            )
+            XCTAssertEqual(withoutLease, 403)
+
+            let acquire = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: try JSONEncoder().encode(RemoteClientMessage(
+                    type: "acquire", clientId: "phone", sessionId: sessionId, data: nil
+                ))
+            )
+            XCTAssertEqual(acquire, 204)
+
+            // Malformed answer payload → bad request.
+            let malformed = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: try answerBody(
+                    requestId: "req-form", action: .accept, rawData: "{"
+                )
+            )
+            XCTAssertEqual(malformed, 400)
+
+            // No live elicitation yet → unprocessable.
+            let noQuestion = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: try answerBody(
+                    requestId: "req-form", action: .accept,
+                    content: ["fruit": .string("apple")]
+                )
+            )
+            XCTAssertEqual(noQuestion, 422)
+
+            let snapshot = AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: ISO8601DateFormatter().string(from: Date()),
+                foregroundTurnActive: false,
+                scheduledTurnActive: false,
+                activeSubagents: [],
+                schedules: [],
+                idleGeneration: 0,
+                lastIdleAborted: false,
+                lastIdleTurnKind: nil,
+                error: nil,
+                trackedUserInputs: nil,
+                trackedElicitations: [
+                    TrackedElicitation(
+                        requestId: "req-form",
+                        message: "Pick a fruit",
+                        mode: "form",
+                        url: nil,
+                        schema: .object([
+                            "type": .string("object"),
+                            "properties": .object([
+                                "fruit": .object(["type": .string("string")])
+                            ]),
+                        ]),
+                        elicitationSource: nil,
+                        requestedAt: ISO8601DateFormatter().string(from: Date()),
+                        agentId: nil
+                    )
+                ]
+            )
+            try JSONEncoder().encode(snapshot).write(
+                to: root.appendingPathComponent("\(sessionId).agent-activity.json")
+            )
+            try Data("copilot-session".utf8).write(
+                to: root.appendingPathComponent("\(sessionId).copilot-session")
+            )
+
+            let accepted = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: try answerBody(
+                    requestId: "req-form", action: .accept,
+                    content: ["fruit": .string("apple")]
+                )
+            )
+            XCTAssertEqual(accepted, 204)
+
+            // A second answer while the response awaits pickup → conflict.
+            let conflict = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: try answerBody(requestId: "req-form", action: .cancel)
+            )
+            XCTAssertEqual(conflict, 409)
+        } catch {
+            await gateway.stop()
+            throw error
+        }
+        await gateway.stop()
+        SessionArtifacts.removeFiles(sessionId: sessionId)
+    }
+
+    @MainActor
     func testRemoteGatewayTranscriptSuccess() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

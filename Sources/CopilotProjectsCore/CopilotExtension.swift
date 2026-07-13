@@ -1048,23 +1048,7 @@ public enum CopilotExtension {
             });
         } catch {}
 
-        // Both user_input.requested and elicitation.requested are gated events: the
-        // runtime only delivers them to consumers that register interest, otherwise
-        // it keeps its default terminal-only handling. Register AFTER attaching the
-        // listeners so a question dispatched immediately can't slip past them.
         const eventInterestHandles = [];
-        for (const eventType of ["user_input.requested", "elicitation.requested"]) {
-            try {
-                const interest = await session.rpc.eventLog.registerInterest({ eventType });
-                if (interest?.handle) eventInterestHandles.push(interest.handle);
-            } catch (error) {
-                console.error(
-                    "[copilot-projects] failed to register interest in " + eventType + ":",
-                    error
-                );
-            }
-        }
-
         session.on("user_input.requested", (event) => {
             const entry = userInputEntry(event);
             // A rejected entry is never exposed remotely; the terminal keeps the
@@ -1096,6 +1080,22 @@ public enum CopilotExtension {
                 publish();
             }
         });
+
+        // Both user_input.requested and elicitation.requested are gated events: the
+        // runtime only delivers them to consumers that register interest, otherwise
+        // it keeps its default terminal-only handling. Register AFTER attaching the
+        // listeners so a question dispatched immediately can't slip past them.
+        for (const eventType of ["user_input.requested", "elicitation.requested"]) {
+            try {
+                const interest = await session.rpc.eventLog.registerInterest({ eventType });
+                if (interest?.handle) eventInterestHandles.push(interest.handle);
+            } catch (error) {
+                console.error(
+                    "[copilot-projects] failed to register interest in " + eventType + ":",
+                    error
+                );
+            }
+        }
 
         await refreshAllowAll();
         // Keep this Copilot session's last good drawer visible while history is

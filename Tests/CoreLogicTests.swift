@@ -137,8 +137,12 @@ final class CoreLogicTests: XCTestCase {
         let listenerRange = try XCTUnwrap(CopilotExtension.script.range(
             of: #"session.on("user_input.requested""#
         ))
+        let registrationRange = try XCTUnwrap(CopilotExtension.script.range(
+            of: "registerInterest({ eventType })"
+        ))
         XCTAssertLessThan(cleanupRange.lowerBound, listenerRange.lowerBound)
         XCTAssertLessThan(watcherRange.lowerBound, listenerRange.lowerBound)
+        XCTAssertLessThan(listenerRange.lowerBound, registrationRange.lowerBound)
         // The transcript turn must span a whole request, not stop at the first
         // agentic-loop turn end, and must not key suppression off parentAgentTaskId
         // (that field is present on genuine human input too).
@@ -1110,6 +1114,211 @@ final class CoreLogicTests: XCTestCase {
         let handledResponse = handledPayload?["response"] as? [String: Any]
         XCTAssertEqual(handledResponse?["answer"] as? String, "Yes, deploy")
         XCTAssertEqual(handledResponse?["wasFreeform"] as? Bool, false)
+        XCTAssertEqual(summary["pendingAfter"] as? [String], [])
+        XCTAssertEqual(summary["responseRemoved"] as? Bool, true)
+    }
+
+    func testCopilotExtensionRegistersTracksCompletesAndAnswersElicitation() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-elicitation-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let appSessionId = "12345678-1234-1234-1234-123456789abc"
+
+        let prelude = #"""
+        let transcriptListener = null;
+        const namedListeners = new Map();
+        const eventInterestRegistrations = [];
+        const eventInterestReleases = [];
+        const handledElicitationCalls = [];
+        const fakeSession = {
+          sessionId: "copilot-session",
+          rpc: {
+            schedule: { list: async () => ({entries:[]}) },
+            permissions: { getAllowAll: async () => ({enabled:false}) },
+            eventLog: {
+              registerInterest: async ({eventType}) => {
+                eventInterestRegistrations.push(eventType);
+                if (eventType === "elicitation.requested") {
+                  fakeSession.emit({
+                    id:"elicit-registration",type:"elicitation.requested",
+                    timestamp:"2026-07-12T04:00:01.000Z",
+                    data:{requestId:"req-form",message:"Pick a fruit",mode:"form",
+                      requestedSchema:{type:"object",properties:{fruit:{type:"string"}}},
+                      elicitationSource:"unit-test"}
+                  });
+                }
+                return { handle: `handle-${eventType}` };
+              },
+              releaseInterest: async ({handle}) => {
+                eventInterestReleases.push(handle);
+                return { success: true };
+              },
+            },
+            ui: {
+              handlePendingElicitation: async (payload) => {
+                handledElicitationCalls.push(payload);
+                return { success: true };
+              },
+            },
+          },
+          on(name, handler) {
+            if (typeof name === "function") { transcriptListener = name; return; }
+            namedListeners.set(name, handler);
+          },
+          emit(event) {
+            const named = namedListeners.get(event.type);
+            if (named) named(event);
+            if (transcriptListener) transcriptListener(event);
+          },
+          async getEvents() { return []; }
+        };
+        globalThis.__fakeSession = fakeSession;
+        """#
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: "const joinSession = async () => fakeSession;"
+        )
+        let epilogue = #"""
+
+        const { existsSync, statSync } = await import("node:fs");
+        const sessionsDir = `${process.env.COPILOT_PROJECTS_ROOT}/sessions`;
+        const base = `${sessionsDir}/${process.env.COPILOT_PROJECTS_SESSION}`;
+        const snapshotPath = `${base}.agent-activity.json`;
+        const responsePath = `${base}.elicitation-response.json`;
+        await new Promise((resolve) => setImmediate(resolve));
+
+        __fakeSession.emit({
+          id:"elicit-url",type:"elicitation.requested",agentId:"agent-7",
+          timestamp:"2026-07-12T04:00:02.000Z",
+          data:{requestId:"req-url",message:"Open docs",mode:"url",
+            url:"https://example.com/elicit"}
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+
+        const firstSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
+        const pendingBefore = firstSnapshot.trackedElicitations.map((e) => e.requestId);
+        const formRequest = firstSnapshot.trackedElicitations.find(
+          (e) => e.requestId === "req-form"
+        );
+        const urlRequest = firstSnapshot.trackedElicitations.find(
+          (e) => e.requestId === "req-url"
+        );
+        const snapshotMode = (statSync(snapshotPath).mode & 0o777).toString(8);
+
+        // A stale/foreign-session response is dropped without answering.
+        writeFileSync(responsePath, JSON.stringify({
+          schemaVersion:1,copilotSessionId:"other-session",requestId:"req-form",
+          action:"accept",content:{fruit:"apple"}
+        }));
+        let waited = 0;
+        while (waited < 6000 && existsSync(responsePath)) {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          waited += 80;
+        }
+        const staleHandled = handledElicitationCalls.length;
+        const staleStillPending = JSON.parse(readFileSync(snapshotPath, "utf8"))
+          .trackedElicitations.some((e) => e.requestId === "req-form");
+
+        // A valid form response is delivered over RPC and clears the heartbeat card.
+        writeFileSync(responsePath, JSON.stringify({
+          schemaVersion:1,copilotSessionId:"copilot-session",requestId:"req-form",
+          action:"accept",content:{fruit:"apple"}
+        }));
+        waited = 0;
+        while (waited < 6000 && handledElicitationCalls.length === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          waited += 80;
+        }
+        waited = 0;
+        while (waited < 3000 && existsSync(responsePath)) {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          waited += 80;
+        }
+
+        // A question answered through the terminal clears via the SDK completion event.
+        __fakeSession.emit({
+          id:"elicit-url-complete",type:"elicitation.completed",agentId:"agent-7",
+          timestamp:"2026-07-12T04:00:03.000Z",
+          data:{requestId:"req-url",action:"decline"}
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        const afterSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
+
+        console.log(JSON.stringify({
+          registrations: eventInterestRegistrations,
+          pendingBefore,
+          formMessage: formRequest?.message,
+          formSchemaType: formRequest?.schema?.type,
+          formSource: formRequest?.elicitationSource,
+          urlMode: urlRequest?.mode,
+          url: urlRequest?.url,
+          urlAgentId: urlRequest?.agentId,
+          snapshotMode,
+          staleHandled,
+          staleStillPending,
+          handledPayload: handledElicitationCalls[0],
+          pendingAfter: afterSnapshot.trackedElicitations.map((e) => e.requestId),
+          responseRemoved: existsSync(responsePath) === false
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("elicitation.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "COPILOT_PROJECTS_SESSION": appSessionId,
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let summary = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: output) as? [String: Any]
+        )
+        XCTAssertEqual(
+            summary["registrations"] as? [String],
+            ["user_input.requested", "elicitation.requested"]
+        )
+        XCTAssertEqual(
+            (summary["pendingBefore"] as? [String])?.sorted(),
+            ["req-form", "req-url"]
+        )
+        XCTAssertEqual(summary["formMessage"] as? String, "Pick a fruit")
+        XCTAssertEqual(summary["formSchemaType"] as? String, "object")
+        XCTAssertEqual(summary["formSource"] as? String, "unit-test")
+        XCTAssertEqual(summary["urlMode"] as? String, "url")
+        XCTAssertEqual(summary["url"] as? String, "https://example.com/elicit")
+        XCTAssertEqual(summary["urlAgentId"] as? String, "agent-7")
+        XCTAssertEqual(summary["snapshotMode"] as? String, "600")
+        XCTAssertEqual(summary["staleHandled"] as? Int, 0)
+        XCTAssertEqual(summary["staleStillPending"] as? Bool, true)
+        let handledPayload = summary["handledPayload"] as? [String: Any]
+        XCTAssertEqual(handledPayload?["requestId"] as? String, "req-form")
+        let result = handledPayload?["result"] as? [String: Any]
+        XCTAssertEqual(result?["action"] as? String, "accept")
+        XCTAssertEqual((result?["content"] as? [String: Any])?["fruit"] as? String, "apple")
         XCTAssertEqual(summary["pendingAfter"] as? [String], [])
         XCTAssertEqual(summary["responseRemoved"] as? Bool, true)
     }
