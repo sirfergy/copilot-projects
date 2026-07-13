@@ -1049,6 +1049,88 @@ public enum CopilotExtension {
         } catch {}
 
         const eventInterestHandles = [];
+        const inFlightEventInterestRegistrations = new Set();
+        let timer = null;
+
+        async function releaseEventInterests() {
+            const handles = [...eventInterestHandles];
+            for (const handle of handles) {
+                let released = false;
+                for (let attempt = 0; attempt < 2 && !released; attempt += 1) {
+                    try {
+                        await session.rpc.eventLog.releaseInterest({ handle });
+                        released = true;
+                    } catch (error) {
+                        if (attempt === 1) {
+                            console.error(
+                                "[copilot-projects] failed to release event interest:",
+                                error
+                            );
+                        }
+                    }
+                }
+                if (released) {
+                    const index = eventInterestHandles.indexOf(handle);
+                    if (index !== -1) eventInterestHandles.splice(index, 1);
+                }
+            }
+        }
+
+        async function registerEventInterest(eventType) {
+            let registration = null;
+            try {
+                registration = session.rpc.eventLog.registerInterest({ eventType });
+                inFlightEventInterestRegistrations.add(registration);
+                const interest = await registration;
+                if (interest?.handle) eventInterestHandles.push(interest.handle);
+            } catch (error) {
+                console.error(
+                    "[copilot-projects] failed to register interest in " + eventType + ":",
+                    error
+                );
+            } finally {
+                if (registration) inFlightEventInterestRegistrations.delete(registration);
+            }
+        }
+
+        async function awaitEventInterestRegistrations() {
+            const registrations = [...inFlightEventInterestRegistrations];
+            if (registrations.length > 0) await Promise.allSettled(registrations);
+        }
+
+        function cleanupSharedFiles() {
+            if (timer) clearInterval(timer);
+            clearTimeout(transcriptPublishTimer);
+            if (userInputWatcher) {
+                try { userInputWatcher.close(); } catch {}
+                userInputWatcher = null;
+            }
+            // Use the read-only ownership check (never claim during cleanup) so an
+            // exiting spawned helper can't wipe a live interactive session's
+            // markers. The owner flushes any progress buffered behind the publish
+            // throttle before releasing the shared files.
+            if (isRecordedOwner()) {
+                writeTranscriptSnapshot();
+                removeFile(snapshotPath);
+                removeFile(scheduledTurnPath);
+                removeFile(transcriptOwnerPath);
+                removeFile(userInputResponsePath);
+                removeFile(elicitationResponsePath);
+            }
+        }
+        let shuttingDown = false;
+        async function shutdown(signal) {
+            if (shuttingDown) return;
+            shuttingDown = true;
+            cleanupSharedFiles();
+            await awaitEventInterestRegistrations();
+            await releaseEventInterests();
+            process.exit(signal === "SIGINT" ? 130 : 143);
+        }
+        process.once("SIGTERM", () => { shutdown("SIGTERM").catch(() => process.exit(143)); });
+        process.once("SIGINT", () => { shutdown("SIGINT").catch(() => process.exit(130)); });
+        process.once("exit", cleanupSharedFiles);
+
         session.on("user_input.requested", (event) => {
             const entry = userInputEntry(event);
             // A rejected entry is never exposed remotely; the terminal keeps the
@@ -1086,15 +1168,8 @@ public enum CopilotExtension {
         // it keeps its default terminal-only handling. Register AFTER attaching the
         // listeners so a question dispatched immediately can't slip past them.
         for (const eventType of ["user_input.requested", "elicitation.requested"]) {
-            try {
-                const interest = await session.rpc.eventLog.registerInterest({ eventType });
-                if (interest?.handle) eventInterestHandles.push(interest.handle);
-            } catch (error) {
-                console.error(
-                    "[copilot-projects] failed to register interest in " + eventType + ":",
-                    error
-                );
-            }
+            if (shuttingDown) break;
+            await registerEventInterest(eventType);
         }
 
         await refreshAllowAll();
@@ -1128,67 +1203,11 @@ public enum CopilotExtension {
         processUserInputResponse();
         processElicitationResponse();
 
-        const timer = setInterval(() => {
+        timer = setInterval(() => {
             refreshSchedules();
             processUserInputResponse();
             processElicitationResponse();
         }, 5_000);
-
-        async function releaseEventInterests() {
-            const handles = [...eventInterestHandles];
-            for (const handle of handles) {
-                let released = false;
-                for (let attempt = 0; attempt < 2 && !released; attempt += 1) {
-                    try {
-                        await session.rpc.eventLog.releaseInterest({ handle });
-                        released = true;
-                    } catch (error) {
-                        if (attempt === 1) {
-                            console.error(
-                                "[copilot-projects] failed to release event interest:",
-                                error
-                            );
-                        }
-                    }
-                }
-                if (released) {
-                    const index = eventInterestHandles.indexOf(handle);
-                    if (index !== -1) eventInterestHandles.splice(index, 1);
-                }
-            }
-        }
-
-        function cleanupSharedFiles() {
-            clearInterval(timer);
-            clearTimeout(transcriptPublishTimer);
-            if (userInputWatcher) {
-                try { userInputWatcher.close(); } catch {}
-                userInputWatcher = null;
-            }
-            // Use the read-only ownership check (never claim during cleanup) so an
-            // exiting spawned helper can't wipe a live interactive session's
-            // markers. The owner flushes any progress buffered behind the publish
-            // throttle before releasing the shared files.
-            if (isRecordedOwner()) {
-                writeTranscriptSnapshot();
-                removeFile(snapshotPath);
-                removeFile(scheduledTurnPath);
-                removeFile(transcriptOwnerPath);
-                removeFile(userInputResponsePath);
-                removeFile(elicitationResponsePath);
-            }
-        }
-        let shuttingDown = false;
-        async function shutdown(signal) {
-            if (shuttingDown) return;
-            shuttingDown = true;
-            cleanupSharedFiles();
-            await releaseEventInterests();
-            process.exit(signal === "SIGINT" ? 130 : 143);
-        }
-        process.once("SIGTERM", () => { shutdown("SIGTERM").catch(() => process.exit(143)); });
-        process.once("SIGINT", () => { shutdown("SIGINT").catch(() => process.exit(130)); });
-        process.once("exit", cleanupSharedFiles);
     }
     """#
 

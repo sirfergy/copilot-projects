@@ -140,11 +140,15 @@ final class CoreLogicTests: XCTestCase {
             of: #"session.on("user_input.requested""#
         ))
         let registrationRange = try XCTUnwrap(CopilotExtension.script.range(
-            of: "registerInterest({ eventType })"
+            of: "await registerEventInterest(eventType)"
+        ))
+        let shutdownRange = try XCTUnwrap(CopilotExtension.script.range(
+            of: #"process.once("SIGTERM""#
         ))
         XCTAssertLessThan(cleanupRange.lowerBound, listenerRange.lowerBound)
         XCTAssertLessThan(watcherRange.lowerBound, listenerRange.lowerBound)
         XCTAssertLessThan(listenerRange.lowerBound, registrationRange.lowerBound)
+        XCTAssertLessThan(shutdownRange.lowerBound, registrationRange.lowerBound)
         // The transcript turn must span a whole request, not stop at the first
         // agentic-loop turn end, and must not key suppression off parentAgentTaskId
         // (that field is present on genuine human input too).

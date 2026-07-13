@@ -2541,6 +2541,25 @@ final class AppLogicTests: XCTestCase {
         }
     }
 
+    func testSessionArtifactCleanupRemovesResponseArtifacts() throws {
+        let sessionId = UUID().uuidString
+        Paths.ensureStateDir()
+        let paths = [
+            Paths.userInputResponsePath(sessionId: sessionId),
+            Paths.elicitationResponsePath(sessionId: sessionId),
+        ]
+        for path in paths {
+            try Data("{}".utf8).write(to: URL(fileURLWithPath: path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+        }
+
+        SessionArtifacts.removeFiles(sessionId: sessionId)
+
+        for path in paths {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        }
+    }
+
     @MainActor
     func testTranscriptDrawerRequiresExplicitOpen() throws {
         let root = FileManager.default.temporaryDirectory

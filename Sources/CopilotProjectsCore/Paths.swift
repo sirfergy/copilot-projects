@@ -152,6 +152,11 @@ public enum Paths {
         sessionsDir.appendingPathComponent("\(sessionId).user-input-response.json").path
     }
 
+    /// Response file the host atomically writes to answer an SDK elicitation.
+    public static func elicitationResponsePath(sessionId: String) -> String {
+        sessionsDir.appendingPathComponent("\(sessionId).elicitation-response.json").path
+    }
+
     public static func transcriptSnapshotPath(sessionId: String) -> String {
         sessionsDir.appendingPathComponent("\(sessionId).transcript.json").path
     }

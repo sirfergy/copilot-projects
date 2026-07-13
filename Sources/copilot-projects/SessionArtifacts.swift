@@ -88,6 +88,7 @@ enum SessionArtifacts {
             Paths.scheduledTurnMarkerPath(sessionId: sessionId),
             Paths.agentActivitySnapshotPath(sessionId: sessionId),
             Paths.userInputResponsePath(sessionId: sessionId),
+            Paths.elicitationResponsePath(sessionId: sessionId),
             Paths.transcriptSnapshotPath(sessionId: sessionId),
             Paths.transcriptOwnerPath(sessionId: sessionId),
             Paths.transcriptOwnerLockPath(sessionId: sessionId),
