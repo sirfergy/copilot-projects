@@ -1100,6 +1100,7 @@ final class AppModel: ObservableObject {
         notification: StatusNotificationKind? = nil
     ) {
         guard let loc = locateIndex(sessionId) else { return }
+        guard statusEventClock.shouldApply(sessionId: sessionId, timestamp: timestamp) else { return }
         // sessionEnd is also emitted during graceful macOS shutdown. Only a live,
         // non-terminating app can treat it as an explicit user exit.
         if source == "session-end", !isTerminating, !isPoweringOff {
@@ -1109,7 +1110,6 @@ final class AppModel: ObservableObject {
                 )
             }
         }
-        guard statusEventClock.shouldApply(sessionId: sessionId, timestamp: timestamp) else { return }
         let previous = projects[loc.p].sessions[loc.s].status
         let startsScheduledTurn = source == "scheduled-start" || source == "scheduled-active"
         let endsScheduledTurn = source == "scheduled-idle"

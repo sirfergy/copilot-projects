@@ -63,7 +63,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(parsed.positionals, ["first", "--literal"])
     }
 
-    func testCopilotExtensionTracksSchedulesAndSubagentsWithoutTools() {
+    func testCopilotExtensionTracksSchedulesAndSubagentsWithoutTools() throws {
         XCTAssertTrue(CopilotExtension.script.contains("session.rpc.schedule.list()"))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("subagent.started""#))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("session.idle""#))
@@ -106,6 +106,17 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains(
             "removeFile(userInputResponsePath)"
         ))
+        let cleanupRange = try XCTUnwrap(CopilotExtension.script.range(
+            of: "Clear stale answer state before any new question can be published"
+        ))
+        let watcherRange = try XCTUnwrap(CopilotExtension.script.range(
+            of: "watch(sessionsDir"
+        ))
+        let listenerRange = try XCTUnwrap(CopilotExtension.script.range(
+            of: #"session.on("user_input.requested""#
+        ))
+        XCTAssertLessThan(cleanupRange.lowerBound, listenerRange.lowerBound)
+        XCTAssertLessThan(watcherRange.lowerBound, listenerRange.lowerBound)
         // The transcript turn must span a whole request, not stop at the first
         // agentic-loop turn end, and must not key suppression off parentAgentTaskId
         // (that field is present on genuine human input too).

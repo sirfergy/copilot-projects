@@ -367,6 +367,46 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testStaleSessionEndDoesNotClearResumeMarkers() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(title: "target", cwd: "/tmp")
+        let project = Project(name: "target", cwd: "/tmp", sessions: [session])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let markers = ["copilot-session", "copilot-allow-all"].map {
+            sessions.appendingPathComponent("\(session.id).\($0)")
+        }
+        for marker in markers {
+            try Data(UUID().uuidString.utf8).write(to: marker)
+        }
+
+        let model = AppModel(
+            stateRepository: repository,
+            resumeMarkerDirectory: sessions
+        )
+        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 200)
+        model.setStatus(
+            sessionId: session.id,
+            status: .idle,
+            text: nil,
+            timestamp: 100,
+            source: "session-end"
+        )
+
+        for marker in markers {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        }
+    }
+
+    @MainActor
     func testPowerOffProtectionExpiresAfterCancelledShutdown() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory
@@ -701,14 +741,22 @@ final class AppLogicTests: XCTestCase {
         private(set) var devices: [StoredAPNsDevice] = []
         private(set) var payloads: [RemoteNotificationPayload] = []
         var result: APNsDelivery = .delivered
+        var showDelayNanoseconds: UInt64 = 0
 
         func send(
             payload: RemoteNotificationPayload,
             device: StoredAPNsDevice
         ) async -> APNsDelivery {
+            if payload.action == .show, showDelayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: showDelayNanoseconds)
+            }
             devices.append(device)
             payloads.append(payload)
             return result
+        }
+
+        func setShowDelayNanoseconds(_ value: UInt64) {
+            showDelayNanoseconds = value
         }
 
         func firstDevice() -> StoredAPNsDevice? { devices.first }
@@ -855,6 +903,51 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(payloads.map(\.action), [.show, .show, .clear])
         XCTAssertEqual(devices.last?.token, secondToken)
         XCTAssertEqual(sync.dismissalSnapshot().ids, [event.id])
+    }
+
+    func testNotificationDismissalWaitsForInFlightShow() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let token = String(repeating: "ab", count: 32)
+        let apnsStore = APNsDeviceStore(url: root.appendingPathComponent("devices.json"))
+        try apnsStore.add(APNsRegistration(
+            token: token,
+            environment: .sandbox,
+            label: "Phone"
+        ))
+        let sender = APNsSenderSpy()
+        await sender.setShowDelayNanoseconds(100_000_000)
+        let apns = APNsService(store: apnsStore, provider: sender)
+        let sync = NotificationSyncService(
+            ledger: NotificationLedger(url: root.appendingPathComponent("ledger.json")),
+            webPushService: nil,
+            apnsService: apns
+        )
+        let event = NotificationEvent(
+            kind: .elicitation,
+            title: "Question",
+            subtitle: "Project · Session",
+            body: nil,
+            projectId: "project",
+            sessionId: "session"
+        )
+
+        sync.post(event, sendRemote: true)
+        sync.dismiss(NotificationDismissRequest(
+            id: event.id,
+            apnsToken: nil,
+            apnsEnvironment: nil
+        ))
+        for _ in 0 ..< 20 {
+            if await sender.sentPayloads().count >= 2 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        let payloads = await sender.sentPayloads()
+        XCTAssertEqual(payloads.map(\.action), [.show, .clear])
     }
 
     func testFocusDeepLinkParsing() throws {

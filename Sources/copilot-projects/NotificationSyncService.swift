@@ -113,10 +113,44 @@ final class NotificationLedger: @unchecked Sendable {
     }
 }
 
+private final class NotificationDeliveryQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tails: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
+
+    func enqueue(
+        id: UUID,
+        operation: @Sendable @escaping () async -> Void
+    ) {
+        let token = UUID()
+        lock.lock()
+        let previous = tails[id]?.task
+        let task = Task.detached {
+            await previous?.value
+            await operation()
+        }
+        tails[id] = (token, task)
+        lock.unlock()
+
+        Task.detached { [weak self] in
+            await task.value
+            self?.remove(id: id, token: token)
+        }
+    }
+
+    private func remove(id: UUID, token: UUID) {
+        lock.lock()
+        if tails[id]?.token == token {
+            tails[id] = nil
+        }
+        lock.unlock()
+    }
+}
+
 final class NotificationSyncService: @unchecked Sendable {
     private let ledger: NotificationLedger
     private let webPushService: WebPushService?
     private let apnsService: APNsService?
+    private let deliveryQueue = NotificationDeliveryQueue()
 
     @MainActor var clearLocalNotification: ((UUID) -> Void)?
 
@@ -134,11 +168,15 @@ final class NotificationSyncService: @unchecked Sendable {
         let apnsSent = sendRemote && apnsService?.hasDevices == true
         ledger.record(id: event.id, sentAt: event.sentAt, apnsSent: apnsSent)
         guard sendRemote else { return }
-        if let webPushService {
-            Task.detached { await webPushService.send(event) }
-        }
-        if let apnsService {
-            Task.detached { await apnsService.send(event) }
+        deliveryQueue.enqueue(id: event.id) { [webPushService, apnsService] in
+            await withTaskGroup(of: Void.self) { group in
+                if let webPushService {
+                    group.addTask { await webPushService.send(event) }
+                }
+                if let apnsService {
+                    group.addTask { await apnsService.send(event) }
+                }
+            }
         }
     }
 
@@ -150,7 +188,7 @@ final class NotificationSyncService: @unchecked Sendable {
         guard transition.newlyDismissed, transition.apnsSent, let apnsService else {
             return
         }
-        Task.detached {
+        deliveryQueue.enqueue(id: request.id) { [apnsService] in
             await apnsService.sendDismissal(
                 id: request.id,
                 excludingToken: request.apnsToken,

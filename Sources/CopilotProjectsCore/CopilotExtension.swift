@@ -810,6 +810,21 @@ public enum CopilotExtension {
         session.on("subagent.completed", finishSubagent);
         session.on("subagent.failed", finishSubagent);
 
+        // Clear stale answer state before any new question can be published, and
+        // establish the watcher before exposing questions so the first host answer
+        // cannot be stranded during startup.
+        if (ownsSharedFiles()) {
+            removeFile(userInputResponsePath);
+        }
+        let userInputWatcher = null;
+        try {
+            userInputWatcher = watch(sessionsDir, (_eventType, filename) => {
+                if (!filename || filename === userInputResponseName) {
+                    processUserInputResponse();
+                }
+            });
+        } catch {}
+
         session.on("user_input.requested", (event) => {
             const entry = userInputEntry(event);
             // A rejected entry is never exposed remotely; the terminal keeps the
@@ -855,20 +870,6 @@ public enum CopilotExtension {
 
         await refreshSchedules();
 
-        // A fresh session must never inherit a stale answer from a prior launch, and
-        // pending questions are rebuilt from live events — never from disk. Only the
-        // owner clears it, so a spawned helper can't wipe the owner's live response.
-        if (ownsSharedFiles()) {
-            removeFile(userInputResponsePath);
-        }
-        let userInputWatcher = null;
-        try {
-            userInputWatcher = watch(sessionsDir, (_eventType, filename) => {
-                if (!filename || filename === userInputResponseName) {
-                    processUserInputResponse();
-                }
-            });
-        } catch {}
         processUserInputResponse();
 
         const timer = setInterval(() => {
