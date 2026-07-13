@@ -185,15 +185,26 @@ final class NotificationSyncService: @unchecked Sendable {
         Task { @MainActor [weak self] in
             self?.clearLocalNotification?(request.id)
         }
-        guard transition.newlyDismissed, transition.apnsSent, let apnsService else {
+        guard transition.newlyDismissed else {
             return
         }
-        deliveryQueue.enqueue(id: request.id) { [apnsService] in
-            await apnsService.sendDismissal(
-                id: request.id,
-                excludingToken: request.apnsToken,
-                environment: request.apnsEnvironment
-            )
+        let sendsAPNs = transition.apnsSent && apnsService != nil
+        guard webPushService != nil || sendsAPNs else { return }
+        deliveryQueue.enqueue(id: request.id) { [webPushService, apnsService, sendsAPNs] in
+            await withTaskGroup(of: Void.self) { group in
+                if let webPushService {
+                    group.addTask { await webPushService.sendDismissal(id: request.id) }
+                }
+                if sendsAPNs, let apnsService {
+                    group.addTask {
+                        await apnsService.sendDismissal(
+                            id: request.id,
+                            excludingToken: request.apnsToken,
+                            environment: request.apnsEnvironment
+                        )
+                    }
+                }
+            }
         }
     }
 

@@ -113,6 +113,16 @@ enum RemoteWebAssets {
       } catch {
         payload = {};
       }
+      if (payload.action === 'clear') {
+        event.waitUntil((async () => {
+          if (!payload.id) return;
+          const notifications = await self.registration.getNotifications({
+            tag: payload.id
+          });
+          notifications.forEach((notification) => notification.close());
+        })());
+        return;
+      }
       const sentAt = Date.parse(payload.sentAt || '') || Date.now();
       const sentTime = new Date(sentAt).toLocaleTimeString([], {
         hour: 'numeric',

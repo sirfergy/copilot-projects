@@ -276,11 +276,9 @@ final class WebPushService: @unchecked Sendable {
     }
 
     func send(_ event: NotificationEvent) async {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
         let body = Self.truncatedUTF8(event.webBody, maximumBytes: 2_000)
         let title = Self.truncatedUTF8(event.title, maximumBytes: 512)
-        guard let payload = try? encoder.encode(RemoteNotificationPayload(
+        await send(payload: RemoteNotificationPayload(
             id: event.id,
             kind: event.kind,
             title: title,
@@ -288,7 +286,27 @@ final class WebPushService: @unchecked Sendable {
             projectId: event.projectId,
             sessionId: event.sessionId,
             sentAt: event.sentAt
-        )), payload.count <= WebPushManager.maximumMessageSize else {
+        ))
+    }
+
+    func sendDismissal(id: UUID) async {
+        await send(payload: RemoteNotificationPayload(
+            action: .clear,
+            id: id,
+            kind: nil,
+            title: "",
+            body: "",
+            projectId: nil,
+            sessionId: nil,
+            sentAt: Date()
+        ))
+    }
+
+    private func send(payload payloadObject: RemoteNotificationPayload) async {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let payload = try? encoder.encode(payloadObject),
+              payload.count <= WebPushManager.maximumMessageSize else {
             return
         }
         updateStatus(attempt: Date(), success: nil, error: nil)
@@ -305,7 +323,7 @@ final class WebPushService: @unchecked Sendable {
                         try await sender.send(
                             data: payload,
                             to: subscriber,
-                            eventID: event.id
+                            eventID: payloadObject.id
                         )
                         return .success(subscriber.endpoint)
                     } catch is BadSubscriberError {

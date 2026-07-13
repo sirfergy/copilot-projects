@@ -755,6 +755,7 @@ final class AppLogicTests: XCTestCase {
         }
 
         func firstPayload() -> Data? { payloads.first }
+        func sentPayloads() -> [Data] { payloads }
     }
 
     private actor APNsSenderSpy: APNsSending {
@@ -881,7 +882,13 @@ final class AppLogicTests: XCTestCase {
             projectId: "project",
             sessionId: "session"
         ))
-        try await Task.sleep(nanoseconds: 50_000_000)
+        for _ in 0 ..< 25 {
+            if await webSender.firstPayload() != nil,
+               await apnsSender.sentPayloads().count >= 1 {
+                break
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
         XCTAssertEqual(native.events.count, 2)
         let firstWebPayload = await webSender.firstPayload()
         let webPayload = try XCTUnwrap(firstWebPayload)
@@ -927,7 +934,6 @@ final class AppLogicTests: XCTestCase {
             sessionId: "session"
         )
         sync.post(event, sendRemote: true)
-        try await Task.sleep(nanoseconds: 50_000_000)
 
         let request = NotificationDismissRequest(
             id: event.id,
@@ -936,13 +942,67 @@ final class AppLogicTests: XCTestCase {
         )
         sync.dismiss(request)
         sync.dismiss(request)
-        try await Task.sleep(nanoseconds: 50_000_000)
+        for _ in 0 ..< 25 {
+            if await sender.sentPayloads().count >= 3 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
 
         let payloads = await sender.sentPayloads()
         let devices = await sender.sentDevices()
         XCTAssertEqual(payloads.map(\.action), [.show, .show, .clear])
         XCTAssertEqual(devices.last?.token, secondToken)
         XCTAssertEqual(sync.dismissalSnapshot().ids, [event.id])
+    }
+
+    func testNotificationDismissalFansOutWebPushClear() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let webStore = WebPushSubscriptionStore(
+            url: root.appendingPathComponent("subscriptions.json")
+        )
+        try webStore.add(JSONDecoder().decode(
+            WebPushRegistration.self,
+            from: webPushRegistrationData(
+                endpoint: "https://wns2-by3p.notify.windows.com/sub/clear"
+            )
+        ))
+        let webSender = WebPushSenderSpy()
+        let webPush = WebPushService(
+            publicKey: VAPID.Key().id.description,
+            store: webStore,
+            sender: webSender
+        )
+        let sync = NotificationSyncService(
+            ledger: NotificationLedger(url: root.appendingPathComponent("ledger.json")),
+            webPushService: webPush,
+            apnsService: nil
+        )
+        let event = NotificationEvent(
+            kind: .permission,
+            title: "Permission",
+            subtitle: "Project · Session",
+            body: nil,
+            projectId: "project",
+            sessionId: "session"
+        )
+
+        sync.post(event, sendRemote: true)
+        sync.dismiss(NotificationDismissRequest(id: event.id))
+        for _ in 0 ..< 25 {
+            if await webSender.sentPayloads().count >= 2 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let webPayloads = await webSender.sentPayloads()
+        let actions = try webPayloads.map {
+            try decoder.decode(RemoteNotificationPayload.self, from: $0).action
+        }
+        XCTAssertEqual(actions, [.show, .clear])
     }
 
     func testNotificationDismissalWaitsForInFlightShow() async throws {
@@ -3357,6 +3417,14 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains("refreshUserInputCardStates();"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 409"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 422"))
+    }
+
+    func testRemoteServiceWorkerClearsSyncedNotifications() {
+        XCTAssertTrue(RemoteWebAssets.serviceWorker.contains("payload.action === 'clear'"))
+        XCTAssertTrue(RemoteWebAssets.serviceWorker.contains(
+            "self.registration.getNotifications"
+        ))
+        XCTAssertTrue(RemoteWebAssets.serviceWorker.contains("notification.close()"))
     }
 
     func testRemoteWebSessionPivotMirrorsIOS() {
