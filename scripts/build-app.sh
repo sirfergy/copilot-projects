@@ -27,7 +27,26 @@ APP_NAME="Copilot Projects"
 # notification authorization to the bundle id, so it re-prompts once.
 BUNDLE_ID="com.obvioussean.copilot-projects"
 EXE_NAME="copilot-projects"
-VERSION="${VERSION:-0.1.0}"
+# Version: an explicit VERSION (e.g. from release.sh) wins for both strings.
+# Otherwise derive from the latest git tag so local/dev builds are versioned
+# correctly instead of silently falling back to 0.1.0. The marketing string is
+# the tag; the build string appends commits-since-tag so a dev build off a
+# release is distinguishable from the tagged release itself.
+if [ -n "${VERSION:-}" ]; then
+  SHORT_VERSION="$VERSION"
+  BUILD_VERSION="$VERSION"
+elif DESCRIBE="$(git describe --tags --long --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null)"; then
+  SHORT_VERSION="${DESCRIBE#v}"; SHORT_VERSION="${SHORT_VERSION%%-*}"   # e.g. 0.8.3
+  COMMITS="${DESCRIBE#*-}"; COMMITS="${COMMITS%%-*}"                    # e.g. 3
+  if [ "${COMMITS:-0}" -gt 0 ] 2>/dev/null; then
+    BUILD_VERSION="$SHORT_VERSION.$COMMITS"                            # e.g. 0.8.3.3
+  else
+    BUILD_VERSION="$SHORT_VERSION"
+  fi
+else
+  SHORT_VERSION="0.1.0"
+  BUILD_VERSION="0.1.0"
+fi
 
 # macOS keys granted permissions (TCC: Accessibility, Automation, Notifications,
 # …) on the app's designated requirement, which includes the signing identity.
@@ -121,8 +140,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>$EXE_NAME</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>CFBundleShortVersionString</key><string>$SHORT_VERSION</string>
+  <key>CFBundleVersion</key><string>$BUILD_VERSION</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -140,8 +159,8 @@ cat > "$HELPER_CONTENTS/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>copilot-projects-link</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID.link</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>CFBundleShortVersionString</key><string>$SHORT_VERSION</string>
+  <key>CFBundleVersion</key><string>$BUILD_VERSION</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSUIElement</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
