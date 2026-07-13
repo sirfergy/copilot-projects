@@ -1,7 +1,0 @@
-Title: Spawned helpers silently drop user input responses
-Severity: High
-Confidence: High
-Scope: CopilotExtension.swift
-Exact code cited: Sources/CopilotProjectsCore/CopilotExtension.swift:360, Sources/CopilotProjectsCore/CopilotExtension.swift:853
-Concrete failure mode: When a spawned helper process (like a subagent) starts for the same session, it runs `CopilotExtension.js` and calls `removeFile(userInputResponsePath)` unconditionally on startup. It also sets up a watcher and timer to run `processUserInputResponse()`. Because the helper's `pendingUserInputs` map is empty (rebuilt from live events the helper missed), any valid user response written by the host is rejected by the helper as an unknown request and deleted before the owner process can submit it to the session. This breaks the answer-questions functionality because responses are actively destroyed by helpers.
-Minimal fix: Add `if (!ownsSharedFiles()) return;` at the beginning of `processUserInputResponse()`, and guard the startup `removeFile(userInputResponsePath)`, `userInputWatcher` setup, and initial `processUserInputResponse()` execution inside an `if (ownsSharedFiles())` block.
