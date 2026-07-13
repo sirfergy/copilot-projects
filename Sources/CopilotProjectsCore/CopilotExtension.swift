@@ -23,11 +23,13 @@ public enum CopilotExtension {
         || process.env.COPILOT_MUX_SESSION;
     const socketPath = process.env.COPILOT_PROJECTS_SOCKET
         || process.env.COPILOT_MUX_SOCKET;
-    const copilotSessionId = process.env.SESSION_ID;
     const validSessionId = /^[0-9A-Fa-f-]{36}$/.test(appSessionId || "");
-    const validCopilotSessionId = /^[0-9A-Fa-f-]{36}$/.test(copilotSessionId || "");
 
     const session = await joinSession();
+    const copilotSessionId = typeof session.sessionId === "string"
+        ? session.sessionId
+        : "";
+    const validCopilotSessionId = /^[0-9A-Fa-f-]{36}$/.test(copilotSessionId);
 
     if (validSessionId && socketPath) {
         const sessionsDir = join(dirname(socketPath), "sessions");

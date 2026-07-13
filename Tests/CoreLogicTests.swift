@@ -81,6 +81,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains("transcript-owner.json"))
         XCTAssertTrue(CopilotExtension.script.contains("transcriptOwnerLockPath"))
         XCTAssertTrue(CopilotExtension.script.contains("owner.pid === process.pid"))
+        XCTAssertTrue(CopilotExtension.script.contains("const copilotSessionId = typeof session.sessionId"))
         XCTAssertTrue(CopilotExtension.script.contains("schemaVersion: 3"))
         XCTAssertTrue(CopilotExtension.script.contains("publishTranscript();"))
         XCTAssertTrue(CopilotExtension.script.contains("removeFile(temporaryPath)"))
@@ -125,6 +126,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertFalse(CopilotExtension.script.contains("scheduleTranscriptTurnEndFallback"))
         XCTAssertFalse(CopilotExtension.script.contains("schemaVersion: 2"))
         XCTAssertFalse(CopilotExtension.script.contains("joinSession({"))
+        XCTAssertFalse(CopilotExtension.script.contains("process.env.SESSION_ID"))
         XCTAssertFalse(CopilotExtension.script.contains("removeFile(transcriptPath)"))
     }
 
