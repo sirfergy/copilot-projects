@@ -745,6 +745,7 @@ final class AppLogicTests: XCTestCase {
 
     private actor WebPushSenderSpy: WebPushSending {
         private(set) var payloads: [Data] = []
+        private(set) var endpoints: [URL] = []
 
         func send(
             data: Data,
@@ -752,10 +753,12 @@ final class AppLogicTests: XCTestCase {
             eventID: UUID
         ) async throws {
             payloads.append(data)
+            endpoints.append(subscriber.endpoint)
         }
 
         func firstPayload() -> Data? { payloads.first }
         func sentPayloads() -> [Data] { payloads }
+        func sentEndpoints() -> [URL] { endpoints }
     }
 
     private actor APNsSenderSpy: APNsSending {
@@ -3620,6 +3623,48 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(service.status().lastError)
     }
 
+    func testWebPushClearSkipsLegacySubscriptionsWithoutCapability() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WebPushSubscriptionStore(
+            url: root.appendingPathComponent("subscriptions.json")
+        )
+        try store.add(JSONDecoder().decode(
+            WebPushRegistration.self,
+            from: webPushRegistrationData(
+                endpoint: "https://wns2-by3p.notify.windows.com/sub/capable"
+            )
+        ))
+        try store.add(JSONDecoder().decode(
+            WebPushRegistration.self,
+            from: webPushRegistrationData(
+                endpoint: "https://wns2-by3p.notify.windows.com/sub/legacy",
+                supportsClearAction: false
+            )
+        ))
+        let sender = WebPushSenderSpy()
+        let service = WebPushService(
+            publicKey: VAPID.Key().id.description,
+            store: store,
+            sender: sender
+        )
+
+        await service.sendDismissal(id: UUID())
+
+        let payloads = await sender.sentPayloads()
+        let endpoints = await sender.sentEndpoints()
+        XCTAssertEqual(payloads.count, 1)
+        XCTAssertEqual(endpoints.map(\.lastPathComponent), ["capable"])
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        XCTAssertEqual(
+            try decoder.decode(RemoteNotificationPayload.self, from: payloads[0]).action,
+            .clear
+        )
+    }
+
     func testAPNsProviderTokenUsesRawES256Signature() async throws {
         let key = P256.Signing.PrivateKey()
         let configuration = APNsConfiguration(
@@ -3693,6 +3738,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "registerSubscription(subscription, applicationServerKey)"
         ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("capabilities: ['clear-action']"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("rel = 'noopener noreferrer'"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("push/subscribe"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("type: 'prompt'"))
@@ -4014,9 +4060,12 @@ final class AppLogicTests: XCTestCase {
             .replacingOccurrences(of: "=", with: "")
     }
 
-    private func webPushRegistrationData(endpoint: String) throws -> Data {
+    private func webPushRegistrationData(
+        endpoint: String,
+        supportsClearAction: Bool = true
+    ) throws -> Data {
         let key = VAPID.Key().id.description
-        return try JSONSerialization.data(withJSONObject: [
+        var registration: [String: Any] = [
             "subscription": [
                 "endpoint": endpoint,
                 "keys": [
@@ -4026,7 +4075,11 @@ final class AppLogicTests: XCTestCase {
                 "applicationServerKey": key,
             ],
             "label": "Test Browser",
-        ])
+        ]
+        if supportsClearAction {
+            registration["capabilities"] = ["clear-action"]
+        }
+        return try JSONSerialization.data(withJSONObject: registration)
     }
 
     private func remoteHTTPStatus(

@@ -8,11 +8,13 @@ import CopilotProjectsProtocol
 struct WebPushRegistration: Codable, Sendable {
     let subscription: Subscriber
     let label: String?
+    let capabilities: [String]?
 }
 
 private struct StoredWebPushSubscription: Codable, Sendable {
     let subscription: Subscriber
     let label: String?
+    let capabilities: [String]?
     let createdAt: Date
 }
 
@@ -44,6 +46,7 @@ private struct LiveWebPushSender: WebPushSending {
 
 final class WebPushSubscriptionStore: @unchecked Sendable {
     private static let maximumSubscriptions = 16
+    private static let clearActionCapability = "clear-action"
     private let lock = NSLock()
     private let url: URL
     private var subscriptions: [StoredWebPushSubscription]
@@ -59,12 +62,26 @@ final class WebPushSubscriptionStore: @unchecked Sendable {
         return subscriptions.map(\.subscription)
     }
 
+    func clearActionSubscribers() -> [Subscriber] {
+        lock.lock()
+        defer { lock.unlock() }
+        return subscriptions
+            .filter { $0.capabilities?.contains(Self.clearActionCapability) == true }
+            .map(\.subscription)
+    }
+
     func add(_ registration: WebPushRegistration) throws {
         guard Self.validEndpoint(registration.subscription.endpoint) else {
             throw WebPushServiceError.invalidSubscription
         }
         let label = registration.label.map {
             String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120))
+        }
+        let capabilities = registration.capabilities?.compactMap { value -> String? in
+            let capability = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard !capability.isEmpty, capability.utf8.count <= 64 else { return nil }
+            return capability
         }
         lock.lock()
         defer { lock.unlock() }
@@ -74,6 +91,7 @@ final class WebPushSubscriptionStore: @unchecked Sendable {
         subscriptions.append(StoredWebPushSubscription(
             subscription: registration.subscription,
             label: label,
+            capabilities: capabilities,
             createdAt: Date()
         ))
         if subscriptions.count > Self.maximumSubscriptions {
@@ -299,16 +317,21 @@ final class WebPushService: @unchecked Sendable {
             projectId: nil,
             sessionId: nil,
             sentAt: Date()
-        ))
+        ), subscribers: store.clearActionSubscribers())
     }
 
-    private func send(payload payloadObject: RemoteNotificationPayload) async {
+    private func send(
+        payload payloadObject: RemoteNotificationPayload,
+        subscribers: [Subscriber]? = nil
+    ) async {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let payload = try? encoder.encode(payloadObject),
               payload.count <= WebPushManager.maximumMessageSize else {
             return
         }
+        let subscribers = subscribers ?? store.all()
+        guard !subscribers.isEmpty else { return }
         updateStatus(attempt: Date(), success: nil, error: nil)
         enum Delivery: Sendable {
             case success(URL)
@@ -317,7 +340,7 @@ final class WebPushService: @unchecked Sendable {
         }
         let sender = self.sender
         await withTaskGroup(of: Delivery.self) { group in
-            for subscriber in store.all() {
+            for subscriber in subscribers {
                 group.addTask {
                     do {
                         try await sender.send(

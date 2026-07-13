@@ -1242,7 +1242,8 @@ enum RemoteWebAssets {
             ...subscription.toJSON(),
             applicationServerKey: publicKey
           },
-          label: navigator.userAgent.slice(0, 120)
+          label: navigator.userAgent.slice(0, 120),
+          capabilities: ['clear-action']
         })
       });
       if (!response.ok) throw new Error(`Subscription failed (${response.status})`);
