@@ -30,8 +30,17 @@ VERSION="${VERSION#v}"   # accept either 0.1.0 or v0.1.0
   exit 1
 }
 TAG="v$VERSION"
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
+
+# Prefer a stable Developer ID Application identity (keeps macOS permission grants
+# across builds and is required to notarize). Override by setting CODESIGN_IDENTITY,
+# or CODESIGN_IDENTITY=- to force ad-hoc for a throwaway local build.
+if [ -z "$CODESIGN_IDENTITY" ]; then
+  CODESIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
+  CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+fi
 
 if [ "$PUBLISH" = "1" ]; then
   [[ "$CODESIGN_IDENTITY" == Developer\ ID\ Application:* ]] || {

@@ -89,6 +89,8 @@ enum SessionArtifacts {
             Paths.agentActivitySnapshotPath(sessionId: sessionId),
             Paths.userInputResponsePath(sessionId: sessionId),
             Paths.transcriptSnapshotPath(sessionId: sessionId),
+            Paths.transcriptOwnerPath(sessionId: sessionId),
+            Paths.transcriptOwnerLockPath(sessionId: sessionId),
         ] {
             try? fm.removeItem(atPath: path)
         }

@@ -26,41 +26,53 @@ enum RemoteWebAssets {
       </header>
       <main>
         <nav id="sessions"></nav>
-        <section id="terminal-pane">
-          <div id="toolbar">
-            <button data-key="esc">Esc</button>
-            <button data-key="ctrl-c">Ctrl-C</button>
-            <button data-key="tab">Tab</button>
-            <button data-key="up">↑</button>
-            <button data-key="down">↓</button>
+        <div id="content" data-mode="conversation">
+          <div id="pivot">
+            <div id="pivot-tabs" role="tablist" aria-label="Session view">
+              <button id="tab-conversation" class="pivot-tab" type="button" role="tab"
+                aria-selected="true" aria-controls="transcript-pane"
+                data-mode="conversation">Conversation</button>
+              <button id="tab-terminal" class="pivot-tab" type="button" role="tab"
+                aria-selected="false" aria-controls="terminal-pane"
+                data-mode="terminal">Terminal</button>
+            </div>
             <button id="notifications" aria-label="Enable web notifications"
               title="Enable web notifications">🔔</button>
-            <span id="lease">view only</span>
           </div>
-          <div id="terminal" role="region" aria-live="off"
-            aria-label="Terminal output" tabindex="0">Select a session</div>
-          <form id="input-form">
-            <input id="input" autocomplete="off" autocapitalize="none" spellcheck="false"
-              aria-label="Command input" placeholder="Send a command">
-            <button>Send</button>
-          </form>
-        </section>
-        <aside id="transcript-pane">
-          <div id="transcript-header">
-            <strong>Completed turns</strong>
-            <span id="prompt-status" role="status" aria-live="polite" aria-atomic="true">
-              Select a Copilot session
-            </span>
-          </div>
-          <div id="transcript" aria-live="polite">Select a session</div>
-          <div id="user-input" role="group" aria-label="Copilot questions"></div>
-          <form id="prompt-form">
-            <textarea id="prompt" rows="3" maxlength="8192" aria-describedby="prompt-warning"
-              aria-label="Message Copilot" placeholder="Message Copilot"></textarea>
-            <div id="prompt-warning">Sending clears any unsent desktop draft.</div>
-            <button id="prompt-submit" disabled>Send message</button>
-          </form>
-        </aside>
+          <aside id="transcript-pane" role="tabpanel" aria-label="Conversation">
+            <div id="transcript-header">
+              <strong>Completed turns</strong>
+              <span id="prompt-status" role="status" aria-live="polite" aria-atomic="true">
+                Select a Copilot session
+              </span>
+            </div>
+            <div id="transcript" aria-live="polite">Select a session</div>
+            <div id="user-input" role="group" aria-label="Copilot questions"></div>
+            <form id="prompt-form">
+              <textarea id="prompt" rows="3" maxlength="8192" aria-describedby="prompt-warning"
+                aria-label="Message Copilot" placeholder="Message Copilot"></textarea>
+              <div id="prompt-warning">Sending clears any unsent desktop draft.</div>
+              <button id="prompt-submit" disabled>Send message</button>
+            </form>
+          </aside>
+          <section id="terminal-pane" role="tabpanel" aria-label="Terminal">
+            <div id="toolbar">
+              <button data-key="esc">Esc</button>
+              <button data-key="ctrl-c">Ctrl-C</button>
+              <button data-key="tab">Tab</button>
+              <button data-key="up">↑</button>
+              <button data-key="down">↓</button>
+              <span id="lease">view only</span>
+            </div>
+            <div id="terminal" role="region" aria-live="off"
+              aria-label="Terminal output" tabindex="0">Select a session</div>
+            <form id="input-form">
+              <input id="input" autocomplete="off" autocapitalize="none" spellcheck="false"
+                aria-label="Command input" placeholder="Send a command">
+              <button>Send</button>
+            </form>
+          </section>
+        </div>
       </main>
       <script src="app.js"></script>
     </body>
@@ -204,7 +216,7 @@ enum RemoteWebAssets {
     .visually-hidden { position:absolute; width:1px; height:1px; padding:0; margin:-1px;
       overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
     main { flex:1; min-height:0; display:grid;
-      grid-template-columns: minmax(180px, 260px) minmax(0, 1fr) minmax(320px, 420px); }
+      grid-template-columns: minmax(180px, 260px) minmax(0, 1fr); }
     nav { overflow:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain;
       border-right:1px solid #333; padding:8px; }
     nav h3 { color:#999; font-size:12px; margin:12px 6px 5px; }
@@ -212,7 +224,19 @@ enum RemoteWebAssets {
       border:0; border-radius:7px; background:transparent; color:#ddd; }
     nav button.active { background:#29334a; }
     nav small { display:block; color:#999; margin-top:3px; }
-    #terminal-pane { min-width:0; min-height:0; display:flex; flex-direction:column; }
+    #content { min-width:0; min-height:0; display:flex; flex-direction:column; }
+    #pivot { flex:0 0 auto; display:flex; align-items:center; gap:8px;
+      padding:6px 8px; border-bottom:1px solid #333; }
+    #pivot-tabs { display:inline-flex; background:#1b1b1b; border:1px solid #333;
+      border-radius:8px; padding:2px; }
+    .pivot-tab { background:transparent; border:0; color:#bbb; padding:6px 15px;
+      border-radius:6px; font-size:13px; }
+    .pivot-tab[aria-selected="true"] { background:#29334a; color:#fff; }
+    #pivot #notifications { margin-left:auto; }
+    #content > #terminal-pane, #content > #transcript-pane {
+      flex:1 1 auto; min-width:0; min-height:0; display:flex; flex-direction:column; }
+    #content[data-mode="conversation"] #terminal-pane { display:none; }
+    #content[data-mode="terminal"] #transcript-pane { display:none; }
     #toolbar { flex:0 0 auto; display:flex; align-items:center; gap:6px; padding:5px 8px;
       border-bottom:1px solid #333; }
     button { background:#2c2c2c; color:#eee; border:1px solid #444; border-radius:6px;
@@ -231,8 +255,7 @@ enum RemoteWebAssets {
       padding-bottom:max(8px, env(safe-area-inset-bottom)); }
     #input { flex:1; min-width:0; background:#222; color:#fff; border:1px solid #555;
       border-radius:7px; padding:10px; font-size:16px; }
-    #transcript-pane { min-width:0; min-height:0; display:flex; flex-direction:column;
-      border-left:1px solid #333; background:#161616; }
+    #transcript-pane { background:#161616; }
     #transcript-header { flex:0 0 auto; display:flex; align-items:baseline;
       justify-content:space-between; gap:8px; padding:11px 12px; border-bottom:1px solid #333; }
     #prompt-status { color:#999; font-size:11px; text-align:right; }
@@ -280,16 +303,13 @@ enum RemoteWebAssets {
       font:16px/1.3 -apple-system, BlinkMacSystemFont, sans-serif; }
     .user-input-status { color:#c9a227; font-size:11px; min-height:1em; }
     @media (max-width: 700px) {
-      main { grid-template-columns: 105px minmax(0, 1fr);
-        grid-template-rows: minmax(0, 1fr) minmax(260px, 46%); }
-      nav { grid-row:1 / 3; }
-      #terminal-pane { grid-column:2; grid-row:1; }
-      #transcript-pane { grid-column:2; grid-row:2; border-left:0; border-top:1px solid #333; }
+      main { grid-template-columns: 92px minmax(0, 1fr); }
       nav { padding:4px; }
       nav button { padding:7px 5px; font-size:12px; }
       #terminal { font-size:10px; padding:6px; }
       #toolbar button { padding:6px 8px; }
       #toolbar { flex-wrap:wrap; height:auto; }
+      .pivot-tab { padding:6px 11px; }
     }
     """#
 
@@ -306,6 +326,8 @@ enum RemoteWebAssets {
     const promptSubmit = document.querySelector('#prompt-submit');
     const userInput = document.querySelector('#user-input');
     const notifications = document.querySelector('#notifications');
+    const content = document.querySelector('#content');
+    const pivotTabs = Array.from(document.querySelectorAll('.pivot-tab'));
     const base = location.pathname.endsWith('/')
       ? location.pathname : `${location.pathname}/`;
     const clientId = (crypto.randomUUID && crypto.randomUUID()) ||
@@ -330,6 +352,7 @@ enum RemoteWebAssets {
     let promptFallbackTimer = null;
     let transcriptRequestId = 0;
     let selectionGeneration = 0;
+    let viewMode = 'conversation';
     const sessionState = new Map();
     // requestId -> card element, and requestId -> { timer } while an answer is
     // awaiting confirmation from the workspace snapshot.
@@ -343,6 +366,34 @@ enum RemoteWebAssets {
       connection.setAttribute('aria-label', label);
       connection.title = label;
       connection.querySelector('.visually-hidden').textContent = label;
+    }
+
+    // Mirror the iOS session pivot: show one pane at a time. While the terminal
+    // is hidden we skip rendering incoming screen frames entirely; activating the
+    // Terminal tab reopens the stream so the gateway resends a fresh snapshot.
+    function refreshTerminal() {
+      lastScreen = null;
+      historyStartLine = 0;
+      historyLines = [];
+      pendingScroll = 0;
+      clearTimeout(scrollTimer);
+      scrollTimer = null;
+      terminal.classList.remove('terminal-scroll');
+      terminal.textContent = selected ? 'Loading…' : 'Select a session';
+      if (selected) openStream();
+    }
+    function setViewMode(mode, options) {
+      if (mode !== 'terminal' && mode !== 'conversation') return;
+      const changed = viewMode !== mode;
+      viewMode = mode;
+      content.dataset.mode = mode;
+      pivotTabs.forEach((tab) => {
+        tab.setAttribute('aria-selected', String(tab.dataset.mode === mode));
+      });
+      if (mode === 'terminal') {
+        if (changed) refreshTerminal();
+        if (!options?.silent) terminal.focus();
+      }
     }
 
     function openStream() {
@@ -420,7 +471,7 @@ enum RemoteWebAssets {
       });
       openStream();
       acquire(id);
-      terminal.focus();
+      if (viewMode === 'terminal') terminal.focus();
       syncUserInputCards();
       updatePromptState();
     }
@@ -946,7 +997,7 @@ enum RemoteWebAssets {
       const message = JSON.parse(event.data);
       if (message.type === 'workspace') renderWorkspace(message.data);
       if (message.type === 'screen' && message.data.sessionId === selected) {
-        renderLines(message.data);
+        if (viewMode === 'terminal') renderLines(message.data);
       }
       if (message.type === 'dismissed-notifications') {
         clearDismissedNotifications(message.data.ids || []);
@@ -997,6 +1048,19 @@ enum RemoteWebAssets {
         else sendKey(TOOLBAR_KEYS[button.dataset.key]);
       };
     });
+    pivotTabs.forEach((tab) => {
+      tab.onclick = () => setViewMode(tab.dataset.mode);
+    });
+    document.querySelector('#pivot-tabs').addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      const current = pivotTabs.findIndex(
+        (tab) => tab.dataset.mode === viewMode
+      );
+      const step = event.key === 'ArrowRight' ? 1 : -1;
+      const next = pivotTabs[(current + step + pivotTabs.length) % pivotTabs.length];
+      if (next) { setViewMode(next.dataset.mode, {silent:true}); next.focus(); }
+    });
     document.querySelector('#input-form').onsubmit = (event) => {
       event.preventDefault();
       if (input.value) {
@@ -1006,6 +1070,13 @@ enum RemoteWebAssets {
       input.value = '';
       terminal.focus();
     };
+    // Enter sends the prompt; Shift+Enter inserts a newline (chat-composer style).
+    prompt.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        promptForm.requestSubmit();
+      }
+    });
     promptForm.onsubmit = async (event) => {
       event.preventDefault();
       const value = prompt.value;

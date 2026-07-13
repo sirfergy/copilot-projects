@@ -33,6 +33,8 @@ public enum CopilotExtension {
         const sessionsDir = join(dirname(socketPath), "sessions");
         const snapshotPath = join(sessionsDir, `${appSessionId}.agent-activity.json`);
         const transcriptPath = join(sessionsDir, `${appSessionId}.transcript.json`);
+        const transcriptOwnerPath = join(sessionsDir, `${appSessionId}.transcript-owner.json`);
+        const transcriptOwnerLockPath = `${transcriptOwnerPath}.lock`;
         const scheduledTurnPath = join(sessionsDir, `${appSessionId}.scheduled-turn`);
         const copilotSessionPath = join(sessionsDir, `${appSessionId}.copilot-session`);
         const allowAllPath = join(sessionsDir, `${appSessionId}.copilot-allow-all`);
@@ -55,19 +57,18 @@ public enum CopilotExtension {
         let schedules = [];
         const transcriptTurns = [];
         const transcriptEventIds = new Set();
-        const suppressedInteractionIds = new Set();
-        const suppressedTurnIds = new Set();
-        const suppressedTurnInteractions = new Map();
         const queuedTranscriptEvents = [];
         let pendingTranscriptTurn = null;
         let transcriptInitialized = false;
-        let transcriptTurnEndTimer = null;
+        let transcriptPublishTimer = null;
 
-        const MAX_TRANSCRIPT_TURNS = 100;
+        const MAX_TRANSCRIPT_TURNS = 200;
         const MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024;
         const MAX_TRANSCRIPT_TEXT = 50_000;
         const MAX_TRANSCRIPT_METADATA_TEXT = 512;
-        const TRANSCRIPT_TURN_END_GRACE_MS = 1_000;
+        const MAX_TRANSCRIPT_ASSISTANT_MESSAGES = 250;
+        const MAX_TRANSCRIPT_TOOLS = 400;
+        const TRANSCRIPT_PUBLISH_THROTTLE_MS = 400;
 
         const MAX_USER_INPUT_QUESTION_BYTES = 16_384;
         const MAX_USER_INPUT_CHOICE_BYTES = 8_192;
@@ -102,7 +103,7 @@ public enum CopilotExtension {
                 const encoded = readFileSync(transcriptPath, "utf8");
                 if (Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES) return false;
                 const snapshot = JSON.parse(encoded);
-                if (snapshot.schemaVersion !== 2
+                if (snapshot.schemaVersion !== 3
                         || snapshot.copilotSessionId
                             !== boundedMetadataText(session.sessionId)
                         || !Array.isArray(snapshot.turns)) return false;
@@ -113,6 +114,121 @@ public enum CopilotExtension {
             } catch {
                 return false;
             }
+        }
+
+        // Several Copilot processes can share one app session id: a `copilot -p`
+        // classifier (or any spawned CLI) inherits COPILOT_PROJECTS_SESSION from
+        // the terminal and would otherwise clobber the interactive session's
+        // shared files (transcript, agent-activity, scheduled-turn marker) with
+        // its own events. Only the process that owns the app session may write
+        // them. Ownership is re-evaluated per write and reclaimed whenever the
+        // recorded owner is gone, so the live interactive session recovers
+        // automatically after a restart.
+        function processAlive(pid) {
+            if (!Number.isInteger(pid) || pid <= 0) return false;
+            try {
+                process.kill(pid, 0);
+                return true;
+            } catch (error) {
+                return Boolean(error) && error.code === "EPERM";
+            }
+        }
+
+        function recordedOwner() {
+            try {
+                return JSON.parse(readFileSync(transcriptOwnerPath, "utf8"));
+            } catch {
+                return null;
+            }
+        }
+
+        function ownerMatchesCurrentProcess(owner) {
+            return Boolean(owner)
+                && owner.copilotSessionId === session.sessionId
+                && owner.pid === process.pid;
+        }
+
+        function ownerMatches(left, right) {
+            return Boolean(left) && Boolean(right)
+                && left.copilotSessionId === right.copilotSessionId
+                && left.pid === right.pid;
+        }
+
+        // Read-only: are we the process currently recorded as owner? Never claims
+        // or writes, so it is safe to call from cleanup without a live different
+        // owner losing its marker to an exiting guest.
+        function isRecordedOwner() {
+            return ownerMatchesCurrentProcess(recordedOwner());
+        }
+
+        function writeOwnerMarker() {
+            try {
+                writeFileSync(
+                    transcriptOwnerPath,
+                    JSON.stringify({
+                        copilotSessionId: session.sessionId,
+                        pid: process.pid,
+                    }),
+                    { flag: "wx", mode: 0o600 }
+                );
+                return true;
+            } catch {
+                return false;
+            }
+        }
+
+        function withTranscriptOwnerLock(action) {
+            try {
+                writeFileSync(
+                    transcriptOwnerLockPath,
+                    JSON.stringify({
+                        copilotSessionId: session.sessionId,
+                        pid: process.pid,
+                    }),
+                    { flag: "wx", mode: 0o600 }
+                );
+            } catch {
+                return false;
+            }
+            try {
+                return action();
+            } finally {
+                removeFile(transcriptOwnerLockPath);
+            }
+        }
+
+        function reclaimDeadOwner(expectedOwner) {
+            return withTranscriptOwnerLock(() => {
+                const owner = recordedOwner();
+                if (!owner) return writeOwnerMarker();
+                if (ownerMatchesCurrentProcess(owner)) return true;
+                if (processAlive(owner.pid)) return false;
+                if (!ownerMatches(owner, expectedOwner)) return false;
+                try { rmSync(transcriptOwnerPath, { force: true }); } catch {}
+                return writeOwnerMarker();
+            });
+        }
+
+        // Claiming: returns true if this process may write shared files. Claims
+        // ownership atomically (exclusive create) when the marker is absent or
+        // held by a dead process. Stale-owner reclamation is serialized so a
+        // process that read the stale marker cannot delete a fresh winner's
+        // marker. Returns false if another live process owns it or the claim is
+        // lost.
+        function ownsSharedFiles() {
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+                const owner = recordedOwner();
+                if (owner) {
+                    if (ownerMatchesCurrentProcess(owner)) return true;
+                    if (processAlive(owner.pid)) return false;
+                    if (reclaimDeadOwner(owner)) return true;
+                } else if (writeOwnerMarker()) {
+                    return true;
+                } else {
+                    // Lost the create race; re-read and re-evaluate.
+                }
+            }
+            return ownerMatchesCurrentProcess(recordedOwner());
         }
 
         function normalizedTimestamp(value) {
@@ -146,6 +262,7 @@ public enum CopilotExtension {
         }
 
         function setScheduledTurnMarker(active) {
+            if (!ownsSharedFiles()) return;
             try {
                 if (active) {
                     writeFileSync(scheduledTurnPath, "");
@@ -163,6 +280,7 @@ public enum CopilotExtension {
         }
 
         function publish(error) {
+            if (!ownsSharedFiles()) return;
             const snapshot = {
                 schemaVersion: 1,
                 updatedAt: new Date().toISOString(),
@@ -306,19 +424,108 @@ public enum CopilotExtension {
             }
         }
 
-        function publishTranscript() {
-            const snapshot = {
-                schemaVersion: 2,
+        function trimTranscriptTurns(maximumTurns = MAX_TRANSCRIPT_TURNS) {
+            // Keep the transcript bounded, but never let automated or scheduled
+            // activity evict the human conversation: drop the oldest non-foreground
+            // turn first, and only fall back to the oldest foreground turn once no
+            // other turns remain.
+            while (transcriptTurns.length > maximumTurns) {
+                let index = transcriptTurns.findIndex(
+                    (turn) => turn.kind !== "foreground"
+                );
+                if (index === -1) index = 0;
+                transcriptTurns.splice(index, 1);
+            }
+        }
+
+        function serializedPendingTurn() {
+            const turn = pendingTranscriptTurn;
+            if (!turn) return null;
+            if (!turn.userContent
+                    && turn.assistantMessages.length === 0
+                    && turn.tools.length === 0) return null;
+            return {
+                id: turn.id,
+                startedAt: turn.startedAt,
+                endedAt: null,
+                kind: turn.kind,
+                userContent: turn.userContent,
+                assistantMessages: turn.assistantMessages,
+                tools: turn.tools,
+                isAborted: false,
+            };
+        }
+
+        // Serializes the transcript within the byte budget while protecting the
+        // human conversation. Reduction order sacrifices the least valuable
+        // content first: whole non-foreground turns, then non-foreground payload
+        // (including an in-progress scheduled/automated turn), then whole
+        // foreground turns, then foreground payload — never the in-progress
+        // turn as a whole. Whole-turn drops mutate transcriptTurns and payload
+        // shedding mutates the shared turn objects, so repeated publishes don't
+        // redo the work.
+        function encodedTranscriptWithinBudget(pending) {
+            const build = () => ({
+                schemaVersion: 3,
                 updatedAt: new Date().toISOString(),
                 copilotSessionId: boundedMetadataText(session.sessionId),
-                turns: transcriptTurns,
-            };
+                ownerPid: process.pid,
+                turns: pending ? [...transcriptTurns, pending] : transcriptTurns.slice(),
+            });
+            let snapshot = build();
             let encoded = JSON.stringify(snapshot);
-            while (Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES
-                    && transcriptTurns.length > 0) {
-                transcriptTurns.shift();
-                encoded = JSON.stringify(snapshot);
+            const overBudget = () => Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES;
+            const reencode = () => { encoded = JSON.stringify(snapshot); };
+            const shedOldestPayload = (predicate) => {
+                for (const turn of snapshot.turns) {
+                    if (!predicate(turn)) continue;
+                    if (turn.assistantMessages.length > 0) {
+                        turn.assistantMessages.shift();
+                        return true;
+                    }
+                    if (turn.tools.length > 0) {
+                        turn.tools.shift();
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            // Phase 1: drop whole non-foreground stored turns (oldest first).
+            while (overBudget()) {
+                const index = transcriptTurns.findIndex(
+                    (turn) => turn.kind !== "foreground"
+                );
+                if (index === -1) break;
+                transcriptTurns.splice(index, 1);
+                snapshot = build();
+                reencode();
             }
+            // Phase 2: shed payload from any remaining non-foreground turn (i.e. an
+            // in-progress scheduled/automated turn) before touching foreground.
+            while (overBudget()
+                    && shedOldestPayload((turn) => turn.kind !== "foreground")) {
+                reencode();
+            }
+            // Phase 3: drop whole foreground stored turns (oldest), never pending,
+            // leaving at least one turn for payload shedding below.
+            const minStored = pending ? 0 : 1;
+            while (overBudget() && transcriptTurns.length > minStored) {
+                transcriptTurns.splice(0, 1);
+                snapshot = build();
+                reencode();
+            }
+            // Phase 4: shed payload from the last remaining turn(s).
+            while (overBudget() && shedOldestPayload(() => true)) {
+                reencode();
+            }
+            return encoded;
+        }
+
+        function writeTranscriptSnapshot() {
+            const pending = serializedPendingTurn();
+            trimTranscriptTurns(pending ? MAX_TRANSCRIPT_TURNS - 1 : MAX_TRANSCRIPT_TURNS);
+            const encoded = encodedTranscriptWithinBudget(pending);
             const temporaryPath = `${transcriptPath}.${process.pid}.tmp`;
             try {
                 writeFileSync(temporaryPath, encoded, { mode: 0o600 });
@@ -328,76 +535,77 @@ public enum CopilotExtension {
             }
         }
 
-        function startTranscriptTurn(event, visibleUser) {
-            const source = event.data.source || null;
+        function publishTranscript() {
+            if (!ownsSharedFiles()) return;
+            clearTimeout(transcriptPublishTimer);
+            transcriptPublishTimer = null;
+            writeTranscriptSnapshot();
+        }
+
+        function schedulePublishTranscript() {
+            if (transcriptPublishTimer) return;
+            transcriptPublishTimer = setTimeout(() => {
+                transcriptPublishTimer = null;
+                publishTranscript();
+            }, TRANSCRIPT_PUBLISH_THROTTLE_MS);
+        }
+
+        // A transcript turn spans a whole user request: the visible user message
+        // plus every agentic loop iteration (assistant.turn_start/turn_end fire
+        // many times per request) until the next visible user message or
+        // session.idle. `kind` is "foreground" (typed by a person), "scheduled"
+        // (a recurring prompt), or "automated" (assistant activity with no
+        // preceding visible message).
+        function startTranscriptTurn(event, kind) {
             pendingTranscriptTurn = {
                 id: boundedMetadataText(event.id),
                 startedAt: normalizedTimestamp(event.timestamp),
                 endedAt: null,
-                kind: source?.startsWith("schedule-")
-                    ? "scheduled"
-                    : visibleUser ? "foreground" : "automated",
-                userContent: visibleUser ? boundedText(event.data.content) : "",
+                kind,
+                userContent: kind === "automated"
+                    ? ""
+                    : boundedText(event.data.content),
                 assistantMessages: [],
                 tools: [],
                 isAborted: false,
-                hasTurnEnd: false,
-                turnEndAt: null,
             };
         }
 
         function ensureSyntheticTranscriptTurn(event) {
             if (pendingTranscriptTurn) return;
-            pendingTranscriptTurn = {
-                id: boundedMetadataText(event.id),
-                startedAt: normalizedTimestamp(event.timestamp),
-                endedAt: null,
-                kind: "automated",
-                userContent: "",
-                assistantMessages: [],
-                tools: [],
-                isAborted: false,
-                hasTurnEnd: false,
-                turnEndAt: null,
-            };
+            startTranscriptTurn(event, "automated");
         }
 
-        function finishTranscriptTurn(aborted, endedAt, publishNow) {
+        function finishTranscriptTurn(aborted, endedAt) {
             const turn = pendingTranscriptTurn;
             pendingTranscriptTurn = null;
-            clearTimeout(transcriptTurnEndTimer);
-            transcriptTurnEndTimer = null;
             if (!turn) return;
             turn.isAborted = aborted === true;
-            turn.endedAt = endedAt
-                ? normalizedTimestamp(endedAt)
-                : turn.turnEndAt || turn.startedAt;
-            delete turn.hasTurnEnd;
-            delete turn.turnEndAt;
+            let end = endedAt ? normalizedTimestamp(endedAt) : turn.startedAt;
+            // A boundary event (e.g. a queued live idle) can carry a timestamp
+            // earlier than this turn's start; never record a negative duration.
+            if (end < turn.startedAt) end = turn.startedAt;
+            turn.endedAt = end;
             if (!turn.userContent
                     && turn.assistantMessages.length === 0
                     && turn.tools.length === 0) return;
             transcriptTurns.push(turn);
-            if (transcriptTurns.length > MAX_TRANSCRIPT_TURNS) {
-                transcriptTurns.splice(
-                    0,
-                    transcriptTurns.length - MAX_TRANSCRIPT_TURNS
-                );
-            }
-            if (publishNow) publishTranscript();
+            trimTranscriptTurns();
         }
 
-        function scheduleTranscriptTurnEndFallback() {
-            clearTimeout(transcriptTurnEndTimer);
-            transcriptTurnEndTimer = null;
-            const turn = pendingTranscriptTurn;
-            if (!turn?.hasTurnEnd) return;
-            transcriptTurnEndTimer = setTimeout(() => {
-                transcriptTurnEndTimer = null;
-                if (pendingTranscriptTurn?.id !== turn.id
-                        || !pendingTranscriptTurn.hasTurnEnd) return;
-                finishTranscriptTurn(false, turn.turnEndAt, true);
-            }, TRANSCRIPT_TURN_END_GRACE_MS);
+        // Classifies a root-level user.message. Genuine human input arrives with
+        // no source; recurring prompts use "schedule-*". Every other source
+        // (skill context, system reminders) is injected machinery that must not
+        // become its own turn — its work folds into the current human turn.
+        // NB: parentAgentTaskId is set on real human messages too, so it must not
+        // be used to suppress input.
+        function classifyUserMessage(event) {
+            const source = event.data.source;
+            if (source === null || source === undefined) return "foreground";
+            if (typeof source === "string" && source.startsWith("schedule-")) {
+                return "scheduled";
+            }
+            return null;
         }
 
         function toolTitle(data) {
@@ -406,77 +614,30 @@ public enum CopilotExtension {
                 || "Tool";
         }
 
-        function rememberBounded(set, value) {
-            if (!value) return;
-            set.add(value);
-            while (set.size > 500) {
-                set.delete(set.values().next().value);
-            }
-        }
-
         function processTranscriptEvent(event, live, reconciling = false) {
             if (event.agentId) return;
             if (reconciling) {
                 if (transcriptEventIds.has(event.id)) return;
                 transcriptEventIds.add(event.id);
             }
-            if (event.type === "user.message" && event.data.parentAgentTaskId) {
-                rememberBounded(suppressedInteractionIds, event.data.interactionId);
-                return;
-            }
-            if (event.data?.interactionId
-                    && suppressedInteractionIds.has(event.data.interactionId)) {
-                if (event.type === "assistant.turn_start") {
-                    rememberBounded(suppressedTurnIds, event.data.turnId);
-                    if (event.data.turnId) {
-                        suppressedTurnInteractions.set(
-                            event.data.turnId,
-                            event.data.interactionId
-                        );
-                        while (suppressedTurnInteractions.size > 500) {
-                            suppressedTurnInteractions.delete(
-                                suppressedTurnInteractions.keys().next().value
-                            );
-                        }
-                    }
-                }
-                return;
-            }
-            if (event.data?.turnId && suppressedTurnIds.has(event.data.turnId)) {
-                if (event.type === "assistant.turn_end") {
-                    suppressedTurnIds.delete(event.data.turnId);
-                    const interactionId = suppressedTurnInteractions.get(event.data.turnId);
-                    suppressedTurnInteractions.delete(event.data.turnId);
-                    if (interactionId) suppressedInteractionIds.delete(interactionId);
-                }
-                return;
-            }
-            if (pendingTranscriptTurn?.hasTurnEnd
-                    && event.type !== "assistant.turn_end"
-                    && event.type !== "session.idle") {
-                finishTranscriptTurn(
-                    false,
-                    pendingTranscriptTurn.turnEndAt || event.timestamp,
-                    live
-                );
-            }
 
             switch (event.type) {
             case "user.message": {
-                const source = event.data.source || null;
-                const visibleUser = source === null || source.startsWith("schedule-");
-                if (visibleUser) {
-                    finishTranscriptTurn(false, event.timestamp, live);
-                    startTranscriptTurn(event, true);
-                } else if (!pendingTranscriptTurn) {
-                    startTranscriptTurn(event, false);
+                const kind = classifyUserMessage(event);
+                if (kind) {
+                    finishTranscriptTurn(false, event.timestamp);
+                    startTranscriptTurn(event, kind);
+                    if (live) publishTranscript();
                 }
+                // Injected context (skill/system) is not its own turn; the work
+                // it triggers folds into the current human turn.
                 break;
             }
             case "assistant.message":
                 ensureSyntheticTranscriptTurn(event);
                 if (event.data.content) {
-                    if (pendingTranscriptTurn.assistantMessages.length >= 20) {
+                    if (pendingTranscriptTurn.assistantMessages.length
+                            >= MAX_TRANSCRIPT_ASSISTANT_MESSAGES) {
                         pendingTranscriptTurn.assistantMessages.shift();
                     }
                     pendingTranscriptTurn.assistantMessages.push({
@@ -484,6 +645,7 @@ public enum CopilotExtension {
                         timestamp: normalizedTimestamp(event.timestamp),
                         content: boundedText(event.data.content),
                     });
+                    if (live) schedulePublishTranscript();
                 }
                 break;
             case "tool.execution_start": {
@@ -492,7 +654,9 @@ public enum CopilotExtension {
                 const existing = pendingTranscriptTurn.tools.find(
                     (tool) => tool.id === toolId
                 );
-                if (!existing && pendingTranscriptTurn.tools.length < 100) {
+                if (!existing
+                        && pendingTranscriptTurn.tools.length
+                            < MAX_TRANSCRIPT_TOOLS) {
                     pendingTranscriptTurn.tools.push({
                         id: toolId,
                         name: boundedMetadataText(event.data.toolName),
@@ -500,6 +664,7 @@ public enum CopilotExtension {
                         success: null,
                     });
                 }
+                if (live) schedulePublishTranscript();
                 break;
             }
             case "tool.execution_complete": {
@@ -508,7 +673,9 @@ public enum CopilotExtension {
                 let tool = pendingTranscriptTurn.tools.find(
                     (candidate) => candidate.id === toolId
                 );
-                if (!tool && pendingTranscriptTurn.tools.length < 100) {
+                if (!tool
+                        && pendingTranscriptTurn.tools.length
+                            < MAX_TRANSCRIPT_TOOLS) {
                     tool = {
                         id: toolId,
                         name: "tool",
@@ -520,21 +687,17 @@ public enum CopilotExtension {
                     pendingTranscriptTurn.tools.push(tool);
                 }
                 if (tool) tool.success = event.data.success === true;
+                if (live) schedulePublishTranscript();
                 break;
             }
             case "assistant.turn_end":
-                if (pendingTranscriptTurn) {
-                    pendingTranscriptTurn.hasTurnEnd = true;
-                    pendingTranscriptTurn.turnEndAt = normalizedTimestamp(event.timestamp);
-                    if (live) scheduleTranscriptTurnEndFallback();
-                }
+                // One agentic loop iteration finished, not the whole request.
+                // Do not end the transcript turn here; just flush progress.
+                if (live && pendingTranscriptTurn) schedulePublishTranscript();
                 break;
             case "session.idle":
-                finishTranscriptTurn(
-                    event.data.aborted === true,
-                    event.timestamp,
-                    live
-                );
+                finishTranscriptTurn(event.data.aborted === true, event.timestamp);
+                if (live) publishTranscript();
                 break;
             }
         }
@@ -667,6 +830,7 @@ public enum CopilotExtension {
         try {
             const history = await session.getEvents();
             transcriptTurns.length = 0;
+            pendingTranscriptTurn = null;
             for (const event of history) processTranscriptEvent(event, false, true);
         } catch {
             transcriptTurns.length = 0;
@@ -681,7 +845,6 @@ public enum CopilotExtension {
         queuedTranscriptEvents.length = 0;
         transcriptEventIds.clear();
         publishTranscript();
-        scheduleTranscriptTurnEndFallback();
 
         await refreshSchedules();
 
@@ -705,14 +868,22 @@ public enum CopilotExtension {
 
         function cleanup() {
             clearInterval(timer);
-            clearTimeout(transcriptTurnEndTimer);
+            clearTimeout(transcriptPublishTimer);
             if (userInputWatcher) {
                 try { userInputWatcher.close(); } catch {}
                 userInputWatcher = null;
             }
-            removeFile(snapshotPath);
-            removeFile(scheduledTurnPath);
-            removeFile(userInputResponsePath);
+            // Use the read-only ownership check (never claim during cleanup) so an
+            // exiting spawned helper can't wipe a live interactive session's
+            // markers. The owner flushes any progress buffered behind the publish
+            // throttle before releasing the shared files.
+            if (isRecordedOwner()) {
+                writeTranscriptSnapshot();
+                removeFile(snapshotPath);
+                removeFile(scheduledTurnPath);
+                removeFile(transcriptOwnerPath);
+                removeFile(userInputResponsePath);
+            }
         }
         process.once("SIGTERM", cleanup);
         process.once("SIGINT", cleanup);

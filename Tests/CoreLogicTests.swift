@@ -76,10 +76,12 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains(#"case "tool.execution_complete":"#))
         XCTAssertTrue(CopilotExtension.script.contains("isAborted"))
         XCTAssertTrue(CopilotExtension.script.contains(".transcript.json"))
-        XCTAssertTrue(CopilotExtension.script.contains("parentAgentTaskId"))
-        XCTAssertTrue(CopilotExtension.script.contains("suppressedInteractionIds"))
-        XCTAssertTrue(CopilotExtension.script.contains("suppressedTurnIds"))
-        XCTAssertTrue(CopilotExtension.script.contains("schemaVersion: 2"))
+        XCTAssertTrue(CopilotExtension.script.contains("classifyUserMessage"))
+        XCTAssertTrue(CopilotExtension.script.contains("ownsSharedFiles"))
+        XCTAssertTrue(CopilotExtension.script.contains("transcript-owner.json"))
+        XCTAssertTrue(CopilotExtension.script.contains("transcriptOwnerLockPath"))
+        XCTAssertTrue(CopilotExtension.script.contains("owner.pid === process.pid"))
+        XCTAssertTrue(CopilotExtension.script.contains("schemaVersion: 3"))
         XCTAssertTrue(CopilotExtension.script.contains("publishTranscript();"))
         XCTAssertTrue(CopilotExtension.script.contains("removeFile(temporaryPath)"))
         XCTAssertTrue(CopilotExtension.script.contains("setScheduledTurnMarker(false)"))
@@ -104,6 +106,13 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains(
             "removeFile(userInputResponsePath)"
         ))
+        // The transcript turn must span a whole request, not stop at the first
+        // agentic-loop turn end, and must not key suppression off parentAgentTaskId
+        // (that field is present on genuine human input too).
+        XCTAssertFalse(CopilotExtension.script.contains("suppressedInteractionIds"))
+        XCTAssertFalse(CopilotExtension.script.contains("suppressedTurnIds"))
+        XCTAssertFalse(CopilotExtension.script.contains("scheduleTranscriptTurnEndFallback"))
+        XCTAssertFalse(CopilotExtension.script.contains("schemaVersion: 2"))
         XCTAssertFalse(CopilotExtension.script.contains("joinSession({"))
         XCTAssertFalse(CopilotExtension.script.contains("removeFile(transcriptPath)"))
     }
@@ -140,138 +149,68 @@ final class CoreLogicTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let overlapUser = """
-        {id:"overlap-user",type:"user.message",timestamp:"2026-07-12T03:00:01.123Z",
-         data:{source:null,content:"overlap prompt"}}
-        """
-        let overlapAssistant = """
-        {id:"overlap-assistant",type:"assistant.message",
-         timestamp:"2026-07-12T03:00:02.456Z",
-         data:{messageId:"overlap-message",content:"one response"}}
-        """
         let prelude = #"""
         let transcriptListener = null;
-        const overlapUser = \#(overlapUser);
-        const overlapAssistant = \#(overlapAssistant);
-        const overlapIdle = {
-          id:"overlap-idle",type:"session.idle",
-          timestamp:"2026-07-12T03:00:03.789Z",data:{aborted:true}
-        };
         const history = [];
-        const timestamp = (offset) => new Date(1700000000000 + offset).toISOString();
-        for (let index = 0; index < 98; index += 1) {
+        const ts = (offset) => new Date(1700000000000 + offset).toISOString();
+        // Foreground-preserving retention: 3 human turns must survive even though
+        // 250 scheduled turns (well over the 200 cap) arrive afterwards.
+        for (let index = 0; index < 3; index += 1) {
           history.push({
-            id:`filler-user-${index}`,type:"user.message",timestamp:timestamp(index * 2),
-            data:{source:null,content:`filler-${index}`}
+            id:`human-${index}`,type:"user.message",timestamp:ts(index * 2),
+            data:{source:null,content:`human ${index}`,parentAgentTaskId:"root-task"}
           });
           history.push({
-            id:`filler-idle-${index}`,type:"session.idle",timestamp:timestamp(index * 2 + 1),
+            id:`human-idle-${index}`,type:"session.idle",timestamp:ts(index * 2 + 1),
             data:{aborted:false}
           });
         }
-        history.push(
-          {
-            id:"hidden-user",type:"user.message",timestamp:"2026-07-12T02:59:00.111Z",
-            data:{source:"internal-follow-up",content:"do not display"}
-          },
-          {
-            id:"hidden-assistant",type:"assistant.message",
-            timestamp:"2026-07-12T02:59:01.222Z",
-            data:{messageId:"hidden-message",content:"automated output"}
-          },
-          {
-            id:"hidden-idle",type:"session.idle",timestamp:"2026-07-12T02:59:02.333Z",
+        for (let index = 0; index < 250; index += 1) {
+          history.push({
+            id:`sched-${index}`,type:"user.message",timestamp:ts(1000 + index * 2),
+            data:{source:"schedule-nightly",content:`sched ${index}`,parentAgentTaskId:"root-task"}
+          });
+          history.push({
+            id:`sched-idle-${index}`,type:"session.idle",timestamp:ts(1000 + index * 2 + 1),
             data:{aborted:false}
-          },
-          {
-            id:"classifier-user",type:"user.message",
-            timestamp:"2026-07-12T02:59:02.400Z",
-            data:{
-              source:null,
-              content:"internal classifier prompt",
-              interactionId:"classifier-interaction",
-              parentAgentTaskId:"parent-task"
-            }
-          },
-          {
-            id:"classifier-system",type:"user.message",
-            timestamp:"2026-07-12T02:59:02.450Z",
-            data:{
-              source:"system",
-              content:"",
-              interactionId:"classifier-interaction"
-            }
-          },
-          {
-            id:"classifier-turn-start",type:"assistant.turn_start",
-            timestamp:"2026-07-12T02:59:02.500Z",
-            data:{interactionId:"classifier-interaction",turnId:"classifier-turn"}
-          },
-          {
-            id:"classifier-assistant",type:"assistant.message",
-            timestamp:"2026-07-12T02:59:02.550Z",
-            data:{
-              messageId:"classifier-message",
-              interactionId:"classifier-interaction",
-              content:"internal classifier result"
-            }
-          },
-          {
-            id:"classifier-tool-start",type:"tool.execution_start",
-            timestamp:"2026-07-12T02:59:02.570Z",
-            data:{
-              turnId:"classifier-turn",
-              toolCallId:"classifier-tool",
-              toolName:"bash"
-            }
-          },
-          {
-            id:"classifier-tool-complete",type:"tool.execution_complete",
-            timestamp:"2026-07-12T02:59:02.580Z",
-            data:{
-              turnId:"classifier-turn",
-              toolCallId:"classifier-tool",
-              success:true
-            }
-          },
-          {
-            id:"classifier-turn-end",type:"assistant.turn_end",
-            timestamp:"2026-07-12T02:59:02.600Z",
-            data:{turnId:"classifier-turn"}
-          },
-          {
-            id:"scheduled-user",type:"user.message",timestamp:"2026-07-12T02:59:03.444Z",
-            data:{source:"schedule-nightly",content:"scheduled prompt"}
-          },
-          {
-            id:"scheduled-assistant",type:"assistant.message",
-            timestamp:"2026-07-12T02:59:04.555Z",
-            data:{messageId:"scheduled-message",content:"scheduled output"}
-          },
-          {
-            id:"scheduled-turn-end",type:"assistant.turn_end",
-            timestamp:"2026-07-12T02:59:05.666Z",data:{}
-          },
-          {
-            id:"scheduled-idle",type:"session.idle",timestamp:"2026-07-12T02:59:06.777Z",
-            data:{aborted:true}
-          },
-          overlapUser,
-          overlapAssistant,
-          {
-            id:"overlap-tool-start",type:"tool.execution_start",
-            timestamp:"2026-07-12T03:00:02.500Z",
-            data:{toolCallId:"tool-1",toolName:"bash",toolDescription:{name:"Run tests"}}
-          },
-          {
-            id:"overlap-tool-complete",type:"tool.execution_complete",
-            timestamp:"2026-07-12T03:00:02.600Z",
-            data:{toolCallId:"tool-1",success:true}
-          },
-          {
-            id:"overlap-turn-end",type:"assistant.turn_end",
-            timestamp:"2026-07-12T03:00:02.700Z",data:{}
-          }
+          });
+        }
+        // One request that runs several agentic loop iterations. It must collapse
+        // into ONE foreground turn, not fragment into automated turns.
+        history.push(
+          {id:"multi",type:"user.message",timestamp:ts(9000),
+           data:{source:null,content:"multi request",parentAgentTaskId:"root-task"}},
+          {id:"multi-ts-1",type:"assistant.turn_start",timestamp:ts(9001),
+           data:{interactionId:"multi-i",turnId:"multi-t1"}},
+          {id:"multi-a1",type:"assistant.message",timestamp:ts(9002),
+           data:{messageId:"multi-m1",content:"first"}},
+          {id:"multi-tool1-start",type:"tool.execution_start",timestamp:ts(9003),
+           data:{turnId:"multi-t1",toolCallId:"multi-tool1",toolName:"bash"}},
+          {id:"multi-tool1-done",type:"tool.execution_complete",timestamp:ts(9004),
+           data:{turnId:"multi-t1",toolCallId:"multi-tool1",success:true}},
+          {id:"multi-te-1",type:"assistant.turn_end",timestamp:ts(9005),data:{turnId:"multi-t1"}},
+          {id:"multi-ts-2",type:"assistant.turn_start",timestamp:ts(9006),
+           data:{interactionId:"multi-i",turnId:"multi-t2"}},
+          {id:"multi-a2",type:"assistant.message",timestamp:ts(9007),
+           data:{messageId:"multi-m2",content:"second"}},
+          {id:"multi-tool2-start",type:"tool.execution_start",timestamp:ts(9008),
+           data:{turnId:"multi-t2",toolCallId:"multi-tool2",toolName:"grep"}},
+          {id:"multi-tool2-done",type:"tool.execution_complete",timestamp:ts(9009),
+           data:{turnId:"multi-t2",toolCallId:"multi-tool2",success:false}},
+          {id:"multi-te-2",type:"assistant.turn_end",timestamp:ts(9010),data:{turnId:"multi-t2"}},
+          {id:"multi-idle",type:"session.idle",timestamp:ts(9011),data:{aborted:false}}
+        );
+        // A human request whose skill context is injected as a user.message must
+        // not become its own turn; its work folds into the human turn.
+        history.push(
+          {id:"with-skill",type:"user.message",timestamp:ts(9100),
+           data:{source:null,content:"invoke skill",parentAgentTaskId:"root-task"}},
+          {id:"skill-ctx",type:"user.message",timestamp:ts(9101),
+           data:{source:"skill-create-pr",content:"SKILL CONTEXT BLOCK"}},
+          {id:"skill-a1",type:"assistant.message",timestamp:ts(9102),
+           data:{messageId:"skill-m1",content:"did the skill work"}},
+          {id:"skill-te",type:"assistant.turn_end",timestamp:ts(9103),data:{turnId:"skill-t"}},
+          {id:"with-skill-idle",type:"session.idle",timestamp:ts(9104),data:{aborted:false}}
         );
         const fakeSession = {
           sessionId: "copilot-session",
@@ -279,12 +218,7 @@ final class CoreLogicTests: XCTestCase {
           on(name, handler) {
             if (typeof name === "function") transcriptListener = name;
           },
-          async getEvents() {
-            transcriptListener(overlapUser);
-            transcriptListener(overlapAssistant);
-            setImmediate(() => transcriptListener(overlapIdle));
-            return history;
-          }
+          async getEvents() { return history; }
         };
         """#
         let extensionScript = CopilotExtension.script.replacingOccurrences(
@@ -294,11 +228,20 @@ final class CoreLogicTests: XCTestCase {
         let epilogue = #"""
 
         await new Promise((resolve) => setImmediate(resolve));
+        const transcriptPath = `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+          + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`;
+        const read = () => JSON.parse(readFileSync(transcriptPath, "utf8"));
+
+        // A live human message must publish immediately, before the turn ends,
+        // so the sender sees their input right away.
         const giantMetadata = "m".repeat(2_000_000);
         transcriptListener({
           id:"live-user",type:"user.message",timestamp:"2026-07-12T03:01:00.123Z",
-          data:{source:null,content:"x".repeat(49999) + "😀"}
+          data:{source:null,content:"x".repeat(49999) + "😀",parentAgentTaskId:"root-task"}
         });
+        const afterLiveUser = read();
+        const livePending = afterLiveUser.turns.find((turn) => turn.id === "live-user");
+
         transcriptListener({
           id:"live-assistant",type:"assistant.message",
           timestamp:"2026-07-12T03:01:01.456Z",
@@ -307,11 +250,8 @@ final class CoreLogicTests: XCTestCase {
         transcriptListener({
           id:"live-tool-start",type:"tool.execution_start",
           timestamp:"2026-07-12T03:01:01.500Z",
-          data:{
-            toolCallId:giantMetadata,
-            toolName:giantMetadata,
-            toolDescription:{name:giantMetadata}
-          }
+          data:{toolCallId:giantMetadata,toolName:giantMetadata,
+            toolDescription:{name:giantMetadata}}
         });
         transcriptListener({
           id:"live-tool-complete",type:"tool.execution_complete",
@@ -323,40 +263,34 @@ final class CoreLogicTests: XCTestCase {
           data:{aborted:false}
         });
 
-        const encodedSnapshot = readFileSync(
-          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
-            + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
-          "utf8"
-        );
+        const encodedSnapshot = readFileSync(transcriptPath, "utf8");
         const snapshot = JSON.parse(encodedSnapshot);
         const find = (id) => snapshot.turns.find((turn) => turn.id === id);
-        const hidden = find("hidden-user");
-        const classifierPayloadPresent = snapshot.turns.some((turn) =>
-          turn.userContent === "internal classifier prompt"
-            || turn.assistantMessages.some((message) =>
-              message.id === "classifier-message"
-                || message.content === "internal classifier result"
-            )
+        const byKind = (kind) => snapshot.turns.filter((turn) => turn.kind === kind);
+        const multi = find("multi");
+        const withSkill = find("with-skill");
+        const skillCtxLeaked = snapshot.turns.some((turn) =>
+          turn.userContent === "SKILL CONTEXT BLOCK"
         );
-        const classifierToolPresent = snapshot.turns.some((turn) =>
-          turn.tools.some((tool) => tool.id === "classifier-tool")
-        );
-        const scheduled = find("scheduled-user");
-        const overlap = find("overlap-user");
         const live = find("live-user");
         console.log(JSON.stringify({
+          schemaVersion: snapshot.schemaVersion,
+          ownerPidIsNumber: typeof snapshot.ownerPid === "number",
           turnCount: snapshot.turns.length,
-          firstId: snapshot.turns[0]?.id,
-          hiddenKind: hidden?.kind,
-          hiddenUserContent: hidden?.userContent,
-          classifierPayloadPresent,
-          classifierToolPresent,
-          scheduledKind: scheduled?.kind,
-          scheduledAborted: scheduled?.isAborted,
-          overlapAssistantCount: overlap?.assistantMessages.length,
-          overlapToolSuccess: overlap?.tools[0]?.success,
-          overlapAborted: overlap?.isAborted,
-          overlapEndedAt: overlap?.endedAt,
+          foregroundCount: byKind("foreground").length,
+          scheduledCount: byKind("scheduled").length,
+          automatedCount: byKind("automated").length,
+          humansPreserved: ["human-0","human-1","human-2"].every(find),
+          multiKind: multi?.kind,
+          multiAssistantCount: multi?.assistantMessages.length,
+          multiToolCount: multi?.tools.length,
+          multiToolSecondSuccess: multi?.tools[1]?.success,
+          withSkillKind: withSkill?.kind,
+          withSkillAssistantCount: withSkill?.assistantMessages.length,
+          skillCtxLeaked,
+          livePendingPresent: Boolean(livePending),
+          livePendingOpen: livePending ? livePending.endedAt === null : false,
+          livePendingTurnCount: afterLiveUser.turns.length,
           liveUserLength: live?.userContent.length,
           liveTruncated: live?.userContent.endsWith("… truncated …"),
           liveHasTrailingHighSurrogate: /[\uD800-\uDBFF]$/.test(
@@ -366,9 +300,6 @@ final class CoreLogicTests: XCTestCase {
             (total, tool) => total + tool.id.length + tool.name.length + tool.title.length,
             0
           ),
-          liveStartedAt: live?.startedAt,
-          liveAssistantAt: live?.assistantMessages[0]?.timestamp,
-          updatedAt: snapshot.updatedAt,
           snapshotBytes: Buffer.byteLength(encodedSnapshot)
         }));
         process.exit(0);
@@ -403,18 +334,26 @@ final class CoreLogicTests: XCTestCase {
         )
         let output = stdout.fileHandleForReading.readDataToEndOfFile()
         let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
-        XCTAssertEqual(summary?["turnCount"] as? Int, 100)
-        XCTAssertEqual(summary?["firstId"] as? String, "filler-user-2")
-        XCTAssertEqual(summary?["hiddenKind"] as? String, "automated")
-        XCTAssertEqual(summary?["hiddenUserContent"] as? String, "")
-        XCTAssertEqual(summary?["classifierPayloadPresent"] as? Bool, false)
-        XCTAssertEqual(summary?["classifierToolPresent"] as? Bool, false)
-        XCTAssertEqual(summary?["scheduledKind"] as? String, "scheduled")
-        XCTAssertEqual(summary?["scheduledAborted"] as? Bool, true)
-        XCTAssertEqual(summary?["overlapAssistantCount"] as? Int, 1)
-        XCTAssertEqual(summary?["overlapToolSuccess"] as? Bool, true)
-        XCTAssertEqual(summary?["overlapAborted"] as? Bool, true)
-        XCTAssertEqual(summary?["overlapEndedAt"] as? String, "2026-07-12T03:00:03.789Z")
+        XCTAssertEqual(summary?["schemaVersion"] as? Int, 3)
+        XCTAssertEqual(summary?["ownerPidIsNumber"] as? Bool, true)
+        // Retention caps the total but never evicts the human conversation.
+        XCTAssertEqual(summary?["turnCount"] as? Int, 200)
+        XCTAssertEqual(summary?["humansPreserved"] as? Bool, true)
+        XCTAssertEqual(summary?["foregroundCount"] as? Int, 6)
+        XCTAssertEqual(summary?["automatedCount"] as? Int, 0)
+        // The multi-iteration request is a single foreground turn.
+        XCTAssertEqual(summary?["multiKind"] as? String, "foreground")
+        XCTAssertEqual(summary?["multiAssistantCount"] as? Int, 2)
+        XCTAssertEqual(summary?["multiToolCount"] as? Int, 2)
+        XCTAssertEqual(summary?["multiToolSecondSuccess"] as? Bool, false)
+        // Injected skill context folds into the human turn, never its own turn.
+        XCTAssertEqual(summary?["withSkillKind"] as? String, "foreground")
+        XCTAssertEqual(summary?["withSkillAssistantCount"] as? Int, 1)
+        XCTAssertEqual(summary?["skillCtxLeaked"] as? Bool, false)
+        // A live human message shows immediately as an open (pending) turn.
+        XCTAssertEqual(summary?["livePendingPresent"] as? Bool, true)
+        XCTAssertEqual(summary?["livePendingOpen"] as? Bool, true)
+        XCTAssertLessThanOrEqual(summary?["livePendingTurnCount"] as? Int ?? .max, 200)
         XCTAssertLessThanOrEqual(summary?["liveUserLength"] as? Int ?? .max, 50_020)
         XCTAssertEqual(summary?["liveTruncated"] as? Bool, true)
         XCTAssertEqual(summary?["liveHasTrailingHighSurrogate"] as? Bool, false)
@@ -423,27 +362,208 @@ final class CoreLogicTests: XCTestCase {
             summary?["snapshotBytes"] as? Int ?? .max,
             5 * 1_024 * 1_024
         )
-        XCTAssertEqual(summary?["liveStartedAt"] as? String, "2026-07-12T03:01:00.123Z")
-        XCTAssertEqual(summary?["liveAssistantAt"] as? String, "2026-07-12T03:01:01.456Z")
-        XCTAssertNotNil((summary?["updatedAt"] as? String)?.range(
-            of: #"\.\d{3}Z$"#,
-            options: .regularExpression
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains("transcriptEventIds.clear();"))
+    }
+
+    func testCopilotExtensionTranscriptOwnershipGuard() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-owner-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let appSessionId = "12345678-1234-1234-1234-123456789abc"
+        // A live owner (pid 1 is always present; process.kill(1, 0) throws EPERM,
+        // which the guard treats as "alive") in a different process, even with
+        // the same Copilot session id.
+        try Data(#"{"copilotSessionId":"guest-session","pid":1}"#.utf8).write(
+            to: sessions.appendingPathComponent("\(appSessionId).transcript-owner.json")
+        )
+        let transcriptURL = sessions.appendingPathComponent("\(appSessionId).transcript.json")
+        try Data(#"""
+        {"schemaVersion":3,"copilotSessionId":"guest-session","ownerPid":1,"turns":[{
+          "id":"owned","startedAt":"2026-07-12T00:00:00.000Z","endedAt":null,
+          "kind":"foreground","userContent":"OWNED","assistantMessages":[],
+          "tools":[],"isAborted":false}]}
+        """#.utf8).write(to: transcriptURL)
+
+        let prelude = #"""
+        let transcriptListener = null;
+        const fakeSession = {
+          sessionId: "guest-session",
+          rpc: { schedule: { list: async () => ({entries:[]}) } },
+          on(name, handler) {
+            if (typeof name === "function") transcriptListener = name;
+          },
+          async getEvents() { return [
+            {id:"g1",type:"user.message",timestamp:"2026-07-12T01:00:00.000Z",
+             data:{source:null,content:"guest classifier output",parentAgentTaskId:"pt"}},
+            {id:"g2",type:"assistant.message",timestamp:"2026-07-12T01:00:01.000Z",
+             data:{messageId:"gm",content:"json"}},
+            {id:"g3",type:"session.idle",timestamp:"2026-07-12T01:00:02.000Z",data:{aborted:false}}
+          ]; }
+        };
+        """#
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: "const joinSession = async () => fakeSession;"
+        )
+        let epilogue = #"""
+
+        await new Promise((resolve) => setImmediate(resolve));
+        const snapshot = JSON.parse(readFileSync(
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+          "utf8"
+        ));
+        console.log(JSON.stringify({
+          copilotSessionId: snapshot.copilotSessionId,
+          firstUserContent: snapshot.turns[0]?.userContent
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("owner.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "COPILOT_PROJECTS_SESSION": appSessionId,
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
+        // The guest must not clobber the live owner's transcript.
+        XCTAssertEqual(summary?["copilotSessionId"] as? String, "guest-session")
+        XCTAssertEqual(summary?["firstUserContent"] as? String, "OWNED")
+    }
+
+    func testCopilotExtensionTranscriptByteBudgetPreservesForeground() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-bytes-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let prelude = #"""
+        let transcriptListener = null;
+        const history = [];
+        const chunk = "z".repeat(50000);
+        let clock = 0;
+        const ts = () => new Date(1700000000000 + (clock++) * 1000).toISOString();
+        // Interleave heavy foreground and scheduled turns so the total exceeds the
+        // 5MB budget; the byte trim must drop scheduled turns before foreground.
+        for (let index = 0; index < 40; index += 1) {
+          const scheduled = index % 2 === 1;
+          history.push({
+            id: `${scheduled ? "sched" : "fg"}-${index}`, type: "user.message",
+            timestamp: ts(),
+            data: { source: scheduled ? "schedule-x" : null, content: `turn ${index}` }
+          });
+          for (let m = 0; m < 4; m += 1) {
+            history.push({
+              id: `a-${index}-${m}`, type: "assistant.message", timestamp: ts(),
+              data: { messageId: `m-${index}-${m}`, content: chunk }
+            });
+          }
+          history.push({ id: `idle-${index}`, type: "session.idle", timestamp: ts(), data: {} });
+        }
+        const fakeSession = {
+          sessionId: "copilot-session",
+          rpc: { schedule: { list: async () => ({entries:[]}) } },
+          on(name, handler) { if (typeof name === "function") transcriptListener = name; },
+          async getEvents() { return history; }
+        };
+        """#
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: "const joinSession = async () => fakeSession;"
+        )
+        let epilogue = #"""
+
+        await new Promise((resolve) => setImmediate(resolve));
+        const encoded = readFileSync(
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+          "utf8"
+        );
+        const snapshot = JSON.parse(encoded);
+        const byKind = (kind) => snapshot.turns.filter((t) => t.kind === kind).length;
+        console.log(JSON.stringify({
+          bytes: Buffer.byteLength(encoded),
+          foreground: byKind("foreground"),
+          scheduled: byKind("scheduled")
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("bytes.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "COPILOT_PROJECTS_SESSION": "12345678-1234-1234-1234-123456789abc",
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
+        XCTAssertLessThanOrEqual(summary?["bytes"] as? Int ?? .max, 5 * 1_024 * 1_024)
+        // Foreground turns are preserved; scheduled turns absorb the byte pressure.
+        XCTAssertEqual(summary?["foreground"] as? Int, 20)
+        XCTAssertLessThan(summary?["scheduled"] as? Int ?? .max, 20)
     }
 
     func testCopilotExtensionPreservesMatchingSnapshotWhenHistoryFails() throws {
-        let summary = try copilotExtensionHistoryFailureSummary(schemaVersion: 2)
+        let summary = try copilotExtensionHistoryFailureSummary(schemaVersion: 3)
 
-        XCTAssertEqual(summary["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(summary["schemaVersion"] as? Int, 3)
         XCTAssertEqual(summary["copilotSessionId"] as? String, "copilot-session")
         XCTAssertEqual(summary["turnIds"] as? [String], ["preserved-turn"])
     }
 
     func testCopilotExtensionRejectsLegacySnapshotWhenHistoryFails() throws {
-        let summary = try copilotExtensionHistoryFailureSummary(schemaVersion: 1)
+        // A v2 snapshot predates the turn-boundary fix and may be contaminated;
+        // it must be discarded, not restored.
+        let summary = try copilotExtensionHistoryFailureSummary(schemaVersion: 2)
 
-        XCTAssertEqual(summary["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(summary["schemaVersion"] as? Int, 3)
         XCTAssertEqual(summary["copilotSessionId"] as? String, "copilot-session")
         XCTAssertEqual(summary["turnIds"] as? [String], [])
     }

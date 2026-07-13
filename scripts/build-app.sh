@@ -28,7 +28,19 @@ APP_NAME="Copilot Projects"
 BUNDLE_ID="com.obvioussean.copilot-projects"
 EXE_NAME="copilot-projects"
 VERSION="${VERSION:-0.1.0}"
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+
+# macOS keys granted permissions (TCC: Accessibility, Automation, Notifications,
+# …) on the app's designated requirement, which includes the signing identity.
+# An ad-hoc signature changes every build, so each local build looks like a new
+# app and the user must re-grant everything. Default to a stable Developer ID
+# Application identity when one is in the keychain so local builds keep their
+# grants across rebuilds. Set CODESIGN_IDENTITY explicitly to override, or
+# CODESIGN_IDENTITY=- to force ad-hoc.
+if [ -z "${CODESIGN_IDENTITY:-}" ]; then
+  CODESIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
+  CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+fi
 
 # SwiftPM needs this when the user's global git sets safe.bareRepository=explicit.
 GIT_CONFIG_INDEX="${GIT_CONFIG_COUNT:-0}"

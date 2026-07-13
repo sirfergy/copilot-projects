@@ -35,14 +35,49 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
 
     @discardableResult
     func sendRemotePrompt(_ value: String) -> Bool {
-        guard terminal != nil, let bytes = Self.remotePromptBytes(value) else {
+        guard terminal != nil, let paste = Self.remotePromptPasteBytes(value) else {
             return false
         }
-        send(bytes)
+        // Deliver the bracketed paste, then submit Enter after a delay. The
+        // Copilot TUI commits pasted text to its input asynchronously, so a
+        // carriage return in the same write (or too soon after) fires before the
+        // text lands and leaves the prompt unsubmitted. There is no out-of-band
+        // signal that the paste committed, so the delay is the only lever; scale
+        // it with paste size since the single-threaded TUI takes longer to ingest
+        // large pastes.
+        send(paste)
+        let delay = Self.promptSubmitDelay(byteCount: paste.count)
+        Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return // cancelled: don't submit an unsettled paste
+            }
+            guard let self, self.terminal != nil else { return }
+            self.send([0x0d])
+        }
         return true
     }
 
+    /// Delay before submitting Enter so the Copilot TUI can commit the paste to
+    /// its input first. Scales modestly with paste size and is bounded.
+    nonisolated static func promptSubmitDelay(byteCount: Int) -> Duration {
+        let base = 150
+        let extra = min(max(0, byteCount - 1_024) / 32, 250)
+        return .milliseconds(base + extra)
+    }
+
+    /// The full remote-prompt byte sequence including the trailing submit CR.
+    /// Kept as the validation entry point; delivery splits the CR off so it can
+    /// be sent after the paste is committed (see `sendRemotePrompt`).
     nonisolated static func remotePromptBytes(_ value: String) -> [UInt8]? {
+        guard let paste = remotePromptPasteBytes(value) else { return nil }
+        return paste + [0x0d]
+    }
+
+    /// The bracketed-paste byte sequence for a remote prompt, without the
+    /// submitting carriage return.
+    nonisolated static func remotePromptPasteBytes(_ value: String) -> [UInt8]? {
         let normalized = value
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
@@ -59,7 +94,6 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         bytes.append(contentsOf: "\u{1b}[200~".utf8)
         bytes.append(contentsOf: normalized.utf8)
         bytes.append(contentsOf: "\u{1b}[201~".utf8)
-        bytes.append(0x0d)
         return bytes
     }
 

@@ -40,6 +40,35 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(ProjectsTerminalView.remotePromptBytes("   \n"))
     }
 
+    func testRemotePromptPasteBytesExcludeSubmitCarriageReturn() throws {
+        let paste = try XCTUnwrap(
+            ProjectsTerminalView.remotePromptPasteBytes("hello")
+        )
+        // The paste carries no submit CR; the Enter is delivered separately after
+        // the TUI commits the paste.
+        XCTAssertNotEqual(paste.last, 0x0d)
+        XCTAssertFalse(paste.contains(0x0d))
+        XCTAssertEqual(
+            ProjectsTerminalView.remotePromptBytes("hello"),
+            paste + [0x0d]
+        )
+        XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("   \n"))
+    }
+
+    func testPromptSubmitDelayScalesWithSizeAndIsBounded() {
+        // Small prompts get the base delay; large ones get more, but bounded.
+        XCTAssertEqual(ProjectsTerminalView.promptSubmitDelay(byteCount: 0), .milliseconds(150))
+        XCTAssertEqual(ProjectsTerminalView.promptSubmitDelay(byteCount: 1_024), .milliseconds(150))
+        XCTAssertGreaterThan(
+            ProjectsTerminalView.promptSubmitDelay(byteCount: 8_192),
+            ProjectsTerminalView.promptSubmitDelay(byteCount: 1_024)
+        )
+        XCTAssertLessThanOrEqual(
+            ProjectsTerminalView.promptSubmitDelay(byteCount: 1_000_000),
+            .milliseconds(400)
+        )
+    }
+
     func testRemotePromptEligibilityRequiresSettledLiveCopilot() {
         XCTAssertEqual(
             AppModel.remotePromptEligibility(
@@ -1841,7 +1870,7 @@ final class AppLogicTests: XCTestCase {
         Paths.ensureStateDir()
         let data = Data("""
         {
-          "schemaVersion": 2,
+          "schemaVersion": 3,
           "updatedAt": "2026-07-12T03:09:00.123Z",
           "copilotSessionId": "copilot-session",
           "turns": [{
@@ -1898,7 +1927,7 @@ final class AppLogicTests: XCTestCase {
         )
         let currentData = Data("""
         {
-          "schemaVersion": 2,
+          "schemaVersion": 3,
           "updatedAt": "2026-07-12T03:09:00.123Z",
           "copilotSessionId": "copilot-session",
           "turns": []
@@ -1916,7 +1945,7 @@ final class AppLogicTests: XCTestCase {
 
         let legacyData = Data("""
         {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "updatedAt": "2026-07-12T03:10:00.123Z",
           "copilotSessionId": "legacy-copilot-session",
           "turns": [{
@@ -1940,21 +1969,29 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(controller.snapshot)
 
         let remote = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
-        XCTAssertEqual(remote.schemaVersion, 2)
+        XCTAssertEqual(remote.schemaVersion, 3)
         XCTAssertTrue(remote.copilotSessionId.isEmpty)
         XCTAssertTrue(remote.turns.isEmpty)
     }
 
-    func testSessionArtifactCleanupRemovesTranscriptSnapshot() throws {
+    func testSessionArtifactCleanupRemovesTranscriptArtifacts() throws {
         let sessionId = UUID().uuidString
         Paths.ensureStateDir()
-        let path = Paths.transcriptSnapshotPath(sessionId: sessionId)
-        try Data("{}".utf8).write(to: URL(fileURLWithPath: path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+        let paths = [
+            Paths.transcriptSnapshotPath(sessionId: sessionId),
+            Paths.transcriptOwnerPath(sessionId: sessionId),
+            Paths.transcriptOwnerLockPath(sessionId: sessionId),
+        ]
+        for path in paths {
+            try Data("{}".utf8).write(to: URL(fileURLWithPath: path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+        }
 
         SessionArtifacts.removeFiles(sessionId: sessionId)
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        for path in paths {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        }
     }
 
     @MainActor
@@ -2478,7 +2515,7 @@ final class AppLogicTests: XCTestCase {
         )
 
         let mockSnapshot = TranscriptSnapshot(
-            schemaVersion: 2,
+            schemaVersion: 3,
             updatedAt: Date(),
             copilotSessionId: "test-copilot",
             turns: []
@@ -3124,6 +3161,44 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 403"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 409"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 422"))
+    }
+
+    func testRemoteWebSessionPivotMirrorsIOS() {
+        // The web UI shows one pane at a time behind a Conversation/Terminal pivot,
+        // mirroring the iOS SessionScreenView segmented control.
+        XCTAssertTrue(RemoteWebAssets.html.contains(#"id="content" data-mode="conversation""#))
+        XCTAssertTrue(RemoteWebAssets.html.contains(
+            #"<div id="pivot-tabs" role="tablist" aria-label="Session view">"#
+        ))
+        XCTAssertTrue(RemoteWebAssets.html.contains(
+            #"data-mode="conversation">Conversation</button>"#
+        ))
+        XCTAssertTrue(RemoteWebAssets.html.contains(
+            #"data-mode="terminal">Terminal</button>"#
+        ))
+        // Panes are toggled purely by the content mode.
+        XCTAssertTrue(RemoteWebAssets.css.contains(
+            #"#content[data-mode="conversation"] #terminal-pane { display:none; }"#
+        ))
+        XCTAssertTrue(RemoteWebAssets.css.contains(
+            #"#content[data-mode="terminal"] #transcript-pane { display:none; }"#
+        ))
+        // Terminal frames are only rendered while the Terminal tab is active.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (viewMode === 'terminal') renderLines(message.data);"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("function setViewMode(mode"))
+    }
+
+    func testRemoteWebPromptSubmitsOnEnter() {
+        // Enter sends the Copilot prompt; Shift+Enter keeps inserting a newline.
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "prompt.addEventListener('keydown', (event) => {"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("promptForm.requestSubmit();"))
     }
 
     func testRemoteWebJavaScriptSyntax() throws {
