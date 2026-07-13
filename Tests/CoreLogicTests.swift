@@ -653,6 +653,14 @@ final class CoreLogicTests: XCTestCase {
           await new Promise((resolve) => setTimeout(resolve, 80));
           waited += 80;
         }
+        // A question answered through the terminal clears via the SDK's
+        // user_input.completed event shape.
+        __fakeSession.emit({
+          id:"ui-sub-complete",type:"user_input.completed",agentId:"agent-7",
+          timestamp:"2026-07-12T03:00:04.000Z",
+          data:{requestId:"req-sub",answer:"A name",wasFreeform:true}
+        });
+        await new Promise((resolve) => setImmediate(resolve));
         const afterSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
 
         console.log(JSON.stringify({
@@ -718,7 +726,7 @@ final class CoreLogicTests: XCTestCase {
         let handledResponse = handledPayload?["response"] as? [String: Any]
         XCTAssertEqual(handledResponse?["answer"] as? String, "Yes, deploy")
         XCTAssertEqual(handledResponse?["wasFreeform"] as? Bool, false)
-        XCTAssertEqual(summary["pendingAfter"] as? [String], ["req-sub"])
+        XCTAssertEqual(summary["pendingAfter"] as? [String], [])
         XCTAssertEqual(summary["responseRemoved"] as? Bool, true)
     }
 

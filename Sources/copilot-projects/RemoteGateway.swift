@@ -803,7 +803,7 @@ private final class RemoteHTTPHandler:
                     case .some(.accepted):
                         response = (.noContent, "")
                     case .some(.conflict):
-                        response = (.conflict, "Question already answered")
+                        response = (.conflict, "Another answer is still processing")
                     case .some(.invalid):
                         response = (.unprocessableEntity, "Answer was not accepted")
                     case .none:

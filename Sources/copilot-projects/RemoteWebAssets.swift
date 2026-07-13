@@ -390,6 +390,7 @@ enum RemoteWebAssets {
       if (response && response.ok) {
         writable = true;
         lease.textContent = 'control enabled';
+        syncUserInputCards();
         updatePromptState();
       }
     }
@@ -567,7 +568,7 @@ enum RemoteWebAssets {
       const card = userInputCards.get(requestId);
       if (!card) return;
       card.querySelectorAll('button, textarea').forEach((element) => {
-        element.disabled = submitting;
+        element.disabled = submitting || !writable;
       });
     }
     // Untrusted question/choice text is only ever inserted with textContent.
@@ -704,7 +705,7 @@ enum RemoteWebAssets {
         lease.textContent = 'view only';
         setCardStatus(requestId, 'Control moved to another device');
       } else if (response?.status === 409) {
-        setCardStatus(requestId, 'This question was already answered');
+        setCardStatus(requestId, 'Another answer is still processing — try again.');
       } else if (response?.status === 422) {
         setCardStatus(requestId, 'Answer was not accepted');
       } else {
