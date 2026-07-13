@@ -773,6 +773,26 @@ final class AppLogicTests: XCTestCase {
         ))
     }
 
+    func testRemoteNotificationPayloadDecodesLegacyShowPayloads() throws {
+        let id = UUID()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let payload = try decoder.decode(RemoteNotificationPayload.self, from: Data("""
+        {
+          "id": "\(id.uuidString)",
+          "kind": "completed",
+          "title": "Complete",
+          "body": "Done",
+          "projectId": "project",
+          "sessionId": "session",
+          "sentAt": "2026-07-13T05:45:00Z"
+        }
+        """.utf8))
+
+        XCTAssertEqual(payload.action, .show)
+        XCTAssertEqual(payload.id, id)
+    }
+
     @MainActor
     func testRoutedNotificationsSuppressRemoteDeliveryWhileDesktopIsActive() async throws {
         let root = FileManager.default.temporaryDirectory
@@ -3255,6 +3275,10 @@ final class AppLogicTests: XCTestCase {
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("if (!ids.has(requestId)) {"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 403"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "if (!selected || !writable || submittingUserInputs.has(requestId)) return;"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("refreshUserInputCardStates();"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 409"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("response?.status === 422"))
     }

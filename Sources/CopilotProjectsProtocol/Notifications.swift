@@ -48,6 +48,30 @@ public struct RemoteNotificationPayload: Codable, Equatable, Sendable {
         self.sessionId = sessionId
         self.sentAt = sentAt
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case id
+        case kind
+        case title
+        case body
+        case projectId
+        case sessionId
+        case sentAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        action = try container.decodeIfPresent(RemoteNotificationAction.self, forKey: .action)
+            ?? .show
+        id = try container.decode(UUID.self, forKey: .id)
+        kind = try container.decodeIfPresent(StatusNotificationKind.self, forKey: .kind)
+        title = try container.decode(String.self, forKey: .title)
+        body = try container.decode(String.self, forKey: .body)
+        projectId = try container.decodeIfPresent(String.self, forKey: .projectId)
+        sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
+        sentAt = try container.decode(Date.self, forKey: .sentAt)
+    }
 }
 
 public struct NotificationDismissRequest: Codable, Equatable, Sendable {

@@ -739,6 +739,11 @@ enum RemoteWebAssets {
         element.disabled = submitting || !writable;
       });
     }
+    function refreshUserInputCardStates() {
+      for (const requestId of userInputCards.keys()) {
+        setCardSubmitting(requestId, submittingUserInputs.has(requestId));
+      }
+    }
     // Untrusted question/choice text is only ever inserted with textContent.
     function buildUserInputCard(request) {
       const card = document.createElement('article');
@@ -829,7 +834,7 @@ enum RemoteWebAssets {
       });
     }
     async function submitUserInput(requestId, answer, wasFreeform) {
-      if (!selected || submittingUserInputs.has(requestId)) return;
+      if (!selected || !writable || submittingUserInputs.has(requestId)) return;
       if (new TextEncoder().encode(answer).length > 8192) {
         setCardStatus(requestId, 'Answer is too large (8 KB maximum)');
         return;
@@ -871,6 +876,7 @@ enum RemoteWebAssets {
       if (response?.status === 403) {
         writable = false;
         lease.textContent = 'view only';
+        refreshUserInputCardStates();
         setCardStatus(requestId, 'Control moved to another device');
       } else if (response?.status === 409) {
         setCardStatus(requestId, 'Another answer is still processing — try again.');
