@@ -132,12 +132,16 @@ final class CoreLogicTests: XCTestCase {
             "removeFile(userInputResponsePath)"
         ))
         // Model info: the heartbeat seeds the effective model from
-        // start/resume/model_change and publishes it for remote clients.
+        // start/resume/model_change — for both live events and replayed history,
+        // so a session whose model was set before we joined is still captured.
         XCTAssertTrue(CopilotExtension.script.contains(
             #"session.on("session.model_change""#
         ))
         XCTAssertTrue(CopilotExtension.script.contains(
             "model: currentModel"
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains(
+            "applyModelFromEvent(event)"
         ))
         let cleanupRange = try XCTUnwrap(CopilotExtension.script.range(
             of: "Clear stale answer state before any new question can be published"

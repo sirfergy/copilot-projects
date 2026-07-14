@@ -1018,23 +1018,23 @@ public enum CopilotExtension {
             publish();
         }
 
-        session.on("session.start", (event) => {
+        // Derive the model from a model-bearing event. Used for both live events
+        // and the replayed history below, so a session whose model was set before
+        // we joined (session.start already fired) is still captured.
+        function applyModelFromEvent(event) {
             if (event.agentId) return;
             const data = event.data || {};
-            applyModelInfo(data.selectedModel, data.reasoningEffort, data.contextTier);
-        });
+            if (event.type === "session.model_change") {
+                applyModelInfo(data.newModel, data.reasoningEffort, data.contextTier);
+            } else if (event.type === "session.start"
+                || event.type === "session.resume") {
+                applyModelInfo(data.selectedModel, data.reasoningEffort, data.contextTier);
+            }
+        }
 
-        session.on("session.resume", (event) => {
-            if (event.agentId) return;
-            const data = event.data || {};
-            applyModelInfo(data.selectedModel, data.reasoningEffort, data.contextTier);
-        });
-
-        session.on("session.model_change", (event) => {
-            if (event.agentId) return;
-            const data = event.data || {};
-            applyModelInfo(data.newModel, data.reasoningEffort, data.contextTier);
-        });
+        session.on("session.start", applyModelFromEvent);
+        session.on("session.resume", applyModelFromEvent);
+        session.on("session.model_change", applyModelFromEvent);
 
         session.on("session.permissions_changed", (event) => {
             if (event.agentId) return;
@@ -1231,7 +1231,10 @@ public enum CopilotExtension {
             const history = await session.getEvents();
             transcriptTurns.length = 0;
             pendingTranscriptTurn = null;
-            for (const event of history) processTranscriptEvent(event, false, true);
+            for (const event of history) {
+                processTranscriptEvent(event, false, true);
+                applyModelFromEvent(event);
+            }
         } catch {
             transcriptTurns.length = 0;
             transcriptTurns.push(...preservedTranscriptTurns);
