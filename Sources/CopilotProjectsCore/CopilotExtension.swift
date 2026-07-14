@@ -65,6 +65,7 @@ public enum CopilotExtension {
         let idleGeneration = 0;
         let lastIdleAborted = false;
         let lastIdleTurnKind = null;
+        let currentModel = null;
         let schedules = [];
         const transcriptTurns = [];
         const transcriptEventIds = new Set();
@@ -343,6 +344,7 @@ public enum CopilotExtension {
                 lastIdleTurnKind,
                 trackedUserInputs: [...pendingUserInputs.values()],
                 trackedElicitations: [...pendingElicitations.values()],
+                ...(currentModel ? { model: currentModel } : {}),
                 ...(error ? { error: String(error) } : {}),
             };
             const temporaryPath = `${snapshotPath}.${process.pid}.tmp`;
@@ -998,6 +1000,40 @@ public enum CopilotExtension {
             activeSubagents.clear();
             publish();
             setTimeout(() => setScheduledTurnMarker(false), 5_000);
+        });
+
+        // Track the effective model so remote clients can show it. Seeded from
+        // start/resume (selectedModel) and kept current via model_change
+        // (newModel). Root agent only; sub-agent model changes are ignored.
+        function applyModelInfo(name, reasoningEffort, contextTier) {
+            if (typeof name !== "string" || name.length === 0) return;
+            const info = { name };
+            if (typeof reasoningEffort === "string" && reasoningEffort.length > 0) {
+                info.reasoningEffort = reasoningEffort;
+            }
+            if (typeof contextTier === "string" && contextTier.length > 0) {
+                info.contextTier = contextTier;
+            }
+            currentModel = info;
+            publish();
+        }
+
+        session.on("session.start", (event) => {
+            if (event.agentId) return;
+            const data = event.data || {};
+            applyModelInfo(data.selectedModel, data.reasoningEffort, data.contextTier);
+        });
+
+        session.on("session.resume", (event) => {
+            if (event.agentId) return;
+            const data = event.data || {};
+            applyModelInfo(data.selectedModel, data.reasoningEffort, data.contextTier);
+        });
+
+        session.on("session.model_change", (event) => {
+            if (event.agentId) return;
+            const data = event.data || {};
+            applyModelInfo(data.newModel, data.reasoningEffort, data.contextTier);
         });
 
         session.on("session.permissions_changed", (event) => {

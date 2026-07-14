@@ -20,6 +20,9 @@ struct AgentActivitySnapshot: Codable, Equatable {
     /// Schema-form `elicitation.requested` questions awaiting an answer. Optional
     /// (nil default) for backward-compatible decoding of older heartbeats.
     var trackedElicitations: [TrackedElicitation]? = nil
+    /// The session's effective model (name + reasoning effort + context tier).
+    /// Optional (nil default) so older heartbeats without it still decode.
+    var model: TrackedModel? = nil
 
     func isFresh(at now: Date = Date(), ttl: TimeInterval = 15) -> Bool {
         guard schemaVersion == Self.currentSchemaVersion,
@@ -39,6 +42,17 @@ struct AgentActivitySnapshot: Codable, Equatable {
     func remoteElicitationRequests() -> [RemoteElicitationRequest]? {
         guard let trackedElicitations, !trackedElicitations.isEmpty else { return nil }
         return trackedElicitations.map { $0.remoteRequest() }
+    }
+
+    /// Convert the tracked model into the shared remote model. Returns nil when
+    /// no model has been reported so the field is omitted entirely.
+    func remoteModelInfo() -> RemoteModelInfo? {
+        guard let model, !model.name.isEmpty else { return nil }
+        return RemoteModelInfo(
+            name: model.name,
+            reasoningEffort: model.reasoningEffort,
+            contextTier: model.contextTier
+        )
     }
 
     private static func date(from value: String) -> Date? {
@@ -117,6 +131,13 @@ struct TrackedSubagent: Codable, Equatable, Identifiable {
     var name: String
     var description: String
     var model: String?
+}
+
+/// The session's effective model, mirrored from the extension heartbeat.
+struct TrackedModel: Codable, Equatable {
+    var name: String
+    var reasoningEffort: String?
+    var contextTier: String?
 }
 
 struct TrackedSchedule: Codable, Equatable, Identifiable {

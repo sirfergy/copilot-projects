@@ -131,6 +131,14 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains(
             "removeFile(userInputResponsePath)"
         ))
+        // Model info: the heartbeat seeds the effective model from
+        // start/resume/model_change and publishes it for remote clients.
+        XCTAssertTrue(CopilotExtension.script.contains(
+            #"session.on("session.model_change""#
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains(
+            "model: currentModel"
+        ))
         let cleanupRange = try XCTUnwrap(CopilotExtension.script.range(
             of: "Clear stale answer state before any new question can be published"
         ))

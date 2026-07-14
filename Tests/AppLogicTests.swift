@@ -4286,6 +4286,26 @@ final class AppLogicTests: XCTestCase {
         ))
     }
 
+    func testAgentActivitySnapshotDecodesModelInfo() throws {
+        let base = "\"schemaVersion\":1,\"updatedAt\":\"2026-07-14T00:00:00Z\","
+            + "\"foregroundTurnActive\":false,\"scheduledTurnActive\":false,"
+            + "\"activeSubagents\":[],\"schedules\":[],\"idleGeneration\":0,"
+            + "\"lastIdleAborted\":false"
+        let full = Data(("{" + base + ",\"model\":{\"name\":\"gpt-5.5\","
+            + "\"reasoningEffort\":\"high\",\"contextTier\":\"long_context\"}}").utf8)
+        let info = try XCTUnwrap(
+            try JSONDecoder().decode(AgentActivitySnapshot.self, from: full).remoteModelInfo()
+        )
+        XCTAssertEqual(info.name, "gpt-5.5")
+        XCTAssertEqual(info.reasoningEffort, "high")
+        XCTAssertEqual(info.contextTier, "long_context")
+
+        let bare = Data(("{" + base + "}").utf8)
+        XCTAssertNil(
+            try JSONDecoder().decode(AgentActivitySnapshot.self, from: bare).remoteModelInfo()
+        )
+    }
+
     func testRemoteTerminalScreenCaptureNormalizesCells() {
         XCTAssertEqual(RemoteTerminalScreen.captureVisible(
             sessionId: "session",

@@ -886,7 +886,8 @@ final class AppModel: ObservableObject {
                             pendingUserInputs: session.agentActivity?
                                 .remoteUserInputRequests(),
                             pendingElicitations: session.agentActivity?
-                                .remoteElicitationRequests()
+                                .remoteElicitationRequests(),
+                            model: session.agentActivity?.remoteModelInfo()
                         )
                     }
                 )

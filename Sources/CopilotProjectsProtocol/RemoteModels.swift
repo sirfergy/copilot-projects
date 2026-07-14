@@ -44,6 +44,9 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     /// Schema-form `elicitation.requested` questions awaiting an answer. Optional
     /// (omitted when absent) for backward-compatible decoding.
     public let pendingElicitations: [RemoteElicitationRequest]?
+    /// The session's effective model (name + reasoning effort + context tier).
+    /// Optional (omitted when absent) so older clients decode without this field.
+    public let model: RemoteModelInfo?
 
     public init(
         id: String,
@@ -56,7 +59,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         scheduled: Bool,
         promptable: Bool? = nil,
         pendingUserInputs: [RemoteUserInputRequest]? = nil,
-        pendingElicitations: [RemoteElicitationRequest]? = nil
+        pendingElicitations: [RemoteElicitationRequest]? = nil,
+        model: RemoteModelInfo? = nil
     ) {
         self.id = id
         self.title = title
@@ -69,6 +73,22 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.promptable = promptable
         self.pendingUserInputs = pendingUserInputs
         self.pendingElicitations = pendingElicitations
+        self.model = model
+    }
+}
+
+/// The effective model for a session, surfaced so remote clients can display it.
+/// `reasoningEffort` and `contextTier` are optional — omitted when the agent
+/// doesn't report them (non-reasoning models, default context tier).
+public struct RemoteModelInfo: Codable, Equatable, Sendable {
+    public let name: String
+    public let reasoningEffort: String?
+    public let contextTier: String?
+
+    public init(name: String, reasoningEffort: String? = nil, contextTier: String? = nil) {
+        self.name = name
+        self.reasoningEffort = reasoningEffort
+        self.contextTier = contextTier
     }
 }
 
