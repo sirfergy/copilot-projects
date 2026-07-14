@@ -98,6 +98,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         nativeNotifications.onActivate = { [weak self] projectId, sessionId in
             self?.model.focus(projectId: projectId, sessionId: sessionId)
+            // Tapping a notification both activates the app (from the background)
+            // and switches sessions. During the key-window transition AppKit
+            // restores the *previously* focused terminal as first responder, so
+            // the newly revealed session is left unfocused — the Copilot CLI, which
+            // has focus reporting on (DECSET 1004), receives an ESC[I then ESC[O and
+            // renders a stray unfocused-cursor block in its input — while keystrokes
+            // silently go to the old session. Re-assert focus on the visible
+            // terminal once the window is actually key (see restoreTerminalFocus).
+            self?.restoreTerminalFocus(attemptsRemaining: Self.focusRestoreMaxAttempts)
         }
         let sync = notificationSync
         nativeNotifications.onResolve = { [weak sync] id in
@@ -164,6 +173,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.model.markActiveSessionSeen()
                 self?.model.focusActiveTerminal()
             }
+        }
+    }
+
+    /// Upper bound on focus-restore attempts after a notification activation.
+    /// Ticks run ~20ms apart and each reschedule consumes one, so this bounds the
+    /// wait to ~1 second — far longer than a key-window transition needs, but the
+    /// loop almost always exits early once the window is key and the terminal is
+    /// confirmed first responder.
+    static let focusRestoreMaxAttempts = 50
+
+    /// Re-assert first responder on the visible session's terminal after a
+    /// notification activation, retrying across run-loop turns until it actually
+    /// sticks. `focusActiveTerminal()` only reports success once the window is key
+    /// AND the terminal is first responder, so this keeps re-asserting through the
+    /// key-window transition (which otherwise restores the previously focused
+    /// terminal and steals keystrokes from the revealed session). It re-reads the
+    /// active controller each turn, so switching tabs mid-retry focuses the newly
+    /// selected session rather than a stale one.
+    ///
+    /// `confirmed` requires success on two consecutive turns before stopping: a
+    /// single success can be observed in the brief window before AppKit restores
+    /// its saved responder, so one extra turn confirms the focus survived it. Every
+    /// turn (success or failure) consumes one attempt, so the loop is hard-bounded.
+    private func restoreTerminalFocus(attemptsRemaining: Int, confirmed: Bool = false) {
+        guard attemptsRemaining > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            guard let self, self.isPrimaryInstance else { return }
+            let focused = self.model.focusActiveTerminal()
+            if focused && confirmed { return }
+            self.restoreTerminalFocus(attemptsRemaining: attemptsRemaining - 1, confirmed: focused)
         }
     }
 
