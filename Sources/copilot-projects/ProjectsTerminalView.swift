@@ -23,6 +23,10 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     private(set) var remoteContentGeneration: UInt64 = 0
     private var rendererConfigured = false
     private var surfaceRefreshGeneration = 0
+    /// True from the moment a remote prompt's paste is written until its submit
+    /// Enter fires, so an overlapping remote prompt can't interleave its paste
+    /// bytes into a half-submitted one. Main-actor only.
+    private var isSubmittingRemotePrompt = false
 
     override func dataReceived(slice: ArraySlice<UInt8>) {
         remoteContentGeneration &+= 1
@@ -35,36 +39,75 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
 
     @discardableResult
     func sendRemotePrompt(_ value: String) -> Bool {
-        guard terminal != nil, let paste = Self.remotePromptPasteBytes(value) else {
+        guard !isSubmittingRemotePrompt,
+              terminal != nil,
+              let paste = Self.remotePromptPasteBytes(value) else {
             return false
         }
-        // Deliver the bracketed paste, then submit Enter after a delay. The
-        // Copilot TUI commits pasted text to its input asynchronously, so a
-        // carriage return in the same write (or too soon after) fires before the
-        // text lands and leaves the prompt unsubmitted. There is no out-of-band
-        // signal that the paste committed, so the delay is the only lever; scale
-        // it with paste size since the single-threaded TUI takes longer to ingest
-        // large pastes.
+        // Deliver the bracketed paste, then submit Enter. The Copilot TUI commits
+        // pasted text to its input asynchronously, so a carriage return sent too
+        // soon fires before the text lands and leaves the prompt unsubmitted.
+        // There is no commit acknowledgement, so we wait a floor long enough for
+        // the paste to commit, and only *extend* past it (never shorten below it)
+        // while terminal output is still streaming — a slow/loaded commit keeps
+        // emitting — capped so a continuously redrawing TUI still submits. The
+        // in-flight flag rejects an overlapping prompt (the caller keeps it queued
+        // and retries) so two pastes can't interleave before the first submits.
+        isSubmittingRemotePrompt = true
         send(paste)
-        let delay = Self.promptSubmitDelay(byteCount: paste.count)
+        let floorTicks = Self.promptSubmitFloorTicks(byteCount: paste.count)
+        let maxTicks = Self.promptSubmitMaxTicks(byteCount: paste.count)
         Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(for: delay)
-            } catch {
-                return // cancelled: don't submit an unsettled paste
+            guard let self else { return }
+            defer { self.isSubmittingRemotePrompt = false }
+            var lastGeneration = self.remoteContentGeneration
+            var quietTicks = 0
+            for tick in 0 ..< maxTicks {
+                do {
+                    try await Task.sleep(for: Self.promptSubmitPollInterval)
+                } catch {
+                    return // cancelled: don't submit an unsettled paste
+                }
+                guard self.terminal != nil else { return }
+                let generation = self.remoteContentGeneration
+                if generation != lastGeneration {
+                    lastGeneration = generation
+                    quietTicks = 0
+                } else {
+                    quietTicks += 1
+                }
+                // Submit once past the floor and terminal output has been quiet
+                // for the settle window; keep waiting while output still streams.
+                if tick + 1 >= floorTicks, quietTicks >= Self.promptSubmitSettleTicks {
+                    break
+                }
             }
-            guard let self, self.terminal != nil else { return }
+            guard self.terminal != nil else { return }
             self.send([0x0d])
         }
         return true
     }
 
-    /// Delay before submitting Enter so the Copilot TUI can commit the paste to
-    /// its input first. Scales modestly with paste size and is bounded.
-    nonisolated static func promptSubmitDelay(byteCount: Int) -> Duration {
-        let base = 150
-        let extra = min(max(0, byteCount - 1_024) / 32, 250)
-        return .milliseconds(base + extra)
+    /// How often to poll terminal-output activity while waiting to submit.
+    static let promptSubmitPollInterval: Duration = .milliseconds(30)
+    /// Consecutive quiet polls that let a submit fire once past the floor
+    /// (≈ `promptSubmitSettleTicks` × `promptSubmitPollInterval`).
+    static let promptSubmitSettleTicks = 3
+
+    /// Minimum wait before submitting, in poll ticks — long enough for the paste
+    /// to commit even under load (comfortably above the old fixed delay). Scales
+    /// with paste size (a single-threaded TUI ingests large pastes slower) and is
+    /// bounded. 30ms ticks: 10 (300ms) … 20 (600ms).
+    nonisolated static func promptSubmitFloorTicks(byteCount: Int) -> Int {
+        let base = 10
+        let extra = min(max(0, byteCount - 1_024) / 960, 10)
+        return base + extra
+    }
+
+    /// Upper bound on the wait, in poll ticks: the floor plus a bounded settle
+    /// extension so a continuously redrawing TUI still submits.
+    nonisolated static func promptSubmitMaxTicks(byteCount: Int) -> Int {
+        promptSubmitFloorTicks(byteCount: byteCount) + 17
     }
 
     /// The full remote-prompt byte sequence including the trailing submit CR.

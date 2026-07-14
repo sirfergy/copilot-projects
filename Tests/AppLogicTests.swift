@@ -55,17 +55,31 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("   \n"))
     }
 
-    func testPromptSubmitDelayScalesWithSizeAndIsBounded() {
-        // Small prompts get the base delay; large ones get more, but bounded.
-        XCTAssertEqual(ProjectsTerminalView.promptSubmitDelay(byteCount: 0), .milliseconds(150))
-        XCTAssertEqual(ProjectsTerminalView.promptSubmitDelay(byteCount: 1_024), .milliseconds(150))
+    func testPromptSubmitTimingScalesWithSizeAndIsBounded() {
+        // Small prompts get the base floor; large ones wait longer, but bounded.
+        XCTAssertEqual(ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 0), 10)
+        XCTAssertEqual(ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 1_024), 10)
         XCTAssertGreaterThan(
-            ProjectsTerminalView.promptSubmitDelay(byteCount: 8_192),
-            ProjectsTerminalView.promptSubmitDelay(byteCount: 1_024)
+            ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 8_192),
+            ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 1_024)
         )
         XCTAssertLessThanOrEqual(
-            ProjectsTerminalView.promptSubmitDelay(byteCount: 1_000_000),
-            .milliseconds(400)
+            ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 1_000_000),
+            20
+        )
+        // The floor must comfortably exceed the old 150ms fixed delay (5 ticks).
+        XCTAssertGreaterThan(ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 0), 5)
+        // The cap always leaves room for the settle extension past the floor.
+        for bytes in [0, 1_024, 8_192, 1_000_000] {
+            XCTAssertGreaterThan(
+                ProjectsTerminalView.promptSubmitMaxTicks(byteCount: bytes),
+                ProjectsTerminalView.promptSubmitFloorTicks(byteCount: bytes)
+            )
+        }
+        // A submit can fire at the floor when output is already quiet.
+        XCTAssertLessThan(
+            ProjectsTerminalView.promptSubmitSettleTicks,
+            ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 0)
         )
     }
 
