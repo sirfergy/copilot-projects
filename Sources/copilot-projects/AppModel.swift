@@ -1985,9 +1985,19 @@ final class AppModel: ObservableObject {
     /// Make the visible session's terminal the first responder. Used when the app
     /// is activated (clicked / ⌘-Tab'd back) so focus lands on the terminal rather
     /// than the sidebar project list.
-    func focusActiveTerminal() {
-        guard let view = activeController?.terminalView, let window = view.window else { return }
+    ///
+    /// Returns whether the terminal actually *ended up* focused in the key window,
+    /// which is the only reliable success signal: `makeFirstResponder` returns
+    /// true (and sets `firstResponder`) even on a window that is not yet key, so a
+    /// retry that trusted its return — or a bare `firstResponder === view` check —
+    /// would "succeed" before AppKit's key-window transition restores its saved
+    /// responder and then be silently reset. Callers that only need best-effort
+    /// focus can ignore the result; the notification-activation retry uses it.
+    @discardableResult
+    func focusActiveTerminal() -> Bool {
+        guard let view = activeController?.terminalView, let window = view.window else { return false }
         window.makeFirstResponder(view)
+        return window.isKeyWindow && window.firstResponder === view
     }
 
     private func updateDockBadge() {
