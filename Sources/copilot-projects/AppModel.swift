@@ -463,7 +463,8 @@ final class AppModel: ObservableObject {
     func controller(
         for sessionId: String,
         launchCopilotIfCreated: Bool = false,
-        copilotExecutable: String? = nil
+        copilotExecutable: String? = nil,
+        launchWithAllowAll: Bool = false
     ) -> TerminalController? {
         if let c = controllers[sessionId] { return c }
         guard let loc = locateIndex(sessionId) else { return nil }
@@ -494,7 +495,7 @@ final class AppModel: ObservableObject {
             dtachExecutable: dtach,
             dtachSocket: socket,
             copilotSessionId: (recordedCopilot?.isEmpty == false) ? recordedCopilot : nil,
-            copilotSessionAllowAll: resumeWithAllowAll,
+            copilotSessionAllowAll: resumeWithAllowAll || launchWithAllowAll,
             launchCopilotExecutable: launchCopilotIfCreated ? copilotExecutable : nil
         )
         c.onTitle = { [weak self] title in self?.updateTitle(sessionId: sessionId, title: title) }
@@ -700,13 +701,16 @@ final class AppModel: ObservableObject {
         }
 
         // Bring up the terminal with a one-shot Copilot launch on its fresh master.
+        // Remote (phone/web) sessions start in allow-all so they run unattended
+        // without tool-approval prompts nobody is at the Mac to answer.
         if let remoteSessionLauncher {
             remoteSessionLauncher(sessionId, copilotExecutable)
         } else {
             controller(
                 for: sessionId,
                 launchCopilotIfCreated: true,
-                copilotExecutable: copilotExecutable
+                copilotExecutable: copilotExecutable,
+                launchWithAllowAll: true
             )
         }
         refreshSelectedTranscriptController()

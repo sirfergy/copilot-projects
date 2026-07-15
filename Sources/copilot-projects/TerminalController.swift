@@ -259,7 +259,11 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
             return [shell, "-l", "-c", "\(resume); exec \(shellSingleQuote(shell)) -l"]
         }
         if let executable = launchCopilotExecutable, !executable.isEmpty {
-            return [shell, "-l", "-c", launchCommand(executable: executable, shell: shell)]
+            return [shell, "-l", "-c", launchCommand(
+                executable: executable,
+                shell: shell,
+                allowAll: copilotSessionAllowAll
+            )]
         }
         return [shell, "-l"]
     }
@@ -268,8 +272,12 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     /// shell. The executable is shell-single-quoted so spaces/apostrophes in the
     /// path can't break the command; a launch failure prints a message but still
     /// hands the tab a usable shell. Pure/static for command-building tests.
-    nonisolated static func launchCommand(executable: String, shell: String) -> String {
-        "\(shellSingleQuote(executable))"
+    nonisolated static func launchCommand(
+        executable: String,
+        shell: String,
+        allowAll: Bool = false
+    ) -> String {
+        "\(shellSingleQuote(executable))\(allowAll ? " --allow-all" : "")"
             + " || printf '\\n[Copilot Projects] could not launch Copilot\\n';"
             + " exec \(shellSingleQuote(shell)) -l"
     }

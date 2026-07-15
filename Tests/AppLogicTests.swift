@@ -2480,6 +2480,27 @@ final class AppLogicTests: XCTestCase {
                 + " || printf '\\n[Copilot Projects] could not launch Copilot\\n';"
                 + " exec '/bin/zsh' -l"
         )
+        // A remote (phone) session launches with allow-all so it runs unattended.
+        XCTAssertEqual(
+            TerminalController.launchCommand(
+                executable: executable, shell: shell, allowAll: true
+            ),
+            "'/opt/my copilot/copilot' --allow-all"
+                + " || printf '\\n[Copilot Projects] could not launch Copilot\\n';"
+                + " exec '/bin/zsh' -l"
+        )
+        XCTAssertEqual(
+            TerminalController.startupProgram(
+                shell: shell,
+                copilotSessionId: nil,
+                copilotSessionAllowAll: true,
+                launchCopilotExecutable: executable
+            ),
+            [shell, "-l", "-c",
+             TerminalController.launchCommand(
+                executable: executable, shell: shell, allowAll: true
+             )]
+        )
         // A recorded resume session ALWAYS wins over a one-shot launch executable.
         let sessionId = UUID().uuidString
         let resumeProgram = TerminalController.startupProgram(
