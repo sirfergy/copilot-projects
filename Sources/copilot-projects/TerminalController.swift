@@ -157,20 +157,14 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         let shellName = (shell as NSString).lastPathComponent
 
         var env = processEnv
-        // The Copilot CLI tags its process tree with per-session/loader env vars.
-        // If this app was launched from a copilot session (e.g. `copilot ... --resume`
-        // that ran `open`), they leak in and get inherited by every terminal — so a
-        // `copilot` started in a session believes it's already a managed child and
-        // its `/restart` defers to the launcher's (wrong, often gone) loader instead
-        // of re-spawning. Strip them so each session's copilot owns its own lifecycle.
-        for key in [
-            "COPILOT_LOADER_PID", "COPILOT_RUN_APP", "COPILOT_DETACHED_SESSION",
-            "COPILOT_DETACHED_PARENT_SESSION_ID", "COPILOT_DETACHED_PARENT_ENGAGEMENT_ID",
-            "COPILOT_AGENT_SESSION_ID", "COPILOT_CONNECTION_TOKEN", "COPILOT_SHUTDOWN_FLUSH",
-            "COPILOT_CLI", "COPILOT_CLI_BINARY_VERSION",
-        ] {
-            env.removeValue(forKey: key)
-        }
+        // The Copilot CLI tags its process tree with per-session/loader/supervisor
+        // env vars. If this app was launched from a copilot session (e.g.
+        // `copilot ... --resume` that ran `open`), they leak in and get inherited by
+        // every terminal — so a `copilot` started in a session believes it's a
+        // managed/supervised child: its `/restart` shuts down (COPILOT_SUPERVISED)
+        // or defers to the launcher's (wrong, often gone) loader instead of
+        // re-spawning. Strip them so each session's copilot owns its own lifecycle.
+        env = Self.sessionEnvironment(from: env)
         for (k, v) in extraEnvironment { env[k] = v }
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
@@ -238,6 +232,29 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
 
     nonisolated static func resumeCommand(sessionId: String, allowAll: Bool) -> String {
         "copilot \(allowAll ? "--allow-all " : "")--resume=\(sessionId)"
+    }
+
+    /// Copilot loader/supervisor env vars that leak in when this app was itself
+    /// launched from a Copilot session. They must be stripped from every spawned
+    /// session's environment: otherwise a `copilot` started inside one believes
+    /// it's a managed/supervised child, so `COPILOT_SUPERVISED` makes its
+    /// `/restart` shut down instead of re-spawn, and the loader vars make it defer
+    /// to a launcher that's usually gone.
+    nonisolated static let leakedCopilotEnvKeys: Set<String> = [
+        "COPILOT_LOADER_PID", "COPILOT_RUN_APP", "COPILOT_DETACHED_SESSION",
+        "COPILOT_DETACHED_PARENT_SESSION_ID", "COPILOT_DETACHED_PARENT_ENGAGEMENT_ID",
+        "COPILOT_AGENT_SESSION_ID", "COPILOT_CONNECTION_TOKEN", "COPILOT_SHUTDOWN_FLUSH",
+        "COPILOT_CLI", "COPILOT_CLI_BINARY_VERSION", "COPILOT_SUPERVISED",
+    ]
+
+    /// Returns `base` with the leaked Copilot loader/supervisor vars removed. Pure
+    /// so the stripping can be unit-tested without spawning a process.
+    nonisolated static func sessionEnvironment(
+        from base: [String: String]
+    ) -> [String: String] {
+        var env = base
+        for key in leakedCopilotEnvKeys { env.removeValue(forKey: key) }
+        return env
     }
 
     /// The dtach `-E` program: the argv run only when dtach creates a FRESH master.

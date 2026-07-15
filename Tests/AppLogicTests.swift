@@ -2514,6 +2514,28 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(joined.contains("my copilot/copilot"))
     }
 
+    func testSessionEnvironmentStripsLeakedCopilotVars() {
+        // When the app is launched from a Copilot session these leak into its
+        // environment; a spawned session's copilot must not inherit them or its
+        // /restart shuts down (COPILOT_SUPERVISED) / defers to a gone loader.
+        let base = [
+            "COPILOT_SUPERVISED": "1",
+            "COPILOT_LOADER_PID": "123",
+            "COPILOT_AGENT_SESSION_ID": "abc",
+            "COPILOT_CLI": "1",
+            "PATH": "/usr/bin",
+            "COPILOT_PROJECTS_SESSION": "keep-me",
+        ]
+        let cleaned = TerminalController.sessionEnvironment(from: base)
+        XCTAssertNil(cleaned["COPILOT_SUPERVISED"])
+        XCTAssertNil(cleaned["COPILOT_LOADER_PID"])
+        XCTAssertNil(cleaned["COPILOT_AGENT_SESSION_ID"])
+        XCTAssertNil(cleaned["COPILOT_CLI"])
+        // Non-leaked vars (the app's own IPC handshake, PATH) must survive.
+        XCTAssertEqual(cleaned["PATH"], "/usr/bin")
+        XCTAssertEqual(cleaned["COPILOT_PROJECTS_SESSION"], "keep-me")
+    }
+
     func testSessionCreationLedgerIdempotencyTombstoneAndPersistence() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
