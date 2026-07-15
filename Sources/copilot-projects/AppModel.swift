@@ -1972,6 +1972,22 @@ final class AppModel: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// Mark a session read on behalf of a remote client that is now viewing it (iOS
+    /// session screen on-screen). Clears the same flags local focus does — `hasUnread`
+    /// (mirrored to remotes as `unread`) and the Mac-local `finishedUnseen` dot — so a
+    /// read on the phone clears the indicator everywhere via the workspace-snapshot diff.
+    /// Unlike `focus`, it does NOT change the Mac's selection or activate the app: a
+    /// phone read must not yank the desktop UI. `hasUnread`/`finishedUnseen` are
+    /// transient (not persisted), so there's nothing to `save()`.
+    func markSessionRead(sessionId: String) {
+        guard let loc = locateIndex(sessionId) else { return }
+        guard projects[loc.p].sessions[loc.s].hasUnread
+            || projects[loc.p].sessions[loc.s].finishedUnseen else { return }
+        projects[loc.p].sessions[loc.s].hasUnread = false
+        projects[loc.p].sessions[loc.s].finishedUnseen = false
+        updateDockBadge()
+    }
+
     /// Clear the on-screen session's "finished" flag when the app is brought forward
     /// (you're now looking at it). Other tabs keep their flag until you switch to them.
     func markActiveSessionSeen() {

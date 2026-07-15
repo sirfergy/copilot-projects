@@ -580,6 +580,59 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testMarkSessionReadClearsUnreadWithoutMovingSelection() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let target = Session(title: "target", cwd: "/tmp")
+        let visible = Session(title: "visible", cwd: "/tmp")
+        // The project is selected on `visible`, so `target` completes while it is
+        // not the on-screen session and picks up unread/finished flags.
+        let project = Project(
+            name: "p",
+            cwd: "/tmp",
+            sessions: [target, visible],
+            selectedSessionId: visible.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+
+        let model = AppModel(
+            stateRepository: repository,
+            completionNotificationDelayNanoseconds: 10_000_000
+        )
+        model.setStatus(sessionId: target.id, status: .running, text: nil, timestamp: 100)
+        model.setStatus(
+            sessionId: target.id,
+            status: .idle,
+            text: nil,
+            timestamp: 111,
+            source: "session-idle",
+            notification: .completed
+        )
+        XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
+        XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
+
+        // A remote read (e.g. the iOS session screen appearing) clears the flags…
+        model.markSessionRead(sessionId: target.id)
+        XCTAssertFalse(model.projects[0].sessions[0].hasUnread)
+        XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
+
+        // …without moving the Mac's selection or touching the other session.
+        XCTAssertEqual(model.selectedProjectId, project.id)
+        XCTAssertEqual(model.projects[0].selectedSessionId, visible.id)
+
+        // Unknown ids are a no-op rather than a crash.
+        model.markSessionRead(sessionId: "does-not-exist")
+    }
+
+    @MainActor
     func testCompletionSignalsSurviveEitherTimestampArrivalOrder() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory

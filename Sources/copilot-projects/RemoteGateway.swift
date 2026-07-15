@@ -88,6 +88,10 @@ final class RemoteModelBridge: @unchecked Sendable {
         model?.sendRemoteScroll(sessionId: sessionId, delta: delta)
     }
 
+    func markRead(sessionId: String) {
+        model?.markSessionRead(sessionId: sessionId)
+    }
+
     nonisolated func transcriptRevision(sessionId: String) -> RemoteTranscriptRevision {
         TranscriptController.remoteRevision(sessionId: sessionId)
     }
@@ -805,6 +809,17 @@ private final class RemoteHTTPHandler:
         switch message.type {
         case "acquire":
             leases.acquire(sessionId: sessionId, clientId: clientId)
+            respond(context: context, method: .POST, status: .noContent,
+                    contentType: "text/plain", body: "")
+        case "mark-read":
+            // Read receipt from a remote client viewing the session. No lease
+            // required — a view-only client must be able to clear its unread dot.
+            // The workspace-snapshot diff propagates the cleared state to every
+            // client (and the Mac), so read state syncs across devices.
+            let bridge = self.bridge
+            Task { @MainActor in
+                bridge.markRead(sessionId: sessionId)
+            }
             respond(context: context, method: .POST, status: .noContent,
                     contentType: "text/plain", body: "")
         case "prompt":
