@@ -181,6 +181,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>NSMicrophoneUsageDescription</key><string>Copilot Projects needs microphone access so Copilot sessions running in its terminals can use voice input.</string>
 </dict>
 </plist>
 PLIST
@@ -218,11 +219,30 @@ else
   echo "==> signing with $CODESIGN_IDENTITY"
   SIGN_ARGS=(--force --options runtime --timestamp --sign "$CODESIGN_IDENTITY")
 fi
+
+# Entitlements for the main app: microphone device access. Required under the
+# hardened runtime (--options runtime) in addition to NSMicrophoneUsageDescription,
+# so Copilot sessions spawned in the app's terminals — whose TCC mic prompts are
+# attributed to this responsible app — can use the microphone. Written outside the
+# .app bundle: --entitlements embeds it into the signature, so it must NOT be a
+# sealed bundle resource (removing it post-sign would invalidate the signature).
+ENTITLEMENTS="$ROOT/dist/copilot-projects.entitlements"
+cat > "$ENTITLEMENTS" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.device.audio-input</key><true/>
+</dict>
+</plist>
+PLIST
+
 if [ -x "$CONTENTS/Helpers/dtach" ]; then
   codesign "${SIGN_ARGS[@]}" "$CONTENTS/Helpers/dtach"
 fi
 codesign "${SIGN_ARGS[@]}" "$HELPER_APP"
-codesign "${SIGN_ARGS[@]}" "$APP_DIR"
+codesign "${SIGN_ARGS[@]}" --entitlements "$ENTITLEMENTS" "$APP_DIR"
+rm -f "$ENTITLEMENTS"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 echo "App path:"

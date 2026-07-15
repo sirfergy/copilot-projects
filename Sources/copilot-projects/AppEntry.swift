@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AVFoundation
 import CopilotProjectsCore
 import CopilotProjectsProtocol
 
@@ -125,6 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.startLivenessReconciler()
         model.startAgentActivityTracking()
         model.startRemoteAccessIfEnabled()
+        requestMicrophoneAccessIfNeeded()
         let env = ProcessInfo.processInfo.environment
         if Env.shouldInstallGlobalIntegration(env) {
             model.installCLISymlinkIfPossible()
@@ -326,6 +328,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let s = event.charactersIgnoringModifiers, s.count == 1,
               let n = Int(s), (1...9).contains(n) else { return nil }
         return n
+    }
+
+    /// Prompt for microphone access once, up front. Copilot sessions run as child
+    /// processes of this app, so macOS attributes their mic TCC prompt to this
+    /// responsible app; granting it here (rather than mid-session) means a session's
+    /// voice input isn't silently denied before the app has ever been authorized.
+    /// Only triggers the system prompt when the status is still undetermined.
+    private func requestMicrophoneAccessIfNeeded() {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined else {
+            return
+        }
+        AVCaptureDevice.requestAccess(for: .audio) { _ in }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
