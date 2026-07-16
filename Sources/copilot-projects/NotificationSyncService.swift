@@ -248,7 +248,9 @@ final class RoutedNotificationPoster: NotificationPosting {
     }
 
     func post(_ event: NotificationEvent) {
-        native.post(event)
+        if !event.isTargetVisible {
+            native.post(event)
+        }
         sync.post(event, sendRemote: !isDesktopRecentlyActive())
     }
 }
