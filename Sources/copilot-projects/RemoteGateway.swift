@@ -825,7 +825,7 @@ private final class RemoteHTTPHandler:
         case "prompt":
             guard let value = message.data,
                   value.utf8.count <= 8_192,
-                  ProjectsTerminalView.remotePromptBytes(value) != nil else {
+                  ProjectsTerminalView.remotePromptPasteBytes(value) != nil else {
                 respond(context: context, method: .POST, status: .badRequest,
                         contentType: "text/plain", body: "Invalid prompt")
                 return

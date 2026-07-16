@@ -45,8 +45,8 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             return false
         }
         // Deliver the bracketed paste, then submit Enter. The Copilot TUI commits
-        // pasted text to its input asynchronously, so a carriage return sent too
-        // soon fires before the text lands and leaves the prompt unsubmitted.
+        // pasted text to its input asynchronously, so Enter sent too soon fires
+        // before the text lands and leaves the prompt unsubmitted.
         // There is no commit acknowledgement, so we wait a floor long enough for
         // the paste to commit, and only *extend* past it (never shorten below it)
         // while terminal output is still streaming — a slow/loaded commit keeps
@@ -82,8 +82,10 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                     break
                 }
             }
-            guard self.terminal != nil else { return }
-            self.send([0x0d])
+            guard let terminal = self.terminal else { return }
+            self.send(Self.remoteEnterBytes(
+                keyboardEnhancementFlags: terminal.keyboardEnhancementFlags
+            ))
         }
         return true
     }
@@ -110,16 +112,18 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         promptSubmitFloorTicks(byteCount: byteCount) + 17
     }
 
-    /// The full remote-prompt byte sequence including the trailing submit CR.
-    /// Kept as the validation entry point; delivery splits the CR off so it can
-    /// be sent after the paste is committed (see `sendRemotePrompt`).
-    nonisolated static func remotePromptBytes(_ value: String) -> [UInt8]? {
-        guard let paste = remotePromptPasteBytes(value) else { return nil }
-        return paste + [0x0d]
+    /// An unmodified Enter press encoded the same way SwiftTerm does: report-all
+    /// Kitty mode requires CSI-u, while every other negotiated mode uses CR.
+    nonisolated static func remoteEnterBytes(
+        keyboardEnhancementFlags: KittyKeyboardFlags
+    ) -> [UInt8] {
+        keyboardEnhancementFlags.contains(.reportAllKeys)
+            ? Array("\u{1b}[13u".utf8)
+            : [0x0d]
     }
 
-    /// The bracketed-paste byte sequence for a remote prompt, without the
-    /// submitting carriage return.
+    /// The bracketed-paste byte sequence for a remote prompt. Enter is encoded
+    /// separately after the paste settles so active keyboard protocols are respected.
     nonisolated static func remotePromptPasteBytes(_ value: String) -> [UInt8]? {
         let normalized = value
             .replacingOccurrences(of: "\r\n", with: "\n")

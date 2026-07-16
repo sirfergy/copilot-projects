@@ -963,7 +963,7 @@ final class AppModel: ObservableObject {
     }
 
     func sendRemotePrompt(sessionId: String, value: String) -> RemotePromptResult {
-        guard ProjectsTerminalView.remotePromptBytes(value) != nil,
+        guard ProjectsTerminalView.remotePromptPasteBytes(value) != nil,
               let location = locateIndex(sessionId) else { return .invalid }
         let session = projects[location.p].sessions[location.s]
         let liveSessions = remotePromptLiveSessions?(agentProcessNames)

@@ -23,36 +23,40 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(TerminalController.classifyFooter("ordinary output"), .unknown)
     }
 
-    func testRemotePromptBytesAreSanitizedAndSubmittedAtomically() throws {
-        let bytes = try XCTUnwrap(
-            ProjectsTerminalView.remotePromptBytes("first line\nsecond line")
+    func testRemotePromptPasteBytesAreSanitized() throws {
+        let paste = try XCTUnwrap(
+            ProjectsTerminalView.remotePromptPasteBytes("first line\nsecond line")
         )
-        XCTAssertEqual(Array(bytes.prefix(2)), [0x1b, 0x1b])
-        XCTAssertTrue(bytes.starts(with: [0x1b, 0x1b] + Array("\u{1b}[200~".utf8)))
-        XCTAssertEqual(bytes.last, 0x0d)
+        XCTAssertEqual(Array(paste.prefix(2)), [0x1b, 0x1b])
+        XCTAssertTrue(paste.starts(with: [0x1b, 0x1b] + Array("\u{1b}[200~".utf8)))
         XCTAssertEqual(
-            String(decoding: bytes, as: UTF8.self),
-            "\u{1b}\u{1b}\u{1b}[200~first line\nsecond line\u{1b}[201~\r"
+            String(decoding: paste, as: UTF8.self),
+            "\u{1b}\u{1b}\u{1b}[200~first line\nsecond line\u{1b}[201~"
         )
-        XCTAssertNil(ProjectsTerminalView.remotePromptBytes("unsafe\u{1b}[201~input"))
-        XCTAssertNil(ProjectsTerminalView.remotePromptBytes("unsafe\u{009b}31m"))
-        XCTAssertNil(ProjectsTerminalView.remotePromptBytes("unsafe\u{0}input"))
-        XCTAssertNil(ProjectsTerminalView.remotePromptBytes("   \n"))
+        XCTAssertFalse(paste.contains(0x0d))
+        XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("unsafe\u{1b}[201~input"))
+        XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("unsafe\u{009b}31m"))
+        XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("unsafe\u{0}input"))
+        XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("   \n"))
     }
 
-    func testRemotePromptPasteBytesExcludeSubmitCarriageReturn() throws {
-        let paste = try XCTUnwrap(
-            ProjectsTerminalView.remotePromptPasteBytes("hello")
-        )
-        // The paste carries no submit CR; the Enter is delivered separately after
-        // the TUI commits the paste.
-        XCTAssertNotEqual(paste.last, 0x0d)
-        XCTAssertFalse(paste.contains(0x0d))
+    func testRemoteEnterBytesHonorKittyReportAllKeys() {
         XCTAssertEqual(
-            ProjectsTerminalView.remotePromptBytes("hello"),
-            paste + [0x0d]
+            ProjectsTerminalView.remoteEnterBytes(keyboardEnhancementFlags: []),
+            [0x0d]
         )
-        XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("   \n"))
+        XCTAssertEqual(
+            ProjectsTerminalView.remoteEnterBytes(
+                keyboardEnhancementFlags: [.disambiguate, .reportEvents]
+            ),
+            [0x0d]
+        )
+        XCTAssertEqual(
+            ProjectsTerminalView.remoteEnterBytes(
+                keyboardEnhancementFlags: [.reportAllKeys, .reportEvents, .reportText]
+            ),
+            Array("\u{1b}[13u".utf8)
+        )
     }
 
     func testPromptSubmitTimingScalesWithSizeAndIsBounded() {
