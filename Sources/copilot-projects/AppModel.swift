@@ -1846,11 +1846,11 @@ final class AppModel: ObservableObject {
         body: String?
     ) {
         var subtitle: String?
+        var isTargetVisible = false
         if let loc = locateIndex(sessionId) {
-            let visible = NSApp.isActive
-                && selectedProjectId == projectId
-                && projects[loc.p].selectedSessionId == sessionId
-            if !visible {
+            isTargetVisible = projects[loc.p].id == projectId
+                && isVisible(projectIndex: loc.p, sessionIndex: loc.s)
+            if !isTargetVisible {
                 projects[loc.p].sessions[loc.s].hasUnread = true
             }
             subtitle = Self.notificationSubtitle(
@@ -1864,7 +1864,8 @@ final class AppModel: ObservableObject {
             subtitle: subtitle,
             body: body,
             projectId: projectId,
-            sessionId: sessionId
+            sessionId: sessionId,
+            isTargetVisible: isTargetVisible
         ))
         updateDockBadge()
     }

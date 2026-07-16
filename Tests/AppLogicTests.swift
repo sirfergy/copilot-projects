@@ -783,6 +783,58 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testPromptNotificationsTrackWhetherTargetTabIsVisible() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(title: "visible", cwd: "/tmp")
+        let project = Project(
+            name: "selected",
+            cwd: "/tmp",
+            sessions: [session],
+            selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+
+        var appIsActive = true
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { appIsActive }
+        )
+        let notifications = NotificationSpy()
+        model.attach(notifications: notifications)
+
+        model.setStatus(
+            sessionId: session.id,
+            status: .waiting,
+            text: nil,
+            timestamp: 100,
+            notification: .permission
+        )
+        XCTAssertTrue(try XCTUnwrap(notifications.events.first).isTargetVisible)
+        XCTAssertFalse(model.projects[0].sessions[0].hasUnread)
+
+        appIsActive = false
+        model.setStatus(
+            sessionId: session.id,
+            status: .waiting,
+            text: nil,
+            timestamp: 101,
+            notification: .elicitation
+        )
+        XCTAssertFalse(try XCTUnwrap(notifications.events.last).isTargetVisible)
+        XCTAssertEqual(notifications.events.count, 2)
+        XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
+    }
+
+    @MainActor
     private final class NotificationSpy: NotificationPosting {
         struct Call: Equatable {
             let title: String
@@ -885,7 +937,7 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
-    func testRoutedNotificationsSuppressRemoteDeliveryWhileDesktopIsActive() async throws {
+    func testRoutedNotificationsSuppressVisibleNativeDeliveryButPreserveRemoteDelivery() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -934,10 +986,11 @@ final class AppLogicTests: XCTestCase {
             subtitle: "Project · Session",
             body: nil,
             projectId: "project",
-            sessionId: "session"
+            sessionId: "session",
+            isTargetVisible: true
         ))
         try await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(native.events.count, 1)
+        XCTAssertTrue(native.events.isEmpty)
         let suppressedWebPayload = await webSender.firstPayload()
         let suppressedAPNsPayloads = await apnsSender.sentPayloads()
         XCTAssertNil(suppressedWebPayload)
@@ -950,7 +1003,8 @@ final class AppLogicTests: XCTestCase {
             subtitle: "Project · Session",
             body: nil,
             projectId: "project",
-            sessionId: "session"
+            sessionId: "session",
+            isTargetVisible: true
         ))
         for _ in 0 ..< 25 {
             if await webSender.firstPayload() != nil,
@@ -959,7 +1013,7 @@ final class AppLogicTests: XCTestCase {
             }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
-        XCTAssertEqual(native.events.count, 2)
+        XCTAssertTrue(native.events.isEmpty)
         let firstWebPayload = await webSender.firstPayload()
         let webPayload = try XCTUnwrap(firstWebPayload)
         let sentAPNsPayloads = await apnsSender.sentPayloads()
@@ -970,6 +1024,22 @@ final class AppLogicTests: XCTestCase {
             .show
         )
         XCTAssertEqual(sentAPNsPayloads.map(\.action), [.show])
+
+        active = true
+        router.post(NotificationEvent(
+            kind: .elicitation,
+            title: "Question",
+            subtitle: "Project · Other session",
+            body: nil,
+            projectId: "project",
+            sessionId: "other-session"
+        ))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(native.events.map(\.kind), [.elicitation])
+        let webPayloads = await webSender.sentPayloads()
+        let apnsPayloads = await apnsSender.sentPayloads()
+        XCTAssertEqual(webPayloads.count, 1)
+        XCTAssertEqual(apnsPayloads.count, 1)
     }
 
     func testNotificationDismissalFansOutOnceAndExcludesOriginDevice() async throws {

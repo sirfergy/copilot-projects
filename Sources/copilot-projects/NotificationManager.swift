@@ -21,6 +21,7 @@ struct NotificationEvent: Codable, Equatable, Sendable {
     let body: String?
     let projectId: String?
     let sessionId: String?
+    let isTargetVisible: Bool
     let sentAt: Date
 
     init(
@@ -31,6 +32,7 @@ struct NotificationEvent: Codable, Equatable, Sendable {
         body: String?,
         projectId: String?,
         sessionId: String?,
+        isTargetVisible: Bool = false,
         sentAt: Date = Date()
     ) {
         self.id = id
@@ -40,6 +42,7 @@ struct NotificationEvent: Codable, Equatable, Sendable {
         self.body = body
         self.projectId = projectId
         self.sessionId = sessionId
+        self.isTargetVisible = isTargetVisible
         self.sentAt = sentAt
     }
 
