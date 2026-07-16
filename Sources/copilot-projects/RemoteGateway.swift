@@ -125,14 +125,39 @@ final class RemoteWriterLeases: @unchecked Sendable {
         let expiresAt: Date
     }
 
+    private struct PromptRequestKey: Hashable {
+        let sessionId: String
+        let clientId: String
+        let requestId: String
+    }
+
+    private struct AcceptedPromptRequest {
+        var expiresAt: Date
+    }
+
     // Real sessions number in the dozens; the cap only bounds memory against a
     // buggy/hostile authenticated client POSTing many distinct session ids.
     private static let maxHolders = 512
     private static let promptSubmissionTimeout: TimeInterval = 5
+    private static let defaultPromptRequestTTL: TimeInterval = 24 * 60 * 60
+    private static let defaultMaxAcceptedPromptRequests = 4_096
 
     private let lock = NSLock()
+    private let promptRequestTTL: TimeInterval
+    private let maxAcceptedPromptRequests: Int
     private var holders: [String: String] = [:]
     private var promptSubmissions: [String: PromptSubmission] = [:]
+    private var acceptedPromptRequests: [PromptRequestKey: AcceptedPromptRequest] = [:]
+
+    init(
+        promptRequestTTL: TimeInterval =
+            RemoteWriterLeases.defaultPromptRequestTTL,
+        maxAcceptedPromptRequests: Int =
+            RemoteWriterLeases.defaultMaxAcceptedPromptRequests
+    ) {
+        self.promptRequestTTL = max(1, promptRequestTTL)
+        self.maxAcceptedPromptRequests = max(1, maxAcceptedPromptRequests)
+    }
 
     func acquire(sessionId: String, clientId: String) {
         lock.lock()
@@ -164,12 +189,25 @@ final class RemoteWriterLeases: @unchecked Sendable {
     func submitPrompt(
         sessionId: String,
         clientId: String,
+        requestId: String? = nil,
         now: Date = Date(),
         perform: () -> RemotePromptResult
     ) -> RemotePromptResult {
         lock.lock()
         defer { lock.unlock() }
         guard holders[sessionId] == clientId else { return .forbidden }
+        let requestKey = requestId.map {
+            PromptRequestKey(sessionId: sessionId, clientId: clientId, requestId: $0)
+        }
+        if let requestKey,
+           let accepted = acceptedPromptRequests[requestKey],
+           accepted.expiresAt > now {
+            acceptedPromptRequests[requestKey] = AcceptedPromptRequest(
+                expiresAt: now.addingTimeInterval(promptRequestTTL)
+            )
+            return .sent
+        }
+        pruneAcceptedPromptRequests(now: now, reservingEntry: requestKey != nil)
         if let submission = promptSubmissions[sessionId] {
             guard submission.expiresAt <= now else { return .busy }
             promptSubmissions[sessionId] = nil
@@ -180,8 +218,29 @@ final class RemoteWriterLeases: @unchecked Sendable {
                 submittedAt: now,
                 expiresAt: now.addingTimeInterval(Self.promptSubmissionTimeout)
             )
+            if let requestKey {
+                acceptedPromptRequests[requestKey] = AcceptedPromptRequest(
+                    expiresAt: now.addingTimeInterval(promptRequestTTL)
+                )
+            }
         }
         return result
+    }
+
+    private func pruneAcceptedPromptRequests(now: Date, reservingEntry: Bool) {
+        acceptedPromptRequests = acceptedPromptRequests.filter { $0.value.expiresAt > now }
+        guard reservingEntry,
+              acceptedPromptRequests.count >= maxAcceptedPromptRequests else {
+            return
+        }
+        let removeCount =
+            acceptedPromptRequests.count - maxAcceptedPromptRequests + 1
+        let oldest = acceptedPromptRequests
+            .sorted { $0.value.expiresAt < $1.value.expiresAt }
+            .prefix(removeCount)
+        for entry in oldest {
+            acceptedPromptRequests[entry.key] = nil
+        }
     }
 
     func observePromptUnavailable(sessionId: String, observedAt: Date = Date()) {
@@ -824,6 +883,11 @@ private final class RemoteHTTPHandler:
                     contentType: "text/plain", body: "")
         case "prompt":
             guard let value = message.data,
+                  message.requestId == nil
+                    || (
+                        message.requestId?.isEmpty == false
+                            && (message.requestId?.utf8.count ?? 0) <= 64
+                    ),
                   value.utf8.count <= 8_192,
                   ProjectsTerminalView.remotePromptBytes(value) != nil else {
                 respond(context: context, method: .POST, status: .badRequest,
@@ -840,7 +904,8 @@ private final class RemoteHTTPHandler:
             Task { @MainActor in
                 let result = leases.submitPrompt(
                     sessionId: sessionId,
-                    clientId: clientId
+                    clientId: clientId,
+                    requestId: message.requestId
                 ) {
                     self.bridge.sendPrompt(sessionId: sessionId, value: value)
                 }

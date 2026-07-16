@@ -896,7 +896,8 @@ final class AppModel: ObservableObject {
                     }
                 )
             },
-            selectedProjectId: selectedProjectId
+            selectedProjectId: selectedProjectId,
+            promptRequestIdempotency: true
         )
     }
 

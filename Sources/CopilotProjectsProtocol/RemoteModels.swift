@@ -3,10 +3,16 @@ import Foundation
 public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
     public let projects: [RemoteProjectSnapshot]
     public let selectedProjectId: String?
+    public let promptRequestIdempotency: Bool?
 
-    public init(projects: [RemoteProjectSnapshot], selectedProjectId: String?) {
+    public init(
+        projects: [RemoteProjectSnapshot],
+        selectedProjectId: String?,
+        promptRequestIdempotency: Bool? = nil
+    ) {
         self.projects = projects
         self.selectedProjectId = selectedProjectId
+        self.promptRequestIdempotency = promptRequestIdempotency
     }
 }
 public struct RemoteProjectSnapshot: Codable, Equatable, Sendable {
@@ -288,6 +294,7 @@ public struct RemoteClientMessage: Codable, Equatable, Sendable {
     public let type: String
     public let clientId: String?
     public let sessionId: String?
+    public let requestId: String?
     public let data: String?
     public let delta: Int?
 
@@ -295,12 +302,14 @@ public struct RemoteClientMessage: Codable, Equatable, Sendable {
         type: String,
         clientId: String? = nil,
         sessionId: String? = nil,
+        requestId: String? = nil,
         data: String? = nil,
         delta: Int? = nil
     ) {
         self.type = type
         self.clientId = clientId
         self.sessionId = sessionId
+        self.requestId = requestId
         self.data = data
         self.delta = delta
     }

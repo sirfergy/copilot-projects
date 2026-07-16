@@ -4378,7 +4378,8 @@ final class AppLogicTests: XCTestCase {
                     sessions: []
                 ),
             ],
-            selectedProjectId: selected.id
+            selectedProjectId: selected.id,
+            promptRequestIdempotency: true
         ))
     }
 
@@ -4491,6 +4492,21 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertEqual(decoded.type, "scroll")
         XCTAssertEqual(decoded.delta, -4)
+    }
+
+    func testRemotePromptMessageRoundTripsRequestId() throws {
+        let message = RemoteClientMessage(
+            type: "prompt",
+            clientId: "phone",
+            sessionId: "session",
+            requestId: "request-1",
+            data: "hello"
+        )
+        let decoded = try JSONDecoder().decode(
+            RemoteClientMessage.self,
+            from: JSONEncoder().encode(message)
+        )
+        XCTAssertEqual(decoded.requestId, "request-1")
     }
 
     func testRemoteSessionSnapshotDecodesWithoutPromptableField() throws {
@@ -4973,6 +4989,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains("rel = 'noopener noreferrer'"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("push/subscribe"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("type: 'prompt'"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("crypto.randomUUID()"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("requestId: entry.requestId"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "transcript?s=${encodeURIComponent(sessionId)}"
         ))
@@ -5115,6 +5133,133 @@ final class AppLogicTests: XCTestCase {
             .sent
         )
         XCTAssertEqual(sentValues, ["first", "after-transition", "after-timeout"])
+    }
+
+    func testRemoteWriterLeaseReplaysAcceptedPromptIdempotently() {
+        let leases = RemoteWriterLeases(promptRequestTTL: 5)
+        leases.acquire(sessionId: "session", clientId: "phone")
+        let startedAt = Date(timeIntervalSince1970: 100)
+        var sentValues: [String] = []
+
+        for offset in [0.0, 4.0, 8.0] {
+            XCTAssertEqual(
+                leases.submitPrompt(
+                    sessionId: "session",
+                    clientId: "phone",
+                    requestId: "request-1",
+                    now: startedAt.addingTimeInterval(offset)
+                ) {
+                    sentValues.append("sent")
+                    return .sent
+                },
+                .sent
+            )
+        }
+        XCTAssertEqual(sentValues, ["sent"])
+    }
+
+    func testRemoteWriterLeaseRecordsOnlyAcceptedPromptIds() {
+        let leases = RemoteWriterLeases()
+        leases.acquire(sessionId: "session", clientId: "phone")
+        let startedAt = Date(timeIntervalSince1970: 100)
+        var attempts = 0
+
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                requestId: "request-1",
+                now: startedAt
+            ) {
+                attempts += 1
+                return .noLiveCopilot
+            },
+            .noLiveCopilot
+        )
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                requestId: "request-1",
+                now: startedAt
+            ) {
+                attempts += 1
+                return .sent
+            },
+            .sent
+        )
+        XCTAssertEqual(attempts, 2)
+    }
+
+    func testRemoteWriterLeaseScopesPromptIdsByClient() {
+        let leases = RemoteWriterLeases()
+        let startedAt = Date(timeIntervalSince1970: 100)
+        var sentValues: [String] = []
+
+        leases.acquire(sessionId: "session", clientId: "phone")
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "phone",
+                requestId: "request-1",
+                now: startedAt
+            ) {
+                sentValues.append("phone")
+                return .sent
+            },
+            .sent
+        )
+        leases.acquire(sessionId: "session", clientId: "laptop")
+        XCTAssertEqual(
+            leases.submitPrompt(
+                sessionId: "session",
+                clientId: "laptop",
+                requestId: "request-1",
+                now: startedAt.addingTimeInterval(6)
+            ) {
+                sentValues.append("laptop")
+                return .sent
+            },
+            .sent
+        )
+        XCTAssertEqual(sentValues, ["phone", "laptop"])
+    }
+
+    func testRemoteWriterLeaseEvictsOldestInactivePromptId() {
+        let leases = RemoteWriterLeases(
+            promptRequestTTL: 100,
+            maxAcceptedPromptRequests: 2
+        )
+        leases.acquire(sessionId: "session", clientId: "phone")
+        let startedAt = Date(timeIntervalSince1970: 100)
+        var sentValues: [String] = []
+
+        func submit(_ requestId: String, at offset: TimeInterval) {
+            XCTAssertEqual(
+                leases.submitPrompt(
+                    sessionId: "session",
+                    clientId: "phone",
+                    requestId: requestId,
+                    now: startedAt.addingTimeInterval(offset)
+                ) {
+                    sentValues.append(requestId)
+                    return .sent
+                },
+                .sent
+            )
+        }
+
+        submit("request-1", at: 0)
+        submit("request-2", at: 6)
+        submit("request-1", at: 10)
+        submit("request-3", at: 12)
+        submit("request-1", at: 13)
+        submit("request-2", at: 18)
+
+        XCTAssertEqual(
+            sentValues,
+            ["request-1", "request-2", "request-3", "request-2"]
+        )
     }
 
     func testCLIParsesStatusNotificationFlagIntoControlRequest() throws {

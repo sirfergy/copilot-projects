@@ -693,13 +693,13 @@ enum RemoteWebAssets {
       const q = selected ? sessionQueue(selected) : [];
       promptQueue.replaceChildren();
       promptQueue.hidden = q.length === 0;
-      q.forEach((message, index) => {
+      q.forEach((entry, index) => {
         const item = document.createElement('div');
         item.className = 'queue-item';
         item.setAttribute('role', 'listitem');
         const text = document.createElement('span');
         text.className = 'queue-text';
-        text.textContent = message;
+        text.textContent = entry.value;
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'queue-remove';
@@ -725,7 +725,7 @@ enum RemoteWebAssets {
         updatePromptState(`Queue is full (${QUEUE_CAP} max)`);
         return false;
       }
-      q.push(value);
+      q.push({ requestId: crypto.randomUUID(), value });
       renderQueue();
       updatePromptState();
       return true;
@@ -744,15 +744,20 @@ enum RemoteWebAssets {
           && !promptSending && !awaitingPromptStart)) return;
       flushingQueue = true;
       try {
-        const value = q[0];
+        const entry = q[0];
         const submittedGeneration = selectionGeneration;
         promptSending = true;
         promptStatus.textContent = 'Sending…';
-        const response = await control({ type: 'prompt', sessionId: id, data: value });
+        const response = await control({
+          type: 'prompt',
+          sessionId: id,
+          requestId: entry.requestId,
+          data: entry.value
+        });
         promptSending = false;
         if (selected !== id || selectionGeneration !== submittedGeneration) return;
         if (response?.ok) {
-          if (q[0] === value) q.shift();
+          if (q[0] === entry) q.shift();
           renderQueue();
           awaitingPromptStart = true;
           clearTimeout(promptFallbackTimer);
