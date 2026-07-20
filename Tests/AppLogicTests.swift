@@ -3354,6 +3354,113 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteGatewayMoveSessionMapsOutcomesWithoutLease() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let moved = Session(id: "session-move", title: "Move", cwd: root.path)
+        let source = Project(
+            id: "source", name: "Source", cwd: root.path, sessions: [moved])
+        let target = Project(
+            id: "target", name: "Target", cwd: root.path, sessions: [])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [source, target], selectedProjectId: source.id))
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root
+        )
+
+        let config = CloudflareAccessConfig(
+            teamDomain: "team.cloudflareaccess.com",
+            audTag: "expected-aud",
+            allowedEmail: "user@example.com"
+        )
+        let verifier = CloudflareAccessVerifier(
+            config: config, now: { Date() }, fetch: { _ in nil })
+        let (privateKey, publicKey) = try makeRSAKeyPair()
+        verifier.installKey(kid: "test-key", key: publicKey)
+        let token = try accessToken(
+            kid: "test-key",
+            claims: [
+                "iss": config.issuer,
+                "aud": config.audTag,
+                "email": config.allowedEmail,
+                "exp": Date().timeIntervalSince1970 + 3_600,
+            ],
+            privateKey: privateKey
+        )
+        let gateway = RemoteGateway()
+        let port = try gateway.start(
+            bridge: RemoteModelBridge(model: model),
+            expectedHost: "127.0.0.1",
+            expectedOrigin: "https://projects.example.com",
+            verifier: verifier,
+            port: 0
+        )
+        let origin = "https://projects.example.com"
+
+        func moveBody(sessionId: String, targetProjectId: String?) throws -> Data {
+            try JSONEncoder().encode(RemoteClientMessage(
+                type: "move-session",
+                clientId: "phone",
+                sessionId: sessionId,
+                data: targetProjectId
+            ))
+        }
+
+        do {
+            let movedStatus = try await remoteHTTPStatus(
+                port: port, path: "/control", method: "POST",
+                token: token, origin: origin,
+                body: try moveBody(sessionId: moved.id, targetProjectId: target.id))
+            XCTAssertEqual(movedStatus, 204)
+            XCTAssertTrue(model.project(source.id)?.sessions.isEmpty == true)
+            XCTAssertEqual(model.project(target.id)?.sessions.map(\.id), [moved.id])
+
+            let replayStatus = try await remoteHTTPStatus(
+                port: port, path: "/control", method: "POST",
+                token: token, origin: origin,
+                body: try moveBody(sessionId: moved.id, targetProjectId: target.id))
+            XCTAssertEqual(replayStatus, 204)
+
+            let missingDataStatus = try await remoteHTTPStatus(
+                port: port, path: "/control", method: "POST",
+                token: token, origin: origin,
+                body: try moveBody(sessionId: moved.id, targetProjectId: nil))
+            XCTAssertEqual(missingDataStatus, 400)
+
+            let malformedDataStatus = try await remoteHTTPStatus(
+                port: port, path: "/control", method: "POST",
+                token: token, origin: origin,
+                body: try moveBody(
+                    sessionId: moved.id,
+                    targetProjectId: String(repeating: "p", count: 65)))
+            XCTAssertEqual(malformedDataStatus, 400)
+
+            let missingSessionStatus = try await remoteHTTPStatus(
+                port: port, path: "/control", method: "POST",
+                token: token, origin: origin,
+                body: try moveBody(sessionId: "missing", targetProjectId: target.id))
+            XCTAssertEqual(missingSessionStatus, 404)
+
+            let missingProjectStatus = try await remoteHTTPStatus(
+                port: port, path: "/control", method: "POST",
+                token: token, origin: origin,
+                body: try moveBody(sessionId: moved.id, targetProjectId: "missing"))
+            XCTAssertEqual(missingProjectStatus, 404)
+        } catch {
+            await gateway.stop()
+            throw error
+        }
+        await gateway.stop()
+    }
+
+    @MainActor
     func testRemoteGatewayAnswerUserInputRequiresLeaseAndReportsStatuses() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
