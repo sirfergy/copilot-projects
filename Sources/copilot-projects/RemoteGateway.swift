@@ -96,6 +96,16 @@ final class RemoteModelBridge: @unchecked Sendable {
         model?.closeRemoteSession(sessionId: sessionId) ?? false
     }
 
+    func moveSession(
+        sessionId: String,
+        toProjectId targetProjectId: String
+    ) -> RemoteSessionMoveResult {
+        model?.moveRemoteSession(
+            sessionId: sessionId,
+            toProjectId: targetProjectId
+        ) ?? .missing
+    }
+
     nonisolated func transcriptRevision(sessionId: String) -> RemoteTranscriptRevision {
         TranscriptController.remoteRevision(sessionId: sessionId)
     }
@@ -861,6 +871,37 @@ private final class RemoteHTTPHandler:
                         response = (.notFound, "Session not found")
                     case .none:
                         response = (.forbidden, "view only")
+                    }
+                    self.respond(
+                        channel: channel,
+                        method: .POST,
+                        status: response.0,
+                        contentType: "text/plain",
+                        body: Data(response.1.utf8)
+                    )
+                }
+            }
+        case "move-session":
+            guard let targetProjectId = message.data,
+                  !targetProjectId.isEmpty,
+                  targetProjectId.utf8.count <= 64 else {
+                respond(context: context, method: .POST, status: .badRequest,
+                        contentType: "text/plain", body: "Invalid project")
+                return
+            }
+            let channel = context.channel
+            Task { @MainActor in
+                let result = self.bridge.moveSession(
+                    sessionId: sessionId,
+                    toProjectId: targetProjectId
+                )
+                channel.eventLoop.execute {
+                    let response: (HTTPResponseStatus, String)
+                    switch result {
+                    case .moved, .unchanged:
+                        response = (.noContent, "")
+                    case .missing:
+                        response = (.notFound, "Session or project not found")
                     }
                     self.respond(
                         channel: channel,

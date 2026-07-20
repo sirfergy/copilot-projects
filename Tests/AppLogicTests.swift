@@ -277,6 +277,70 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(model.projects[0].selectedSessionId)
     }
 
+    @MainActor
+    func testRemoteMoveSessionPreservesTargetSelectionAndIsIdempotent() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let moved = Session(title: "move", cwd: root.path)
+        let sourceFallback = Session(title: "source fallback", cwd: root.path)
+        let targetSelected = Session(title: "target selected", cwd: root.path)
+        let source = Project(
+            name: "source",
+            cwd: root.path,
+            sessions: [moved, sourceFallback],
+            selectedSessionId: moved.id
+        )
+        let target = Project(
+            name: "target",
+            cwd: root.path,
+            sessions: [targetSelected],
+            selectedSessionId: targetSelected.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [source, target],
+            selectedProjectId: target.id
+        ))
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root
+        )
+
+        XCTAssertEqual(
+            model.moveRemoteSession(
+                sessionId: moved.id,
+                toProjectId: target.id
+            ),
+            .moved
+        )
+        XCTAssertEqual(model.projects[0].sessions.map(\.id), [sourceFallback.id])
+        XCTAssertEqual(model.projects[0].selectedSessionId, sourceFallback.id)
+        XCTAssertEqual(
+            model.projects[1].sessions.map(\.id),
+            [targetSelected.id, moved.id]
+        )
+        XCTAssertEqual(model.projects[1].selectedSessionId, targetSelected.id)
+        XCTAssertEqual(model.globalSelectedSessionId, targetSelected.id)
+        XCTAssertEqual(
+            model.moveRemoteSession(
+                sessionId: moved.id,
+                toProjectId: target.id
+            ),
+            .unchanged
+        )
+        XCTAssertEqual(
+            model.moveRemoteSession(
+                sessionId: "missing",
+                toProjectId: target.id
+            ),
+            .missing
+        )
+    }
+
     func testActivityTrackerRequiresObservedWorkAndTwoIdleTicks() {
         let sessionId = UUID().uuidString
         var tracker = ActivityTracker()
@@ -4328,6 +4392,62 @@ final class AppLogicTests: XCTestCase {
             .conflict
         )
         XCTAssertTrue(model.project("p2")?.sessions.isEmpty == true)
+    }
+
+    @MainActor
+    func testCreateRemoteSessionReplayFollowsMovedOriginal() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [
+                Project(id: "p1", name: "First", cwd: "/tmp", sessions: []),
+                Project(id: "p2", name: "Second", cwd: "/tmp", sessions: []),
+            ],
+            selectedProjectId: "p1",
+            reposDirectory: { repos.path },
+            ledger: ledger,
+            onLaunch: { _, _ in }
+        )
+        let request = RemoteCreateSessionRequest(
+            requestId: UUID(),
+            projectId: "p1"
+        )
+        _ = model.createRemoteSession(request)
+        XCTAssertEqual(
+            model.moveRemoteSession(
+                sessionId: request.requestId.uuidString,
+                toProjectId: "p2"
+            ),
+            .moved
+        )
+
+        XCTAssertEqual(
+            model.createRemoteSession(request),
+            .existing(RemoteCreateSessionResponse(
+                requestId: request.requestId,
+                projectId: "p2",
+                sessionId: request.requestId.uuidString
+            ))
+        )
+        XCTAssertEqual(
+            model.createRemoteSession(RemoteCreateSessionRequest(
+                requestId: request.requestId,
+                projectId: "p2"
+            )),
+            .conflict
+        )
+        XCTAssertTrue(model.project("p1")?.sessions.isEmpty == true)
+        XCTAssertEqual(
+            model.project("p2")?.sessions.map(\.id),
+            [request.requestId.uuidString]
+        )
     }
 
     @MainActor

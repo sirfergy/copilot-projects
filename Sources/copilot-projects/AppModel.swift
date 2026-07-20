@@ -167,6 +167,12 @@ private enum WindowScreenshot {
 
 /// Single source of truth. Holds value-type projects/sessions (observed) and live
 /// terminal controllers (NOT observed, kept out of the SwiftUI graph).
+enum RemoteSessionMoveResult: Equatable {
+    case moved
+    case unchanged
+    case missing
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var projects: [Project] = []
@@ -679,7 +685,19 @@ final class AppModel: ObservableObject {
                 projectId: owningProjectId,
                 sessionId: sessionId
             )
-            return owningProjectId == request.projectId ? .existing(response) : .conflict
+            if let record = sessionCreationLedger.record(
+                for: request.requestId,
+                now: now
+            ) {
+                guard record.projectId == request.projectId,
+                      record.sessionId == sessionId else {
+                    return .conflict
+                }
+                return .existing(response)
+            }
+            return owningProjectId == request.projectId
+                ? .existing(response)
+                : .conflict
         }
 
         // Processed before, but the session is gone: it is a tombstone, never resurrect it.
@@ -1435,10 +1453,16 @@ final class AppModel: ObservableObject {
     /// (status/notification/focus routing all resolve by session id). No-op when
     /// dropped on the project the session already belongs to.
     @discardableResult
-    func moveSession(toProjectId targetPid: String, draggedId sid: String) -> Bool {
+    func moveSession(
+        toProjectId targetPid: String,
+        draggedId sid: String,
+        selectInTarget: Bool = true
+    ) -> Bool {
         guard let tpi = projectIndex(targetPid), let from = locateIndex(sid),
               projects[from.p].id != targetPid else { return false }
 
+        let previousGlobalSelection = globalSelectedSessionId
+        let targetWasEmpty = projects[tpi].sessions.isEmpty
         let session = projects[from.p].sessions.remove(at: from.s)
         // Keep the source project's selection sane (mirrors closeSession): fall back
         // to the tab left of the one that moved, or clear if it's now empty.
@@ -1449,11 +1473,33 @@ final class AppModel: ObservableObject {
                     : projects[from.p].sessions[max(0, from.s - 1)].id
         }
         projects[tpi].sessions.append(session)
-        projects[tpi].selectedSessionId = session.id
-        refreshSelectedTranscriptController()
+        if selectInTarget || targetWasEmpty {
+            projects[tpi].selectedSessionId = session.id
+        }
+        if globalSelectedSessionId != previousGlobalSelection {
+            refreshSelectedTranscriptController()
+        }
         updateDockBadge()
         save()
         return true
+    }
+
+    func moveRemoteSession(
+        sessionId: String,
+        toProjectId targetProjectId: String
+    ) -> RemoteSessionMoveResult {
+        guard projectIndex(targetProjectId) != nil,
+              let source = locateIndex(sessionId) else {
+            return .missing
+        }
+        guard projects[source.p].id != targetProjectId else {
+            return .unchanged
+        }
+        return moveSession(
+            toProjectId: targetProjectId,
+            draggedId: sessionId,
+            selectInTarget: false
+        ) ? .moved : .missing
     }
 
     func setNumberHint(_ hint: NumberHint) {
