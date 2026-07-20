@@ -165,14 +165,14 @@ private enum WindowScreenshot {
     }
 }
 
-/// Single source of truth. Holds value-type projects/sessions (observed) and live
-/// terminal controllers (NOT observed, kept out of the SwiftUI graph).
 enum RemoteSessionMoveResult: Equatable {
     case moved
     case unchanged
     case missing
 }
 
+/// Single source of truth. Holds value-type projects/sessions (observed) and live
+/// terminal controllers (NOT observed, kept out of the SwiftUI graph).
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var projects: [Project] = []
