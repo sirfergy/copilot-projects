@@ -260,6 +260,20 @@ final class AppModel: ObservableObject {
     private var footerTimer: Timer?
     private var agentActivityTimer: Timer?
     private var agentActivitySource: DispatchSourceFileSystemObject?
+    // Throttle state for the sessions-directory watcher: the directory holds a
+    // file per session (activity/status/marker/transcript) and receives frequent
+    // writes across all sessions, so an unthrottled watcher re-scans every session
+    // on the main thread many times a second and starves keystroke handling.
+    private var agentActivityRefreshCoolingDown = false
+    private var agentActivityRefreshPending = false
+    // Bumped whenever tracking (re)starts or terminates so an already-scheduled
+    // cooldown from a prior chain — which `asyncAfter` cannot cancel — no-ops
+    // instead of corrupting the current chain's throttle state.
+    private var agentActivityRefreshGeneration = 0
+    private let agentActivityRefreshThrottle: TimeInterval
+    private let agentActivityCooldownScheduler:
+        (_ delay: TimeInterval, _ action: @escaping @MainActor () -> Void) -> Void
+    private let agentActivityScanObserver: (() -> Void)?
 
     private var activityTracker = ActivityTracker()
     private var statusEventClock = StatusEventClock()
@@ -328,6 +342,16 @@ final class AppModel: ObservableObject {
         },
         remoteSessionLauncher: ((String, String) -> Void)? = nil,
         sessionCreationLedger: SessionCreationLedger = SessionCreationLedger(),
+        agentActivityRefreshThrottle: TimeInterval = 0.5,
+        agentActivityCooldownScheduler: @escaping (
+            _ delay: TimeInterval,
+            _ action: @escaping @MainActor () -> Void
+        ) -> Void = { delay, action in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                Task { @MainActor in action() }
+            }
+        },
+        agentActivityScanObserver: (() -> Void)? = nil,
         webPushService: WebPushService? = nil,
         apnsService: APNsService? = nil,
         notificationSync: NotificationSyncService? = nil
@@ -344,6 +368,9 @@ final class AppModel: ObservableObject {
         self.remoteSessionBackendAvailable = remoteSessionBackendAvailable
         self.remoteSessionLauncher = remoteSessionLauncher
         self.sessionCreationLedger = sessionCreationLedger
+        self.agentActivityRefreshThrottle = agentActivityRefreshThrottle
+        self.agentActivityCooldownScheduler = agentActivityCooldownScheduler
+        self.agentActivityScanObserver = agentActivityScanObserver
         remoteAccess = RemoteAccessController(
             webPushService: webPushService,
             apnsService: apnsService,
@@ -851,6 +878,7 @@ final class AppModel: ObservableObject {
         agentActivityTimer?.invalidate()
         agentActivitySource?.cancel()
         agentActivitySource = nil
+        agentActivityRefreshGeneration += 1
         remoteAccess.stopGateway()
     }
 
@@ -1701,6 +1729,9 @@ final class AppModel: ObservableObject {
         agentActivityTimer?.invalidate()
         agentActivitySource?.cancel()
         agentActivitySource = nil
+        agentActivityRefreshGeneration += 1
+        agentActivityRefreshCoolingDown = false
+        agentActivityRefreshPending = false
 
         try? FileManager.default.createDirectory(
             at: agentActivityDirectory,
@@ -1716,7 +1747,7 @@ final class AppModel: ObservableObject {
                 queue: .main
             )
             source.setEventHandler { [weak self] in
-                self?.refreshAgentActivitySnapshots()
+                self?.throttledRefreshAgentActivitySnapshots()
             }
             source.setCancelHandler { close(fd) }
             source.resume()
@@ -1730,7 +1761,38 @@ final class AppModel: ObservableObject {
         agentActivityTimer = timer
     }
 
+    /// Coalesce the watcher's bursty directory events into at most one snapshot
+    /// scan per throttle window. Leading-edge (the first event of a burst applies
+    /// immediately) with a guaranteed trailing flush, so a sustained write storm
+    /// whose inter-event gap is below the window is still reflected promptly —
+    /// unlike a resettable trailing debounce, which would keep deferring and only
+    /// fire once the storm paused. Bounds the *event-driven* scans to one pass per
+    /// `agentActivityRefreshThrottle`; the 10s backstop timer scans independently.
+    func throttledRefreshAgentActivitySnapshots() {
+        guard !agentActivityRefreshCoolingDown else {
+            agentActivityRefreshPending = true
+            return
+        }
+        agentActivityRefreshCoolingDown = true
+        refreshAgentActivitySnapshots()
+        scheduleAgentActivityCooldown(generation: agentActivityRefreshGeneration)
+    }
+
+    private func scheduleAgentActivityCooldown(generation: Int) {
+        agentActivityCooldownScheduler(agentActivityRefreshThrottle) { [weak self] in
+            guard let self, generation == self.agentActivityRefreshGeneration else { return }
+            if self.agentActivityRefreshPending {
+                self.agentActivityRefreshPending = false
+                self.refreshAgentActivitySnapshots()
+                self.scheduleAgentActivityCooldown(generation: generation)
+            } else {
+                self.agentActivityRefreshCoolingDown = false
+            }
+        }
+    }
+
     func refreshAgentActivitySnapshots(now: Date = Date()) {
+        agentActivityScanObserver?()
         let decoder = JSONDecoder()
         let fm = FileManager.default
         for pi in projects.indices {
@@ -1745,7 +1807,9 @@ final class AppModel: ObservableObject {
                     snapshot = nil
                 }
                 let fresh = snapshot?.isFresh(at: now) == true ? snapshot : nil
-                projects[pi].sessions[si].agentActivity = fresh
+                if projects[pi].sessions[si].agentActivity != fresh {
+                    projects[pi].sessions[si].agentActivity = fresh
+                }
 
                 let scheduledMarkerURL = agentActivityDirectory
                     .appendingPathComponent("\(sessionId).scheduled-turn")
@@ -1755,10 +1819,9 @@ final class AppModel: ObservableObject {
                 }
                 let snapshotScheduled = fresh?.scheduledTurnActive == true
                     && !scheduledSnapshotsSuppressed.contains(sessionId)
-                if scheduledMarker || snapshotScheduled {
-                    projects[pi].sessions[si].scheduledTurnActive = true
-                } else {
-                    projects[pi].sessions[si].scheduledTurnActive = false
+                let scheduledActive = scheduledMarker || snapshotScheduled
+                if projects[pi].sessions[si].scheduledTurnActive != scheduledActive {
+                    projects[pi].sessions[si].scheduledTurnActive = scheduledActive
                 }
 
             }

@@ -3,6 +3,7 @@ import XCTest
 import CopilotProjectsCore
 import CopilotProjectsProtocol
 import AppKit
+import Combine
 import Security
 import WebPush
 import CryptoKit
@@ -28,6 +29,38 @@ private final class SSECaptureDelegate: NSObject, URLSessionDataDelegate, @unche
         lock.lock()
         defer { lock.unlock() }
         return String(decoding: received, as: UTF8.self)
+    }
+}
+
+private final class AgentActivityCooldownHarness {
+    private(set) var delays: [TimeInterval] = []
+    private var actions: [@MainActor () -> Void] = []
+
+    var scheduledCount: Int { actions.count }
+
+    func schedule(after delay: TimeInterval, action: @escaping @MainActor () -> Void) {
+        delays.append(delay)
+        actions.append(action)
+    }
+
+    @MainActor
+    func runNext() {
+        let action = popNext()
+        action()
+    }
+
+    @MainActor
+    func popNext() -> @MainActor () -> Void {
+        delays.removeFirst()
+        return actions.removeFirst()
+    }
+}
+
+private final class ScanCounter {
+    private(set) var value = 0
+
+    func increment() {
+        value += 1
     }
 }
 
@@ -1073,7 +1106,7 @@ final class AppLogicTests: XCTestCase {
 
         func send(
             data: Data,
-            to subscriber: Subscriber,
+            to subscriber: WebPush.Subscriber,
             eventID: UUID
         ) async throws {
             payloads.append(data)
@@ -1952,6 +1985,181 @@ final class AppLogicTests: XCTestCase {
 
         XCTAssertNil(model.projects[0].sessions[0].agentActivity)
         XCTAssertFalse(model.projects[0].sessions[0].scheduledTurnActive)
+    }
+
+    @MainActor
+    func testAgentActivityRefreshIsIdempotentAndClearsOnDeletion() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let activityDirectory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: activityDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let targetSession = Session(title: "target", cwd: "/tmp")
+        defer { SessionArtifacts.removeFiles(sessionId: targetSession.id) }
+        let targetProject = Project(name: "target", cwd: "/tmp", sessions: [targetSession])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [targetProject],
+            selectedProjectId: targetProject.id
+        ))
+
+        let snapshot = AgentActivitySnapshot(
+            schemaVersion: 1,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            foregroundTurnActive: true,
+            scheduledTurnActive: false,
+            activeSubagents: [],
+            schedules: [],
+            idleGeneration: 0,
+            lastIdleAborted: false,
+            lastIdleTurnKind: nil,
+            error: nil
+        )
+        let path = activityDirectory
+            .appendingPathComponent("\(targetSession.id).agent-activity.json")
+        try JSONEncoder().encode(snapshot).write(to: path)
+
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: activityDirectory
+        )
+        model.refreshAgentActivitySnapshots()
+        XCTAssertNotNil(model.projects[0].sessions[0].agentActivity)
+
+        var projectPublications = 0
+        let projectChanges = model.objectWillChange.sink { projectPublications += 1 }
+
+        // A second scan with no file change must neither clear the snapshot nor
+        // publish the same projects value again.
+        model.refreshAgentActivitySnapshots()
+        XCTAssertNotNil(model.projects[0].sessions[0].agentActivity)
+        XCTAssertEqual(projectPublications, 0)
+
+        // Deleting the file (not just TTL expiry) must still nil the snapshot — the
+        // guard must detect the value change from present to nil, not skip it.
+        try FileManager.default.removeItem(at: path)
+        model.refreshAgentActivitySnapshots()
+        XCTAssertNil(model.projects[0].sessions[0].agentActivity)
+        XCTAssertEqual(projectPublications, 1)
+        withExtendedLifetime(projectChanges) {}
+    }
+
+    @MainActor
+    func testAgentActivityWatcherThrottleCoalescesTrailingAndSustainedScans() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let activityDirectory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: activityDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let targetSession = Session(title: "target", cwd: root.path)
+        defer { SessionArtifacts.removeFiles(sessionId: targetSession.id) }
+        let targetProject = Project(name: "target", cwd: root.path, sessions: [targetSession])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [targetProject],
+            selectedProjectId: targetProject.id
+        ))
+
+        let cooldown = AgentActivityCooldownHarness()
+        let scans = ScanCounter()
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: activityDirectory,
+            agentActivityRefreshThrottle: 1.25,
+            agentActivityCooldownScheduler: { delay, action in
+                cooldown.schedule(after: delay, action: action)
+            },
+            agentActivityScanObserver: scans.increment
+        )
+
+        model.throttledRefreshAgentActivitySnapshots()
+        XCTAssertEqual(scans.value, 1)
+        XCTAssertEqual(cooldown.delays, [1.25])
+        XCTAssertEqual(cooldown.scheduledCount, 1)
+
+        model.throttledRefreshAgentActivitySnapshots()
+        model.throttledRefreshAgentActivitySnapshots()
+        XCTAssertEqual(scans.value, 1)
+        XCTAssertEqual(cooldown.scheduledCount, 1)
+
+        cooldown.runNext()
+        XCTAssertEqual(scans.value, 2)
+        XCTAssertEqual(cooldown.scheduledCount, 1)
+
+        model.throttledRefreshAgentActivitySnapshots()
+        XCTAssertEqual(scans.value, 2)
+
+        cooldown.runNext()
+        XCTAssertEqual(scans.value, 3)
+        XCTAssertEqual(cooldown.scheduledCount, 1)
+
+        cooldown.runNext()
+        XCTAssertEqual(scans.value, 3)
+        XCTAssertEqual(cooldown.scheduledCount, 0)
+
+        model.throttledRefreshAgentActivitySnapshots()
+        XCTAssertEqual(scans.value, 4)
+        XCTAssertEqual(cooldown.scheduledCount, 1)
+    }
+
+    @MainActor
+    func testAgentActivityWatcherIgnoresStaleCooldownAfterTrackingRestart() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let activityDirectory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: activityDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let targetSession = Session(title: "target", cwd: root.path)
+        defer { SessionArtifacts.removeFiles(sessionId: targetSession.id) }
+        let targetProject = Project(name: "target", cwd: root.path, sessions: [targetSession])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [targetProject],
+            selectedProjectId: targetProject.id
+        ))
+
+        let cooldown = AgentActivityCooldownHarness()
+        let scans = ScanCounter()
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: activityDirectory,
+            agentActivityRefreshThrottle: 1.25,
+            agentActivityCooldownScheduler: { delay, action in
+                cooldown.schedule(after: delay, action: action)
+            },
+            agentActivityScanObserver: scans.increment
+        )
+
+        model.throttledRefreshAgentActivitySnapshots()
+        XCTAssertEqual(scans.value, 1)
+        let staleCooldown = cooldown.popNext()
+
+        model.startAgentActivityTracking()
+        defer { model.beginTermination() }
+        XCTAssertEqual(scans.value, 2)
+
+        staleCooldown()
+        XCTAssertEqual(scans.value, 2)
+        XCTAssertEqual(cooldown.scheduledCount, 0)
+
+        model.throttledRefreshAgentActivitySnapshots()
+        XCTAssertEqual(scans.value, 3)
+        XCTAssertEqual(cooldown.scheduledCount, 1)
     }
 
     @MainActor
