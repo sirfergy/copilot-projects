@@ -435,6 +435,17 @@ struct SessionTabBar: View {
             }
             .frame(maxWidth: .infinity)
 
+            Button { model.redrawActiveTerminal() } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption)
+                    .frame(width: 24, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .hoverHighlight()
+            .help("Redraw Terminal")
+            .accessibilityLabel("Redraw Terminal")
+            .padding(.trailing, 4)
+
             Button { model.addSession(toProjectId: project.id) } label: {
                 Image(systemName: "plus")
                     .font(.caption)

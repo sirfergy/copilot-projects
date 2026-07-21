@@ -256,6 +256,17 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         }
     }
 
+    /// Strong manual recovery for a surface that stayed blank after reveal:
+    /// invalidate the full model, draw the paused Metal view immediately, and
+    /// retain the normal deferred retry for a temporarily unavailable drawable.
+    func forceRedraw() {
+        refreshSurface()
+        if isUsingMetalRenderer,
+           let metalView: MTKView = firstDescendant(of: MTKView.self) {
+            metalView.draw()
+        }
+    }
+
     private func firstDescendant<T: NSView>(of type: T.Type) -> T? {
         firstDescendant(of: type, below: self)
     }
