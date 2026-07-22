@@ -958,6 +958,7 @@ final class AppModel: ObservableObject {
                                 backgroundOnly: Self.backgroundOnlyPromptEvidence(
                                     status: session.status,
                                     snapshot: session.agentActivity,
+                                    backgroundAgentsActive: session.backgroundAgentsActive,
                                     now: promptNow,
                                     nowMs: promptNowMs,
                                     clockMs: promptStatusEventClock.timestamp(for: session.id)
@@ -1070,6 +1071,7 @@ final class AppModel: ObservableObject {
             backgroundOnly: Self.backgroundOnlyPromptEvidence(
                 status: session.status,
                 snapshot: session.agentActivity,
+                backgroundAgentsActive: session.backgroundAgentsActive,
                 now: promptNow,
                 nowMs: promptNowMs,
                 clockMs: promptStatusEventClock.timestamp(for: sessionId)
@@ -1129,19 +1131,30 @@ final class AppModel: ObservableObject {
         return .sent
     }
 
-    /// Evidence that a session is only busy because scheduled or subagent work
-    /// remains after the interactive foreground ended. This mirrors the causal
-    /// guards in `reconcileAgentFooters`: stale footer text alone is never enough
-    /// to inject a remote prompt over a possibly-active foreground turn.
+    /// Evidence that a session is only busy because scheduled, subagent, or CLI
+    /// background-agent work remains after the interactive foreground ended. This
+    /// mirrors the causal guards in `reconcileAgentFooters`: stale footer text alone
+    /// is never enough to inject a remote prompt over a possibly-active foreground
+    /// turn.
+    ///
+    /// `backgroundAgentsActive` carries the session's CLI background-agent state
+    /// (scraped from the terminal title: "Copilot: Waiting for background agents").
+    /// Those agents have no representation in the heartbeat's `activeSubagents`
+    /// array, yet they keep `session.idle` from firing exactly like scheduled and
+    /// subagent work — so a `.running` session whose foreground has gone idle while
+    /// they run must count as background-only too, or it reads "working" forever.
     nonisolated static func backgroundOnlyEvidenceMs(
         snapshot: AgentActivitySnapshot?,
+        backgroundAgentsActive: Bool,
         now: Date,
         nowMs: Int64
     ) -> Int64? {
         guard let snapshot,
               snapshot.isFresh(at: now),
               snapshot.foregroundTurnActive == false,
-              snapshot.scheduledTurnActive || !snapshot.activeSubagents.isEmpty,
+              snapshot.scheduledTurnActive
+                || !snapshot.activeSubagents.isEmpty
+                || backgroundAgentsActive,
               let snapshotMs = snapshot.foregroundTransitionMilliseconds,
               snapshotMs <= nowMs else { return nil }
         return snapshotMs
@@ -1150,6 +1163,7 @@ final class AppModel: ObservableObject {
     nonisolated static func backgroundOnlyPromptEvidence(
         status: SessionStatus,
         snapshot: AgentActivitySnapshot?,
+        backgroundAgentsActive: Bool,
         now: Date,
         nowMs: Int64,
         clockMs: Int64?
@@ -1157,6 +1171,7 @@ final class AppModel: ObservableObject {
         guard snapshot?.reportsTerminalDisconnect != true else { return false }
         guard let snapshotMs = backgroundOnlyEvidenceMs(
             snapshot: snapshot,
+            backgroundAgentsActive: backgroundAgentsActive,
             now: now,
             nowMs: nowMs
         ) else { return false }
@@ -2159,16 +2174,18 @@ final class AppModel: ObservableObject {
                     activityTracker.resetDisconnectIdle(sessionId: sid)
                 }
                 // Stale "working" recovery: the foreground turn has ended, but
-                // scheduled or subagent work keeps `session.idle` from firing, so the
-                // hook path below (guarded by `supportsSessionIdleHook`) never demotes
-                // the tab and it reads "working" while the terminal is actually idle
-                // and interactive. Scope this strictly to fresh background-only
-                // evidence so ordinary sessions keep falling through. Demote to idle
+                // scheduled, subagent, or CLI background-agent work keeps
+                // `session.idle` from firing, so the hook path below (guarded by
+                // `supportsSessionIdleHook`) never demotes the tab and it reads
+                // "working" while the terminal is actually idle and interactive.
+                // Scope this strictly to fresh background-only evidence so ordinary
+                // sessions keep falling through. Demote to idle
                 // once the ended-turn condition persists across two scans (a normal
                 // inter-iteration gap flips `foregroundTurnActive` false only briefly:
                 // `turn_end` fires per loop iteration and tool calls run *inside* a
-                // turn, so foreground stays active through them). Leave scheduled
-                // and subagent state intact so the background indicator persists.
+                // turn, so foreground stays active through them). Leave scheduled,
+                // subagent, and background-agent state intact so the background
+                // indicator persists.
                 // The clock-ordering guard rejects a snapshot that predates the latest
                 // status hook, so a just-submitted prompt (whose running hook advanced
                 // the clock before its own fresh snapshot lands) can't be demoted; and
@@ -2182,6 +2199,7 @@ final class AppModel: ObservableObject {
                 if status == .running,
                    let snapshotMs = Self.backgroundOnlyEvidenceMs(
                        snapshot: projects[pi].sessions[si].agentActivity,
+                       backgroundAgentsActive: projects[pi].sessions[si].backgroundAgentsActive,
                        now: backgroundNow,
                        nowMs: backgroundNowMs
                    ),

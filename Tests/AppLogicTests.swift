@@ -267,6 +267,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(AppModel.backgroundOnlyPromptEvidence(
             status: .running,
             snapshot: snapshot,
+            backgroundAgentsActive: false,
             now: now,
             nowMs: nowMs,
             clockMs: transitionMs - 1
@@ -274,6 +275,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
             status: .running,
             snapshot: snapshot,
+            backgroundAgentsActive: false,
             now: now,
             nowMs: nowMs,
             clockMs: transitionMs
@@ -281,6 +283,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
             status: .running,
             snapshot: snapshot,
+            backgroundAgentsActive: false,
             now: now,
             nowMs: nowMs,
             clockMs: nowMs
@@ -291,6 +294,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
             status: .running,
             snapshot: activeForeground,
+            backgroundAgentsActive: false,
             now: now,
             nowMs: nowMs,
             clockMs: nil
@@ -301,6 +305,28 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
             status: .running,
             snapshot: noSubagents,
+            backgroundAgentsActive: false,
+            now: now,
+            nowMs: nowMs,
+            clockMs: nil
+        ))
+        // CLI background agents (terminal-title state, no `activeSubagents`) count
+        // as background-only evidence just like scheduled/subagent work.
+        XCTAssertTrue(AppModel.backgroundOnlyPromptEvidence(
+            status: .running,
+            snapshot: noSubagents,
+            backgroundAgentsActive: true,
+            now: now,
+            nowMs: nowMs,
+            clockMs: transitionMs - 1
+        ))
+        // ...but only once the foreground turn has actually gone idle.
+        var noSubagentsActiveForeground = noSubagents
+        noSubagentsActiveForeground.foregroundTurnActive = true
+        XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
+            status: .running,
+            snapshot: noSubagentsActiveForeground,
+            backgroundAgentsActive: true,
             now: now,
             nowMs: nowMs,
             clockMs: nil
@@ -311,6 +337,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(AppModel.backgroundOnlyPromptEvidence(
             status: .running,
             snapshot: scheduled,
+            backgroundAgentsActive: false,
             now: now,
             nowMs: nowMs,
             clockMs: transitionMs - 1
@@ -318,6 +345,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(AppModel.backgroundOnlyPromptEvidence(
             status: .idle,
             snapshot: scheduled,
+            backgroundAgentsActive: false,
             now: now,
             nowMs: nowMs,
             clockMs: transitionMs
@@ -325,6 +353,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
             status: .idle,
             snapshot: scheduled,
+            backgroundAgentsActive: false,
             now: now,
             nowMs: nowMs,
             clockMs: transitionMs + 1
@@ -335,6 +364,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(
             AppModel.backgroundOnlyEvidenceMs(
                 snapshot: disconnected,
+                backgroundAgentsActive: false,
                 now: now,
                 nowMs: nowMs
             ),
@@ -343,6 +373,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
             status: .idle,
             snapshot: disconnected,
+            backgroundAgentsActive: false,
             now: now,
             nowMs: nowMs,
             clockMs: nil
