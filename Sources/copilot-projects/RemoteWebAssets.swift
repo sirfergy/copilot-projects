@@ -1833,6 +1833,17 @@ enum RemoteWebAssets {
         updatePromptState();
       }
     }
+    // Keep the selected session in the URL so a refresh restores it. The
+    // initial ?session= param is read into pendingFocusSession on load and
+    // applied by renderWorkspace once the session is present.
+    function rememberSelectedSession(id) {
+      try {
+        const url = new URL(location.href);
+        if (id) url.searchParams.set('session', id);
+        else url.searchParams.delete('session');
+        history.replaceState(history.state, '', url);
+      } catch (_) {}
+    }
     function selectSession(id) {
       const previousSession = selected;
       // Only resave the outgoing draft while that session is still part of
@@ -1844,6 +1855,7 @@ enum RemoteWebAssets {
         persistPromptDrafts();
       }
       selected = id;
+      rememberSelectedSession(id);
       prompt.value = draftForSession(id);
       writable = false;
       pendingActions.length = 0;
