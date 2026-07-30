@@ -63,6 +63,141 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(parsed.positionals, ["first", "--literal"])
     }
 
+    /// Runs the extension's real catalog mapping against a fixture shaped like an
+    /// actual `rpc.model.list()` response. The RPC types its entries as
+    /// `unknown[]` and returns raw snake_case CAPI objects, so a camelCase-only
+    /// mapping silently publishes a catalog with no reasoning efforts, no long
+    /// context, and no categories — which is exactly what shipped before.
+    func testCopilotExtensionNormalizesSnakeCaseModelCatalog() throws {
+        try requireNodeForJavaScriptTests()
+        guard let start = CopilotExtension.script.range(of: "function pickKey"),
+              let end = CopilotExtension.script.range(of: "async function refreshModels")
+        else {
+            return XCTFail("catalog mapping helpers not found in extension script")
+        }
+        let mapping = String(CopilotExtension.script[start.lowerBound..<end.lowerBound])
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("mapping.mjs")
+        try (mapping + Self.modelCatalogAssertions).write(
+            to: script,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", script.path]
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+        let output = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: output, encoding: .utf8) ?? "catalog mapping assertions failed"
+        )
+    }
+
+    private static let modelCatalogAssertions = #"""
+
+    function check(condition, message) {
+        if (!condition) {
+            console.error("FAIL: " + message);
+            process.exitCode = 1;
+        }
+    }
+
+    // Shaped like a real `rpc.model.list()` entry: snake_case CAPI objects.
+    const snakeCase = normalizeAvailableModels([
+        {
+            id: "gpt-5.6-sol",
+            name: "GPT-5.6 Sol",
+            model_picker_category: "powerful",
+            model_picker_enabled: true,
+            policy: { state: "enabled" },
+            capabilities: { supports: { reasoning_effort: ["none", "low", "high"] } },
+            billing: { token_prices: { long_context: { input_price: 300 } } },
+        },
+        {
+            id: "claude-haiku-4.5",
+            name: "Claude Haiku 4.5",
+            model_picker_category: "lightweight",
+            model_picker_enabled: true,
+            capabilities: { supports: { vision: true } },
+            billing: { token_prices: {} },
+        },
+        {
+            id: "gated-model",
+            name: "Gated Model",
+            model_picker_enabled: false,
+            capabilities: {},
+            billing: {},
+        },
+        {
+            id: "policy-gated",
+            name: "Policy Gated",
+            policy: { state: "disabled" },
+            capabilities: {},
+            billing: {},
+        },
+    ]);
+
+    check(snakeCase.length === 4, "expected all four entries, got " + snakeCase.length);
+
+    const sol = snakeCase[0];
+    check(
+        JSON.stringify(sol.supportedReasoningEfforts) === JSON.stringify(["none", "low", "high"]),
+        "reasoning efforts must come from capabilities.supports.reasoning_effort, got "
+            + JSON.stringify(sol.supportedReasoningEfforts)
+    );
+    check(sol.longContextAvailable === true, "long context must come from billing.token_prices.long_context");
+    check(sol.category === "powerful", "category must come from model_picker_category");
+    check(sol.disabled !== true, "an enabled model must not be marked disabled");
+
+    const haiku = snakeCase[1];
+    check(haiku.supportedReasoningEfforts === undefined, "a model without reasoning support must omit efforts");
+    check(haiku.longContextAvailable === false, "a model without a long context tier must report false");
+    check(haiku.category === "lightweight", "lightweight category must round-trip");
+
+    check(snakeCase[2].disabled === true, "model_picker_enabled:false must mark the model disabled");
+    check(snakeCase[3].disabled === true, "policy.state:disabled must mark the model disabled");
+
+    // The documented camelCase `Model` shape must keep working if the CLI ever
+    // normalizes the payload.
+    const camelCase = normalizeAvailableModels([
+        {
+            id: "camel",
+            name: "Camel",
+            modelPickerCategory: "versatile",
+            supportedReasoningEfforts: ["low", "high"],
+            defaultReasoningEffort: "high",
+            billing: { tokenPrices: { longContext: { inputPrice: 1 } } },
+        },
+    ]);
+    check(camelCase[0].category === "versatile", "camelCase category must still map");
+    check(
+        JSON.stringify(camelCase[0].supportedReasoningEfforts) === JSON.stringify(["low", "high"]),
+        "camelCase efforts must still map"
+    );
+    check(camelCase[0].defaultReasoningEffort === "high", "camelCase default effort must still map");
+    check(camelCase[0].longContextAvailable === true, "camelCase long context must still map");
+
+    // `supports.reasoningEffort` is typed as a boolean, so it must not become a list.
+    const boolEffort = normalizeAvailableModels([
+        { id: "b", name: "B", capabilities: { supports: { reasoningEffort: true } }, billing: {} },
+    ]);
+    check(
+        boolEffort[0].supportedReasoningEfforts === undefined,
+        "a boolean reasoningEffort capability must not produce an effort list"
+    );
+
+    """#
+
     func testCopilotExtensionTracksSchedulesAndSubagentsWithoutTools() throws {
         XCTAssertTrue(CopilotExtension.script.contains("session.rpc.schedule.list()"))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("subagent.started""#))

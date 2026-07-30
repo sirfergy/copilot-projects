@@ -1150,6 +1150,16 @@ public enum CopilotExtension {
             } catch {}
         }
 
+        // `rpc.model.list()` types its entries as `unknown[]` and returns the raw
+        // CAPI model objects, which are snake_case (`model_picker_category`,
+        // `capabilities.supports.reasoning_effort`, `billing.token_prices`) even
+        // though the generated SDK `Model` interface documents camelCase. Read
+        // both spellings so the catalog stays populated whichever shape arrives.
+        function pickKey(source, snakeKey, camelKey) {
+            if (!source || typeof source !== "object") return undefined;
+            return source[snakeKey] !== undefined ? source[snakeKey] : source[camelKey];
+        }
+
         // Reduce a raw `rpc.model.list()` entry to the compact, host-facing shape
         // the remote picker needs. Drops entries without a usable id/name; bounds
         // strings/count so a pathological catalog can't bloat the 0600 heartbeat.
@@ -1165,24 +1175,45 @@ public enum CopilotExtension {
                 const name = rawName.slice(0, 200);
                 if (!id || !name) continue;
                 const model = { id, name };
-                if (Array.isArray(entry.supportedReasoningEfforts)) {
-                    const efforts = entry.supportedReasoningEfforts
+                // Efforts live on the capability block at runtime; the top-level
+                // `supportedReasoningEfforts` is the documented camelCase form.
+                // `supports.reasoningEffort` is typed as a bool, so only arrays
+                // are treated as an effort list.
+                const supports = pickKey(entry.capabilities, "supports", "supports");
+                const rawEfforts = [
+                    pickKey(supports, "reasoning_effort", "reasoningEffort"),
+                    pickKey(entry, "supported_reasoning_efforts", "supportedReasoningEfforts"),
+                ].find(Array.isArray);
+                if (rawEfforts) {
+                    const efforts = rawEfforts
                         .filter((value) => typeof value === "string" && value.length > 0)
                         .slice(0, 16);
                     if (efforts.length > 0) model.supportedReasoningEfforts = efforts;
                 }
-                if (typeof entry.defaultReasoningEffort === "string"
-                        && entry.defaultReasoningEffort.length > 0) {
-                    model.defaultReasoningEffort = entry.defaultReasoningEffort;
+                const defaultEffort = pickKey(
+                    entry, "default_reasoning_effort", "defaultReasoningEffort"
+                );
+                if (typeof defaultEffort === "string" && defaultEffort.length > 0) {
+                    model.defaultReasoningEffort = defaultEffort;
                 }
-                model.longContextAvailable = !!(entry.billing
-                    && entry.billing.tokenPrices
-                    && entry.billing.tokenPrices.longContext);
-                if (entry.policy && entry.policy.state === "disabled") {
+                const tokenPrices = pickKey(entry.billing, "token_prices", "tokenPrices");
+                model.longContextAvailable = !!pickKey(
+                    tokenPrices, "long_context", "longContext"
+                );
+                // A model is unselectable when policy gates it or the picker
+                // excludes it (Auto may still route to picker-disabled models).
+                const pickerEnabled = pickKey(
+                    entry, "model_picker_enabled", "modelPickerEnabled"
+                );
+                if ((entry.policy && entry.policy.state === "disabled")
+                        || pickerEnabled === false) {
                     model.disabled = true;
                 }
-                if (typeof entry.modelPickerCategory === "string") {
-                    model.category = entry.modelPickerCategory;
+                const category = pickKey(
+                    entry, "model_picker_category", "modelPickerCategory"
+                );
+                if (typeof category === "string" && category.length > 0) {
+                    model.category = category.slice(0, 60);
                 }
                 out.push(model);
                 if (out.length >= 100) break;
