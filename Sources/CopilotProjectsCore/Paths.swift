@@ -45,8 +45,15 @@ public enum Paths {
         return defaultStateDir
     }
 
-    private static let defaultStateDir = FileManager.default.homeDirectoryForCurrentUser
+    public static let defaultStateDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".local/state/copilot-projects", isDirectory: true)
+
+    /// The socket a non-isolated instance listens on, ignoring any environment
+    /// override. `socketPath` honors the override; this is the baseline it is
+    /// compared against when deciding whether an instance is truly isolated.
+    public static var defaultSocketPath: String {
+        defaultStateDir.appendingPathComponent("control.sock").path
+    }
 
     /// Unix domain socket the app listens on (override with `COPILOT_PROJECTS_SOCKET`).
     public static var socketPath: String {

@@ -14,14 +14,45 @@ public enum Env {
         nonEmpty(env["COPILOT_PROJECTS_SOCKET"])
     }
 
+    /// True when this process should install/refresh the global Copilot CLI
+    /// integration (hooks + tracker extension) in `~/.copilot`.
+    ///
+    /// Only a *deliberately isolated* instance must skip it. The state dir and
+    /// socket variables are injected into every session shell, so launching the
+    /// app from a terminal running inside a session (`open -a "Copilot Projects"`)
+    /// makes it inherit them — pointing at this very instance's own default
+    /// location. Treating that as isolation silently skipped the install for the
+    /// normal global instance, leaving a stale extension behind after an upgrade.
+    /// Only a value that resolves somewhere *other* than the default counts.
     public static func shouldInstallGlobalIntegration(
-        _ env: [String: String] = ProcessInfo.processInfo.environment
+        _ env: [String: String] = ProcessInfo.processInfo.environment,
+        defaultStateDir: String = Paths.defaultStateDir.path,
+        defaultSocketPath: String = Paths.defaultSocketPath
     ) -> Bool {
         guard nonEmpty(env["COPILOT_PROJECTS_NO_INSTALL"]) != "1"
         else { return false }
 
-        return nonEmpty(env["COPILOT_PROJECTS_STATE_DIR"]) == nil
-            && socket(env) == nil
+        if let stateDir = nonEmpty(env["COPILOT_PROJECTS_STATE_DIR"]),
+           !isSamePath(stateDir, defaultStateDir) {
+            return false
+        }
+        if let socket = socket(env), !isSamePath(socket, defaultSocketPath) {
+            return false
+        }
+        return true
+    }
+
+    /// Compares two filesystem paths for equality after expanding `~`, resolving
+    /// `.`/`..`, and following symlinks, so a trailing slash or an equivalent
+    /// spelling of the default location isn't mistaken for a redirect.
+    private static func isSamePath(_ lhs: String, _ rhs: String) -> Bool {
+        func normalize(_ path: String) -> String {
+            URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+                .path
+        }
+        return normalize(lhs) == normalize(rhs)
     }
 
     private static func nonEmpty(_ value: String?) -> String? {

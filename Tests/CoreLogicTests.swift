@@ -2098,6 +2098,57 @@ final class CoreLogicTests: XCTestCase {
         ]))
     }
 
+    /// Launching the app from a terminal inside a session inherits that session's
+    /// targeting variables, which name this instance's own default location. That
+    /// is not isolation, and treating it as such silently skipped the hook and
+    /// extension refresh on every such launch.
+    func testInheritedSessionEnvStillInstallsGlobalIntegration() {
+        let stateDir = "/Users/example/.local/state/copilot-projects"
+        let socket = "\(stateDir)/control.sock"
+
+        XCTAssertTrue(Env.shouldInstallGlobalIntegration(
+            ["COPILOT_PROJECTS_SOCKET": socket],
+            defaultStateDir: stateDir,
+            defaultSocketPath: socket
+        ))
+        XCTAssertTrue(Env.shouldInstallGlobalIntegration(
+            [
+                "COPILOT_PROJECTS_SOCKET": socket,
+                "COPILOT_PROJECTS_STATE_DIR": stateDir,
+                "COPILOT_PROJECTS_SESSION": "9CE858E3-60D3-47CF-A5E0-ACB8BDDBBEAD",
+                "COPILOT_PROJECTS_PROJECT": "proj",
+            ],
+            defaultStateDir: stateDir,
+            defaultSocketPath: socket
+        ))
+        // Equivalent spellings of the default are still the default.
+        XCTAssertTrue(Env.shouldInstallGlobalIntegration(
+            [
+                "COPILOT_PROJECTS_STATE_DIR": "\(stateDir)/",
+                "COPILOT_PROJECTS_SOCKET": "\(stateDir)/./control.sock",
+            ],
+            defaultStateDir: stateDir,
+            defaultSocketPath: socket
+        ))
+        // An explicit opt-out still wins over an inherited default-valued socket.
+        XCTAssertFalse(Env.shouldInstallGlobalIntegration(
+            ["COPILOT_PROJECTS_SOCKET": socket, "COPILOT_PROJECTS_NO_INSTALL": "1"],
+            defaultStateDir: stateDir,
+            defaultSocketPath: socket
+        ))
+        // A genuinely isolated instance is still suppressed.
+        XCTAssertFalse(Env.shouldInstallGlobalIntegration(
+            ["COPILOT_PROJECTS_SOCKET": "/isolated/control.sock"],
+            defaultStateDir: stateDir,
+            defaultSocketPath: socket
+        ))
+        XCTAssertFalse(Env.shouldInstallGlobalIntegration(
+            ["COPILOT_PROJECTS_STATE_DIR": "/isolated/state"],
+            defaultStateDir: stateDir,
+            defaultSocketPath: socket
+        ))
+    }
+
     func testDtachMasterSelectionIgnoresAttachedClient() {
         let socket = "/tmp/session.sock"
         let processes = [
