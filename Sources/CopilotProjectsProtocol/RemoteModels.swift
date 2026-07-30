@@ -47,6 +47,10 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     /// The session's effective model (name + reasoning effort + context tier).
     /// Optional (omitted when absent) so older clients decode without this field.
     public let model: RemoteModelInfo?
+    /// Models the session can switch to, ordered with the preferred default first.
+    /// Optional (omitted when absent) so older clients decode without this field
+    /// and so a session that hasn't reported its catalog yet simply has no picker.
+    public let availableModels: [RemoteAvailableModel]?
 
     public init(
         id: String,
@@ -60,7 +64,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         promptable: Bool? = nil,
         pendingUserInputs: [RemoteUserInputRequest]? = nil,
         pendingElicitations: [RemoteElicitationRequest]? = nil,
-        model: RemoteModelInfo? = nil
+        model: RemoteModelInfo? = nil,
+        availableModels: [RemoteAvailableModel]? = nil
     ) {
         self.id = id
         self.title = title
@@ -74,6 +79,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.pendingUserInputs = pendingUserInputs
         self.pendingElicitations = pendingElicitations
         self.model = model
+        self.availableModels = availableModels
     }
 }
 
@@ -87,6 +93,58 @@ public struct RemoteModelInfo: Codable, Equatable, Sendable {
 
     public init(name: String, reasoningEffort: String? = nil, contextTier: String? = nil) {
         self.name = name
+        self.reasoningEffort = reasoningEffort
+        self.contextTier = contextTier
+    }
+}
+
+/// One model the session can switch to, mirrored from the CLI's own model catalog
+/// (`session.rpc.model.list()`) so a remote client can render a native picker
+/// instead of driving the terminal `/model` TUI. `id` is the switch identifier
+/// (a bare CAPI id like `gpt-5.4`, or a provider-qualified BYOK id like
+/// `acme/model`); `name` is the display label. The reasoning-effort fields are
+/// present only for models that support it, so the picker can offer exactly the
+/// levels the CLI would accept. `disabled` reflects policy state (shown greyed,
+/// not selectable). `longContextAvailable` gates offering the long-context tier.
+public struct RemoteAvailableModel: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let supportedReasoningEfforts: [String]?
+    public let defaultReasoningEffort: String?
+    public let longContextAvailable: Bool?
+    public let disabled: Bool?
+    public let category: String?
+
+    public init(
+        id: String,
+        name: String,
+        supportedReasoningEfforts: [String]? = nil,
+        defaultReasoningEffort: String? = nil,
+        longContextAvailable: Bool? = nil,
+        disabled: Bool? = nil,
+        category: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.supportedReasoningEfforts = supportedReasoningEfforts
+        self.defaultReasoningEffort = defaultReasoningEffort
+        self.longContextAvailable = longContextAvailable
+        self.disabled = disabled
+        self.category = category
+    }
+}
+
+/// A remote request to switch the session's model, carried in the `data` of a
+/// `set-model` control message. `modelId` must be one advertised in the session's
+/// `availableModels`; `reasoningEffort` (when set) must be one of that model's
+/// `supportedReasoningEfforts`; `contextTier` is `default` or `long_context`.
+public struct RemoteModelSelection: Codable, Equatable, Sendable {
+    public let modelId: String
+    public let reasoningEffort: String?
+    public let contextTier: String?
+
+    public init(modelId: String, reasoningEffort: String? = nil, contextTier: String? = nil) {
+        self.modelId = modelId
         self.reasoningEffort = reasoningEffort
         self.contextTier = contextTier
     }

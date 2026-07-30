@@ -113,6 +113,14 @@ public enum CopilotExtension {
             sessionsDir, `${appSessionId}.elicitation-response.json`
         );
         const elicitationResponseName = `${appSessionId}.elicitation-response.json`;
+        // Host-written model switch request; same single-outstanding lifecycle as
+        // the user-input/elicitation responses. The host validates against the
+        // published catalog before writing; we re-validate the session binding
+        // before switching over RPC.
+        const setModelRequestPath = join(
+            sessionsDir, `${appSessionId}.set-model-request.json`
+        );
+        const setModelRequestName = `${appSessionId}.set-model-request.json`;
         const activeSubagents = new Map();
         // All outstanding structured questions (root and subagent), keyed by
         // requestId. Starts empty every launch: stale question state is never
@@ -143,6 +151,13 @@ public enum CopilotExtension {
         let lastIdleAborted = false;
         let lastIdleTurnKind = null;
         let currentModel = null;
+        // Compact, host-facing catalog of switchable models, refreshed from
+        // `session.rpc.model.list()`. Null until the first successful fetch so the
+        // client shows the read-only model line rather than an empty picker.
+        let availableModels = null;
+        // Guards against processing two set-model requests concurrently for the
+        // same file write burst (mirrors inFlightUserInputResponses).
+        let inFlightSetModelRequest = false;
         let schedules = [];
         const transcriptTurns = [];
         const transcriptEventIds = new Set();
@@ -514,6 +529,7 @@ public enum CopilotExtension {
                 trackedUserInputs: [...pendingUserInputs.values()],
                 trackedElicitations: [...pendingElicitations.values()],
                 ...(currentModel ? { model: currentModel } : {}),
+                ...(availableModels ? { availableModels } : {}),
                 ...(error ? { error: String(error) } : {}),
             };
             const temporaryPath = `${snapshotPath}.${process.pid}.tmp`;
@@ -1134,6 +1150,112 @@ public enum CopilotExtension {
             } catch {}
         }
 
+        // Reduce a raw `rpc.model.list()` entry to the compact, host-facing shape
+        // the remote picker needs. Drops entries without a usable id/name; bounds
+        // strings/count so a pathological catalog can't bloat the 0600 heartbeat.
+        function normalizeAvailableModels(rawList) {
+            if (!Array.isArray(rawList)) return null;
+            const out = [];
+            for (const entry of rawList) {
+                if (!entry || typeof entry !== "object") continue;
+                const id = typeof entry.id === "string" ? entry.id.slice(0, 200) : "";
+                const rawName = typeof entry.name === "string" && entry.name.length > 0
+                    ? entry.name
+                    : id;
+                const name = rawName.slice(0, 200);
+                if (!id || !name) continue;
+                const model = { id, name };
+                if (Array.isArray(entry.supportedReasoningEfforts)) {
+                    const efforts = entry.supportedReasoningEfforts
+                        .filter((value) => typeof value === "string" && value.length > 0)
+                        .slice(0, 16);
+                    if (efforts.length > 0) model.supportedReasoningEfforts = efforts;
+                }
+                if (typeof entry.defaultReasoningEffort === "string"
+                        && entry.defaultReasoningEffort.length > 0) {
+                    model.defaultReasoningEffort = entry.defaultReasoningEffort;
+                }
+                model.longContextAvailable = !!(entry.billing
+                    && entry.billing.tokenPrices
+                    && entry.billing.tokenPrices.longContext);
+                if (entry.policy && entry.policy.state === "disabled") {
+                    model.disabled = true;
+                }
+                if (typeof entry.modelPickerCategory === "string") {
+                    model.category = entry.modelPickerCategory;
+                }
+                out.push(model);
+                if (out.length >= 100) break;
+            }
+            return out.length > 0 ? out : null;
+        }
+
+        async function refreshModels() {
+            try {
+                const result = await session.rpc.model.list();
+                const normalized = normalizeAvailableModels(
+                    result && Array.isArray(result.list) ? result.list : null
+                );
+                // Keep the last good catalog if a refresh returns nothing usable.
+                if (normalized) {
+                    availableModels = normalized;
+                    publish();
+                }
+            } catch {}
+        }
+
+        // Consume a host-written model switch request: validate it targets THIS
+        // Copilot session, then switch over RPC. `session.model_change` refreshes
+        // the current-model line; we drop the request file whether it succeeds or
+        // fails so the client can issue a fresh one (the model is unchanged on
+        // failure, so retrying is safe).
+        async function processSetModelRequest() {
+            if (!ownsSharedFiles() || inFlightSetModelRequest) return;
+            let encoded;
+            try {
+                encoded = readFileSync(setModelRequestPath, "utf8");
+            } catch {
+                return;
+            }
+            let request;
+            try {
+                request = JSON.parse(encoded);
+            } catch {
+                removeFile(setModelRequestPath);
+                return;
+            }
+            if (!request || typeof request !== "object"
+                    || request.schemaVersion !== 1
+                    || typeof request.modelId !== "string"
+                    || request.modelId.length === 0
+                    || request.modelId.length > 200
+                    || request.copilotSessionId !== session.sessionId) {
+                removeFile(setModelRequestPath);
+                return;
+            }
+            const params = { modelId: request.modelId };
+            if (typeof request.reasoningEffort === "string"
+                    && request.reasoningEffort.length > 0
+                    && request.reasoningEffort.length <= 64) {
+                params.reasoningEffort = request.reasoningEffort;
+            }
+            if (request.contextTier === "default"
+                    || request.contextTier === "long_context") {
+                params.contextTier = request.contextTier;
+            }
+            inFlightSetModelRequest = true;
+            try {
+                await session.rpc.model.switchTo(params);
+                removeFile(setModelRequestPath);
+                // Quotas / preferred default can shift after a switch.
+                await refreshModels();
+            } catch {
+                removeFile(setModelRequestPath);
+            } finally {
+                inFlightSetModelRequest = false;
+            }
+        }
+
         session.on("user.message", (event) => {
             if (event.agentId) return;
             lastIdleTurnKind = null;
@@ -1251,6 +1373,9 @@ public enum CopilotExtension {
         if (ownsSharedFiles()) {
             removeFile(userInputResponsePath);
             removeFile(elicitationResponsePath);
+            // A switch request from a previous session in this tab must never be
+            // executed against the newly joined session.
+            removeFile(setModelRequestPath);
         }
         let userInputWatcher = null;
         try {
@@ -1260,6 +1385,9 @@ public enum CopilotExtension {
                 }
                 if (!filename || filename === elicitationResponseName) {
                     processElicitationResponse();
+                }
+                if (!filename || filename === setModelRequestName) {
+                    processSetModelRequest();
                 }
             });
         } catch {}
@@ -1345,6 +1473,7 @@ public enum CopilotExtension {
                 // provenance in the meantime.
                 removeFile(userInputResponsePath);
                 removeFile(elicitationResponsePath);
+                removeFile(setModelRequestPath);
             }
         }
         let shuttingDown = false;
@@ -1431,14 +1560,18 @@ public enum CopilotExtension {
         publishTranscript();
 
         await refreshSchedules();
+        await refreshModels();
 
         processUserInputResponse();
         processElicitationResponse();
+        processSetModelRequest();
 
         timer = setInterval(() => {
             refreshSchedules();
+            refreshModels();
             processUserInputResponse();
             processElicitationResponse();
+            processSetModelRequest();
         }, 5_000);
     }
     """#

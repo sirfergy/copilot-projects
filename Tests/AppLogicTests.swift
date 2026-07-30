@@ -3066,6 +3066,162 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testSetModelValidatesAgainstCatalogAndSession() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(id: "session-model", title: "target", cwd: "/tmp")
+        let project = Project(name: "target", cwd: "/tmp", sessions: [session])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+        let requestURL = directory
+            .appendingPathComponent("\(session.id).set-model-request.json")
+        let markerURL = directory.appendingPathComponent("\(session.id).copilot-session")
+
+        func writeSnapshot(updatedAt: Date) throws {
+            let snapshot = AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: ISO8601DateFormatter().string(from: updatedAt),
+                foregroundTurnActive: false,
+                scheduledTurnActive: false,
+                activeSubagents: [],
+                schedules: [],
+                idleGeneration: 0,
+                lastIdleAborted: false,
+                lastIdleTurnKind: nil,
+                error: nil,
+                availableModels: [
+                    TrackedAvailableModel(
+                        id: "gpt-5.4",
+                        name: "GPT-5.4",
+                        supportedReasoningEfforts: ["low", "high"],
+                        defaultReasoningEffort: "high",
+                        longContextAvailable: true,
+                        disabled: nil,
+                        category: "versatile"
+                    ),
+                    TrackedAvailableModel(
+                        id: "locked-model",
+                        name: "Locked",
+                        supportedReasoningEfforts: nil,
+                        defaultReasoningEffort: nil,
+                        longContextAvailable: false,
+                        disabled: true,
+                        category: nil
+                    ),
+                ]
+            )
+            try JSONEncoder().encode(snapshot).write(to: requestURL.deletingLastPathComponent()
+                .appendingPathComponent("\(session.id).agent-activity.json"))
+        }
+        try writeSnapshot(updatedAt: Date())
+        try Data("copilot-session".utf8).write(to: markerURL)
+
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: directory,
+            resumeMarkerDirectory: directory
+        )
+
+        // Unknown model id is rejected.
+        XCTAssertEqual(
+            model.setModel(
+                sessionId: session.id,
+                selection: RemoteModelSelection(modelId: "does-not-exist")
+            ),
+            .invalid
+        )
+        // A policy-disabled model is never switchable.
+        XCTAssertEqual(
+            model.setModel(
+                sessionId: session.id,
+                selection: RemoteModelSelection(modelId: "locked-model")
+            ),
+            .invalid
+        )
+        // An unsupported reasoning effort is rejected.
+        XCTAssertEqual(
+            model.setModel(
+                sessionId: session.id,
+                selection: RemoteModelSelection(modelId: "gpt-5.4", reasoningEffort: "max")
+            ),
+            .invalid
+        )
+        // long_context requires the model to advertise it.
+        XCTAssertEqual(
+            model.setModel(
+                sessionId: session.id,
+                selection: RemoteModelSelection(
+                    modelId: "locked-model", contextTier: "long_context"
+                )
+            ),
+            .invalid
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: requestURL.path))
+
+        // A valid selection is accepted and atomically written 0600.
+        XCTAssertEqual(
+            model.setModel(
+                sessionId: session.id,
+                selection: RemoteModelSelection(
+                    modelId: "gpt-5.4", reasoningEffort: "high", contextTier: "long_context"
+                )
+            ),
+            .accepted
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: requestURL.path))
+        let attributes = try FileManager.default.attributesOfItem(atPath: requestURL.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let written = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: requestURL))
+                as? [String: Any]
+        )
+        XCTAssertEqual(written["schemaVersion"] as? Int, 1)
+        XCTAssertEqual(written["copilotSessionId"] as? String, "copilot-session")
+        XCTAssertEqual(written["modelId"] as? String, "gpt-5.4")
+        XCTAssertEqual(written["reasoningEffort"] as? String, "high")
+        XCTAssertEqual(written["contextTier"] as? String, "long_context")
+
+        // A second switch conflicts while the prior request awaits pickup.
+        XCTAssertEqual(
+            model.setModel(
+                sessionId: session.id,
+                selection: RemoteModelSelection(modelId: "gpt-5.4")
+            ),
+            .conflict
+        )
+        try FileManager.default.removeItem(at: requestURL)
+
+        // Without a live Copilot session marker the switch cannot be bound.
+        try FileManager.default.removeItem(at: markerURL)
+        XCTAssertEqual(
+            model.setModel(
+                sessionId: session.id,
+                selection: RemoteModelSelection(modelId: "gpt-5.4")
+            ),
+            .invalid
+        )
+
+        // A stale heartbeat can no longer be switched.
+        try Data("copilot-session".utf8).write(to: markerURL)
+        try writeSnapshot(updatedAt: Date(timeIntervalSince1970: 0))
+        XCTAssertEqual(
+            model.setModel(
+                sessionId: session.id,
+                selection: RemoteModelSelection(modelId: "gpt-5.4")
+            ),
+            .invalid
+        )
+    }
+
+    @MainActor
     func testAnswerElicitationValidatesActionContentAndSession() throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory
@@ -6417,6 +6573,38 @@ final class AppLogicTests: XCTestCase {
         let bare = Data(("{" + base + "}").utf8)
         XCTAssertNil(
             try JSONDecoder().decode(AgentActivitySnapshot.self, from: bare).remoteModelInfo()
+        )
+    }
+
+    func testAgentActivitySnapshotDecodesAvailableModels() throws {
+        let base = "\"schemaVersion\":1,\"updatedAt\":\"2026-07-14T00:00:00Z\","
+            + "\"foregroundTurnActive\":false,\"scheduledTurnActive\":false,"
+            + "\"activeSubagents\":[],\"schedules\":[],\"idleGeneration\":0,"
+            + "\"lastIdleAborted\":false"
+        // A well-formed entry, plus one missing its id which must be dropped.
+        let full = Data(("{" + base + ",\"availableModels\":["
+            + "{\"id\":\"gpt-5.4\",\"name\":\"GPT-5.4\","
+            + "\"supportedReasoningEfforts\":[\"low\",\"high\"],"
+            + "\"defaultReasoningEffort\":\"high\",\"longContextAvailable\":true,"
+            + "\"disabled\":false,\"category\":\"versatile\"},"
+            + "{\"name\":\"No Id\"}]}").utf8)
+        let models = try XCTUnwrap(
+            try JSONDecoder().decode(AgentActivitySnapshot.self, from: full)
+                .remoteAvailableModels()
+        )
+        XCTAssertEqual(models.count, 1)
+        XCTAssertEqual(models[0].id, "gpt-5.4")
+        XCTAssertEqual(models[0].name, "GPT-5.4")
+        XCTAssertEqual(models[0].supportedReasoningEfforts, ["low", "high"])
+        XCTAssertEqual(models[0].defaultReasoningEffort, "high")
+        XCTAssertEqual(models[0].longContextAvailable, true)
+        XCTAssertEqual(models[0].disabled, false)
+        XCTAssertEqual(models[0].category, "versatile")
+
+        let bare = Data(("{" + base + "}").utf8)
+        XCTAssertNil(
+            try JSONDecoder().decode(AgentActivitySnapshot.self, from: bare)
+                .remoteAvailableModels()
         )
     }
 

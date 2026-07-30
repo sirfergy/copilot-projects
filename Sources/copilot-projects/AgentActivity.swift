@@ -31,6 +31,11 @@ struct AgentActivitySnapshot: Codable, Equatable {
     /// The session's effective model (name + reasoning effort + context tier).
     /// Optional (nil default) so older heartbeats without it still decode.
     var model: TrackedModel? = nil
+    /// The models this session can switch to, mirrored from the CLI's own catalog
+    /// (`session.rpc.model.list()`), ordered preferred-default-first. Optional (nil
+    /// default) so older heartbeats without it still decode and so a session that
+    /// hasn't reported its catalog yet simply exposes no picker.
+    var availableModels: [TrackedAvailableModel]? = nil
 
     func isFresh(at now: Date = Date(), ttl: TimeInterval = 15) -> Bool {
         guard schemaVersion == Self.currentSchemaVersion,
@@ -98,6 +103,15 @@ struct AgentActivitySnapshot: Codable, Equatable {
             reasoningEffort: model.reasoningEffort,
             contextTier: model.contextTier
         )
+    }
+
+    /// Convert the tracked model catalog into the shared remote list. Returns nil
+    /// when the catalog is absent or empty so the field is omitted entirely (and
+    /// the client shows the read-only model line rather than an empty picker).
+    func remoteAvailableModels() -> [RemoteAvailableModel]? {
+        guard let availableModels, !availableModels.isEmpty else { return nil }
+        let mapped = availableModels.compactMap { $0.remoteAvailableModel() }
+        return mapped.isEmpty ? nil : mapped
     }
 
     private static func date(from value: String) -> Date? {
@@ -183,6 +197,33 @@ struct TrackedModel: Codable, Equatable {
     var name: String
     var reasoningEffort: String?
     var contextTier: String?
+}
+
+/// One switchable model, mirrored from the extension heartbeat's catalog. Maps to
+/// the shared `RemoteAvailableModel`. `id`/`name` are decoded as optional so a
+/// single malformed entry is dropped rather than failing the whole heartbeat
+/// decode; the extension always emits both for real entries.
+struct TrackedAvailableModel: Codable, Equatable {
+    var id: String?
+    var name: String?
+    var supportedReasoningEfforts: [String]?
+    var defaultReasoningEffort: String?
+    var longContextAvailable: Bool?
+    var disabled: Bool?
+    var category: String?
+
+    func remoteAvailableModel() -> RemoteAvailableModel? {
+        guard let id, !id.isEmpty, let name, !name.isEmpty else { return nil }
+        return RemoteAvailableModel(
+            id: id,
+            name: name,
+            supportedReasoningEfforts: supportedReasoningEfforts,
+            defaultReasoningEffort: defaultReasoningEffort,
+            longContextAvailable: longContextAvailable,
+            disabled: disabled,
+            category: category
+        )
+    }
 }
 
 struct TrackedSchedule: Codable, Equatable, Identifiable {

@@ -73,6 +73,16 @@ private struct ElicitationResponseFile: Codable {
     let content: [String: RemoteJSONValue]?
 }
 
+/// On-disk shape of the host-written set-model request file. The extension
+/// re-validates the target against its live catalog before switching over RPC.
+private struct SetModelRequestFile: Codable {
+    let schemaVersion: Int
+    let copilotSessionId: String
+    let modelId: String
+    let reasoningEffort: String?
+    let contextTier: String?
+}
+
 struct RemotePromptTarget {
     let activity: FooterActivity
     let send: (String) -> Bool
@@ -1012,7 +1022,9 @@ final class AppModel: ObservableObject {
                                 .remoteUserInputRequests(),
                             pendingElicitations: session.agentActivity?
                                 .remoteElicitationRequests(),
-                            model: session.agentActivity?.remoteModelInfo()
+                            model: session.agentActivity?.remoteModelInfo(),
+                            availableModels: session.agentActivity?
+                                .remoteAvailableModels()
                         )
                     }
                 )
@@ -1391,6 +1403,71 @@ final class AppModel: ObservableObject {
         )
         guard let encoded = try? JSONEncoder().encode(payload),
               Self.atomicallyWrite0600(encoded, to: responseURL) else {
+            return .invalid
+        }
+        return .accepted
+    }
+
+    /// Submit a remote model switch. Mirrors `answerUserInput`/`answerElicitation`:
+    /// re-reads the fresh heartbeat snapshot, validates the target against the
+    /// session's live catalog, binds to the tab's Copilot session, and writes an
+    /// atomic single-outstanding request file the extension consumes over RPC.
+    func setModel(
+        sessionId: String,
+        selection: RemoteModelSelection,
+        now: Date = Date()
+    ) -> RemoteUserInputResult {
+        guard locateIndex(sessionId) != nil else { return .invalid }
+
+        let snapshotURL = agentActivityDirectory
+            .appendingPathComponent("\(sessionId).agent-activity.json")
+        guard let data = try? Data(contentsOf: snapshotURL),
+              let snapshot = try? JSONDecoder().decode(
+                AgentActivitySnapshot.self, from: data
+              ),
+              snapshot.isFresh(at: now),
+              let target = snapshot.availableModels?
+                .first(where: { $0.id == selection.modelId })
+        else { return .invalid }
+
+        // Never switch to a policy-disabled model, even if a stale client offered it.
+        guard target.disabled != true else { return .invalid }
+
+        if let effort = selection.reasoningEffort {
+            // Only accept a level this model actually advertises.
+            guard let supported = target.supportedReasoningEfforts,
+                  supported.contains(effort) else { return .invalid }
+        }
+        if let tier = selection.contextTier {
+            guard tier == "default" || tier == "long_context" else { return .invalid }
+            if tier == "long_context" {
+                guard target.longContextAvailable != false else { return .invalid }
+            }
+        }
+
+        // Bind the switch to the tab's live Copilot session so a request written for
+        // an old (pre-resume) agent session is rejected by the extension.
+        let markerURL = resumeMarkerDirectory
+            .appendingPathComponent("\(sessionId).copilot-session")
+        guard let copilotSessionId = (try? String(contentsOf: markerURL, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !copilotSessionId.isEmpty else { return .invalid }
+
+        // One outstanding switch per tab: refuse while a prior request is still being
+        // consumed by the extension, which serializes retries.
+        let requestURL = agentActivityDirectory
+            .appendingPathComponent("\(sessionId).set-model-request.json")
+        if FileManager.default.fileExists(atPath: requestURL.path) { return .conflict }
+
+        let payload = SetModelRequestFile(
+            schemaVersion: 1,
+            copilotSessionId: copilotSessionId,
+            modelId: selection.modelId,
+            reasoningEffort: selection.reasoningEffort,
+            contextTier: selection.contextTier
+        )
+        guard let encoded = try? JSONEncoder().encode(payload),
+              Self.atomicallyWrite0600(encoded, to: requestURL) else {
             return .invalid
         }
         return .accepted

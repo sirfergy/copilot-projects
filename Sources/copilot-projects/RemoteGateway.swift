@@ -162,6 +162,13 @@ final class RemoteModelBridge: @unchecked Sendable {
         model?.answerElicitation(sessionId: sessionId, answer: answer) ?? .invalid
     }
 
+    func setModel(
+        sessionId: String,
+        selection: RemoteModelSelection
+    ) -> RemoteUserInputResult {
+        model?.setModel(sessionId: sessionId, selection: selection) ?? .invalid
+    }
+
     /// The exact retained PNG bytes for `(imageId, version)` in `sessionId`'s
     /// terminal, or `nil` if the session, id, or exact version isn't (or is no
     /// longer) available.
@@ -1219,6 +1226,55 @@ private final class RemoteHTTPHandler:
                         response = (.conflict, "Another answer is still processing")
                     case .some(.invalid):
                         response = (.unprocessableEntity, "Answer was not accepted")
+                    case .none:
+                        response = (.forbidden, "view only")
+                    }
+                    self.respond(
+                        channel: channel,
+                        method: .POST,
+                        status: response.0,
+                        contentType: "text/plain",
+                        body: Data(response.1.utf8)
+                    )
+                }
+            }
+        case "set-model":
+            guard let payload = message.data,
+                  payload.utf8.count <= 4_096,
+                  let selection = try? JSONDecoder().decode(
+                    RemoteModelSelection.self, from: Data(payload.utf8)
+                  ),
+                  !selection.modelId.isEmpty,
+                  selection.modelId.utf8.count <= 200,
+                  (selection.reasoningEffort?.utf8.count ?? 0) <= 64,
+                  (selection.contextTier?.utf8.count ?? 0) <= 64 else {
+                respond(context: context, method: .POST, status: .badRequest,
+                        contentType: "text/plain", body: "Bad request")
+                return
+            }
+            guard leases.holds(sessionId: sessionId, clientId: clientId) else {
+                respond(context: context, method: .POST, status: .forbidden,
+                        contentType: "text/plain", body: "view only")
+                return
+            }
+            let channel = context.channel
+            let leases = self.leases
+            Task { @MainActor in
+                let result = leases.withHeldLease(
+                    sessionId: sessionId,
+                    clientId: clientId
+                ) {
+                    self.bridge.setModel(sessionId: sessionId, selection: selection)
+                }
+                channel.eventLoop.execute {
+                    let response: (HTTPResponseStatus, String)
+                    switch result {
+                    case .some(.accepted):
+                        response = (.noContent, "")
+                    case .some(.conflict):
+                        response = (.conflict, "Another model switch is still processing")
+                    case .some(.invalid):
+                        response = (.unprocessableEntity, "Model switch was not accepted")
                     case .none:
                         response = (.forbidden, "view only")
                     }
