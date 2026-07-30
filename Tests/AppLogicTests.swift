@@ -8354,6 +8354,194 @@ final class AppLogicTests: XCTestCase {
         )
     }
 
+    /// Exercises the web model picker's pure helpers under Node. The syntax check
+    /// above can't catch a mis-grouped category or an effort default that silently
+    /// selects "none", which is the failure mode that matters here.
+    func testRemoteWebModelPickerHelpers() throws {
+        try requireNodeForJavaScriptTests()
+        let js = RemoteWebAssets.javascript
+        guard let start = js.range(of: "function effortLabel(model) {"),
+              let end = js.range(of: "function renderModelLine()") else {
+            return XCTFail("model picker helpers not found in web JavaScript")
+        }
+        let helpers = String(js[start.lowerBound..<end.lowerBound])
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("helpers.mjs")
+        try (Self.webModelPickerHarness + helpers + Self.webModelPickerAssertions)
+            .write(to: script, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", script.path]
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+        let output = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: output, encoding: .utf8) ?? "model picker helper assertions failed"
+        )
+    }
+
+    /// Stands in for the browser state the helpers read.
+    private static let webModelPickerHarness = #"""
+    let currentModel = null;
+    function currentModelInfo() { return currentModel; }
+
+    """#
+
+    private static let webModelPickerAssertions = #"""
+
+    function check(condition, message) {
+        if (!condition) {
+            console.error("FAIL: " + message);
+            process.exitCode = 1;
+        }
+    }
+
+    currentModel = null;
+    check(effortLabel(null) === "Default", "absent model reads as Default effort");
+    check(contextLabel(null) === "Default", "absent model reads as Default context");
+    check(effortLabel({ reasoningEffort: "xhigh" }) === "Xhigh", "effort is capitalized");
+    check(effortLabel({ reasoningEffort: "" }) === "Default", "empty effort reads as Default");
+    check(
+        contextLabel({ contextTier: "long_context" }) === "Long context",
+        "long context tier is labeled"
+    );
+    check(contextLabel({ contextTier: "default" }) === "Default", "default tier is labeled");
+
+    check(modelSwitchErrorMessage(403) === "View only", "403 maps to view only");
+    check(
+        modelSwitchErrorMessage(409) === "Another model switch is still processing",
+        "409 maps to in-progress"
+    );
+    check(
+        modelSwitchErrorMessage(422) === "Model switch was not accepted",
+        "422 maps to rejected"
+    );
+    check(modelSwitchErrorMessage(500) === "Model switch failed", "500 maps to generic failure");
+    check(modelSwitchErrorMessage(0) === "Model switch failed", "network error maps to failure");
+
+    // The session reports its model as either the id or the display name.
+    currentModel = { name: "GPT-5.6 Sol", reasoningEffort: "xhigh" };
+    check(isCurrentModel({ id: "gpt-5.6-sol", name: "GPT-5.6 Sol" }), "matches on display name");
+    currentModel = { name: "gpt-5.6-sol" };
+    check(isCurrentModel({ id: "gpt-5.6-sol", name: "GPT-5.6 Sol" }), "matches on id");
+    check(!isCurrentModel({ id: "other", name: "Other" }), "does not match a different model");
+
+    // "none" is advertised first by the GPT-5.6 models; preselecting it would
+    // silently disable reasoning, so with no better signal defer to Copilot.
+    currentModel = null;
+    check(
+        initialEffort({
+            id: "gpt-5.6-sol", name: "Sol",
+            supportedReasoningEfforts: ["none", "low", "high"]
+        }) === "",
+        "no signal defers to Copilot rather than picking none"
+    );
+    currentModel = { name: "Sol", reasoningEffort: "high" };
+    check(
+        initialEffort({
+            id: "sol", name: "Sol",
+            supportedReasoningEfforts: ["none", "low", "high"]
+        }) === "high",
+        "active model keeps its current level"
+    );
+    check(
+        initialEffort({
+            id: "other", name: "Other",
+            supportedReasoningEfforts: ["low", "high"], defaultReasoningEffort: "low"
+        }) === "low",
+        "a different model uses its advertised default"
+    );
+    currentModel = { name: "Sol", reasoningEffort: "xhigh" };
+    check(
+        initialEffort({
+            id: "sol", name: "Sol",
+            supportedReasoningEfforts: ["low", "high"], defaultReasoningEffort: "high"
+        }) === "high",
+        "an unsupported current level falls through to the model default"
+    );
+    check(
+        initialEffort({ id: "sol", name: "Sol", supportedReasoningEfforts: [] }) === "",
+        "a model without efforts yields no selection"
+    );
+
+    currentModel = null;
+    const sections = modelSections([
+        { id: "a", name: "A", category: "versatile" },
+        { id: "b", name: "B", category: "powerful" },
+        { id: "c", name: "C", category: "lightweight" },
+        { id: "d", name: "D" },
+        { id: "e", name: "E", category: "powerful" }
+    ]);
+    check(
+        JSON.stringify(sections.map((s) => s.title))
+            === JSON.stringify(["Powerful", "Versatile", "Lightweight", "Other"]),
+        "categories order powerful/versatile/lightweight then other, got "
+            + JSON.stringify(sections.map((s) => s.title))
+    );
+    check(
+        JSON.stringify(sections[0].models.map((m) => m.id)) === JSON.stringify(["b", "e"]),
+        "preferred-first order is preserved within a category"
+    );
+    check(sections[3].models.length === 1, "uncategorized models land in Other");
+
+    // A catalog with no categories at all renders as one untitled group.
+    const flat = modelSections([{ id: "a", name: "A" }, { id: "b", name: "B" }]);
+    check(flat.length === 1 && flat[0].title === "", "uncategorized catalog is one untitled group");
+    check(flat[0].models.length === 2, "untitled group keeps every model");
+    check(modelSections([]).length === 0, "an empty catalog yields no sections");
+
+    """#
+
+    /// Every `document.querySelector('#id')` in the web bundle must resolve against
+    /// the served HTML. A typo'd or missing id yields null and throws at load,
+    /// taking down the whole page rather than just the feature that added it.
+    func testRemoteWebQueriedElementIdsExistInHTML() throws {
+        let html = RemoteWebAssets.html
+        var htmlIDs = Set<String>()
+        var htmlSearch = html.startIndex..<html.endIndex
+        while let match = html.range(of: #"id="[^"]+""#, options: .regularExpression, range: htmlSearch) {
+            let raw = String(html[match])
+            htmlIDs.insert(String(raw.dropFirst(4).dropLast()))
+            htmlSearch = match.upperBound..<html.endIndex
+        }
+        XCTAssertFalse(htmlIDs.isEmpty, "no ids parsed out of the HTML")
+
+        let js = RemoteWebAssets.javascript
+        var queried = Set<String>()
+        var jsSearch = js.startIndex..<js.endIndex
+        while let match = js.range(
+            of: #"querySelector\('#[A-Za-z0-9_-]+'\)"#,
+            options: .regularExpression,
+            range: jsSearch
+        ) {
+            let raw = String(js[match])
+            queried.insert(
+                String(raw.dropFirst("querySelector('#".count).dropLast(2))
+            )
+            jsSearch = match.upperBound..<js.endIndex
+        }
+        XCTAssertFalse(queried.isEmpty, "no querySelector ids parsed out of the JavaScript")
+
+        XCTAssertEqual(
+            queried.subtracting(htmlIDs).sorted(),
+            [],
+            "JavaScript queries element ids that the HTML never defines"
+        )
+        // Guards the wiring this test was added for.
+        for id in ["model-line", "model-line-name", "model-picker", "model-picker-body"] {
+            XCTAssertTrue(queried.contains(id), "\(id) is no longer wired up in the JavaScript")
+        }
+    }
+
     func testRemoteWebJavaScriptSyntax() throws {
         try requireNodeForJavaScriptTests()
         let root = FileManager.default.temporaryDirectory

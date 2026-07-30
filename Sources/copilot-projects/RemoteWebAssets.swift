@@ -62,7 +62,13 @@ enum RemoteWebAssets {
             <form id="prompt-form">
               <textarea id="prompt" rows="3" maxlength="8192" aria-describedby="prompt-warning"
                 aria-label="Message Copilot" placeholder="Message Copilot"></textarea>
-              <div id="prompt-warning">Sending clears any unsent desktop draft.</div>
+              <div id="prompt-footer">
+                <div id="prompt-warning">Sending clears any unsent desktop draft.</div>
+                <button id="model-line" type="button" hidden aria-haspopup="dialog">
+                  <span id="model-line-name">Model</span>
+                  <span id="model-line-chevron" aria-hidden="true">&#9662;</span>
+                </button>
+              </div>
               <button id="prompt-submit" disabled>Send message</button>
             </form>
           </aside>
@@ -101,6 +107,16 @@ enum RemoteWebAssets {
         <img class="image-lightbox-img" alt="Expanded terminal image" draggable="false">
         <div class="image-lightbox-hint">Scroll or pinch to zoom · drag to pan · Esc to close</div>
       </div>
+      <dialog id="model-picker" aria-labelledby="model-picker-title">
+        <div id="model-picker-head">
+          <button id="model-picker-back" type="button" hidden
+            aria-label="Back to model list">&#8249;</button>
+          <strong id="model-picker-title">Model</strong>
+          <button id="model-picker-close" type="button" aria-label="Close">&times;</button>
+        </div>
+        <div id="model-picker-body"></div>
+        <div id="model-picker-status" role="status" aria-live="polite"></div>
+      </dialog>
       <script src="app.js"></script>
     </body>
     </html>
@@ -408,6 +424,58 @@ enum RemoteWebAssets {
     #prompt { width:100%; resize:none; background:#222; color:#fff; border:1px solid #555;
       border-radius:7px; padding:9px; font:16px/1.3 -apple-system, BlinkMacSystemFont, sans-serif; }
     #prompt-warning { color:#999; font-size:10px; }
+    #prompt-footer { display:flex; align-items:center; gap:8px; }
+    #prompt-footer #prompt-warning { flex:1 1 auto; min-width:0; }
+    #model-line { flex:0 0 auto; max-width:55%; display:inline-flex; align-items:center;
+      gap:4px; padding:2px 6px; border:0; background:transparent; color:#999;
+      font-size:11px; border-radius:6px; cursor:pointer; }
+    #model-line[data-interactive="false"] { cursor:default; color:#777; }
+    #model-line[data-interactive="false"] #model-line-chevron { display:none; }
+    #model-line-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    #model-line-chevron { font-size:9px; }
+    #model-picker { width:min(420px, 92vw); max-height:80vh; padding:0; border:1px solid #333;
+      border-radius:12px; background:#1b1b1b; color:#eee; overflow:hidden; }
+    #model-picker::backdrop { background:rgba(0,0,0,.6); }
+    #model-picker[open] { display:flex; flex-direction:column; }
+    #model-picker-head { flex:0 0 auto; display:flex; align-items:center; gap:8px;
+      padding:10px 12px; border-bottom:1px solid #333; }
+    #model-picker-head strong { flex:1 1 auto; min-width:0; overflow:hidden;
+      text-overflow:ellipsis; white-space:nowrap; font-size:14px; }
+    #model-picker-head button { padding:2px 9px; font-size:15px; line-height:1.4;
+      background:transparent; border:0; color:#bbb; }
+    #model-picker-body { flex:1 1 auto; min-height:0; overflow:auto;
+      -webkit-overflow-scrolling:touch; overscroll-behavior:contain; padding:10px 12px; }
+    #model-picker-status { flex:0 0 auto; padding:0 12px; color:#8b949e; font-size:11px; }
+    #model-picker-status:empty { display:none; }
+    #model-picker-status.error { color:#f85149; }
+    #model-picker-status:not(:empty) { padding:8px 12px; border-top:1px solid #333; }
+    .model-group-title { color:#8b949e; font-size:11px; text-transform:uppercase;
+      letter-spacing:.04em; margin:12px 2px 5px; }
+    .model-group-title:first-child { margin-top:0; }
+    .model-row { display:flex; align-items:center; gap:8px; width:100%; margin:2px 0;
+      padding:9px 10px; text-align:left; border:0; border-radius:7px;
+      background:#222; color:#ddd; font-size:13px; }
+    .model-row:disabled { opacity:.45; }
+    .model-row-name { flex:1 1 auto; min-width:0; overflow:hidden;
+      text-overflow:ellipsis; white-space:nowrap; }
+    .model-row-note { color:#8b949e; font-size:11px; }
+    .model-row-check { color:#3fb950; }
+    .model-current { display:grid; gap:5px; padding:9px 10px; border:1px solid #333;
+      border-radius:8px; background:#1f1f1f; }
+    .model-current-row { display:flex; align-items:baseline; gap:8px; font-size:12px; }
+    .model-current-row dt { flex:0 0 auto; color:#8b949e; margin:0; }
+    .model-current-row dd { flex:1 1 auto; min-width:0; margin:0; text-align:right;
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .model-field { display:grid; gap:5px; margin:12px 0; }
+    .model-field label { color:#8b949e; font-size:11px; }
+    .model-field select { padding:8px; border:1px solid #444; border-radius:7px;
+      background:#222; color:#eee; font-size:14px; }
+    .model-toggle { display:flex; align-items:center; gap:8px; font-size:13px; }
+    .model-toggle input { width:17px; height:17px; }
+    .model-apply { width:100%; margin-top:6px; padding:10px; border:1px solid #1f6feb55;
+      border-radius:8px; background:#1f6feb; color:#fff; font-size:14px; }
+    .model-apply:disabled { background:#30363d; color:#7d8590; border-color:#444; }
+    .model-hint { color:#8b949e; font-size:11px; margin-top:4px; }
     #prompt-submit:disabled { opacity:.5; }
     #prompt-form.hidden { display:none; }
     #user-input { flex:0 0 auto; display:grid; gap:10px; padding:10px;
@@ -1558,6 +1626,14 @@ enum RemoteWebAssets {
     const prompt = document.querySelector('#prompt');
     const promptStatus = document.querySelector('#prompt-status');
     const promptSubmit = document.querySelector('#prompt-submit');
+    const modelLine = document.querySelector('#model-line');
+    const modelLineName = document.querySelector('#model-line-name');
+    const modelPicker = document.querySelector('#model-picker');
+    const modelPickerBody = document.querySelector('#model-picker-body');
+    const modelPickerTitle = document.querySelector('#model-picker-title');
+    const modelPickerStatus = document.querySelector('#model-picker-status');
+    const modelPickerBack = document.querySelector('#model-picker-back');
+    const modelPickerClose = document.querySelector('#model-picker-close');
     const userInput = document.querySelector('#user-input');
     const promptQueue = document.querySelector('#prompt-queue');
     const notifications = document.querySelector('#notifications');
@@ -2167,8 +2243,304 @@ enum RemoteWebAssets {
         flushingQueue = false;
       }
     }
+    // ---- Model picker -------------------------------------------------------
+    // The composer line shows only the model name; the picker spells out the full
+    // selection and drives `set-model` over the same lease-gated /control route
+    // the native clients use.
+    let modelPickerModelId = null;
+    let modelSwitchSubmitting = false;
+
+    function currentModelInfo() {
+      const state = selected && sessionState.get(selected);
+      return (state && state.model) || null;
+    }
+    function availableModelOptions() {
+      const state = selected && sessionState.get(selected);
+      return (state && Array.isArray(state.availableModels)) ? state.availableModels : [];
+    }
+    function effortLabel(model) {
+      const effort = model && model.reasoningEffort;
+      if (!effort) return 'Default';
+      return effort.charAt(0).toUpperCase() + effort.slice(1);
+    }
+    function contextLabel(model) {
+      return model && model.contextTier === 'long_context' ? 'Long context' : 'Default';
+    }
+    // The session reports its active model as either the id or the display name.
+    function isCurrentModel(model) {
+      const current = currentModelInfo();
+      if (!current || !current.name) return false;
+      return current.name === model.id || current.name === model.name;
+    }
+    function modelSwitchErrorMessage(status) {
+      if (status === 403) return 'View only';
+      if (status === 409) return 'Another model switch is still processing';
+      if (status === 422) return 'Model switch was not accepted';
+      return 'Model switch failed';
+    }
+    // Never fall back to the first advertised level: several models list "none"
+    // first, so that would silently disable reasoning. Keep the session's current
+    // level when re-configuring the active model, otherwise defer to Copilot.
+    function initialEffort(model) {
+      const supported = Array.isArray(model.supportedReasoningEfforts)
+        ? model.supportedReasoningEfforts : [];
+      const current = isCurrentModel(model)
+        ? (currentModelInfo() || {}).reasoningEffort : null;
+      return [current, model.defaultReasoningEffort]
+        .find((value) => !!value && supported.includes(value)) || '';
+    }
+    // Category order mirrors the CLI picker's tabs; unknown/absent categories fall
+    // into a trailing "Other" group, preserving preferred-first order within each.
+    function modelSections(options) {
+      const order = ['powerful', 'versatile', 'lightweight'];
+      const titles = {
+        powerful: 'Powerful', versatile: 'Versatile', lightweight: 'Lightweight'
+      };
+      const grouped = new Map();
+      const seen = [];
+      for (const model of options) {
+        const key = order.includes(model.category) ? model.category : 'other';
+        if (!grouped.has(key)) { grouped.set(key, []); seen.push(key); }
+        grouped.get(key).push(model);
+      }
+      if (seen.length === 1 && seen[0] === 'other') {
+        return [{ title: '', models: grouped.get('other') }];
+      }
+      const ordered = order.filter((key) => grouped.has(key))
+        .concat(seen.filter((key) => !order.includes(key)));
+      return ordered.map((key) => ({
+        title: titles[key] || 'Other', models: grouped.get(key)
+      }));
+    }
+
+    function renderModelLine() {
+      const model = currentModelInfo();
+      const name = (model && model.name) || '';
+      const interactive = availableModelOptions().length > 0;
+      modelLine.hidden = !name;
+      if (!name) {
+        if (modelPicker.open) closeModelPicker();
+        return;
+      }
+      modelLineName.textContent = name;
+      modelLine.dataset.interactive = interactive ? 'true' : 'false';
+      modelLine.disabled = !interactive;
+      const summary = [name, model.reasoningEffort]
+        .filter(Boolean)
+        .concat(model.contextTier === 'long_context' ? ['long context'] : [])
+        .join(' \u00b7 ');
+      // Screen-reader users can't glance at the sheet, so keep the full state here.
+      modelLine.setAttribute(
+        'aria-label',
+        interactive ? `Model ${summary}. Change model` : `Model ${summary}`
+      );
+      if (modelPicker.open) renderModelPicker();
+    }
+
+    function setModelPickerStatus(message, isError) {
+      modelPickerStatus.textContent = message || '';
+      modelPickerStatus.classList.toggle('error', !!isError && !!message);
+    }
+
+    function modelCurrentSummary() {
+      const current = currentModelInfo();
+      if (!current || !current.name) return null;
+      const list = document.createElement('dl');
+      list.className = 'model-current';
+      for (const [label, value] of [
+        ['Model', current.name],
+        ['Reasoning effort', effortLabel(current)],
+        ['Context', contextLabel(current)]
+      ]) {
+        const row = document.createElement('div');
+        row.className = 'model-current-row';
+        const dt = document.createElement('dt');
+        dt.textContent = label;
+        const dd = document.createElement('dd');
+        dd.textContent = value;
+        row.append(dt, dd);
+        list.append(row);
+      }
+      return list;
+    }
+
+    function renderModelList() {
+      modelPickerModelId = null;
+      modelPickerTitle.textContent = 'Model';
+      modelPickerBack.hidden = true;
+      modelPickerBody.replaceChildren();
+      const summary = modelCurrentSummary();
+      if (summary) {
+        const heading = document.createElement('div');
+        heading.className = 'model-group-title';
+        heading.textContent = 'Current';
+        modelPickerBody.append(heading, summary);
+      }
+      for (const section of modelSections(availableModelOptions())) {
+        if (section.title) {
+          const heading = document.createElement('div');
+          heading.className = 'model-group-title';
+          heading.textContent = section.title;
+          modelPickerBody.append(heading);
+        }
+        for (const model of section.models) {
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.className = 'model-row';
+          row.disabled = model.disabled === true || !writable;
+          const name = document.createElement('span');
+          name.className = 'model-row-name';
+          name.textContent = model.name;
+          row.append(name);
+          if (model.disabled === true) {
+            const note = document.createElement('span');
+            note.className = 'model-row-note';
+            note.textContent = 'Unavailable';
+            row.append(note);
+          }
+          if (isCurrentModel(model)) {
+            const check = document.createElement('span');
+            check.className = 'model-row-check';
+            check.textContent = '\u2713';
+            check.setAttribute('aria-label', 'Current model');
+            row.append(check);
+          }
+          row.onclick = () => renderModelOptions(model);
+          modelPickerBody.append(row);
+        }
+      }
+      setModelPickerStatus(writable ? '' : 'View only \u2014 control is on another device');
+    }
+
+    function renderModelOptions(model) {
+      modelPickerModelId = model.id;
+      modelPickerTitle.textContent = model.name;
+      modelPickerBack.hidden = false;
+      modelPickerBody.replaceChildren();
+
+      const efforts = Array.isArray(model.supportedReasoningEfforts)
+        ? model.supportedReasoningEfforts : [];
+      let effortSelect = null;
+      if (efforts.length) {
+        const field = document.createElement('div');
+        field.className = 'model-field';
+        const label = document.createElement('label');
+        label.textContent = 'Reasoning effort';
+        label.htmlFor = 'model-effort';
+        effortSelect = document.createElement('select');
+        effortSelect.id = 'model-effort';
+        const fallback = document.createElement('option');
+        fallback.value = '';
+        fallback.textContent = 'Default';
+        effortSelect.append(fallback);
+        for (const level of efforts) {
+          const option = document.createElement('option');
+          option.value = level;
+          option.textContent = level.charAt(0).toUpperCase() + level.slice(1);
+          effortSelect.append(option);
+        }
+        effortSelect.value = initialEffort(model);
+        const hint = document.createElement('div');
+        hint.className = 'model-hint';
+        hint.textContent = "Default lets Copilot pick the model's usual level.";
+        field.append(label, effortSelect, hint);
+        modelPickerBody.append(field);
+      }
+
+      let longContext = null;
+      if (model.longContextAvailable === true) {
+        const field = document.createElement('div');
+        field.className = 'model-field';
+        const toggle = document.createElement('label');
+        toggle.className = 'model-toggle';
+        longContext = document.createElement('input');
+        longContext.type = 'checkbox';
+        longContext.checked = isCurrentModel(model)
+          && (currentModelInfo() || {}).contextTier === 'long_context';
+        const text = document.createElement('span');
+        text.textContent = 'Long context';
+        toggle.append(longContext, text);
+        const hint = document.createElement('div');
+        hint.className = 'model-hint';
+        hint.textContent = 'Accept larger inputs at long-context pricing.';
+        field.append(toggle, hint);
+        modelPickerBody.append(field);
+      }
+
+      const apply = document.createElement('button');
+      apply.type = 'button';
+      apply.className = 'model-apply';
+      apply.textContent = `Switch to ${model.name}`;
+      apply.disabled = model.disabled === true || !writable;
+      apply.onclick = () => submitModelSwitch(model, {
+        reasoningEffort: effortSelect ? (effortSelect.value || null) : null,
+        contextTier: longContext ? (longContext.checked ? 'long_context' : 'default') : null
+      });
+      modelPickerBody.append(apply);
+      setModelPickerStatus(writable ? '' : 'View only \u2014 control is on another device');
+    }
+
+    function renderModelPicker() {
+      if (modelSwitchSubmitting) return;
+      const options = availableModelOptions();
+      const target = modelPickerModelId
+        && options.find((model) => model.id === modelPickerModelId);
+      if (target) renderModelOptions(target); else renderModelList();
+    }
+
+    async function submitModelSwitch(model, selection) {
+      if (modelSwitchSubmitting) return;
+      const sessionId = selected;
+      if (!sessionId || !writable) return;
+      modelSwitchSubmitting = true;
+      setModelPickerStatus('Switching\u2026');
+      const response = await control({
+        type: 'set-model',
+        sessionId,
+        data: JSON.stringify({
+          modelId: model.id,
+          reasoningEffort: selection.reasoningEffort,
+          contextTier: selection.contextTier
+        })
+      });
+      modelSwitchSubmitting = false;
+      if (selected !== sessionId) return;
+      if (response && response.ok) {
+        closeModelPicker();
+        return;
+      }
+      if (response && response.status === 403) {
+        writable = false;
+        lease.textContent = 'view only';
+        updatePromptState();
+      }
+      setModelPickerStatus(
+        modelSwitchErrorMessage(response ? response.status : 0), true
+      );
+    }
+
+    function openModelPicker() {
+      if (!availableModelOptions().length) return;
+      renderModelList();
+      if (!modelPicker.open) modelPicker.showModal();
+    }
+    function closeModelPicker() {
+      modelPickerModelId = null;
+      setModelPickerStatus('');
+      if (modelPicker.open) modelPicker.close();
+    }
+
+    modelLine.onclick = openModelPicker;
+    modelPickerBack.onclick = () => renderModelList();
+    modelPickerClose.onclick = () => closeModelPicker();
+    modelPicker.addEventListener('close', () => {
+      modelPickerModelId = null;
+      setModelPickerStatus('');
+    });
+
     function updatePromptState(message) {
       updateCloseSessionState();
+      renderModelLine();
       const state = selected && sessionState.get(selected);
       const pendingInputs = (state && state.pendingUserInputs) || [];
       const pendingElicits = (state && state.pendingElicitations) || [];
