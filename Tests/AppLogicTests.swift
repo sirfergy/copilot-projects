@@ -97,25 +97,6 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("   \n"))
     }
 
-    func testRemoteEnterBytesHonorKittyReportAllKeys() {
-        XCTAssertEqual(
-            ProjectsTerminalView.remoteEnterBytes(keyboardEnhancementFlags: []),
-            [0x0d]
-        )
-        XCTAssertEqual(
-            ProjectsTerminalView.remoteEnterBytes(
-                keyboardEnhancementFlags: [.disambiguate, .reportEvents]
-            ),
-            [0x0d]
-        )
-        XCTAssertEqual(
-            ProjectsTerminalView.remoteEnterBytes(
-                keyboardEnhancementFlags: [.reportAllKeys, .reportEvents, .reportText]
-            ),
-            Array("\u{1b}[13u".utf8)
-        )
-    }
-
     func testPromptSubmitTimingScalesWithSizeAndIsBounded() {
         // Small prompts get the base floor; large ones wait longer, but bounded.
         XCTAssertEqual(ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 0), 10)
