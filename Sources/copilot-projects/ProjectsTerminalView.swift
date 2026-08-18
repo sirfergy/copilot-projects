@@ -27,6 +27,12 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// Enter fires, so an overlapping remote prompt can't interleave its paste
     /// bytes into a half-submitted one. Main-actor only.
     private var isSubmittingRemotePrompt = false
+    /// SwiftTerm emits focus events on first-responder transitions. Inspect the
+    /// responder directly instead of its `hasFocus` getter, which also folds in
+    /// whether the window is key and can disagree with the last wire event.
+    private var hasActualTerminalFocus: Bool {
+        window?.firstResponder === self
+    }
     /// Captures this session's Kitty inline images for remote clients. One
     /// instance per terminal view (never shared/global), fed on the main actor.
     /// Replaced (once) by `configureImagePersistence` with a session/disk-store
@@ -345,12 +351,31 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     }
 
     @discardableResult
-    func sendRemotePrompt(_ value: String) -> Bool {
+    func sendRemoteCommand(_ value: String, forceFocusReporting: Bool) -> Bool {
         guard !isSubmittingRemotePrompt,
-              terminal != nil,
-              let paste = Self.remotePromptPasteBytes(value) else {
+              let terminal,
+              let bytes = Self.remoteCommandBytes(
+                value,
+                keyboardEnhancementFlags: terminal.keyboardEnhancementFlags,
+                scopedFocus: forceFocusReporting && !hasActualTerminalFocus
+              ) else {
             return false
         }
+        send(bytes)
+        return true
+    }
+
+    @discardableResult
+    func sendRemotePrompt(_ value: String) -> Bool {
+        guard !isSubmittingRemotePrompt,
+              terminal != nil else {
+            return false
+        }
+        let startedWithScopedFocus = !hasActualTerminalFocus
+        guard let paste = Self.remotePromptPasteBytes(
+            value,
+            scopedFocus: startedWithScopedFocus
+        ) else { return false }
         // Deliver the bracketed paste, then submit Enter. The Copilot TUI commits
         // pasted text to its input asynchronously, so Enter sent too soon fires
         // before the text lands and leaves the prompt unsubmitted.
@@ -366,7 +391,16 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         let maxTicks = Self.promptSubmitMaxTicks(byteCount: paste.count)
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isSubmittingRemotePrompt = false }
+            var submitted = false
+            defer {
+                self.isSubmittingRemotePrompt = false
+                if startedWithScopedFocus,
+                   !submitted,
+                   !self.hasActualTerminalFocus,
+                   self.terminal != nil {
+                    self.send(Self.remoteFocusOutBytes)
+                }
+            }
             var lastGeneration = self.remoteContentGeneration
             var quietTicks = 0
             for tick in 0 ..< maxTicks {
@@ -389,11 +423,12 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                     break
                 }
             }
-            guard self.terminal != nil else { return }
-            // Let SwiftTerm encode Enter using the terminal's complete, current
-            // Kitty keyboard mode. Duplicating that encoding here missed protocol
-            // changes made by newer Copilot CLI releases.
-            self.sendRemoteKey("enter")
+            guard let terminal = self.terminal else { return }
+            self.send(Self.remoteSubmitBytes(
+                keyboardEnhancementFlags: terminal.keyboardEnhancementFlags,
+                scopedFocus: !self.hasActualTerminalFocus
+            ))
+            submitted = true
         }
         return true
     }
@@ -420,9 +455,34 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         promptSubmitFloorTicks(byteCount: byteCount) + 17
     }
 
-    /// The bracketed-paste byte sequence for a remote prompt. Enter is encoded
-    /// separately after the paste settles so active keyboard protocols are respected.
-    nonisolated static func remotePromptPasteBytes(_ value: String) -> [UInt8]? {
+    nonisolated static let remoteFocusInBytes = Array("\u{1b}[I".utf8)
+    nonisolated static let remoteFocusOutBytes = Array("\u{1b}[O".utf8)
+
+    /// An unmodified Enter press encoded the same way SwiftTerm does: report-all
+    /// Kitty mode requires CSI-u, while every other negotiated mode uses CR.
+    nonisolated static func remoteEnterBytes(
+        keyboardEnhancementFlags: KittyKeyboardFlags
+    ) -> [UInt8] {
+        keyboardEnhancementFlags.contains(.reportAllKeys)
+            ? Array("\u{1b}[13u".utf8)
+            : [0x0d]
+    }
+
+    nonisolated static func remoteSubmitBytes(
+        keyboardEnhancementFlags: KittyKeyboardFlags,
+        scopedFocus: Bool
+    ) -> [UInt8] {
+        var bytes = scopedFocus ? remoteFocusInBytes : []
+        bytes.append(contentsOf: remoteEnterBytes(
+            keyboardEnhancementFlags: keyboardEnhancementFlags
+        ))
+        if scopedFocus {
+            bytes.append(contentsOf: remoteFocusOutBytes)
+        }
+        return bytes
+    }
+
+    nonisolated static func remoteCommandTextBytes(_ value: String) -> [UInt8]? {
         let normalized = value
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
@@ -435,14 +495,61 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                 return nil
             }
         }
-        var bytes: [UInt8] = [0x1b, 0x1b]
+        return Array(normalized.utf8)
+    }
+
+    nonisolated static func remoteCommandBytes(
+        _ value: String,
+        keyboardEnhancementFlags: KittyKeyboardFlags,
+        scopedFocus: Bool
+    ) -> [UInt8]? {
+        guard let command = remoteCommandTextBytes(value) else { return nil }
+        var bytes = scopedFocus ? remoteFocusInBytes : []
+        bytes.append(contentsOf: command)
+        bytes.append(contentsOf: remoteEnterBytes(
+            keyboardEnhancementFlags: keyboardEnhancementFlags
+        ))
+        if scopedFocus {
+            bytes.append(contentsOf: remoteFocusOutBytes)
+        }
+        return bytes
+    }
+
+    /// The bracketed-paste byte sequence for a remote prompt. Enter is encoded
+    /// separately after the paste settles so active keyboard protocols are respected.
+    nonisolated static func remotePromptPasteBytes(
+        _ value: String,
+        scopedFocus: Bool = false
+    ) -> [UInt8]? {
+        let normalized = value
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              normalized.utf8.count <= 8_192 else { return nil }
+        for scalar in normalized.unicodeScalars {
+            if scalar.value == 0x7f
+                || (scalar.value < 0x20 && scalar != "\n" && scalar != "\t")
+                || (0x80 ... 0x9f).contains(scalar.value) {
+                return nil
+            }
+        }
+        var bytes = scopedFocus ? remoteFocusInBytes : []
+        bytes.append(contentsOf: [0x1b, 0x1b])
         bytes.append(contentsOf: "\u{1b}[200~".utf8)
         bytes.append(contentsOf: normalized.utf8)
         bytes.append(contentsOf: "\u{1b}[201~".utf8)
         return bytes
     }
 
-    func sendRemoteKey(_ key: String) {
+    func sendRemoteKey(_ key: String, forceFocusReporting: Bool = false) {
+        if key == "enter", forceFocusReporting,
+           let terminal {
+            send(Self.remoteSubmitBytes(
+                keyboardEnhancementFlags: terminal.keyboardEnhancementFlags,
+                scopedFocus: !hasActualTerminalFocus
+            ))
+            return
+        }
         let selector: Selector?
         switch key {
         case "enter": selector = #selector(insertNewline(_:))

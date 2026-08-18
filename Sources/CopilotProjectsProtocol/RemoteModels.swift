@@ -360,6 +360,7 @@ public struct RemoteClientMessage: Codable, Equatable, Sendable {
     public let type: String
     public let clientId: String?
     public let sessionId: String?
+    public let requestId: String?
     public let data: String?
     public let delta: Int?
 
@@ -367,12 +368,14 @@ public struct RemoteClientMessage: Codable, Equatable, Sendable {
         type: String,
         clientId: String? = nil,
         sessionId: String? = nil,
+        requestId: String? = nil,
         data: String? = nil,
         delta: Int? = nil
     ) {
         self.type = type
         self.clientId = clientId
         self.sessionId = sessionId
+        self.requestId = requestId
         self.data = data
         self.delta = delta
     }

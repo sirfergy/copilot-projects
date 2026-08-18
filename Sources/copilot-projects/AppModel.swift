@@ -42,6 +42,29 @@ enum RemotePromptResult: Equatable {
     case noLiveCopilot
 }
 
+enum RemoteCommandResult: Equatable {
+    case sent
+    case busy
+    case invalid
+}
+
+struct RemoteCommandRequestLedger {
+    private var accepted: Set<String> = []
+    private var order: [String] = []
+
+    mutating func contains(_ requestId: String) -> Bool {
+        accepted.contains(requestId)
+    }
+
+    mutating func record(_ requestId: String, cap: Int = 512) {
+        guard accepted.insert(requestId).inserted else { return }
+        order.append(requestId)
+        while order.count > cap {
+            accepted.remove(order.removeFirst())
+        }
+    }
+}
+
 /// Outcome of accepting a remote answer to a structured `ask_user` question.
 enum RemoteUserInputResult: Equatable {
     /// The answer passed validation and a response file was written for the extension.
@@ -317,6 +340,7 @@ final class AppModel: ObservableObject {
     private(set) var isPoweringOff = false
     private let remotePromptLiveSessions: ((Set<String>) -> Set<String>)?
     private let remotePromptTarget: ((String) -> RemotePromptTarget?)?
+    private var remoteCommandRequestLedger = RemoteCommandRequestLedger()
 
     /// Resolves the absolute Copilot executable for a remotely-created session, and
     /// the absolute `$HOME/Repos` working directory. Injected so tests can drive the
@@ -1137,7 +1161,46 @@ final class AppModel: ObservableObject {
     }
 
     func sendRemoteKey(sessionId: String, key: String) {
-        controller(for: sessionId)?.terminalView.sendRemoteKey(key)
+        controller(for: sessionId)?.terminalView.sendRemoteKey(
+            key,
+            forceFocusReporting: key == "enter"
+                && remoteSessionHasLiveAgent(sessionId)
+        )
+    }
+
+    func sendRemoteCommand(
+        sessionId: String,
+        requestId: String,
+        value: String
+    ) -> RemoteCommandResult {
+        let ledgerId = "\(sessionId):\(requestId)"
+        if remoteCommandRequestLedger.contains(ledgerId) {
+            return .sent
+        }
+        guard ProjectsTerminalView.remoteCommandTextBytes(value) != nil,
+              let view = controller(for: sessionId)?.terminalView else {
+            return .invalid
+        }
+        guard view.sendRemoteCommand(
+            value,
+            forceFocusReporting: remoteSessionHasLiveAgent(sessionId)
+        ) else {
+            return .busy
+        }
+        remoteCommandRequestLedger.record(ledgerId)
+        return .sent
+    }
+
+    private func remoteSessionHasLiveAgent(_ sessionId: String) -> Bool {
+        if liveAgentSessions.contains(sessionId) {
+            return true
+        }
+        let liveSessions = remotePromptLiveSessions?(agentProcessNames)
+            ?? ProcessTree.agentSessions(
+                agentNames: agentProcessNames,
+                in: ProcessTree.snapshot()
+            )
+        return liveSessions.contains(sessionId)
     }
 
     func sendRemoteScroll(sessionId: String, delta: Int) {

@@ -97,6 +97,18 @@ final class RemoteModelBridge: @unchecked Sendable {
         model?.sendRemoteKey(sessionId: sessionId, key: key)
     }
 
+    func sendCommand(
+        sessionId: String,
+        requestId: String,
+        value: String
+    ) -> RemoteCommandResult {
+        model?.sendRemoteCommand(
+            sessionId: sessionId,
+            requestId: requestId,
+            value: value
+        ) ?? .invalid
+    }
+
     func sendScroll(sessionId: String, delta: Int) {
         model?.sendRemoteScroll(sessionId: sessionId, delta: delta)
     }
@@ -1287,6 +1299,55 @@ private final class RemoteHTTPHandler:
                     )
                 }
             }
+        case "command":
+            guard let value = message.data,
+                  let requestId = message.requestId,
+                  !requestId.isEmpty,
+                  requestId.utf8.count <= 64,
+                  ProjectsTerminalView.remoteCommandTextBytes(value) != nil else {
+                respond(context: context, method: .POST, status: .unprocessableEntity,
+                        contentType: "text/plain", body: "Invalid command")
+                return
+            }
+            guard leases.holds(sessionId: sessionId, clientId: clientId) else {
+                respond(context: context, method: .POST, status: .forbidden,
+                        contentType: "text/plain", body: "view only")
+                return
+            }
+            let channel = context.channel
+            let leases = self.leases
+            Task { @MainActor in
+                let result = leases.withHeldLease(
+                    sessionId: sessionId,
+                    clientId: clientId
+                ) {
+                    self.bridge.sendCommand(
+                        sessionId: sessionId,
+                        requestId: requestId,
+                        value: value
+                    )
+                }
+                channel.eventLoop.execute {
+                    let response: (HTTPResponseStatus, String)
+                    switch result {
+                    case .some(.sent):
+                        response = (.noContent, "")
+                    case .some(.busy):
+                        response = (.conflict, "Terminal input is busy")
+                    case .some(.invalid):
+                        response = (.unprocessableEntity, "Command was not accepted")
+                    case .none:
+                        response = (.forbidden, "view only")
+                    }
+                    self.respond(
+                        channel: channel,
+                        method: .POST,
+                        status: response.0,
+                        contentType: "text/plain",
+                        body: Data(response.1.utf8)
+                    )
+                }
+            }
         case "input":
             guard let value = message.data else {
                 respond(context: context, method: .POST, status: .badRequest,
@@ -1303,14 +1364,26 @@ private final class RemoteHTTPHandler:
                         contentType: "text/plain", body: "view only")
                 return
             }
+            let channel = context.channel
             let leases = self.leases
             Task { @MainActor in
-                _ = leases.withHeldLease(sessionId: sessionId, clientId: clientId) {
+                let sent = leases.withHeldLease(
+                    sessionId: sessionId,
+                    clientId: clientId
+                ) {
                     self.bridge.sendInput(sessionId: sessionId, value: value)
+                    return true
+                } ?? false
+                channel.eventLoop.execute {
+                    self.respond(
+                        channel: channel,
+                        method: .POST,
+                        status: sent ? .noContent : .forbidden,
+                        contentType: "text/plain",
+                        body: Data()
+                    )
                 }
             }
-            respond(context: context, method: .POST, status: .noContent,
-                    contentType: "text/plain", body: "")
         case "key":
             guard let key = message.data,
                   ["enter", "escape", "backspace", "tab",
@@ -1324,14 +1397,26 @@ private final class RemoteHTTPHandler:
                         contentType: "text/plain", body: "view only")
                 return
             }
+            let channel = context.channel
             let leases = self.leases
             Task { @MainActor in
-                _ = leases.withHeldLease(sessionId: sessionId, clientId: clientId) {
+                let sent = leases.withHeldLease(
+                    sessionId: sessionId,
+                    clientId: clientId
+                ) {
                     self.bridge.sendKey(sessionId: sessionId, key: key)
+                    return true
+                } ?? false
+                channel.eventLoop.execute {
+                    self.respond(
+                        channel: channel,
+                        method: .POST,
+                        status: sent ? .noContent : .forbidden,
+                        contentType: "text/plain",
+                        body: Data()
+                    )
                 }
             }
-            respond(context: context, method: .POST, status: .noContent,
-                    contentType: "text/plain", body: "")
         case "scroll":
             guard let delta = message.delta,
                   delta != 0,
