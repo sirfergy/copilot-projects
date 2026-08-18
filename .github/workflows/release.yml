@@ -34,6 +34,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Configure runner PATH
+        run: printf '%s\n' /opt/homebrew/bin /usr/local/bin >> "$GITHUB_PATH"
+
       - name: Validate release
         id: release
         env:
@@ -152,6 +155,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Configure runner PATH
+        run: printf '%s\n' /opt/homebrew/bin /usr/local/bin >> "$GITHUB_PATH"
 
       - name: Configure release credentials
         id: signing
