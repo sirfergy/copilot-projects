@@ -389,10 +389,11 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                     break
                 }
             }
-            guard let terminal = self.terminal else { return }
-            self.send(Self.remoteEnterBytes(
-                keyboardEnhancementFlags: terminal.keyboardEnhancementFlags
-            ))
+            guard self.terminal != nil else { return }
+            // Let SwiftTerm encode Enter using the terminal's complete, current
+            // Kitty keyboard mode. Duplicating that encoding here missed protocol
+            // changes made by newer Copilot CLI releases.
+            self.sendRemoteKey("enter")
         }
         return true
     }
@@ -417,16 +418,6 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// extension so a continuously redrawing TUI still submits.
     nonisolated static func promptSubmitMaxTicks(byteCount: Int) -> Int {
         promptSubmitFloorTicks(byteCount: byteCount) + 17
-    }
-
-    /// An unmodified Enter press encoded the same way SwiftTerm does: report-all
-    /// Kitty mode requires CSI-u, while every other negotiated mode uses CR.
-    nonisolated static func remoteEnterBytes(
-        keyboardEnhancementFlags: KittyKeyboardFlags
-    ) -> [UInt8] {
-        keyboardEnhancementFlags.contains(.reportAllKeys)
-            ? Array("\u{1b}[13u".utf8)
-            : [0x0d]
     }
 
     /// The bracketed-paste byte sequence for a remote prompt. Enter is encoded
