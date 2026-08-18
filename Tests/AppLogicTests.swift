@@ -97,6 +97,82 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("   \n"))
     }
 
+    func testRemotePromptFocusBytesBracketTheSubmission() throws {
+        let paste = try XCTUnwrap(
+            ProjectsTerminalView.remotePromptPasteBytes(
+                "hello",
+                scopedFocus: true
+            )
+        )
+        XCTAssertTrue(paste.starts(with:
+            ProjectsTerminalView.remoteFocusInBytes + [0x1b, 0x1b]
+        ))
+        XCTAssertEqual(
+            ProjectsTerminalView.remoteSubmitBytes(
+                keyboardEnhancementFlags: [.disambiguate],
+                scopedFocus: true
+            ),
+            ProjectsTerminalView.remoteFocusInBytes
+                + [0x0d]
+                + ProjectsTerminalView.remoteFocusOutBytes
+        )
+    }
+
+    func testRemoteEnterBytesHonorKittyReportAllKeys() {
+        XCTAssertEqual(
+            ProjectsTerminalView.remoteEnterBytes(keyboardEnhancementFlags: []),
+            [0x0d]
+        )
+        XCTAssertEqual(
+            ProjectsTerminalView.remoteEnterBytes(
+                keyboardEnhancementFlags: [.disambiguate, .reportEvents]
+            ),
+            [0x0d]
+        )
+        XCTAssertEqual(
+            ProjectsTerminalView.remoteEnterBytes(
+                keyboardEnhancementFlags: [.reportAllKeys, .reportEvents, .reportText]
+            ),
+            Array("\u{1b}[13u".utf8)
+        )
+    }
+
+    func testRemoteCommandIsOneFocusedWrite() throws {
+        XCTAssertEqual(
+            try XCTUnwrap(ProjectsTerminalView.remoteCommandBytes(
+                "git status",
+                keyboardEnhancementFlags: [.disambiguate],
+                scopedFocus: true
+            )),
+            ProjectsTerminalView.remoteFocusInBytes
+                + Array("git status".utf8)
+                + [0x0d]
+                + ProjectsTerminalView.remoteFocusOutBytes
+        )
+        XCTAssertEqual(
+            ProjectsTerminalView.remoteCommandTextBytes("first\r\n\tsecond"),
+            Array("first\n\tsecond".utf8)
+        )
+        XCTAssertNil(ProjectsTerminalView.remoteCommandTextBytes("unsafe\u{1b}[31m"))
+        XCTAssertNil(ProjectsTerminalView.remoteCommandTextBytes("   "))
+    }
+
+    func testRemoteCommandRequestLedgerDeduplicatesAndBoundsEntries() {
+        var ledger = RemoteCommandRequestLedger()
+        XCTAssertFalse(ledger.contains("session:first"))
+
+        ledger.record("session:first", cap: 2)
+        ledger.record("session:first", cap: 2)
+        ledger.record("session:second", cap: 2)
+        XCTAssertTrue(ledger.contains("session:first"))
+        XCTAssertTrue(ledger.contains("session:second"))
+
+        ledger.record("session:third", cap: 2)
+        XCTAssertFalse(ledger.contains("session:first"))
+        XCTAssertTrue(ledger.contains("session:second"))
+        XCTAssertTrue(ledger.contains("session:third"))
+    }
+
     func testPromptSubmitTimingScalesWithSizeAndIsBounded() {
         // Small prompts get the base floor; large ones wait longer, but bounded.
         XCTAssertEqual(ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 0), 10)
