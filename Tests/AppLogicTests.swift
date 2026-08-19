@@ -1491,7 +1491,7 @@ final class AppLogicTests: XCTestCase {
             status: .waiting,
             text: nil,
             timestamp: 100,
-            notification: .permission
+            notification: .elicitation
         )
         XCTAssertTrue(try XCTUnwrap(notifications.events.first).isTargetVisible)
         XCTAssertFalse(model.projects[0].sessions[0].hasUnread)
@@ -1507,6 +1507,274 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(notifications.events.last).isTargetVisible)
         XCTAssertEqual(notifications.events.count, 2)
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
+    }
+
+    func testPermissionNotificationDecisionUsesAuthoritativePendingState() {
+        XCTAssertEqual(
+            AppModel.permissionNotificationDecision(
+                status: .waiting,
+                hasPendingQuestions: false,
+                pendingPermissionRequestIds: ["request"]
+            ),
+            .post
+        )
+        XCTAssertEqual(
+            AppModel.permissionNotificationDecision(
+                status: .waiting,
+                hasPendingQuestions: false,
+                pendingPermissionRequestIds: []
+            ),
+            .suppress
+        )
+        XCTAssertEqual(
+            AppModel.permissionNotificationDecision(
+                status: .waiting,
+                hasPendingQuestions: false,
+                pendingPermissionRequestIds: nil
+            ),
+            .post
+        )
+        XCTAssertEqual(
+            AppModel.permissionNotificationDecision(
+                status: .running,
+                hasPendingQuestions: false,
+                pendingPermissionRequestIds: ["request"]
+            ),
+            .cancel
+        )
+        XCTAssertEqual(
+            AppModel.permissionNotificationDecision(
+                status: .waiting,
+                hasPendingQuestions: true,
+                pendingPermissionRequestIds: []
+            ),
+            .cancel
+        )
+        XCTAssertEqual(
+            AppModel.permissionNotificationDecision(
+                status: .waiting,
+                hasPendingQuestions: true,
+                pendingPermissionRequestIds: ["permission"]
+            ),
+            .post
+        )
+    }
+
+    @MainActor
+    func testAutoApprovedPermissionIsSuppressedAndRestoresScheduledStatus() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var session = Session(title: "scheduled", cwd: "/tmp")
+        session.scheduledTurnActive = true
+        let project = Project(
+            name: "selected",
+            cwd: "/tmp",
+            sessions: [session],
+            selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+        try writePermissionSnapshot(
+            sessionId: session.id,
+            pendingIds: [],
+            directory: root
+        )
+
+        var persisted: [(SessionStatus, Int64, Int64)] = []
+        let model = AppModel(
+            stateRepository: repository,
+            permissionNotificationDelayNanoseconds: 5_000_000,
+            persistPermissionStatus: { _, status, timestamp, promptTimestamp in
+                persisted.append((status, timestamp, promptTimestamp))
+            },
+            agentActivityDirectory: root
+        )
+        let notifications = NotificationSpy()
+        let unexpected = expectation(description: "auto-approved prompt does not notify")
+        unexpected.isInverted = true
+        notifications.onPost = { _ in unexpected.fulfill() }
+        model.attach(notifications: notifications)
+        model.setStatus(
+            sessionId: session.id,
+            status: .idle,
+            text: nil,
+            timestamp: 90,
+            source: "scheduled-active"
+        )
+
+        model.setStatus(
+            sessionId: session.id,
+            status: .waiting,
+            text: nil,
+            timestamp: 100,
+            notification: .permission
+        )
+
+        await fulfillment(of: [unexpected], timeout: 0.05)
+        XCTAssertEqual(model.projects[0].sessions[0].status, .idle)
+        XCTAssertTrue(model.projects[0].sessions[0].scheduledTurnActive)
+        XCTAssertTrue(notifications.events.isEmpty)
+        XCTAssertEqual(persisted.count, 1)
+        XCTAssertEqual(persisted.first?.0, .idle)
+        XCTAssertEqual(persisted.first?.1, 100)
+        XCTAssertEqual(persisted.first?.2, 100)
+    }
+
+    @MainActor
+    func testPendingPermissionPostsOnceAndLaterStatusCancels() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(title: "permission", cwd: "/tmp")
+        let project = Project(
+            name: "selected",
+            cwd: "/tmp",
+            sessions: [session],
+            selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+        try writePermissionSnapshot(
+            sessionId: session.id,
+            pendingIds: ["request"],
+            directory: root
+        )
+
+        let model = AppModel(
+            stateRepository: repository,
+            permissionNotificationDelayNanoseconds: 10_000_000,
+            agentActivityDirectory: root
+        )
+        let notifications = NotificationSpy()
+        let posted = expectation(description: "pending permission posts")
+        notifications.onPost = { _ in posted.fulfill() }
+        model.attach(notifications: notifications)
+        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 90)
+        model.setStatus(
+            sessionId: session.id,
+            status: .waiting,
+            text: nil,
+            timestamp: 100,
+            notification: .permission
+        )
+        model.setStatus(
+            sessionId: session.id,
+            status: .waiting,
+            text: nil,
+            timestamp: 101,
+            notification: .permission
+        )
+        await fulfillment(of: [posted], timeout: 0.2)
+        XCTAssertEqual(notifications.events.count, 1)
+
+        notifications.onPost = nil
+        model.setStatus(
+            sessionId: session.id,
+            status: .waiting,
+            text: nil,
+            timestamp: 102,
+            notification: .permission
+        )
+        model.setStatus(
+            sessionId: session.id,
+            status: .running,
+            text: nil,
+            timestamp: 103
+        )
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(notifications.events.count, 1)
+    }
+
+    @MainActor
+    func testPermissionDecisionReadsSnapshotAtFireTime() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(title: "late permission", cwd: "/tmp")
+        let project = Project(
+            name: "selected",
+            cwd: "/tmp",
+            sessions: [session],
+            selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+        try writePermissionSnapshot(
+            sessionId: session.id,
+            pendingIds: [],
+            directory: root
+        )
+
+        let model = AppModel(
+            stateRepository: repository,
+            permissionNotificationDelayNanoseconds: 50_000_000,
+            agentActivityDirectory: root
+        )
+        let notifications = NotificationSpy()
+        let posted = expectation(description: "late permission snapshot posts")
+        notifications.onPost = { _ in posted.fulfill() }
+        model.attach(notifications: notifications)
+        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 90)
+        model.setStatus(
+            sessionId: session.id,
+            status: .waiting,
+            text: nil,
+            timestamp: 100,
+            notification: .permission
+        )
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        try writePermissionSnapshot(
+            sessionId: session.id,
+            pendingIds: ["late-request"],
+            directory: root
+        )
+
+        await fulfillment(of: [posted], timeout: 0.2)
+        XCTAssertEqual(notifications.events.count, 1)
+        XCTAssertEqual(model.projects[0].sessions[0].status, .waiting)
+    }
+
+    private func writePermissionSnapshot(
+        sessionId: String,
+        pendingIds: [String]?,
+        directory: URL
+    ) throws {
+        let snapshot = AgentActivitySnapshot(
+            schemaVersion: AgentActivitySnapshot.currentSchemaVersion,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            foregroundTurnActive: true,
+            scheduledTurnActive: false,
+            activeSubagents: [],
+            schedules: [],
+            idleGeneration: 0,
+            lastIdleAborted: false,
+            lastIdleTurnKind: nil,
+            error: nil,
+            pendingPermissionRequestIds: pendingIds
+        )
+        try JSONEncoder().encode(snapshot).write(
+            to: directory.appendingPathComponent("\(sessionId).agent-activity.json"),
+            options: .atomic
+        )
     }
 
     @MainActor

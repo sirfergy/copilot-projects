@@ -492,6 +492,25 @@ final class CoreLogicTests: XCTestCase {
           {id:"ignored-system",type:"system.message",timestamp:ts(9206),
            data:{role:"system",content:"SECRET SYSTEM INSTRUCTIONS"}}
         );
+        history.push(
+          {id:"permission-auto-request",type:"permission.requested",timestamp:ts(9300),
+           data:{requestId:"permission-auto",permissionRequest:{kind:"read"}}},
+          {id:"permission-auto-complete",type:"permission.completed",timestamp:ts(9301),
+           data:{requestId:"permission-auto",result:{kind:"approved"}}},
+          // A completion observed before a queued/replayed request must tombstone it.
+          {id:"permission-late-complete",type:"permission.completed",timestamp:ts(9302),
+           data:{requestId:"permission-late",result:{kind:"approved"}}},
+          {id:"permission-late-request",type:"permission.requested",timestamp:ts(9303),
+           data:{requestId:"permission-late",permissionRequest:{kind:"mcp"}}},
+          {id:"permission-idle-request",type:"permission.requested",timestamp:ts(9304),
+           data:{requestId:"permission-idle",permissionRequest:{kind:"write"}}},
+          {id:"permission-idle",type:"session.idle",timestamp:ts(9305),
+           data:{aborted:false}},
+          {id:"permission-real-request",type:"permission.requested",timestamp:ts(9306),
+           data:{requestId:"permission-real",permissionRequest:{kind:"custom-tool"}}},
+          {id:"subagent-idle",type:"session.idle",timestamp:ts(9307),
+           agentId:"subagent-1",data:{aborted:false}}
+        );
         const fakeSession = {
           sessionId: "copilot-session",
           rpc: { schedule: { list: async () => ({entries:[]}) } },
@@ -510,8 +529,12 @@ final class CoreLogicTests: XCTestCase {
         await new Promise((resolve) => setImmediate(resolve));
         const transcriptPath = `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
           + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`;
+        const activityPath = `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+          + `${process.env.COPILOT_PROJECTS_SESSION}.agent-activity.json`;
         const read = () => JSON.parse(readFileSync(transcriptPath, "utf8"));
+        const readActivity = () => JSON.parse(readFileSync(activityPath, "utf8"));
         const afterReplay = read();
+        const activityAfterReplay = readActivity();
         const replayFind = (id) =>
           afterReplay.turns.find((turn) => turn.id === id);
         const replayRestart = replayFind("restart-user");
@@ -524,6 +547,12 @@ final class CoreLogicTests: XCTestCase {
               || message.content.includes("SECRET SYSTEM INSTRUCTIONS")
           )
         );
+        transcriptListener({
+          id:"permission-real-complete",type:"permission.completed",
+          timestamp:"2026-07-12T03:00:00.000Z",
+          data:{requestId:"permission-real",result:{kind:"approved"}}
+        });
+        const activityAfterPermissionComplete = readActivity();
 
         // A live human message must publish immediately, before the turn ends,
         // so the sender sees their input right away.
@@ -680,6 +709,15 @@ final class CoreLogicTests: XCTestCase {
           replayResumeTurnId: replayResumeTurns[0]?.id,
           replayResumeMessage: replayResumeTurns[0]?.assistantMessages[0]?.content,
           replayLeakedInternalText,
+          replayPendingPermissionIds:
+            activityAfterReplay.pendingPermissionRequestIds,
+          completedPendingPermissionIds:
+            activityAfterPermissionComplete.pendingPermissionRequestIds,
+          permissionKeyPresentAfterReplay:
+            Object.prototype.hasOwnProperty.call(
+              activityAfterReplay,
+              "pendingPermissionRequestIds"
+            ),
           snapshotBytes: Buffer.byteLength(encodedSnapshot)
         }));
         process.exit(0);
@@ -760,6 +798,15 @@ final class CoreLogicTests: XCTestCase {
             "Session resumed. Terminal startup details are available in Terminal."
         )
         XCTAssertEqual(summary?["replayLeakedInternalText"] as? Bool, false)
+        XCTAssertEqual(
+            summary?["replayPendingPermissionIds"] as? [String],
+            ["permission-real"]
+        )
+        XCTAssertEqual(
+            summary?["completedPendingPermissionIds"] as? [String],
+            []
+        )
+        XCTAssertEqual(summary?["permissionKeyPresentAfterReplay"] as? Bool, true)
         XCTAssertLessThanOrEqual(
             summary?["snapshotBytes"] as? Int ?? .max,
             5 * 1_024 * 1_024
