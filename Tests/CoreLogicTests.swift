@@ -462,6 +462,16 @@ final class CoreLogicTests: XCTestCase {
            data:{source:"skill-create-pr",content:"SKILL CONTEXT BLOCK"}},
           {id:"skill-a1",type:"assistant.message",timestamp:ts(9102),
            data:{messageId:"skill-m1",content:"did the skill work"}},
+          {id:"skill-complete-start",type:"tool.execution_start",timestamp:ts(9102.1),
+           data:{toolCallId:"skill-complete",toolName:"task_complete",
+             arguments:{summary:"Replay task completed."}}},
+          {id:"skill-complete-done",type:"tool.execution_complete",timestamp:ts(9102.2),
+           data:{toolCallId:"skill-complete",success:true,
+             result:{content:[{type:"text",text:"non-string history result"}]}}},
+          {id:"skill-session-complete",type:"session.task_complete",timestamp:ts(9102.25),
+           data:{summary:"Replay task completed."}},
+          {id:"skill-summary-duplicate",type:"assistant.message",timestamp:ts(9102.3),
+           data:{messageId:"skill-summary-message",content:"Replay task completed."}},
           {id:"skill-te",type:"assistant.turn_end",timestamp:ts(9103),data:{turnId:"skill-t"}},
           {id:"with-skill-idle",type:"session.idle",timestamp:ts(9104),data:{aborted:false}}
         );
@@ -541,6 +551,60 @@ final class CoreLogicTests: XCTestCase {
           timestamp:"2026-07-12T03:01:01.600Z",
           data:{toolCallId:giantMetadata,success:true}
         });
+        // Fill the disclosure array before task_complete. Its separate session
+        // event must still surface the summary when no TranscriptTool can be added.
+        for (let index = 0; index < 405; index += 1) {
+          transcriptListener({
+            id:`cap-tool-start-${index}`,type:"tool.execution_start",
+            timestamp:"2026-07-12T03:01:01.700Z",
+            data:{toolCallId:`cap-tool-${index}`,toolName:"bash"}
+          });
+          transcriptListener({
+            id:`cap-tool-done-${index}`,type:"tool.execution_complete",
+            timestamp:"2026-07-12T03:01:01.800Z",
+            data:{toolCallId:`cap-tool-${index}`,success:true}
+          });
+        }
+        transcriptListener({
+          id:"live-complete-start",type:"tool.execution_start",
+          timestamp:"2026-07-12T03:01:01.900Z",
+          data:{toolCallId:"live-complete",toolName:"task_complete",
+            arguments:{summary:"Live task completed."}}
+        });
+        transcriptListener({
+          id:"live-complete-done",type:"tool.execution_complete",
+          timestamp:"2026-07-12T03:01:02.000Z",
+          data:{toolCallId:"live-complete",success:true,
+            result:{content:"Live task completed.\n\nUNSAFE REVIEWER TEXT",
+              detailedContent:"✓ Task completed: Live task completed.\n\nUNSAFE REVIEWER TEXT"}}
+        });
+        transcriptListener({
+          id:"live-session-complete",type:"session.task_complete",
+          timestamp:"2026-07-12T03:01:02.050Z",
+          data:{summary:"Live task completed.",success:true}
+        });
+        transcriptListener({
+          id:"live-summary-duplicate",type:"assistant.message",
+          timestamp:"2026-07-12T03:01:02.100Z",
+          data:{messageId:"live-summary-message",content:"Live task completed."}
+        });
+        transcriptListener({
+          id:"failed-complete-start",type:"tool.execution_start",
+          timestamp:"2026-07-12T03:01:02.200Z",
+          data:{toolCallId:"failed-complete",toolName:"task_complete",
+            arguments:{summary:"Failed task must not surface."}}
+        });
+        transcriptListener({
+          id:"failed-complete-done",type:"tool.execution_complete",
+          timestamp:"2026-07-12T03:01:02.300Z",
+          data:{toolCallId:"failed-complete",success:false,
+            result:{content:"Failed task must not surface."}}
+        });
+        transcriptListener({
+          id:"failed-session-complete",type:"session.task_complete",
+          timestamp:"2026-07-12T03:01:02.350Z",
+          data:{summary:"Failed task must not surface.",success:false}
+        });
         transcriptListener({
           id:"live-idle",type:"session.idle",timestamp:"2026-07-12T03:01:02.789Z",
           data:{aborted:false}
@@ -556,6 +620,25 @@ final class CoreLogicTests: XCTestCase {
           turn.userContent === "SKILL CONTEXT BLOCK"
         );
         const live = find("live-user");
+        const replaySummaryCount = withSkill?.assistantMessages.filter(
+          (message) => message.content === "Replay task completed."
+        ).length;
+        const liveSummaryCount = live?.assistantMessages.filter(
+          (message) => message.content === "Live task completed."
+        ).length;
+        const failedSummaryCount = live?.assistantMessages.filter(
+          (message) => message.content === "Failed task must not surface."
+        ).length;
+        const reviewerTextLeaked = live?.assistantMessages.some(
+          (message) => message.content.includes("UNSAFE REVIEWER TEXT")
+        );
+        const liveTaskCompleteTool = live?.tools.find(
+          (tool) => tool.name === "task_complete"
+        );
+        const toolKeysAreExact = live?.tools.every(
+          (tool) => Object.keys(tool).sort().join(",")
+            === "id,name,success,title"
+        );
         console.log(JSON.stringify({
           schemaVersion: snapshot.schemaVersion,
           ownerPidIsNumber: typeof snapshot.ownerPid === "number",
@@ -570,6 +653,7 @@ final class CoreLogicTests: XCTestCase {
           multiToolSecondSuccess: multi?.tools[1]?.success,
           withSkillKind: withSkill?.kind,
           withSkillAssistantCount: withSkill?.assistantMessages.length,
+          replaySummaryCount,
           skillCtxLeaked,
           livePendingPresent: Boolean(livePending),
           livePendingOpen: livePending ? livePending.endedAt === null : false,
@@ -579,10 +663,17 @@ final class CoreLogicTests: XCTestCase {
           liveHasTrailingHighSurrogate: /[\uD800-\uDBFF]$/.test(
             live?.userContent.split("\n")[0] || ""
           ),
-          liveToolMetadataLength: live?.tools.reduce(
-            (total, tool) => total + tool.id.length + tool.name.length + tool.title.length,
-            0
+          liveMaxToolMetadataLength: Math.max(
+            0,
+            ...(live?.tools || []).map(
+              (tool) => tool.id.length + tool.name.length + tool.title.length
+            )
           ),
+          liveSummaryCount,
+          failedSummaryCount,
+          reviewerTextLeaked,
+          liveTaskCompleteToolPresent: Boolean(liveTaskCompleteTool),
+          toolKeysAreExact,
           replayRestartEnded: replayRestart?.endedAt,
           replayRestartAborted: replayRestart?.isAborted,
           replayResumeTurnCount: replayResumeTurns.length,
@@ -638,7 +729,8 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary?["multiToolSecondSuccess"] as? Bool, false)
         // Injected skill context folds into the human turn, never its own turn.
         XCTAssertEqual(summary?["withSkillKind"] as? String, "foreground")
-        XCTAssertEqual(summary?["withSkillAssistantCount"] as? Int, 1)
+        XCTAssertEqual(summary?["withSkillAssistantCount"] as? Int, 2)
+        XCTAssertEqual(summary?["replaySummaryCount"] as? Int, 1)
         XCTAssertEqual(summary?["skillCtxLeaked"] as? Bool, false)
         // A live human message shows immediately as an open (pending) turn.
         XCTAssertEqual(summary?["livePendingPresent"] as? Bool, true)
@@ -647,7 +739,15 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertLessThanOrEqual(summary?["liveUserLength"] as? Int ?? .max, 50_020)
         XCTAssertEqual(summary?["liveTruncated"] as? Bool, true)
         XCTAssertEqual(summary?["liveHasTrailingHighSurrogate"] as? Bool, false)
-        XCTAssertLessThanOrEqual(summary?["liveToolMetadataLength"] as? Int ?? .max, 1_536)
+        XCTAssertLessThanOrEqual(
+            summary?["liveMaxToolMetadataLength"] as? Int ?? .max,
+            1_536
+        )
+        XCTAssertEqual(summary?["liveSummaryCount"] as? Int, 1)
+        XCTAssertEqual(summary?["failedSummaryCount"] as? Int, 0)
+        XCTAssertEqual(summary?["reviewerTextLeaked"] as? Bool, false)
+        XCTAssertEqual(summary?["liveTaskCompleteToolPresent"] as? Bool, false)
+        XCTAssertEqual(summary?["toolKeysAreExact"] as? Bool, true)
         XCTAssertNotNil(summary?["replayRestartEnded"] as? String)
         XCTAssertEqual(summary?["replayRestartAborted"] as? Bool, true)
         XCTAssertEqual(summary?["replayResumeTurnCount"] as? Int, 1)

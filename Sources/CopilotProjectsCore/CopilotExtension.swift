@@ -165,6 +165,7 @@ public enum CopilotExtension {
         let pendingTranscriptTurn = null;
         let transcriptAssistantTurnActive = false;
         let latestResumeTranscriptTurnId = null;
+        let synthesizedTaskCompletionContent = null;
         let transcriptInitialized = false;
         let transcriptPublishTimer = null;
         let sharedFilesOwnershipInitializedFor = null;
@@ -1008,9 +1009,29 @@ public enum CopilotExtension {
             startTranscriptTurn(event, "automated");
         }
 
+        function appendTranscriptAssistantMessage(event, value) {
+            if (typeof value !== "string" || value.length === 0) return;
+            ensureSyntheticTranscriptTurn(event);
+            const content = boundedText(value);
+            if (pendingTranscriptTurn.assistantMessages.length
+                    >= MAX_TRANSCRIPT_ASSISTANT_MESSAGES) {
+                pendingTranscriptTurn.assistantMessages.shift();
+            }
+            pendingTranscriptTurn.assistantMessages.push({
+                id: boundedMetadataText(event.data.messageId || event.id),
+                timestamp: normalizedTimestamp(event.timestamp),
+                content,
+            });
+        }
+
+        function resetPendingTranscriptTurn() {
+            pendingTranscriptTurn = null;
+            synthesizedTaskCompletionContent = null;
+        }
+
         function finishTranscriptTurn(aborted, endedAt) {
             const turn = pendingTranscriptTurn;
-            pendingTranscriptTurn = null;
+            resetPendingTranscriptTurn();
             if (!turn) return;
             turn.isAborted = aborted === true;
             let end = endedAt ? normalizedTimestamp(endedAt) : turn.startedAt;
@@ -1097,18 +1118,14 @@ public enum CopilotExtension {
                 transcriptAssistantTurnActive = true;
                 break;
             case "assistant.message":
-                ensureSyntheticTranscriptTurn(event);
                 if (event.data.content) {
-                    if (pendingTranscriptTurn.assistantMessages.length
-                            >= MAX_TRANSCRIPT_ASSISTANT_MESSAGES) {
-                        pendingTranscriptTurn.assistantMessages.shift();
+                    const content = boundedText(event.data.content);
+                    if (content === synthesizedTaskCompletionContent) {
+                        synthesizedTaskCompletionContent = null;
+                    } else {
+                        appendTranscriptAssistantMessage(event, content);
+                        if (live) schedulePublishTranscript();
                     }
-                    pendingTranscriptTurn.assistantMessages.push({
-                        id: boundedMetadataText(event.data.messageId || event.id),
-                        timestamp: normalizedTimestamp(event.timestamp),
-                        content: boundedText(event.data.content),
-                    });
-                    if (live) schedulePublishTranscript();
                 }
                 break;
             case "tool.execution_start": {
@@ -1151,6 +1168,25 @@ public enum CopilotExtension {
                 }
                 if (tool) tool.success = event.data.success === true;
                 if (live) schedulePublishTranscript();
+                break;
+            }
+            case "session.task_complete": {
+                const summary = typeof event.data.summary === "string"
+                    ? boundedText(event.data.summary)
+                    : "";
+                // Older durable events omit success; like the SDK consumers,
+                // treat only an explicit false as rejected/blocked.
+                if (event.data.success !== false && summary.length > 0) {
+                    ensureSyntheticTranscriptTurn(event);
+                    const alreadyPresent = pendingTranscriptTurn.assistantMessages.some(
+                        (message) => message.content === summary
+                    );
+                    if (!alreadyPresent) {
+                        appendTranscriptAssistantMessage(event, summary);
+                        synthesizedTaskCompletionContent = summary;
+                    }
+                    if (live) schedulePublishTranscript();
+                }
                 break;
             }
             case "assistant.turn_end":
@@ -1639,7 +1675,7 @@ public enum CopilotExtension {
         try {
             const history = await session.getEvents();
             transcriptTurns.length = 0;
-            pendingTranscriptTurn = null;
+            resetPendingTranscriptTurn();
             for (const event of history) {
                 processTranscriptEvent(event, false, true);
                 applyModelFromEvent(event);
@@ -1647,7 +1683,7 @@ public enum CopilotExtension {
         } catch {
             transcriptTurns.length = 0;
             transcriptTurns.push(...preservedTranscriptTurns);
-            pendingTranscriptTurn = null;
+            resetPendingTranscriptTurn();
             transcriptEventIds.clear();
         }
         transcriptInitialized = true;
