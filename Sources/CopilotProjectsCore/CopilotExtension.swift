@@ -163,6 +163,8 @@ public enum CopilotExtension {
         const transcriptEventIds = new Set();
         const queuedTranscriptEvents = [];
         let pendingTranscriptTurn = null;
+        let transcriptAssistantTurnActive = false;
+        let latestResumeTranscriptTurnId = null;
         let transcriptInitialized = false;
         let transcriptPublishTimer = null;
         let sharedFilesOwnershipInitializedFor = null;
@@ -841,14 +843,20 @@ public enum CopilotExtension {
         }
 
         function trimTranscriptTurns(maximumTurns = MAX_TRANSCRIPT_TURNS) {
-            // Keep the transcript bounded, but never let automated or scheduled
-            // activity evict the human conversation: drop the oldest non-foreground
-            // turn first, and only fall back to the oldest foreground turn once no
-            // other turns remain.
+            // Keep the transcript bounded. Drop the oldest non-foreground turn
+            // first, except for the latest resume marker; if only foreground
+            // conversation plus that marker remain, sacrifice the oldest
+            // foreground turn so the restart boundary is visible.
             while (transcriptTurns.length > maximumTurns) {
                 let index = transcriptTurns.findIndex(
                     (turn) => turn.kind !== "foreground"
+                        && turn.id !== latestResumeTranscriptTurnId
                 );
+                if (index === -1) {
+                    index = transcriptTurns.findIndex(
+                        (turn) => turn.id !== latestResumeTranscriptTurnId
+                    );
+                }
                 if (index === -1) index = 0;
                 transcriptTurns.splice(index, 1);
             }
@@ -911,6 +919,7 @@ public enum CopilotExtension {
             while (overBudget()) {
                 const index = transcriptTurns.findIndex(
                     (turn) => turn.kind !== "foreground"
+                        && turn.id !== latestResumeTranscriptTurnId
                 );
                 if (index === -1) break;
                 transcriptTurns.splice(index, 1);
@@ -920,14 +929,21 @@ public enum CopilotExtension {
             // Phase 2: shed payload from any remaining non-foreground turn (i.e. an
             // in-progress scheduled/automated turn) before touching foreground.
             while (overBudget()
-                    && shedOldestPayload((turn) => turn.kind !== "foreground")) {
+                    && shedOldestPayload(
+                        (turn) => turn.kind !== "foreground"
+                            && turn.id !== latestResumeTranscriptTurnId
+                    )) {
                 reencode();
             }
             // Phase 3: drop whole foreground stored turns (oldest), never pending,
             // leaving at least one turn for payload shedding below.
             const minStored = pending ? 0 : 1;
             while (overBudget() && transcriptTurns.length > minStored) {
-                transcriptTurns.splice(0, 1);
+                const index = transcriptTurns.findIndex(
+                    (turn) => turn.id !== latestResumeTranscriptTurnId
+                );
+                if (index === -1) break;
+                transcriptTurns.splice(index, 1);
                 snapshot = build();
                 reencode();
             }
@@ -1009,6 +1025,33 @@ public enum CopilotExtension {
             trimTranscriptTurns();
         }
 
+        function appendLatestResumeTurn(event) {
+            const prefix = "session-resume-";
+            for (let index = transcriptTurns.length - 1; index >= 0; index -= 1) {
+                if (transcriptTurns[index].id.startsWith(prefix)) {
+                    transcriptTurns.splice(index, 1);
+                }
+            }
+            const timestamp = normalizedTimestamp(event.timestamp);
+            latestResumeTranscriptTurnId =
+                `${prefix}${boundedMetadataText(event.id)}`;
+            transcriptTurns.push({
+                id: latestResumeTranscriptTurnId,
+                startedAt: timestamp,
+                endedAt: timestamp,
+                kind: "automated",
+                userContent: "",
+                assistantMessages: [{
+                    id: boundedMetadataText(event.id),
+                    timestamp,
+                    content: "Session resumed. Terminal startup details are available in Terminal.",
+                }],
+                tools: [],
+                isAborted: false,
+            });
+            trimTranscriptTurns();
+        }
+
         // Classifies a root-level user.message. Genuine human input arrives with
         // no source; recurring prompts use "schedule-*". Every other source
         // (skill context, system reminders) is injected machinery that must not
@@ -1041,6 +1084,7 @@ public enum CopilotExtension {
             case "user.message": {
                 const kind = classifyUserMessage(event);
                 if (kind) {
+                    latestResumeTranscriptTurnId = null;
                     finishTranscriptTurn(false, event.timestamp);
                     startTranscriptTurn(event, kind);
                     if (live) publishTranscript();
@@ -1049,6 +1093,9 @@ public enum CopilotExtension {
                 // it triggers folds into the current human turn.
                 break;
             }
+            case "assistant.turn_start":
+                transcriptAssistantTurnActive = true;
+                break;
             case "assistant.message":
                 ensureSyntheticTranscriptTurn(event);
                 if (event.data.content) {
@@ -1107,11 +1154,32 @@ public enum CopilotExtension {
                 break;
             }
             case "assistant.turn_end":
+                transcriptAssistantTurnActive = false;
                 // One agentic loop iteration finished, not the whole request.
                 // Do not end the transcript turn here; just flush progress.
                 if (live && pendingTranscriptTurn) schedulePublishTranscript();
                 break;
+            case "session.shutdown":
+                const shutdownWasActive = transcriptAssistantTurnActive;
+                transcriptAssistantTurnActive = false;
+                // Shutdown is a hard boundary even when turn_end was never
+                // persisted (crash, kill, reboot). Preserve partial output but
+                // mark the interrupted turn as stopped.
+                finishTranscriptTurn(shutdownWasActive, event.timestamp);
+                if (live) schedulePublishTranscript();
+                break;
+            case "session.resume":
+                const racingLiveTurn = live && transcriptAssistantTurnActive;
+                if (!racingLiveTurn) {
+                    const resumeWasActive = transcriptAssistantTurnActive;
+                    transcriptAssistantTurnActive = false;
+                    finishTranscriptTurn(resumeWasActive, event.timestamp);
+                    appendLatestResumeTurn(event);
+                }
+                if (live) schedulePublishTranscript();
+                break;
             case "session.idle":
+                transcriptAssistantTurnActive = false;
                 finishTranscriptTurn(event.data.aborted === true, event.timestamp);
                 if (live) publishTranscript();
                 break;

@@ -405,9 +405,10 @@ final class CoreLogicTests: XCTestCase {
         let transcriptListener = null;
         const history = [];
         const ts = (offset) => new Date(1700000000000 + offset).toISOString();
-        // Foreground-preserving retention: 3 human turns must survive even though
-        // 250 scheduled turns (well over the 200 cap) arrive afterwards.
-        for (let index = 0; index < 3; index += 1) {
+        // Fill the transcript entirely with human turns, then overflow it with
+        // scheduled turns. The later resume notice must survive the 200-turn cap
+        // without allowing scheduled work to displace recent human conversation.
+        for (let index = 0; index < 197; index += 1) {
           history.push({
             id:`human-${index}`,type:"user.message",timestamp:ts(index * 2),
             data:{source:null,content:`human ${index}`,parentAgentTaskId:"root-task"}
@@ -464,6 +465,23 @@ final class CoreLogicTests: XCTestCase {
           {id:"skill-te",type:"assistant.turn_end",timestamp:ts(9103),data:{turnId:"skill-t"}},
           {id:"with-skill-idle",type:"session.idle",timestamp:ts(9104),data:{aborted:false}}
         );
+        // A killed process can resume with a dangling assistant turn and no
+        // persisted shutdown/idle event. Replay must close it as stopped and
+        // retain only the newest resume boundary.
+        history.push(
+          {id:"restart-user",type:"user.message",timestamp:ts(9200),
+           data:{source:null,content:"before restart",parentAgentTaskId:"root-task"}},
+          {id:"restart-turn-start",type:"assistant.turn_start",timestamp:ts(9201),
+           data:{turnId:"restart-turn"}},
+          {id:"restart-assistant",type:"assistant.message",timestamp:ts(9202),
+           data:{messageId:"restart-message",content:"restart answer"}},
+          {id:"resume-old",type:"session.resume",timestamp:ts(9203),data:{}},
+          {id:"resume-latest",type:"session.resume",timestamp:ts(9204),data:{}},
+          {id:"ignored-warning",type:"session.warning",timestamp:ts(9205),
+           data:{warningType:"mcp",message:"MCP startup chatter"}},
+          {id:"ignored-system",type:"system.message",timestamp:ts(9206),
+           data:{role:"system",content:"SECRET SYSTEM INSTRUCTIONS"}}
+        );
         const fakeSession = {
           sessionId: "copilot-session",
           rpc: { schedule: { list: async () => ({entries:[]}) } },
@@ -483,6 +501,19 @@ final class CoreLogicTests: XCTestCase {
         const transcriptPath = `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
           + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`;
         const read = () => JSON.parse(readFileSync(transcriptPath, "utf8"));
+        const afterReplay = read();
+        const replayFind = (id) =>
+          afterReplay.turns.find((turn) => turn.id === id);
+        const replayRestart = replayFind("restart-user");
+        const replayResumeTurns = afterReplay.turns.filter(
+          (turn) => turn.id.startsWith("session-resume-")
+        );
+        const replayLeakedInternalText = afterReplay.turns.some((turn) =>
+          turn.assistantMessages.some((message) =>
+            message.content.includes("MCP startup chatter")
+              || message.content.includes("SECRET SYSTEM INSTRUCTIONS")
+          )
+        );
 
         // A live human message must publish immediately, before the turn ends,
         // so the sender sees their input right away.
@@ -532,7 +563,7 @@ final class CoreLogicTests: XCTestCase {
           foregroundCount: byKind("foreground").length,
           scheduledCount: byKind("scheduled").length,
           automatedCount: byKind("automated").length,
-          humansPreserved: ["human-0","human-1","human-2"].every(find),
+          humansPreserved: ["human-1","human-100","human-195"].every(find),
           multiKind: multi?.kind,
           multiAssistantCount: multi?.assistantMessages.length,
           multiToolCount: multi?.tools.length,
@@ -552,6 +583,12 @@ final class CoreLogicTests: XCTestCase {
             (total, tool) => total + tool.id.length + tool.name.length + tool.title.length,
             0
           ),
+          replayRestartEnded: replayRestart?.endedAt,
+          replayRestartAborted: replayRestart?.isAborted,
+          replayResumeTurnCount: replayResumeTurns.length,
+          replayResumeTurnId: replayResumeTurns[0]?.id,
+          replayResumeMessage: replayResumeTurns[0]?.assistantMessages[0]?.content,
+          replayLeakedInternalText,
           snapshotBytes: Buffer.byteLength(encodedSnapshot)
         }));
         process.exit(0);
@@ -592,7 +629,7 @@ final class CoreLogicTests: XCTestCase {
         // Retention caps the total but never evicts the human conversation.
         XCTAssertEqual(summary?["turnCount"] as? Int, 200)
         XCTAssertEqual(summary?["humansPreserved"] as? Bool, true)
-        XCTAssertEqual(summary?["foregroundCount"] as? Int, 6)
+        XCTAssertEqual(summary?["foregroundCount"] as? Int, 200)
         XCTAssertEqual(summary?["automatedCount"] as? Int, 0)
         // The multi-iteration request is a single foreground turn.
         XCTAssertEqual(summary?["multiKind"] as? String, "foreground")
@@ -611,6 +648,18 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary?["liveTruncated"] as? Bool, true)
         XCTAssertEqual(summary?["liveHasTrailingHighSurrogate"] as? Bool, false)
         XCTAssertLessThanOrEqual(summary?["liveToolMetadataLength"] as? Int ?? .max, 1_536)
+        XCTAssertNotNil(summary?["replayRestartEnded"] as? String)
+        XCTAssertEqual(summary?["replayRestartAborted"] as? Bool, true)
+        XCTAssertEqual(summary?["replayResumeTurnCount"] as? Int, 1)
+        XCTAssertEqual(
+            summary?["replayResumeTurnId"] as? String,
+            "session-resume-resume-latest"
+        )
+        XCTAssertEqual(
+            summary?["replayResumeMessage"] as? String,
+            "Session resumed. Terminal startup details are available in Terminal."
+        )
+        XCTAssertEqual(summary?["replayLeakedInternalText"] as? Bool, false)
         XCTAssertLessThanOrEqual(
             summary?["snapshotBytes"] as? Int ?? .max,
             5 * 1_024 * 1_024
