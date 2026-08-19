@@ -132,6 +132,11 @@ public enum CopilotExtension {
         // events, never resurrected from disk.
         const pendingElicitations = new Map();
         const inFlightElicitationResponses = new Set();
+        // Passive observation only: NEVER register interest / call setRequired for
+        // permission events, or this extension would take prompt ownership away
+        // from the CLI's terminal UI.
+        const pendingPermissionRequestIds = new Set();
+        const completedPermissionRequestIds = new Set();
         let foregroundTurnActive = false;
         // Wall-clock time of the most recent `foregroundTurnActive` transition
         // (root turn_start/turn_end/session.idle). Distinct from `updatedAt`,
@@ -531,6 +536,9 @@ public enum CopilotExtension {
                 lastIdleTurnKind,
                 trackedUserInputs: [...pendingUserInputs.values()],
                 trackedElicitations: [...pendingElicitations.values()],
+                // Always present (including []) so the host can distinguish this
+                // extension from an older build that cannot validate prompts.
+                pendingPermissionRequestIds: [...pendingPermissionRequestIds],
                 ...(currentModel ? { model: currentModel } : {}),
                 ...(availableModels ? { availableModels } : {}),
                 ...(error ? { error: String(error) } : {}),
@@ -1094,6 +1102,41 @@ public enum CopilotExtension {
                 || "Tool";
         }
 
+        function boundCompletedPermissionIds() {
+            while (completedPermissionRequestIds.size > 128) {
+                completedPermissionRequestIds.delete(
+                    completedPermissionRequestIds.values().next().value
+                );
+            }
+        }
+
+        function applyPermissionEvent(event, live) {
+            if (event.type === "session.idle") {
+                if (event.agentId) return;
+                if (pendingPermissionRequestIds.size > 0) {
+                    pendingPermissionRequestIds.clear();
+                    if (live) publish();
+                }
+                return;
+            }
+            const requestId = event.data?.requestId;
+            if (typeof requestId !== "string" || requestId.length === 0) return;
+            let changed = false;
+            if (event.type === "permission.requested") {
+                if (!completedPermissionRequestIds.has(requestId)
+                        && !pendingPermissionRequestIds.has(requestId)
+                        && pendingPermissionRequestIds.size < 64) {
+                    pendingPermissionRequestIds.add(requestId);
+                    changed = true;
+                }
+            } else if (event.type === "permission.completed") {
+                completedPermissionRequestIds.add(requestId);
+                boundCompletedPermissionIds();
+                changed = pendingPermissionRequestIds.delete(requestId);
+            }
+            if (live && changed) publish();
+        }
+
         function processTranscriptEvent(event, live, reconciling = false) {
             if (event.agentId) return;
             if (reconciling) {
@@ -1226,6 +1269,7 @@ public enum CopilotExtension {
             if (!transcriptInitialized) {
                 queuedTranscriptEvents.push(event);
             } else {
+                applyPermissionEvent(event, true);
                 processTranscriptEvent(event, true);
             }
         });
@@ -1677,6 +1721,7 @@ public enum CopilotExtension {
             transcriptTurns.length = 0;
             resetPendingTranscriptTurn();
             for (const event of history) {
+                applyPermissionEvent(event, false);
                 processTranscriptEvent(event, false, true);
                 applyModelFromEvent(event);
             }
@@ -1688,10 +1733,12 @@ public enum CopilotExtension {
         }
         transcriptInitialized = true;
         for (const event of queuedTranscriptEvents) {
+            applyPermissionEvent(event, false);
             processTranscriptEvent(event, false, true);
         }
         queuedTranscriptEvents.length = 0;
         transcriptEventIds.clear();
+        publish();
         publishTranscript();
 
         await refreshSchedules();

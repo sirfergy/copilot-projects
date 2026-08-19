@@ -204,6 +204,12 @@ enum RemoteSessionMoveResult: Equatable {
     case missing
 }
 
+enum PermissionNotificationDecision: Equatable {
+    case cancel
+    case post
+    case suppress
+}
+
 /// Single source of truth. Holds value-type projects/sessions (observed) and live
 /// terminal controllers (NOT observed, kept out of the SwiftUI graph).
 @MainActor
@@ -333,6 +339,24 @@ final class AppModel: ObservableObject {
     private var scheduledSnapshotsSuppressed: Set<String> = []
     private var foregroundIdleGenerationBaselines: [String: Int] = [:]
     private let completionNotificationDelayNanoseconds: UInt64
+    private let permissionNotificationDelayNanoseconds: UInt64
+    private let persistPermissionStatus:
+        (_ sessionId: String, _ status: SessionStatus, _ timestamp: Int64,
+         _ promptStatusTimestamp: Int64) -> Void
+    private struct PermissionStatusRestore {
+        let status: SessionStatus
+        let statusText: String?
+        let scheduledTurnActive: Bool
+        let finishedUnseen: Bool
+        let turnCompleted: Bool
+        let backgroundAgentsSuppressed: Bool
+        let completionPending: Bool
+        let foregroundIdleGenerationBaseline: Int?
+        let statusTimestamp: Int64
+        let promptStatusTimestamp: Int64
+    }
+    private var permissionNotificationTokens: [String: UUID] = [:]
+    private var permissionStatusRestores: [String: PermissionStatusRestore] = [:]
     private let isAppActive: @MainActor () -> Bool
     private let agentActivityDirectory: URL
     private let resumeMarkerDirectory: URL
@@ -382,6 +406,18 @@ final class AppModel: ObservableObject {
     init(
         stateRepository: StateRepository = StateRepository(),
         completionNotificationDelayNanoseconds: UInt64 = 1_000_000_000,
+        permissionNotificationDelayNanoseconds: UInt64 = 1_000_000_000,
+        persistPermissionStatus: @escaping (
+            _ sessionId: String, _ status: SessionStatus, _ timestamp: Int64,
+            _ promptStatusTimestamp: Int64
+        ) -> Void = { sessionId, status, timestamp, promptStatusTimestamp in
+            SessionArtifacts.persistStatus(
+                sessionId: sessionId,
+                status: status,
+                timestamp: timestamp,
+                promptStatusTimestamp: promptStatusTimestamp
+            )
+        },
         isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive },
         agentActivityDirectory: URL = Paths.sessionsDir,
         resumeMarkerDirectory: URL = Paths.sessionsDir,
@@ -411,6 +447,8 @@ final class AppModel: ObservableObject {
     ) {
         self.stateRepository = stateRepository
         self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
+        self.permissionNotificationDelayNanoseconds = permissionNotificationDelayNanoseconds
+        self.persistPermissionStatus = persistPermissionStatus
         self.isAppActive = isAppActive
         self.agentActivityDirectory = agentActivityDirectory
         self.resumeMarkerDirectory = resumeMarkerDirectory
@@ -880,6 +918,8 @@ final class AppModel: ObservableObject {
         promptStatusEventClock.reset(sessionId: sid)
         backgroundAgentsSuppressed.remove(sid)
         completionPending.remove(sid)
+        permissionNotificationTokens[sid] = nil
+        permissionStatusRestores[sid] = nil
         scheduledSnapshotsSuppressed.remove(sid)
         foregroundIdleGenerationBaselines.removeValue(forKey: sid)
         let closedIndex = projects[pi].sessions.firstIndex { $0.id == sid }
@@ -1932,6 +1972,28 @@ final class AppModel: ObservableObject {
             }
         }
         let previous = projects[loc.p].sessions[loc.s].status
+        let permissionRestoreState: (
+            status: SessionStatus,
+            statusText: String?,
+            scheduledTurnActive: Bool,
+            finishedUnseen: Bool,
+            turnCompleted: Bool,
+            backgroundAgentsSuppressed: Bool,
+            completionPending: Bool,
+            foregroundIdleGenerationBaseline: Int?
+        )? = notification == .permission
+            && permissionNotificationTokens[sessionId] == nil
+            ? (
+                previous,
+                projects[loc.p].sessions[loc.s].statusText,
+                projects[loc.p].sessions[loc.s].scheduledTurnActive,
+                projects[loc.p].sessions[loc.s].finishedUnseen,
+                projects[loc.p].sessions[loc.s].turnCompleted,
+                backgroundAgentsSuppressed.contains(sessionId),
+                completionPending.contains(sessionId),
+                foregroundIdleGenerationBaselines[sessionId]
+            )
+            : nil
         let startsScheduledTurn = source == "scheduled-start" || source == "scheduled-active"
         let endsScheduledTurn = source == "scheduled-idle"
         let scheduledStateChanges = startsScheduledTurn
@@ -1962,6 +2024,9 @@ final class AppModel: ObservableObject {
                 || hasCompletionSignal
                 || scheduledStateChanges
         else { return }
+        if status != .waiting {
+            cancelPermissionNotification(sessionId: sessionId)
+        }
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
         if status == .running || status == .waiting {
@@ -2027,6 +2092,32 @@ final class AppModel: ObservableObject {
             } else {
                 postCompletionIfReady(sessionId: sessionId)
             }
+        } else if notification == .permission {
+            if let permissionRestoreState {
+                let now = SessionArtifacts.currentStatusTimestamp()
+                let statusTimestamp = timestamp
+                    ?? statusEventClock.timestamp(for: sessionId)
+                    ?? now
+                let promptTimestamp = promptStatusEventClock.timestamp(for: sessionId)
+                    ?? statusTimestamp
+                schedulePermissionNotification(
+                    sessionId: sessionId,
+                    restore: PermissionStatusRestore(
+                        status: permissionRestoreState.status,
+                        statusText: permissionRestoreState.statusText,
+                        scheduledTurnActive: permissionRestoreState.scheduledTurnActive,
+                        finishedUnseen: permissionRestoreState.finishedUnseen,
+                        turnCompleted: permissionRestoreState.turnCompleted,
+                        backgroundAgentsSuppressed:
+                            permissionRestoreState.backgroundAgentsSuppressed,
+                        completionPending: permissionRestoreState.completionPending,
+                        foregroundIdleGenerationBaseline:
+                            permissionRestoreState.foregroundIdleGenerationBaseline,
+                        statusTimestamp: statusTimestamp,
+                        promptStatusTimestamp: promptTimestamp
+                    )
+                )
+            }
         } else if let notification, notification != .completed {
             postNotification(
                 projectId: projects[loc.p].id,
@@ -2035,6 +2126,136 @@ final class AppModel: ObservableObject {
                 title: notification.title,
                 body: nil
             )
+        }
+    }
+
+    nonisolated static func permissionNotificationDecision(
+        status: SessionStatus,
+        hasPendingQuestions: Bool,
+        pendingPermissionRequestIds: [String]?
+    ) -> PermissionNotificationDecision {
+        guard status == .waiting else { return .cancel }
+        if pendingPermissionRequestIds?.isEmpty == false { return .post }
+        guard !hasPendingQuestions else { return .cancel }
+        guard let pendingPermissionRequestIds else {
+            // Older/stale extensions cannot prove that the prompt is gone.
+            return .post
+        }
+        return pendingPermissionRequestIds.isEmpty ? .suppress : .post
+    }
+
+    private func schedulePermissionNotification(
+        sessionId: String,
+        restore: PermissionStatusRestore
+    ) {
+        guard permissionNotificationTokens[sessionId] == nil else { return }
+        let token = UUID()
+        permissionNotificationTokens[sessionId] = token
+        permissionStatusRestores[sessionId] = restore
+        let delay = permissionNotificationDelayNanoseconds
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            self?.resolvePermissionNotification(sessionId: sessionId, token: token)
+        }
+    }
+
+    private func cancelPermissionNotification(sessionId: String) {
+        permissionNotificationTokens[sessionId] = nil
+        permissionStatusRestores[sessionId] = nil
+    }
+
+    private func resolvePermissionNotification(sessionId: String, token: UUID) {
+        guard permissionNotificationTokens[sessionId] == token,
+              let restore = permissionStatusRestores[sessionId] else {
+            return
+        }
+        permissionNotificationTokens[sessionId] = nil
+        permissionStatusRestores[sessionId] = nil
+        guard let loc = locateIndex(sessionId) else { return }
+
+        let fm = FileManager.default
+        let decoder = JSONDecoder()
+        let path = agentActivityDirectory
+            .appendingPathComponent("\(sessionId).agent-activity.json").path
+        let loaded = loadAgentActivitySnapshot(
+            sessionId: sessionId,
+            path: path,
+            decoder: decoder,
+            fm: fm
+        )
+        let snapshot = loaded?.isFresh() == true ? loaded : nil
+        let session = projects[loc.p].sessions[loc.s]
+        let hasPendingQuestions = snapshot.map {
+            $0.trackedUserInputs?.isEmpty == false
+                || $0.trackedElicitations?.isEmpty == false
+        } ?? session.hasPendingQuestions
+        switch Self.permissionNotificationDecision(
+            status: session.status,
+            hasPendingQuestions: hasPendingQuestions,
+            pendingPermissionRequestIds: snapshot?.pendingPermissionRequestIds
+        ) {
+        case .cancel:
+            return
+        case .post:
+            postNotification(
+                projectId: projects[loc.p].id,
+                sessionId: sessionId,
+                kind: .permission,
+                title: StatusNotificationKind.permission.title,
+                body: nil
+            )
+        case .suppress:
+            restoreStatusAfterTransientPermission(
+                sessionId: sessionId,
+                location: loc,
+                restore: restore
+            )
+        }
+    }
+
+    private func restoreStatusAfterTransientPermission(
+        sessionId: String,
+        location: (p: Int, s: Int),
+        restore: PermissionStatusRestore
+    ) {
+        var session = projects[location.p].sessions[location.s]
+        session.status = restore.status
+        session.statusText = restore.statusText
+        session.scheduledTurnActive = restore.scheduledTurnActive
+        session.finishedUnseen = restore.finishedUnseen
+        session.turnCompleted = restore.turnCompleted
+        projects[location.p].sessions[location.s] = session
+
+        if restore.backgroundAgentsSuppressed {
+            backgroundAgentsSuppressed.insert(sessionId)
+        } else {
+            backgroundAgentsSuppressed.remove(sessionId)
+        }
+        if restore.completionPending {
+            completionPending.insert(sessionId)
+        } else {
+            completionPending.remove(sessionId)
+        }
+        if let baseline = restore.foregroundIdleGenerationBaseline {
+            foregroundIdleGenerationBaselines[sessionId] = baseline
+        } else {
+            foregroundIdleGenerationBaselines.removeValue(forKey: sessionId)
+        }
+
+        statusEventClock.seed(sessionId: sessionId, timestamp: restore.statusTimestamp)
+        promptStatusEventClock.seed(
+            sessionId: sessionId,
+            timestamp: restore.promptStatusTimestamp
+        )
+        persistPermissionStatus(
+            sessionId,
+            restore.status,
+            restore.statusTimestamp,
+            restore.promptStatusTimestamp
+        )
+        updateDockBadge()
+        if restore.completionPending {
+            postCompletionIfReady(sessionId: sessionId)
         }
     }
 

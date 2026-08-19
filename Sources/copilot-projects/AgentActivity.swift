@@ -28,6 +28,10 @@ struct AgentActivitySnapshot: Codable, Equatable {
     /// Schema-form `elicitation.requested` questions awaiting an answer. Optional
     /// (nil default) for backward-compatible decoding of older heartbeats.
     var trackedElicitations: [TrackedElicitation]? = nil
+    /// Permission requests currently awaiting a CLI response. Always present in
+    /// new extension snapshots (including `[]`); nil identifies an older
+    /// extension that cannot validate permission-notification hooks.
+    var pendingPermissionRequestIds: [String]? = nil
     /// The session's effective model (name + reasoning effort + context tier).
     /// Optional (nil default) so older heartbeats without it still decode.
     var model: TrackedModel? = nil
