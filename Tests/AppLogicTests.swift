@@ -68,6 +68,80 @@ private final class ScanCounter {
 }
 
 final class AppLogicTests: XCTestCase {
+    func testRendererLRUKeepsThreeMostRecentLiveSessions() {
+        let live: Set<String> = ["a", "b", "c", "d"]
+        var lru = TerminalsContainerView.updatedRendererLRU(
+            [],
+            active: "a",
+            live: live
+        )
+        lru = TerminalsContainerView.updatedRendererLRU(lru, active: "b", live: live)
+        lru = TerminalsContainerView.updatedRendererLRU(lru, active: "c", live: live)
+        XCTAssertEqual(lru, ["a", "b", "c"])
+
+        lru = TerminalsContainerView.updatedRendererLRU(lru, active: "d", live: live)
+        XCTAssertEqual(lru, ["b", "c", "d"])
+        lru = TerminalsContainerView.updatedRendererLRU(lru, active: "b", live: live)
+        XCTAssertEqual(lru, ["c", "d", "b"])
+    }
+
+    func testRendererLRUDropsRemovedAndClearsWithoutActiveSession() {
+        XCTAssertEqual(
+            TerminalsContainerView.updatedRendererLRU(
+                ["removed", "a", "b"],
+                active: "b",
+                live: ["a", "b"]
+            ),
+            ["a", "b"]
+        )
+        XCTAssertEqual(
+            TerminalsContainerView.updatedRendererLRU(
+                ["a", "b"],
+                active: nil,
+                live: ["a", "b"]
+            ),
+            []
+        )
+    }
+
+    @MainActor
+    func testTerminalContainerParksOutsideWarmLRUAndReplacements() {
+        let container = TerminalsContainerView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 500)
+        )
+        var views = Dictionary(uniqueKeysWithValues: ["a", "b", "c", "d"].map {
+            ($0, ProjectsTerminalView(frame: container.bounds))
+        })
+
+        for active in ["a", "b", "c", "d"] {
+            container.sync(
+                order: ["a", "b", "c", "d"],
+                active: active,
+                emptyHint: ("", ""),
+                onNew: {},
+                provider: { views[$0] }
+            )
+        }
+
+        XCTAssertEqual(views.values.filter(\.rendererShouldBeActiveForTesting).count, 3)
+        XCTAssertFalse(views["a"]!.rendererShouldBeActiveForTesting)
+        XCTAssertTrue(views["d"]!.rendererShouldBeActiveForTesting)
+
+        let replaced = views["d"]!
+        views["d"] = ProjectsTerminalView(frame: container.bounds)
+        container.sync(
+            order: ["a", "b", "c", "d"],
+            active: "d",
+            emptyHint: ("", ""),
+            onNew: {},
+            provider: { views[$0] }
+        )
+
+        XCTAssertFalse(replaced.rendererShouldBeActiveForTesting)
+        XCTAssertTrue(views["d"]!.rendererShouldBeActiveForTesting)
+        XCTAssertEqual(views.values.filter(\.rendererShouldBeActiveForTesting).count, 3)
+    }
+
     func testFooterClassification() {
         XCTAssertEqual(
             TerminalController.classifyFooter("◎ Working   esc cancel"),

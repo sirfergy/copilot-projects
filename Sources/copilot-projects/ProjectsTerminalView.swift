@@ -18,10 +18,22 @@ import SwiftTerm
 ///     scroll": send cursor up/down keys so pagers/TUIs scroll.
 ///  3. Otherwise (normal shell) → let SwiftTerm scroll its own scrollback.
 final class ProjectsTerminalView: LocalProcessTerminalView {
+    private enum RendererMode {
+        case metal
+        case coreGraphicsForced
+        case coreGraphicsFallback
+    }
+
     private var scrollAccum: CGFloat = 0
     private(set) var rendererName = "unconfigured"
     private(set) var remoteContentGeneration: UInt64 = 0
-    private var rendererConfigured = false
+    private var rendererMode: RendererMode = {
+        ProcessInfo.processInfo.environment["COPILOT_PROJECTS_RENDERER"]?
+            .lowercased() == "coregraphics"
+            ? .coreGraphicsForced
+            : .metal
+    }()
+    private var rendererShouldBeActive = false
     private var surfaceRefreshGeneration = 0
     /// True from the moment a remote prompt's paste is written until its submit
     /// Enter fires, so an overlapping remote prompt can't interleave its paste
@@ -604,34 +616,82 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        configureRendererIfNeeded()
+        applyRendererState()
     }
 
-    private func configureRendererIfNeeded() {
-        guard window != nil, !rendererConfigured else { return }
-        rendererConfigured = true
+    /// Keeps the terminal model, parser, scrollback, and PTY alive while releasing
+    /// the expensive Metal renderer for terminals outside the container's warm LRU.
+    func setRendererActive(_ active: Bool) {
+        if rendererShouldBeActive == active {
+            switch rendererMode {
+            case .metal where active == isUsingMetalRenderer:
+                return
+            case .coreGraphicsForced, .coreGraphicsFallback:
+                return
+            default:
+                break
+            }
+        }
+        rendererShouldBeActive = active
+        applyRendererState()
+    }
 
-        let requested = ProcessInfo.processInfo.environment["COPILOT_PROJECTS_RENDERER"]?
-            .lowercased()
-        guard requested != "coregraphics" else {
-            rendererName = "coregraphics"
+    private func applyRendererState() {
+        switch rendererMode {
+        case .coreGraphicsForced:
+            rendererName = "coregraphics-forced"
             disableFullRedrawOnAnyChanges = false
+        case .coreGraphicsFallback:
+            rendererName = "coregraphics-fallback"
+            disableFullRedrawOnAnyChanges = false
+        case .metal:
+            guard rendererShouldBeActive else {
+                parkMetalRenderer()
+                return
+            }
+            guard window != nil else {
+                parkMetalRenderer()
+                return
+            }
+            do {
+                if !isUsingMetalRenderer {
+                    surfaceRefreshGeneration += 1
+                    try setUseMetal(true)
+                }
+                rendererName = "metal"
+            } catch {
+                rendererMode = .coreGraphicsFallback
+                rendererName = "coregraphics-fallback"
+                disableFullRedrawOnAnyChanges = false
+                NSLog("copilot-projects: Metal renderer unavailable, using CoreGraphics: \(error)")
+            }
+        }
+    }
+
+    private func parkMetalRenderer() {
+        guard isUsingMetalRenderer else {
+            rendererName = "parked"
             return
         }
         do {
-            try setUseMetal(true)
-            rendererName = "metal"
+            surfaceRefreshGeneration += 1
+            try setUseMetal(false)
+            rendererName = "parked"
         } catch {
-            rendererName = "coregraphics-fallback"
-            disableFullRedrawOnAnyChanges = false
-            NSLog("copilot-projects: Metal renderer unavailable, using CoreGraphics: \(error)")
+            rendererName = "metal-teardown-failed"
+            NSLog("copilot-projects: failed to park Metal renderer: \(error)")
         }
+    }
+
+    var rendererShouldBeActiveForTesting: Bool {
+        rendererShouldBeActive
     }
 
     /// Ask the active surface to render its current model after being revealed.
     /// SwiftTerm's Metal view is intentionally paused and redraws on demand.
     func refreshSurface() {
-        configureRendererIfNeeded()
+        guard rendererShouldBeActive, window != nil else { return }
+        applyRendererState()
         if isUsingMetalRenderer,
            let metalView: MTKView = firstDescendant(of: MTKView.self) {
             // `terminal.updateFullScreen()` marks the terminal's rows dirty but
