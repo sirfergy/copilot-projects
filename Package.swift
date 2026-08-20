@@ -20,7 +20,7 @@ let package = Package(
         // sirfergy/SwiftTerm#1 and sirfergy/SwiftTerm#2.
         .package(
             url: "https://github.com/sirfergy/SwiftTerm",
-            revision: "47519a0d0776a6a90fc6641f499b6c703a6dc893"
+            revision: "2f7dd30c7cb4c9df15b3c33ed1a79109a90a87d9"
         ),
         .package(
             url: "https://github.com/apple/swift-nio",

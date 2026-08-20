@@ -4,10 +4,10 @@ import SwiftTerm
 
 /// One long-lived AppKit view that hosts EVERY session's terminal across all
 /// projects. Modeled on Ghostty's surface hosting: the terminal NSViews are owned
-/// outside SwiftUI, never torn down on a project/tab switch, and never hidden via
-/// opacity. The selected session's terminal is brought to the front — its opaque
-/// background covers the rest — while the others keep rendering underneath, so a
-/// tab that streamed while in the background is already painted when revealed.
+/// outside SwiftUI and never torn down on a project/tab switch. The selected
+/// session's terminal is shown while hidden terminal models keep consuming PTY
+/// output. Only the three most recently selected terminals retain Metal renderers;
+/// the rest release their GPU surfaces until selected again.
 ///
 /// This replaces the SwiftUI `ZStack`-of-`TerminalHostView` approach. That version
 /// kept only the *selected project's* panes mounted, so switching projects made
@@ -24,6 +24,8 @@ final class TerminalsContainerView: NSView {
     /// state a real affordance without a SwiftUI overlay punching through the NSView.
     private let cover = EmptyStateView()
     private var activeId: String?
+    private var rendererLRU: [String] = []
+    private static let rendererWarmCapacity = 3
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -74,7 +76,9 @@ final class TerminalsContainerView: NSView {
         for id in order {
             guard let view = provider(id) else { continue }
             if hosted[id] !== view {
+                hosted[id]?.setRendererActive(false)
                 hosted[id]?.removeFromSuperview()
+                view.setRendererActive(false)
                 view.isHidden = true
                 view.frame = bounds
                 addSubview(view)
@@ -83,6 +87,7 @@ final class TerminalsContainerView: NSView {
             }
         }
         for (id, view) in hosted where !live.contains(id) {
+            view.setRendererActive(false)
             view.removeFromSuperview()
             hosted.removeValue(forKey: id)
         }
@@ -91,33 +96,66 @@ final class TerminalsContainerView: NSView {
 
         let activeChanged = activeId != active
         activeId = active
-        // Show ONLY the active pane (or the cover); hide the rest. Visibility is
-        // toggled with isHidden, NOT by reordering the view hierarchy — remove/re-add
-        // churned the backing layer, leaving a revealed pane painting only the
-        // streaming agent's incremental dirty cells onto a cleared (black) surface
-        // (the blank-on-switch glitch). With a stable hierarchy, reveal() forces the
-        // one full-bounds repaint a freshly-shown pane needs.
-        for (id, view) in hosted { view.isHidden = (id != active) }
+        let needsReveal = activeChanged || active.map(inserted.contains) == true
+        // Hide the outgoing and incoming panes before parking/activating renderers.
+        // Keeping the NSView hierarchy stable avoids the blank-on-switch backing
+        // layer bug while ensuring renderer teardown is never visible.
+        for (id, view) in hosted where id != active || needsReveal {
+            view.isHidden = true
+        }
+
+        rendererLRU = Self.updatedRendererLRU(
+            rendererLRU,
+            active: active,
+            live: Set(hosted.keys),
+            capacity: Self.rendererWarmCapacity
+        )
+        if let active, let view = hosted[active] {
+            view.frame = bounds
+            view.layoutSubtreeIfNeeded()
+        }
+        let warm = Set(rendererLRU)
+        for (id, view) in hosted {
+            view.setRendererActive(warm.contains(id))
+        }
+
         if let active, let view = hosted[active] {
             cover.isHidden = true
             layer?.backgroundColor = view.nativeBackgroundColor.cgColor
             layoutVisible()
-            if activeChanged || inserted.contains(active) { reveal(view) }
+            view.isHidden = false
+            if needsReveal { reveal(view) }
         } else {
             cover.isHidden = false
             layoutVisible()
         }
         TerminalController.debugLog(
             "container.sync active=\(active?.prefix(8) ?? "nil") changed=\(activeChanged) "
-            + "hosted=\(hosted.count) visibleActive=\(active.flatMap { hosted[$0]?.isHidden == false } ?? false)")
+            + "hosted=\(hosted.count) warm=\(rendererLRU.count) "
+            + "visibleActive=\(active.flatMap { hosted[$0]?.isHidden == false } ?? false)")
     }
 
-    /// Size, redraw, and focus the newly revealed terminal. SwiftTerm's Metal path
-    /// owns its invalidation contract; CoreGraphics fallback performs one full draw.
+    static func updatedRendererLRU(
+        _ current: [String],
+        active: String?,
+        live: Set<String>,
+        capacity: Int = rendererWarmCapacity
+    ) -> [String] {
+        guard let active, live.contains(active), capacity > 0 else { return [] }
+        var next: [String] = []
+        for id in current where live.contains(id) && id != active && !next.contains(id) {
+            next.append(id)
+        }
+        next.append(active)
+        return Array(next.suffix(capacity))
+    }
+
+    /// Size, synchronously draw, and focus the newly revealed terminal. A deferred
+    /// retry inside `forceRedraw` handles a drawable unavailable during activation.
     private func reveal(_ view: ProjectsTerminalView) {
         view.frame = bounds
         view.layoutSubtreeIfNeeded()
-        view.refreshSurface()
+        view.forceRedraw()
         if let window, window.firstResponder !== view {
             window.makeFirstResponder(view)
         }
