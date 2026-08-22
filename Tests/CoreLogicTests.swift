@@ -206,7 +206,8 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("session.permissions_changed""#))
         XCTAssertTrue(CopilotExtension.script.contains("writeMarker(copilotSessionPath, copilotSessionId)"))
         XCTAssertTrue(CopilotExtension.script.contains("writeMarker(allowAllPath, copilotSessionId)"))
-        XCTAssertTrue(CopilotExtension.script.contains("await session.getEvents()"))
+        XCTAssertTrue(CopilotExtension.script.contains("await sdkHistoryWithTimeout()"))
+        XCTAssertTrue(CopilotExtension.script.contains("await replayDurableHistory()"))
         XCTAssertTrue(CopilotExtension.script.contains(#"case "assistant.message":"#))
         XCTAssertTrue(CopilotExtension.script.contains(#"case "tool.execution_complete":"#))
         XCTAssertTrue(CopilotExtension.script.contains("isAborted"))
@@ -1564,6 +1565,184 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["schemaVersion"] as? Int, 3)
         XCTAssertEqual(summary["copilotSessionId"] as? String, "copilot-session")
         XCTAssertEqual(summary["turnIds"] as? [String], ["preserved-turn"])
+    }
+
+    func testCopilotExtensionFallsBackWhenSDKHistoryHangs() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-history-timeout-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let copilotHome = root.appendingPathComponent("copilot-home", isDirectory: true)
+        let copilotSessionId = "11111111-1111-4111-8111-111111111111"
+        let appSessionId = "22222222-2222-4222-8222-222222222222"
+        let source = copilotHome
+            .appendingPathComponent("session-state", isDirectory: true)
+            .appendingPathComponent(copilotSessionId, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Data(#"""
+        {"id":"durable-start","type":"session.start","timestamp":"2026-07-12T00:59:59.000Z","data":{"selectedModel":"old-model"}}
+        {"id":"durable-user","type":"user.message","timestamp":"2026-07-12T01:00:00.000Z","data":{"content":"durable question","source":null}}
+        {"id":"durable-answer","type":"assistant.message","timestamp":"2026-07-12T01:00:01.000Z","data":{"messageId":"durable-message","content":"durable answer"}}
+        {"id":"durable-idle","type":"session.idle","timestamp":"2026-07-12T01:00:02.000Z","data":{"aborted":false}}
+        {"id":"shape-drift","type":"user.message","timestamp":"2026-07-12T01:00:02.500Z"}
+        null
+        {"id":"torn"
+        """#.utf8).write(to: source.appendingPathComponent("events.jsonl"))
+
+        let prelude = #"""
+        let transcriptListener = null;
+        const namedListeners = new Map();
+        const fakeSession = {
+          sessionId: "__COPILOT_SESSION_ID__",
+          rpc: {
+            schedule: { list: async () => ({entries:[]}) },
+            permissions: { getAllowAll: async () => ({enabled:false}) },
+            model: { list: async () => [] },
+            eventLog: {
+              registerInterest: async ({eventType}) => ({handle:eventType}),
+              releaseInterest: async () => ({success:true})
+            }
+          },
+          on(name, handler) {
+            if (typeof name === "function") transcriptListener = name;
+            else namedListeners.set(name, handler);
+          },
+          getEvents() {
+            return new Promise((_, reject) => {
+              setTimeout(() => reject(new Error("late SDK history failure")), 50);
+            });
+          }
+        };
+        setTimeout(() => {
+          transcriptListener?.({
+            id:"live-model",type:"session.model_change",
+            timestamp:"2026-07-12T01:00:02.900Z",
+            data:{newModel:"new-model"}
+          });
+          transcriptListener?.({
+            id:"durable-answer",type:"assistant.message",
+            timestamp:"2026-07-12T01:00:01.000Z",
+            data:{messageId:"durable-message",content:"durable answer"}
+          });
+          transcriptListener?.({
+            id:"live-user",type:"user.message",
+            timestamp:"2026-07-12T01:00:03.000Z",
+            data:{content:"live question",source:null}
+          });
+          transcriptListener?.({
+            id:"live-answer",type:"assistant.message",
+            timestamp:"2026-07-12T01:00:04.000Z",
+            data:{messageId:"live-message",content:"live answer"}
+          });
+          transcriptListener?.({
+            id:"live-idle",type:"session.idle",
+            timestamp:"2026-07-12T01:00:05.000Z",data:{aborted:false}
+          });
+        }, 5);
+        """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
+        let extensionScript = CopilotExtension.script
+            .replacingOccurrences(
+                of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                with: "const joinSession = async () => fakeSession;"
+            )
+            .replacingOccurrences(
+                of: "const HISTORY_REPLAY_TIMEOUT_MS = 5_000;",
+                with: "const HISTORY_REPLAY_TIMEOUT_MS = 25;"
+            )
+        let epilogue = #"""
+
+        transcriptListener?.({
+          id:"live-user",type:"user.message",
+          timestamp:"2026-07-12T01:00:03.000Z",
+          data:{content:"live question",source:null}
+        });
+        transcriptListener?.({
+          id:"live-answer",type:"assistant.message",
+          timestamp:"2026-07-12T01:00:04.000Z",
+          data:{messageId:"live-message",content:"live answer"}
+        });
+        transcriptListener?.({
+          id:"live-idle",type:"session.idle",
+          timestamp:"2026-07-12T01:00:05.000Z",data:{aborted:false}
+        });
+        transcriptListener?.({
+          id:"shape-drift",type:"user.message",
+          timestamp:"2026-07-12T01:00:06.000Z",
+          data:{content:"recovered question",source:null}
+        });
+        transcriptListener?.({
+          id:"shape-answer",type:"assistant.message",
+          timestamp:"2026-07-12T01:00:07.000Z",
+          data:{messageId:"shape-message",content:"recovered answer"}
+        });
+        transcriptListener?.({
+          id:"shape-idle",type:"session.idle",
+          timestamp:"2026-07-12T01:00:08.000Z",data:{aborted:false}
+        });
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        const snapshot = JSON.parse(readFileSync(
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+          "utf8"
+        ));
+        const activity = JSON.parse(readFileSync(
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.agent-activity.json`,
+          "utf8"
+        ));
+        console.log(JSON.stringify({
+          users: snapshot.turns.map((turn) => turn.userContent),
+          assistants: snapshot.turns.map((turn) =>
+            turn.assistantMessages.map((message) => message.content)
+          ),
+          model: activity.model?.name
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("history-timeout.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "HOME": root.path,
+            "COPILOT_HOME": copilotHome.path,
+            "COPILOT_PROJECTS_SESSION": appSessionId,
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
+        XCTAssertEqual(
+            summary?["users"] as? [String],
+            ["durable question", "live question", "recovered question"]
+        )
+        XCTAssertEqual(
+            summary?["assistants"] as? [[String]],
+            [["durable answer"], ["live answer"], ["recovered answer"]]
+        )
+        XCTAssertEqual(summary?["model"] as? String, "new-model")
     }
 
     func testCopilotExtensionRejectsLegacySnapshotWhenHistoryFails() throws {
