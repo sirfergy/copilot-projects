@@ -16,9 +16,10 @@ public enum CopilotExtension {
 
     public static let script = #"""
     import { execFileSync } from "node:child_process";
+    import { homedir } from "node:os";
     import { dirname, join } from "node:path";
     import {
-        existsSync as fileExistsSync,
+        createReadStream, existsSync as fileExistsSync, lstatSync,
         mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync
     } from "node:fs";
     import { joinSession } from "@github/copilot-sdk/extension";
@@ -160,6 +161,8 @@ public enum CopilotExtension {
         // `session.rpc.model.list()`. Null until the first successful fetch so the
         // client shows the read-only model line rather than an empty picker.
         let availableModels = null;
+        let refreshingSchedules = false;
+        let refreshingModels = false;
         // Guards against processing two set-model requests concurrently for the
         // same file write burst (mirrors inFlightUserInputResponses).
         let inFlightSetModelRequest = false;
@@ -183,6 +186,10 @@ public enum CopilotExtension {
         const MAX_TRANSCRIPT_METADATA_TEXT = 512;
         const MAX_TRANSCRIPT_ASSISTANT_MESSAGES = 250;
         const MAX_TRANSCRIPT_TOOLS = 400;
+        const MAX_TRANSCRIPT_EVENT_IDS = 50_000;
+        const MAX_DURABLE_EVENT_BYTES = 4 * 1_024 * 1_024;
+        const HISTORY_REPLAY_TIMEOUT_MS = 5_000;
+        const DURABLE_REPLAY_TIMEOUT_MS = 5_000;
         const TRANSCRIPT_PUBLISH_THROTTLE_MS = 400;
 
         const MAX_USER_INPUT_QUESTION_BYTES = 16_384;
@@ -1137,12 +1144,34 @@ public enum CopilotExtension {
             if (live && changed) publish();
         }
 
-        function processTranscriptEvent(event, live, reconciling = false) {
-            if (event.agentId) return;
-            if (reconciling) {
-                if (transcriptEventIds.has(event.id)) return;
-                transcriptEventIds.add(event.id);
+        function rememberTranscriptEvent(event) {
+            const id = event?.id;
+            if (typeof id !== "string" || id.length === 0) return true;
+            if (transcriptEventIds.has(id)) return false;
+            transcriptEventIds.add(id);
+            while (transcriptEventIds.size > MAX_TRANSCRIPT_EVENT_IDS) {
+                transcriptEventIds.delete(transcriptEventIds.values().next().value);
             }
+            return true;
+        }
+
+        function clearTranscriptEventIds() {
+            transcriptEventIds.clear();
+        }
+
+        function resetTranscriptReplayState(turns, model) {
+            transcriptTurns.length = 0;
+            transcriptTurns.push(...turns);
+            resetPendingTranscriptTurn();
+            transcriptAssistantTurnActive = false;
+            latestResumeTranscriptTurnId = null;
+            currentModel = model;
+            clearTranscriptEventIds();
+        }
+
+        function processTranscriptEvent(event, live) {
+            if (event.agentId) return;
+            if (!rememberTranscriptEvent(event)) return;
 
             switch (event.type) {
             case "user.message": {
@@ -1265,6 +1294,22 @@ public enum CopilotExtension {
             }
         }
 
+        function replayHistoryEvent(event, includePermissions) {
+            if (!event || typeof event !== "object"
+                    || typeof event.type !== "string") {
+                return;
+            }
+            try {
+                if (includePermissions) applyPermissionEvent(event, false);
+                processTranscriptEvent(event, false);
+                applyModelFromEvent(event);
+            } catch {
+                if (typeof event.id === "string") {
+                    transcriptEventIds.delete(event.id);
+                }
+            }
+        }
+
         session.on((event) => {
             if (!transcriptInitialized) {
                 queuedTranscriptEvents.push(event);
@@ -1275,12 +1320,16 @@ public enum CopilotExtension {
         });
 
         async function refreshSchedules() {
+            if (refreshingSchedules) return;
+            refreshingSchedules = true;
             try {
                 const result = await session.rpc.schedule.list();
                 schedules = result.entries;
                 publish();
             } catch (error) {
                 publish(error);
+            } finally {
+                refreshingSchedules = false;
             }
         }
 
@@ -1296,6 +1345,99 @@ public enum CopilotExtension {
                     applyAllowAllMarker(result.enabled === true);
                 }
             } catch {}
+        }
+
+        async function sdkHistoryWithTimeout() {
+            let timeout;
+            const historyPromise = Promise.resolve().then(() => session.getEvents());
+            historyPromise.catch(() => {});
+            try {
+                return await Promise.race([
+                    historyPromise,
+                    new Promise((_, reject) => {
+                        timeout = setTimeout(
+                            () => reject(new Error("history replay timed out")),
+                            HISTORY_REPLAY_TIMEOUT_MS
+                        );
+                    }),
+                ]);
+            } finally {
+                clearTimeout(timeout);
+            }
+        }
+
+        async function replayDurableHistory() {
+            if (!validCopilotSessionId) {
+                throw new Error("invalid Copilot session id");
+            }
+            const copilotHome = process.env.COPILOT_HOME
+                || join(homedir(), ".copilot");
+            const eventsPath = join(
+                copilotHome,
+                "session-state",
+                copilotSessionId,
+                "events.jsonl"
+            );
+            const attributes = lstatSync(eventsPath);
+            if (!attributes.isFile()) {
+                throw new Error("durable history is not a regular file");
+            }
+
+            const input = createReadStream(eventsPath);
+            input.on("error", () => {});
+            const timeout = setTimeout(
+                () => input.destroy(new Error("durable history replay timed out")),
+                DURABLE_REPLAY_TIMEOUT_MS
+            );
+            let pending = Buffer.alloc(0);
+            let droppingOversizedLine = false;
+            try {
+                for await (const chunk of input) {
+                    let offset = 0;
+                    while (offset < chunk.length) {
+                        const newline = chunk.indexOf(0x0A, offset);
+                        const end = newline === -1 ? chunk.length : newline;
+                        const segment = chunk.subarray(offset, end);
+                        if (droppingOversizedLine) {
+                            if (newline !== -1) droppingOversizedLine = false;
+                        } else if (pending.length + segment.length
+                                > MAX_DURABLE_EVENT_BYTES) {
+                            pending = Buffer.alloc(0);
+                            droppingOversizedLine = newline === -1;
+                        } else {
+                            pending = pending.length === 0
+                                ? Buffer.from(segment)
+                                : Buffer.concat(
+                                    [pending, segment],
+                                    pending.length + segment.length
+                                );
+                            if (newline !== -1) {
+                                let text = pending.toString("utf8");
+                                if (text.endsWith("\r")) text = text.slice(0, -1);
+                                try {
+                                    replayHistoryEvent(JSON.parse(text), false);
+                                } catch {
+                                    // The runtime may be appending the final line
+                                    // while the stream reaches EOF.
+                                }
+                                pending = Buffer.alloc(0);
+                            }
+                        }
+                        if (newline === -1) break;
+                        offset = newline + 1;
+                    }
+                }
+                if (!droppingOversizedLine && pending.length > 0) {
+                    let text = pending.toString("utf8");
+                    if (text.endsWith("\r")) text = text.slice(0, -1);
+                    try {
+                        replayHistoryEvent(JSON.parse(text), false);
+                    } catch {}
+                }
+            } finally {
+                clearTimeout(timeout);
+                input.destroy();
+            }
         }
 
         // `rpc.model.list()` types its entries as `unknown[]` and returns the raw
@@ -1370,6 +1512,8 @@ public enum CopilotExtension {
         }
 
         async function refreshModels() {
+            if (refreshingModels) return;
+            refreshingModels = true;
             try {
                 const result = await session.rpc.model.list();
                 const normalized = normalizeAvailableModels(
@@ -1380,7 +1524,10 @@ public enum CopilotExtension {
                     availableModels = normalized;
                     publish();
                 }
-            } catch {}
+            } catch {
+            } finally {
+                refreshingModels = false;
+            }
         }
 
         // Consume a host-written model switch request: validate it targets THIS
@@ -1715,34 +1862,40 @@ public enum CopilotExtension {
         const preservedTranscriptTurns = restoreMatchingTranscript()
             ? [...transcriptTurns]
             : [];
+        const preservedCurrentModel = currentModel;
         if (preservedTranscriptTurns.length === 0) publishTranscript();
+        let historyLoaded = false;
         try {
-            const history = await session.getEvents();
-            transcriptTurns.length = 0;
-            resetPendingTranscriptTurn();
+            const history = await sdkHistoryWithTimeout();
+            resetTranscriptReplayState([], preservedCurrentModel);
             for (const event of history) {
-                applyPermissionEvent(event, false);
-                processTranscriptEvent(event, false, true);
-                applyModelFromEvent(event);
+                replayHistoryEvent(event, true);
             }
-        } catch {
-            transcriptTurns.length = 0;
-            transcriptTurns.push(...preservedTranscriptTurns);
-            resetPendingTranscriptTurn();
-            transcriptEventIds.clear();
+            historyLoaded = true;
+        } catch {}
+        if (!historyLoaded) {
+            resetTranscriptReplayState([], preservedCurrentModel);
+            try {
+                await replayDurableHistory();
+                historyLoaded = true;
+            } catch {}
+        }
+        if (!historyLoaded) {
+            resetTranscriptReplayState(
+                preservedTranscriptTurns,
+                preservedCurrentModel
+            );
         }
         transcriptInitialized = true;
         for (const event of queuedTranscriptEvents) {
-            applyPermissionEvent(event, false);
-            processTranscriptEvent(event, false, true);
+            replayHistoryEvent(event, true);
         }
         queuedTranscriptEvents.length = 0;
-        transcriptEventIds.clear();
         publish();
         publishTranscript();
 
-        await refreshSchedules();
-        await refreshModels();
+        refreshSchedules();
+        refreshModels();
 
         processUserInputResponse();
         processElicitationResponse();
