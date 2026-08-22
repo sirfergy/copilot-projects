@@ -207,7 +207,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains("writeMarker(copilotSessionPath, copilotSessionId)"))
         XCTAssertTrue(CopilotExtension.script.contains("writeMarker(allowAllPath, copilotSessionId)"))
         XCTAssertTrue(CopilotExtension.script.contains("await sdkHistoryWithTimeout()"))
-        XCTAssertTrue(CopilotExtension.script.contains("await replayDurableHistory()"))
+        XCTAssertTrue(CopilotExtension.script.contains("scheduleDurableReconcile(0)"))
         XCTAssertTrue(CopilotExtension.script.contains(#"case "assistant.message":"#))
         XCTAssertTrue(CopilotExtension.script.contains(#"case "tool.execution_complete":"#))
         XCTAssertTrue(CopilotExtension.script.contains("isAborted"))
@@ -1567,7 +1567,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["turnIds"] as? [String], ["preserved-turn"])
     }
 
-    func testCopilotExtensionFallsBackWhenSDKHistoryHangs() throws {
+    func testCopilotExtensionTailsDurableHistoryWhenSDKEventsStop() throws {
         try requireNodeForJavaScriptTests()
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build/copilot-extension-history-timeout-\(UUID().uuidString)")
@@ -1582,18 +1582,27 @@ final class CoreLogicTests: XCTestCase {
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        try Data(#"""
+        try Data((#"""
         {"id":"durable-start","type":"session.start","timestamp":"2026-07-12T00:59:59.000Z","data":{"selectedModel":"old-model"}}
         {"id":"durable-user","type":"user.message","timestamp":"2026-07-12T01:00:00.000Z","data":{"content":"durable question","source":null}}
         {"id":"durable-answer","type":"assistant.message","timestamp":"2026-07-12T01:00:01.000Z","data":{"messageId":"durable-message","content":"durable answer"}}
         {"id":"durable-idle","type":"session.idle","timestamp":"2026-07-12T01:00:02.000Z","data":{"aborted":false}}
         {"id":"shape-drift","type":"user.message","timestamp":"2026-07-12T01:00:02.500Z"}
         null
-        {"id":"torn"
-        """#.utf8).write(to: source.appendingPathComponent("events.jsonl"))
+        """# + "\n").utf8).write(to: source.appendingPathComponent("events.jsonl"))
+        try Data(#"""
+        {"schemaVersion":3,"updatedAt":"2026-07-12T00:00:00.000Z",
+         "copilotSessionId":"99999999-9999-4999-8999-999999999999",
+         "turns":[{"id":"foreign","startedAt":"2026-07-12T00:00:00.000Z",
+         "endedAt":null,"kind":"foreground","userContent":"FOREIGN",
+         "assistantMessages":[],"tools":[],"isAborted":false}]}
+        """#.utf8).write(
+            to: sessions.appendingPathComponent("\(appSessionId).transcript.json")
+        )
 
         let prelude = #"""
         let transcriptListener = null;
+        let foreignObservedAtInit = false;
         const namedListeners = new Map();
         const fakeSession = {
           sessionId: "__COPILOT_SESSION_ID__",
@@ -1610,38 +1619,27 @@ final class CoreLogicTests: XCTestCase {
             if (typeof name === "function") transcriptListener = name;
             else namedListeners.set(name, handler);
           },
-          getEvents() {
-            return new Promise((_, reject) => {
-              setTimeout(() => reject(new Error("late SDK history failure")), 50);
-            });
+          async getEvents() {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            return [{
+              id:"permission-history",type:"permission.requested",
+              timestamp:"2026-07-12T00:59:58.000Z",
+              data:{requestId:"permission-1"}
+            }];
           }
         };
         setTimeout(() => {
-          transcriptListener?.({
-            id:"live-model",type:"session.model_change",
-            timestamp:"2026-07-12T01:00:02.900Z",
-            data:{newModel:"new-model"}
-          });
-          transcriptListener?.({
-            id:"durable-answer",type:"assistant.message",
-            timestamp:"2026-07-12T01:00:01.000Z",
-            data:{messageId:"durable-message",content:"durable answer"}
-          });
-          transcriptListener?.({
-            id:"live-user",type:"user.message",
-            timestamp:"2026-07-12T01:00:03.000Z",
-            data:{content:"live question",source:null}
-          });
-          transcriptListener?.({
-            id:"live-answer",type:"assistant.message",
-            timestamp:"2026-07-12T01:00:04.000Z",
-            data:{messageId:"live-message",content:"live answer"}
-          });
-          transcriptListener?.({
-            id:"live-idle",type:"session.idle",
-            timestamp:"2026-07-12T01:00:05.000Z",data:{aborted:false}
-          });
-        }, 5);
+          try {
+            const value = JSON.parse(readFileSync(
+              `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+                + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+              "utf8"
+            ));
+            foreignObservedAtInit = value.turns.some(
+              (turn) => turn.userContent === "FOREIGN"
+            );
+          } catch {}
+        }, 10);
         """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
         let extensionScript = CopilotExtension.script
             .replacingOccurrences(
@@ -1649,56 +1647,236 @@ final class CoreLogicTests: XCTestCase {
                 with: "const joinSession = async () => fakeSession;"
             )
             .replacingOccurrences(
-                of: "const HISTORY_REPLAY_TIMEOUT_MS = 5_000;",
-                with: "const HISTORY_REPLAY_TIMEOUT_MS = 25;"
+                of: "const DURABLE_RECONCILE_DEBOUNCE_MS = 200;",
+                with: "const DURABLE_RECONCILE_DEBOUNCE_MS = 5;"
+            )
+            .replacingOccurrences(
+                of: "const DURABLE_RECONCILE_POLL_MS = 5_000;",
+                with: "const DURABLE_RECONCILE_POLL_MS = 25;"
             )
         let epilogue = #"""
 
-        transcriptListener?.({
+        const durablePath = join(
+          process.env.COPILOT_HOME,
+          "session-state",
+          copilotSessionId,
+          "events.jsonl"
+        );
+        function appendEvent(event) {
+          writeFileSync(durablePath, JSON.stringify(event) + "\n", {flag:"a"});
+        }
+        async function waitForUsers(count) {
+          for (let attempt = 0; attempt < 200; attempt += 1) {
+            try {
+              const value = JSON.parse(readFileSync(
+                `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+                  + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+                "utf8"
+              ));
+              if (value.turns.filter((turn) => turn.userContent).length >= count) {
+                return value;
+              }
+            } catch {}
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          throw new Error(`timed out waiting for ${count} transcript users`);
+        }
+        async function waitForModel(name) {
+          for (let attempt = 0; attempt < 200; attempt += 1) {
+            try {
+              const value = JSON.parse(readFileSync(
+                `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+                  + `${process.env.COPILOT_PROJECTS_SESSION}.agent-activity.json`,
+                "utf8"
+              ));
+              if (value.model?.name === name) return;
+            } catch {}
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          throw new Error(`timed out waiting for model ${name}`);
+        }
+        async function waitForUpdatedAt(previous) {
+          for (let attempt = 0; attempt < 200; attempt += 1) {
+            try {
+              const value = JSON.parse(readFileSync(
+                `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+                  + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+                "utf8"
+              ));
+              if (value.updatedAt !== previous) return value;
+            } catch {}
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          throw new Error("timed out waiting for transcript update");
+        }
+
+        await waitForUsers(1);
+        const permissionsAfterInit = JSON.parse(readFileSync(
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.agent-activity.json`,
+          "utf8"
+        )).pendingPermissionRequestIds;
+        appendEvent({
+          id:"live-model",type:"session.model_change",
+          timestamp:"2026-07-12T01:00:02.900Z",
+          data:{newModel:"new-model"}
+        });
+        appendEvent({
           id:"live-user",type:"user.message",
           timestamp:"2026-07-12T01:00:03.000Z",
           data:{content:"live question",source:null}
         });
-        transcriptListener?.({
+        appendEvent({
           id:"live-answer",type:"assistant.message",
           timestamp:"2026-07-12T01:00:04.000Z",
           data:{messageId:"live-message",content:"live answer"}
         });
-        transcriptListener?.({
+        appendEvent({
           id:"live-idle",type:"session.idle",
           timestamp:"2026-07-12T01:00:05.000Z",data:{aborted:false}
         });
-        transcriptListener?.({
+        await waitForUsers(2);
+        await waitForModel("new-model");
+
+        const partial = JSON.stringify({
+          id:"partial-user",type:"user.message",
+          timestamp:"2026-07-12T01:00:05.500Z",
+          data:{content:"partial question",source:null}
+        });
+        const split = Math.floor(partial.length / 2);
+        writeFileSync(durablePath, partial.slice(0, split), {flag:"a"});
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        const beforeCompletion = await waitForUsers(2);
+        writeFileSync(
+          durablePath,
+          partial.slice(split) + "\n",
+          {flag:"a"}
+        );
+        appendEvent({
+          id:"partial-answer",type:"assistant.message",
+          timestamp:"2026-07-12T01:00:05.600Z",
+          data:{messageId:"partial-message",content:"partial answer"}
+        });
+        appendEvent({
+          id:"partial-idle",type:"session.idle",
+          timestamp:"2026-07-12T01:00:05.700Z",data:{aborted:false}
+        });
+        await waitForUsers(3);
+
+        appendEvent({
           id:"shape-drift",type:"user.message",
           timestamp:"2026-07-12T01:00:06.000Z",
           data:{content:"recovered question",source:null}
         });
-        transcriptListener?.({
+        appendEvent({
           id:"shape-answer",type:"assistant.message",
           timestamp:"2026-07-12T01:00:07.000Z",
           data:{messageId:"shape-message",content:"recovered answer"}
         });
-        transcriptListener?.({
+        appendEvent({
           id:"shape-idle",type:"session.idle",
           timestamp:"2026-07-12T01:00:08.000Z",data:{aborted:false}
         });
+        const snapshot = await waitForUsers(4);
+        const usersBeforeRotation = snapshot.turns.map((turn) => turn.userContent);
+        const assistantsBeforeRotation = snapshot.turns.map((turn) =>
+          turn.assistantMessages.map((message) => message.content)
+        );
+        const stableUpdatedAt = snapshot.updatedAt;
         await new Promise((resolve) => setTimeout(resolve, 75));
-        const snapshot = JSON.parse(readFileSync(
+        const afterIdlePolls = JSON.parse(readFileSync(
           `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
             + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
           "utf8"
         ));
+
+        const rotatedPath = durablePath + ".rotated";
+        writeFileSync(rotatedPath, readFileSync(durablePath));
+        renameSync(rotatedPath, durablePath);
+        transcriptListener?.({
+          id:"rotation-trigger",type:"session.info",
+          timestamp:"2026-07-12T01:00:08.100Z",data:{}
+        });
+        const afterRotation = await waitForUpdatedAt(stableUpdatedAt);
+
+        const truncated = [
+          {
+            id:"rotated-user",type:"user.message",
+            timestamp:"2026-07-12T01:00:09.000Z",
+            data:{content:"rotated question",source:null}
+          },
+          {
+            id:"rotated-answer",type:"assistant.message",
+            timestamp:"2026-07-12T01:00:10.000Z",
+            data:{messageId:"rotated-message",content:"rotated answer"}
+          },
+          {
+            id:"rotated-idle",type:"session.idle",
+            timestamp:"2026-07-12T01:00:11.000Z",data:{aborted:false}
+          }
+        ].map(JSON.stringify).join("\n") + "\n";
+        writeFileSync(durablePath, truncated);
+        transcriptListener?.({
+          id:"truncation-trigger",type:"session.info",
+          timestamp:"2026-07-12T01:00:08.900Z",data:{}
+        });
+        let finalSnapshot;
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          finalSnapshot = JSON.parse(readFileSync(
+            `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+              + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+            "utf8"
+          ));
+          if (finalSnapshot.turns.map((turn) => turn.userContent)
+                .includes("rotated question")) break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        rmSync(durablePath);
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        transcriptListener?.({
+          id:"sdk-user",type:"user.message",
+          timestamp:"2026-07-12T01:00:12.000Z",
+          data:{content:"sdk fallback question",source:null}
+        });
+        transcriptListener?.({
+          id:"sdk-answer",type:"assistant.message",
+          timestamp:"2026-07-12T01:00:13.000Z",
+          data:{messageId:"sdk-message",content:"sdk fallback answer"}
+        });
+        transcriptListener?.({
+          id:"sdk-idle",type:"session.idle",
+          timestamp:"2026-07-12T01:00:14.000Z",data:{aborted:false}
+        });
+        const afterAuthorityLoss = await waitForUsers(2);
         const activity = JSON.parse(readFileSync(
           `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
             + `${process.env.COPILOT_PROJECTS_SESSION}.agent-activity.json`,
           "utf8"
         ));
         console.log(JSON.stringify({
-          users: snapshot.turns.map((turn) => turn.userContent),
-          assistants: snapshot.turns.map((turn) =>
+          users: usersBeforeRotation,
+          assistants: assistantsBeforeRotation,
+          model: activity.model?.name,
+          pendingPermissions: permissionsAfterInit,
+          partialHiddenUntilComplete:
+            beforeCompletion.turns.every(
+              (turn) => turn.userContent !== "partial question"
+            ),
+          idlePollsDidNotRewrite: afterIdlePolls.updatedAt === stableUpdatedAt,
+          rotationDidNotDuplicate:
+            afterRotation.turns.map((turn) => turn.userContent).join("|")
+              === usersBeforeRotation.join("|"),
+          truncatedUsers: finalSnapshot.turns.map((turn) => turn.userContent),
+          truncatedAssistants: finalSnapshot.turns.map((turn) =>
             turn.assistantMessages.map((message) => message.content)
           ),
-          model: activity.model?.name
+          afterAuthorityLossUsers:
+            afterAuthorityLoss.turns.map((turn) => turn.userContent),
+          afterAuthorityLossAssistants:
+            afterAuthorityLoss.turns.map((turn) =>
+              turn.assistantMessages.map((message) => message.content)
+            ),
+          foreignObservedAtInit
         }));
         process.exit(0);
         """#
@@ -1736,13 +1914,47 @@ final class CoreLogicTests: XCTestCase {
         let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
         XCTAssertEqual(
             summary?["users"] as? [String],
-            ["durable question", "live question", "recovered question"]
+            [
+                "durable question",
+                "live question",
+                "partial question",
+                "recovered question",
+            ]
         )
         XCTAssertEqual(
             summary?["assistants"] as? [[String]],
-            [["durable answer"], ["live answer"], ["recovered answer"]]
+            [
+                ["durable answer"],
+                ["live answer"],
+                ["partial answer"],
+                ["recovered answer"],
+            ]
         )
         XCTAssertEqual(summary?["model"] as? String, "new-model")
+        XCTAssertEqual(
+            summary?["pendingPermissions"] as? [String],
+            ["permission-1"]
+        )
+        XCTAssertEqual(summary?["partialHiddenUntilComplete"] as? Bool, true)
+        XCTAssertEqual(summary?["idlePollsDidNotRewrite"] as? Bool, true)
+        XCTAssertEqual(summary?["rotationDidNotDuplicate"] as? Bool, true)
+        XCTAssertEqual(
+            summary?["truncatedUsers"] as? [String],
+            ["rotated question"]
+        )
+        XCTAssertEqual(
+            summary?["truncatedAssistants"] as? [[String]],
+            [["rotated answer"]]
+        )
+        XCTAssertEqual(
+            summary?["afterAuthorityLossUsers"] as? [String],
+            ["rotated question", "sdk fallback question"]
+        )
+        XCTAssertEqual(
+            summary?["afterAuthorityLossAssistants"] as? [[String]],
+            [["rotated answer"], ["sdk fallback answer"]]
+        )
+        XCTAssertEqual(summary?["foreignObservedAtInit"] as? Bool, false)
     }
 
     func testCopilotExtensionRejectsLegacySnapshotWhenHistoryFails() throws {
