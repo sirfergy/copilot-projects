@@ -176,6 +176,19 @@ public enum CopilotExtension {
         let synthesizedTaskCompletionContent = null;
         let transcriptInitialized = false;
         let transcriptPublishTimer = null;
+        let durableReconcileTimer = null;
+        let durableReconcileInFlight = false;
+        let durableReconcileQueued = false;
+        let durableFailureStreak = 0;
+        let durableTranscriptAuthoritative = false;
+        let durableHistoryIdentity = null;
+        let durableDisabledIdentity = null;
+        let durableHistoryOffset = 0;
+        let durablePending = Buffer.alloc(0);
+        let durableDroppingOversizedLine = false;
+        let durableBaselineComplete = false;
+        let durableFallbackTurns = [];
+        let durableFallbackModel = null;
         let sharedFilesOwnershipInitializedFor = null;
         let allowAllRefreshQueued = false;
         let allowAllUpdateGeneration = 0;
@@ -190,6 +203,8 @@ public enum CopilotExtension {
         const MAX_DURABLE_EVENT_BYTES = 4 * 1_024 * 1_024;
         const HISTORY_REPLAY_TIMEOUT_MS = 5_000;
         const DURABLE_REPLAY_TIMEOUT_MS = 5_000;
+        const DURABLE_RECONCILE_DEBOUNCE_MS = 200;
+        const DURABLE_RECONCILE_POLL_MS = 5_000;
         const TRANSCRIPT_PUBLISH_THROTTLE_MS = 400;
 
         const MAX_USER_INPUT_QUESTION_BYTES = 16_384;
@@ -983,8 +998,12 @@ public enum CopilotExtension {
             }
         }
 
-        function publishTranscript() {
+        function publishTranscript(force = false) {
             if (!ownsSharedFiles()) return;
+            if (!force && durableTranscriptAuthoritative
+                    && !durableBaselineComplete) {
+                return;
+            }
             clearTimeout(transcriptPublishTimer);
             transcriptPublishTimer = null;
             writeTranscriptSnapshot();
@@ -1297,16 +1316,18 @@ public enum CopilotExtension {
         function replayHistoryEvent(event, includePermissions) {
             if (!event || typeof event !== "object"
                     || typeof event.type !== "string") {
-                return;
+                return false;
             }
             try {
                 if (includePermissions) applyPermissionEvent(event, false);
-                processTranscriptEvent(event, false);
                 applyModelFromEvent(event);
+                processTranscriptEvent(event, false);
+                return !event.agentId;
             } catch {
                 if (typeof event.id === "string") {
                     transcriptEventIds.delete(event.id);
                 }
+                return false;
             }
         }
 
@@ -1315,7 +1336,12 @@ public enum CopilotExtension {
                 queuedTranscriptEvents.push(event);
             } else {
                 applyPermissionEvent(event, true);
-                processTranscriptEvent(event, true);
+                applyModelFromEvent(event);
+                if (durableTranscriptAuthoritative) {
+                    scheduleDurableReconcile();
+                } else {
+                    processTranscriptEvent(event, true);
+                }
             }
         });
 
@@ -1366,78 +1392,214 @@ public enum CopilotExtension {
             }
         }
 
-        async function replayDurableHistory() {
+        function durableEventsPath() {
             if (!validCopilotSessionId) {
                 throw new Error("invalid Copilot session id");
             }
             const copilotHome = process.env.COPILOT_HOME
                 || join(homedir(), ".copilot");
-            const eventsPath = join(
+            return join(
                 copilotHome,
                 "session-state",
                 copilotSessionId,
                 "events.jsonl"
             );
-            const attributes = lstatSync(eventsPath);
+        }
+
+        function durableIdentity(attributes) {
+            return [
+                attributes.dev,
+                attributes.ino,
+                attributes.birthtimeMs,
+            ].join(":");
+        }
+
+        function resetDurableCursor(identity) {
+            clearTimeout(transcriptPublishTimer);
+            transcriptPublishTimer = null;
+            if (durableHistoryIdentity === null || durableBaselineComplete) {
+                durableFallbackTurns = [...transcriptTurns];
+                durableFallbackModel = currentModel;
+            }
+            durableHistoryIdentity = identity;
+            durableHistoryOffset = 0;
+            durablePending = Buffer.alloc(0);
+            durableDroppingOversizedLine = false;
+            durableBaselineComplete = false;
+            resetTranscriptReplayState([], currentModel);
+        }
+
+        function loseDurableAuthority(disableCurrentIdentity = false) {
+            if (disableCurrentIdentity) {
+                durableDisabledIdentity = durableHistoryIdentity;
+            }
+            if (!durableBaselineComplete) {
+                resetTranscriptReplayState(
+                    durableFallbackTurns,
+                    durableFallbackModel
+                );
+            }
+            durableTranscriptAuthoritative = false;
+            durableFailureStreak = 0;
+            durableHistoryIdentity = null;
+            durableHistoryOffset = 0;
+            durablePending = Buffer.alloc(0);
+            durableDroppingOversizedLine = false;
+            durableBaselineComplete = false;
+        }
+
+        function durableHistoryAvailable() {
+            try {
+                const attributes = lstatSync(durableEventsPath());
+                return attributes.isFile();
+            } catch {
+                return false;
+            }
+        }
+
+        async function reconcileDurableHistoryOnce() {
+            const eventsPath = durableEventsPath();
+            let attributes;
+            try {
+                attributes = lstatSync(eventsPath);
+            } catch {
+                loseDurableAuthority();
+                return;
+            }
             if (!attributes.isFile()) {
-                throw new Error("durable history is not a regular file");
+                loseDurableAuthority();
+                return;
+            }
+            const identity = durableIdentity(attributes);
+            if (!durableTranscriptAuthoritative
+                    && durableDisabledIdentity === identity) {
+                return;
+            }
+            if (durableDisabledIdentity !== identity) {
+                durableDisabledIdentity = null;
+            }
+            if (!durableTranscriptAuthoritative) {
+                durableTranscriptAuthoritative = true;
+                resetDurableCursor(identity);
+            } else if (durableHistoryIdentity !== identity
+                    || attributes.size < durableHistoryOffset) {
+                resetDurableCursor(identity);
             }
 
-            const input = createReadStream(eventsPath);
+            if (attributes.size === durableHistoryOffset) {
+                if (!durableBaselineComplete) {
+                    durableBaselineComplete = true;
+                    publish();
+                    publishTranscript();
+                }
+                return;
+            }
+
+            const input = createReadStream(eventsPath, {
+                start: durableHistoryOffset,
+                end: attributes.size - 1,
+            });
             input.on("error", () => {});
             const timeout = setTimeout(
                 () => input.destroy(new Error("durable history replay timed out")),
                 DURABLE_REPLAY_TIMEOUT_MS
             );
-            let pending = Buffer.alloc(0);
-            let droppingOversizedLine = false;
+            let changed = false;
             try {
                 for await (const chunk of input) {
+                    durableHistoryOffset += chunk.length;
                     let offset = 0;
                     while (offset < chunk.length) {
                         const newline = chunk.indexOf(0x0A, offset);
                         const end = newline === -1 ? chunk.length : newline;
                         const segment = chunk.subarray(offset, end);
-                        if (droppingOversizedLine) {
-                            if (newline !== -1) droppingOversizedLine = false;
-                        } else if (pending.length + segment.length
+                        if (durableDroppingOversizedLine) {
+                            if (newline !== -1) {
+                                durableDroppingOversizedLine = false;
+                            }
+                        } else if (durablePending.length + segment.length
                                 > MAX_DURABLE_EVENT_BYTES) {
-                            pending = Buffer.alloc(0);
-                            droppingOversizedLine = newline === -1;
+                            durablePending = Buffer.alloc(0);
+                            durableDroppingOversizedLine = newline === -1;
                         } else {
-                            pending = pending.length === 0
+                            durablePending = durablePending.length === 0
                                 ? Buffer.from(segment)
                                 : Buffer.concat(
-                                    [pending, segment],
-                                    pending.length + segment.length
+                                    [durablePending, segment],
+                                    durablePending.length + segment.length
                                 );
                             if (newline !== -1) {
-                                let text = pending.toString("utf8");
+                                let text = durablePending.toString("utf8");
                                 if (text.endsWith("\r")) text = text.slice(0, -1);
                                 try {
-                                    replayHistoryEvent(JSON.parse(text), false);
+                                    changed = replayHistoryEvent(
+                                        JSON.parse(text),
+                                        false
+                                    ) || changed;
                                 } catch {
                                     // The runtime may be appending the final line
                                     // while the stream reaches EOF.
                                 }
-                                pending = Buffer.alloc(0);
+                                durablePending = Buffer.alloc(0);
                             }
                         }
                         if (newline === -1) break;
                         offset = newline + 1;
                     }
                 }
-                if (!droppingOversizedLine && pending.length > 0) {
-                    let text = pending.toString("utf8");
-                    if (text.endsWith("\r")) text = text.slice(0, -1);
-                    try {
-                        replayHistoryEvent(JSON.parse(text), false);
-                    } catch {}
+                const completedBaseline = !durableBaselineComplete;
+                durableBaselineComplete = true;
+                if (completedBaseline) {
+                    durableFallbackTurns = [...transcriptTurns];
+                    durableFallbackModel = currentModel;
+                }
+                if (changed || completedBaseline) {
+                    publish();
+                    publishTranscript();
                 }
             } finally {
                 clearTimeout(timeout);
                 input.destroy();
             }
+        }
+
+        async function reconcileDurableHistory() {
+            if (durableReconcileInFlight) {
+                durableReconcileQueued = true;
+                return;
+            }
+            durableReconcileInFlight = true;
+            try {
+                do {
+                    durableReconcileQueued = false;
+                    const previousOffset = durableHistoryOffset;
+                    try {
+                        await reconcileDurableHistoryOnce();
+                        durableFailureStreak = 0;
+                    } catch {
+                        if (durableHistoryOffset > previousOffset) {
+                            durableFailureStreak = 0;
+                        } else {
+                            durableFailureStreak += 1;
+                            if (durableFailureStreak >= 3) {
+                                loseDurableAuthority(true);
+                            }
+                        }
+                    }
+                } while (durableReconcileQueued);
+            } finally {
+                durableReconcileInFlight = false;
+            }
+        }
+
+        function scheduleDurableReconcile(
+            delay = DURABLE_RECONCILE_DEBOUNCE_MS
+        ) {
+            if (durableReconcileTimer !== null) return;
+            durableReconcileTimer = setTimeout(() => {
+                durableReconcileTimer = null;
+                reconcileDurableHistory();
+            }, delay);
         }
 
         // `rpc.model.list()` types its entries as `unknown[]` and returns the raw
@@ -1775,6 +1937,7 @@ public enum CopilotExtension {
         function cleanupSharedFiles() {
             if (timer) clearInterval(timer);
             clearTimeout(transcriptPublishTimer);
+            clearTimeout(durableReconcileTimer);
             if (userInputWatcher) {
                 try { userInputWatcher.close(); } catch {}
                 userInputWatcher = null;
@@ -1863,36 +2026,72 @@ public enum CopilotExtension {
             ? [...transcriptTurns]
             : [];
         const preservedCurrentModel = currentModel;
-        if (preservedTranscriptTurns.length === 0) publishTranscript();
+        durableTranscriptAuthoritative = durableHistoryAvailable();
+        if (preservedTranscriptTurns.length === 0) {
+            publishTranscript(true);
+        }
+        const durableStartup = durableTranscriptAuthoritative
+            ? reconcileDurableHistory()
+            : null;
         let historyLoaded = false;
         try {
             const history = await sdkHistoryWithTimeout();
-            resetTranscriptReplayState([], preservedCurrentModel);
-            for (const event of history) {
-                replayHistoryEvent(event, true);
+            if (durableTranscriptAuthoritative) {
+                for (const event of history) {
+                    if (!event || typeof event !== "object"
+                            || typeof event.type !== "string") {
+                        continue;
+                    }
+                    try {
+                        applyPermissionEvent(event, false);
+                        applyModelFromEvent(event);
+                    } catch {}
+                }
+            } else {
+                resetTranscriptReplayState([], preservedCurrentModel);
+                for (const event of history) {
+                    replayHistoryEvent(event, true);
+                }
             }
             historyLoaded = true;
         } catch {}
-        if (!historyLoaded) {
-            resetTranscriptReplayState([], preservedCurrentModel);
-            try {
-                await replayDurableHistory();
-                historyLoaded = true;
-            } catch {}
-        }
-        if (!historyLoaded) {
+        if (!durableTranscriptAuthoritative && !historyLoaded) {
             resetTranscriptReplayState(
                 preservedTranscriptTurns,
                 preservedCurrentModel
             );
         }
+        if (durableStartup) {
+            try {
+                await durableStartup;
+            } catch {
+                if (!durableBaselineComplete) {
+                    loseDurableAuthority();
+                }
+            }
+            if (!durableTranscriptAuthoritative && !historyLoaded) {
+                resetTranscriptReplayState(
+                    preservedTranscriptTurns,
+                    preservedCurrentModel
+                );
+            }
+        }
         transcriptInitialized = true;
         for (const event of queuedTranscriptEvents) {
-            replayHistoryEvent(event, true);
+            if (durableTranscriptAuthoritative) {
+                applyPermissionEvent(event, false);
+                applyModelFromEvent(event);
+            } else {
+                replayHistoryEvent(event, true);
+            }
         }
         queuedTranscriptEvents.length = 0;
         publish();
-        publishTranscript();
+        if (durableTranscriptAuthoritative) {
+            scheduleDurableReconcile(0);
+        } else {
+            publishTranscript();
+        }
 
         refreshSchedules();
         refreshModels();
@@ -1907,7 +2106,8 @@ public enum CopilotExtension {
             processUserInputResponse();
             processElicitationResponse();
             processSetModelRequest();
-        }, 5_000);
+            scheduleDurableReconcile(0);
+        }, DURABLE_RECONCILE_POLL_MS);
     }
     """#
 
