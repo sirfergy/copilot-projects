@@ -4902,6 +4902,91 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(recovered.copilotSessionId, newOwnerCopilotSessionId)
     }
 
+    /// A Copilot `/new` / `/resume` rotation replaces this tab's *own* owner
+    /// marker (same pid, same appSessionId) and rewrites `transcript.json`. A
+    /// read that sampled the previous conversation's bytes and only validated
+    /// afterwards would see a legitimate, confirmed-this-tab owner naming a
+    /// different Copilot session — and, before this fix, permanently quarantine
+    /// the previous conversation, so `/resume` could never surface it again.
+    /// A signature that moved underneath the read must reject without recording.
+    func testSnapshotOwnerCrossCheckDoesNotQuarantineAcrossOwnerRotation() throws {
+        let sessionId = UUID().uuidString
+        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
+        Paths.ensureStateDir()
+
+        let previousCopilotSessionId = UUID().uuidString
+        let rotatedCopilotSessionId = UUID().uuidString
+        let snapshotURL = URL(
+            fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
+        )
+        let ownerURL = URL(
+            fileURLWithPath: Paths.transcriptOwnerPath(sessionId: sessionId)
+        )
+        func writeOwner(_ copilotSessionId: String) throws {
+            try JSONSerialization.data(withJSONObject: [
+                "appSessionId": sessionId,
+                "copilotSessionId": copilotSessionId,
+                "pid": Int(getpid()),
+            ]).write(to: ownerURL, options: .atomic)
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(TranscriptSnapshot(
+            schemaVersion: 3,
+            updatedAt: Date(),
+            copilotSessionId: previousCopilotSessionId,
+            turns: []
+        )).write(to: snapshotURL, options: .atomic)
+        try writeOwner(previousCopilotSessionId)
+
+        let allowed = TranscriptController.snapshotPassesOwnerCrossCheck(
+            sessionId: sessionId,
+            copilotSessionId: previousCopilotSessionId,
+            duringRead: {
+                // The extension rotates: owner marker forward, shared transcript
+                // removed inside the same critical section.
+                try? FileManager.default.removeItem(at: snapshotURL)
+                try? writeOwner(rotatedCopilotSessionId)
+            }
+        )
+        XCTAssertFalse(allowed)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: Paths.transcriptQuarantinePath(sessionId: sessionId)
+        ))
+        XCTAssertFalse(TranscriptController.isCopilotSessionQuarantined(
+            sessionId: sessionId,
+            copilotSessionId: previousCopilotSessionId
+        ))
+
+        // Once the rotated conversation publishes its own transcript, reads
+        // succeed again under the new identity.
+        try encoder.encode(TranscriptSnapshot(
+            schemaVersion: 3,
+            updatedAt: Date(),
+            copilotSessionId: rotatedCopilotSessionId,
+            turns: []
+        )).write(to: snapshotURL, options: .atomic)
+        XCTAssertEqual(
+            TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
+                .copilotSessionId,
+            rotatedCopilotSessionId
+        )
+
+        // Rotating back (`/resume`) must find nothing quarantined.
+        try encoder.encode(TranscriptSnapshot(
+            schemaVersion: 3,
+            updatedAt: Date(),
+            copilotSessionId: previousCopilotSessionId,
+            turns: []
+        )).write(to: snapshotURL, options: .atomic)
+        try writeOwner(previousCopilotSessionId)
+        XCTAssertEqual(
+            TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
+                .copilotSessionId,
+            previousCopilotSessionId
+        )
+    }
+
     // An alive but foreign/orphaned owner (a legacy marker with no appSessionId
     // whose pid does not resolve to this tab) must not permanently quarantine
     // this tab's own transcript. The read is rejected (nothing surfaced under an
