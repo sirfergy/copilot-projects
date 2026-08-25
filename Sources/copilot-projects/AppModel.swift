@@ -1458,7 +1458,11 @@ final class AppModel: ObservableObject {
         answer: RemoteElicitationAnswer,
         now: Date = Date()
     ) -> RemoteUserInputResult {
-        guard locateIndex(sessionId) != nil else { return .invalid }
+        guard locateIndex(sessionId) != nil,
+              !answer.requestId.hasPrefix(
+                "synthetic::durable-ask-user::"
+              )
+        else { return .invalid }
 
         let snapshotURL = agentActivityDirectory
             .appendingPathComponent("\(sessionId).agent-activity.json")
@@ -1470,7 +1474,6 @@ final class AppModel: ObservableObject {
               let request = snapshot.trackedElicitations?
                 .first(where: { $0.requestId == answer.requestId })
         else { return .invalid }
-
         // Accept must carry content; decline/cancel must not.
         switch answer.action {
         case .accept:
