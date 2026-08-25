@@ -189,6 +189,9 @@ public enum CopilotExtension {
         let durableBaselineComplete = false;
         let durableFallbackTurns = [];
         let durableFallbackModel = null;
+        let durableAskUser = null;
+        let durableAskUserScan = null;
+        let lastLiveQuestionAt = null;
         let sharedFilesOwnershipInitializedFor = null;
         let allowAllRefreshQueued = false;
         let allowAllUpdateGeneration = 0;
@@ -220,6 +223,7 @@ public enum CopilotExtension {
         const MAX_ELICITATION_URL_BYTES = 4_096;
         const MAX_ELICITATION_CONTENT_BYTES = 32_768;
         const MAX_ELICITATIONS = 50;
+        const DURABLE_ASK_USER_PREFIX = "synthetic::durable-ask-user::";
 
         function truncatedText(value, maximumLength) {
             const text = typeof value === "string" ? value : "";
@@ -557,7 +561,9 @@ public enum CopilotExtension {
                 lastIdleAborted,
                 lastIdleTurnKind,
                 trackedUserInputs: [...pendingUserInputs.values()],
-                trackedElicitations: [...pendingElicitations.values()],
+                trackedElicitations: durableAskUser
+                    ? [...pendingElicitations.values(), durableAskUser]
+                    : [...pendingElicitations.values()],
                 // Always present (including []) so the host can distinguish this
                 // extension from an older build that cannot validate prompts.
                 pendingPermissionRequestIds: [...pendingPermissionRequestIds],
@@ -784,6 +790,80 @@ public enum CopilotExtension {
             }
         }
 
+        function clearDurableAskUser() {
+            const changed = durableAskUser !== null
+                || durableAskUserScan !== null;
+            durableAskUser = null;
+            durableAskUserScan = null;
+            return changed;
+        }
+
+        function observeLiveRootQuestion(event) {
+            if (event.agentId) return false;
+            const observedAt = normalizedTimestamp(event.timestamp);
+            if (!lastLiveQuestionAt || observedAt > lastLiveQuestionAt) {
+                lastLiveQuestionAt = observedAt;
+            }
+            let changed = false;
+            if (durableAskUser?.requestedAt <= observedAt) {
+                durableAskUser = null;
+                changed = true;
+            }
+            if (durableAskUserScan?.requestedAt <= observedAt) {
+                durableAskUserScan = null;
+                changed = true;
+            }
+            return changed;
+        }
+
+        function durableAskUserEntry(event) {
+            const data = event.data;
+            if (!data || typeof data !== "object"
+                    || data.toolName !== "ask_user"
+                    || data.parentToolCallId != null) {
+                return null;
+            }
+            const toolCallId = data.toolCallId;
+            const message = data.arguments?.message;
+            if (typeof toolCallId !== "string" || !toolCallId
+                    || toolCallId.length > 200
+                    || typeof message !== "string"
+                    || userInputByteLength(message)
+                        > MAX_ELICITATION_MESSAGE_BYTES) {
+                return null;
+            }
+            const requestedAt = normalizedTimestamp(event.timestamp);
+            if (lastLiveQuestionAt && requestedAt <= lastLiveQuestionAt) {
+                return null;
+            }
+            return {
+                requestId: DURABLE_ASK_USER_PREFIX + toolCallId,
+                message,
+                mode: "terminal",
+                elicitationSource: "durable-ask-user",
+                requestedAt,
+            };
+        }
+
+        function durableHookMayFollowAskUser(event) {
+            const type = event.data?.hookType;
+            return (event.type === "hook.start" || event.type === "hook.end")
+                && (type === "preToolUse" || type === "notification");
+        }
+
+        // A root `ask_user` blocks the terminal. When its gated SDK event is
+        // missing, expose one read-only terminal card only while the ask start
+        // remains the last significant root event in durable history.
+        function applyDurableAskUserEvent(event) {
+            if (event.agentId) return;
+            if (durableAskUserScan && durableHookMayFollowAskUser(event)) {
+                return;
+            }
+            durableAskUserScan = event.type === "tool.execution_start"
+                ? durableAskUserEntry(event)
+                : null;
+        }
+
         // Answer a pending elicitation from the host-written response file. Mirrors
         // processUserInputResponse: owner-only, validates against the pending record,
         // and keeps the elicitation retryable when a response is rejected.
@@ -809,6 +889,10 @@ public enum CopilotExtension {
                 return;
             }
             const requestId = response.requestId;
+            if (requestId.startsWith(DURABLE_ASK_USER_PREFIX)) {
+                removeFile(elicitationResponsePath);
+                return;
+            }
             if (inFlightElicitationResponses.has(requestId)) return;
             if (response.copilotSessionId !== session.sessionId) {
                 removeFile(elicitationResponsePath);
@@ -1426,6 +1510,8 @@ public enum CopilotExtension {
             durablePending = Buffer.alloc(0);
             durableDroppingOversizedLine = false;
             durableBaselineComplete = false;
+            durableAskUser = null;
+            durableAskUserScan = null;
             resetTranscriptReplayState([], currentModel);
         }
 
@@ -1446,6 +1532,7 @@ public enum CopilotExtension {
             durablePending = Buffer.alloc(0);
             durableDroppingOversizedLine = false;
             durableBaselineComplete = false;
+            if (clearDurableAskUser()) publish();
         }
 
         function durableHistoryAvailable() {
@@ -1521,6 +1608,7 @@ public enum CopilotExtension {
                                 > MAX_DURABLE_EVENT_BYTES) {
                             durablePending = Buffer.alloc(0);
                             durableDroppingOversizedLine = newline === -1;
+                            durableAskUserScan = null;
                         } else {
                             durablePending = durablePending.length === 0
                                 ? Buffer.from(segment)
@@ -1532,10 +1620,14 @@ public enum CopilotExtension {
                                 let text = durablePending.toString("utf8");
                                 if (text.endsWith("\r")) text = text.slice(0, -1);
                                 try {
-                                    changed = replayHistoryEvent(
-                                        JSON.parse(text),
-                                        false
-                                    ) || changed;
+                                    const event = JSON.parse(text);
+                                    if (event && typeof event === "object") {
+                                        applyDurableAskUserEvent(event);
+                                        changed = replayHistoryEvent(
+                                            event,
+                                            false
+                                        ) || changed;
+                                    }
                                 } catch {
                                     // The runtime may be appending the final line
                                     // while the stream reaches EOF.
@@ -1549,11 +1641,14 @@ public enum CopilotExtension {
                 }
                 const completedBaseline = !durableBaselineComplete;
                 durableBaselineComplete = true;
+                const questionChanged =
+                    durableAskUser?.requestId !== durableAskUserScan?.requestId;
+                durableAskUser = durableAskUserScan;
                 if (completedBaseline) {
                     durableFallbackTurns = [...transcriptTurns];
                     durableFallbackModel = currentModel;
                 }
-                if (changed || completedBaseline) {
+                if (changed || completedBaseline || questionChanged) {
                     publish();
                     publishTranscript();
                 }
@@ -1979,10 +2074,14 @@ public enum CopilotExtension {
         process.once("exit", cleanupSharedFiles);
 
         session.on("user_input.requested", (event) => {
+            const cleared = observeLiveRootQuestion(event);
             const entry = userInputEntry(event);
             // A rejected entry is never exposed remotely; the terminal keeps the
             // exact prompt so nothing is lost.
-            if (!entry) return;
+            if (!entry) {
+                if (cleared) publish();
+                return;
+            }
             pendingUserInputs.set(entry.requestId, entry);
             boundPendingUserInputs();
             publish();
@@ -1990,14 +2089,20 @@ public enum CopilotExtension {
 
         session.on("user_input.completed", (event) => {
             const requestId = event.data?.requestId;
-            if (typeof requestId === "string" && pendingUserInputs.delete(requestId)) {
+            const cleared = observeLiveRootQuestion(event);
+            if ((typeof requestId === "string"
+                    && pendingUserInputs.delete(requestId)) || cleared) {
                 publish();
             }
         });
 
         session.on("elicitation.requested", (event) => {
+            const cleared = observeLiveRootQuestion(event);
             const entry = elicitationEntry(event);
-            if (!entry) return;
+            if (!entry) {
+                if (cleared) publish();
+                return;
+            }
             pendingElicitations.set(entry.requestId, entry);
             boundPendingElicitations();
             publish();
@@ -2005,7 +2110,9 @@ public enum CopilotExtension {
 
         session.on("elicitation.completed", (event) => {
             const requestId = event.data?.requestId;
-            if (typeof requestId === "string" && pendingElicitations.delete(requestId)) {
+            const cleared = observeLiveRootQuestion(event);
+            if ((typeof requestId === "string"
+                    && pendingElicitations.delete(requestId)) || cleared) {
                 publish();
             }
         });

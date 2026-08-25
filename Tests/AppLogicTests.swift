@@ -3735,6 +3735,16 @@ final class AppLogicTests: XCTestCase {
                         elicitationSource: nil,
                         requestedAt: ISO8601DateFormatter().string(from: updatedAt),
                         agentId: nil
+                    ),
+                    TrackedElicitation(
+                        requestId: "synthetic::durable-ask-user::call-terminal",
+                        message: "Answer in terminal",
+                        mode: "terminal",
+                        url: nil,
+                        schema: nil,
+                        elicitationSource: "durable-ask-user",
+                        requestedAt: ISO8601DateFormatter().string(from: updatedAt),
+                        agentId: nil
                     )
                 ]
             )
@@ -3748,6 +3758,18 @@ final class AppLogicTests: XCTestCase {
             agentActivityDirectory: directory,
             resumeMarkerDirectory: directory
         )
+
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(
+                    requestId: "synthetic::durable-ask-user::call-terminal",
+                    action: .decline
+                )
+            ),
+            .invalid
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
 
         // Unknown request id → invalid.
         XCTAssertEqual(

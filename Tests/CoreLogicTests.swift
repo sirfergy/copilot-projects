@@ -250,7 +250,7 @@ final class CoreLogicTests: XCTestCase {
             "session.rpc.ui.handlePendingElicitation"
         ))
         XCTAssertTrue(CopilotExtension.script.contains(
-            "trackedElicitations: [...pendingElicitations.values()]"
+            "synthetic::durable-ask-user::"
         ))
         XCTAssertTrue(CopilotExtension.script.contains(
             "registerInterest({ eventType })"
@@ -1955,6 +1955,392 @@ final class CoreLogicTests: XCTestCase {
             [["rotated answer"], ["sdk fallback answer"]]
         )
         XCTAssertEqual(summary?["foreignObservedAtInit"] as? Bool, false)
+    }
+
+    func testCopilotExtensionReconstructsTerminalOnlyAskUserCard() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-durable-ask-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let copilotHome = root.appendingPathComponent("copilot-home", isDirectory: true)
+        let copilotSessionId = "11111111-1111-4111-8111-111111111111"
+        let appSessionId = "22222222-2222-4222-8222-222222222222"
+        let source = copilotHome
+            .appendingPathComponent("session-state", isDirectory: true)
+            .appendingPathComponent(copilotSessionId, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Data((#"""
+        {"id":"completed-start","type":"tool.execution_start","timestamp":"2026-08-25T01:00:00.000Z","data":{"toolCallId":"call-completed","toolName":"ask_user","arguments":{"message":"Completed question"}}}
+        {"id":"completed-done","type":"tool.execution_complete","timestamp":"2026-08-25T01:00:01.000Z","data":{"toolCallId":"call-completed","success":true}}
+        {"id":"cancelled-start","type":"tool.execution_start","timestamp":"2026-08-25T01:00:02.000Z","data":{"toolCallId":"call-cancelled","toolName":"ask_user","arguments":{"message":"Cancelled question"}}}
+        {"id":"cancelled-abort","type":"abort","timestamp":"2026-08-25T01:00:03.000Z","data":{}}
+        {"id":"cancelled-shutdown","type":"session.shutdown","timestamp":"2026-08-25T01:00:04.000Z","data":{}}
+        {"id":"pending-start","type":"tool.execution_start","timestamp":"2026-08-25T01:00:05.000Z","data":{"toolCallId":"call-pending","toolName":"ask_user","arguments":{"message":"Pending terminal question","requestedSchema":{"properties":{"choice":{"type":"string"}}}}}}
+        {"id":"pending-pre","type":"hook.start","timestamp":"2026-08-25T01:00:06.000Z","data":{"hookType":"preToolUse"}}
+        {"id":"pending-notify","type":"hook.end","timestamp":"2026-08-25T01:00:07.000Z","data":{"hookType":"notification"}}
+        """# + "\n").utf8).write(to: source.appendingPathComponent("events.jsonl"))
+
+        let prelude = #"""
+        let transcriptListener = null;
+        let handledElicitations = 0;
+        const namedListeners = new Map();
+        const fakeSession = {
+          sessionId: "__COPILOT_SESSION_ID__",
+          rpc: {
+            schedule: { list: async () => ({entries:[]}) },
+            permissions: { getAllowAll: async () => ({enabled:false}) },
+            model: { list: async () => [] },
+            ui: {
+              handlePendingElicitation: async () => {
+                handledElicitations += 1;
+                return {success:true};
+              }
+            },
+            eventLog: {
+              registerInterest: async ({eventType}) => ({handle:eventType}),
+              releaseInterest: async () => ({success:true})
+            }
+          },
+          on(name, handler) {
+            if (typeof name === "function") transcriptListener = name;
+            else namedListeners.set(name, handler);
+          },
+          async getEvents() { return []; }
+        };
+        """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
+        let extensionScript = CopilotExtension.script
+            .replacingOccurrences(
+                of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                with: "const joinSession = async () => fakeSession;"
+            )
+            .replacingOccurrences(
+                of: "const DURABLE_RECONCILE_DEBOUNCE_MS = 200;",
+                with: "const DURABLE_RECONCILE_DEBOUNCE_MS = 5;"
+            )
+            .replacingOccurrences(
+                of: "const DURABLE_RECONCILE_POLL_MS = 5_000;",
+                with: "const DURABLE_RECONCILE_POLL_MS = 25;"
+            )
+        let epilogue = #"""
+
+        const durablePath = join(
+          process.env.COPILOT_HOME, "session-state",
+          copilotSessionId, "events.jsonl"
+        );
+        const activityPath =
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.agent-activity.json`;
+        const transcriptPath =
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`;
+        const responsePath =
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.elicitation-response.json`;
+        const observedElicitationIds = [];
+        function append(event) {
+          writeFileSync(durablePath, JSON.stringify(event) + "\n", {flag:"a"});
+        }
+        function recordObserved(ids) {
+          const encoded = JSON.stringify(ids);
+          if (observedElicitationIds.at(-1) !== encoded) {
+            observedElicitationIds.push(encoded);
+          }
+        }
+        async function waitFor(ids) {
+          let last = [];
+          for (let attempt = 0; attempt < 200; attempt += 1) {
+            try {
+              const value = JSON.parse(readFileSync(activityPath, "utf8"));
+              const actual = (value.trackedElicitations || [])
+                .map((entry) => entry.requestId);
+              last = actual;
+              recordObserved(actual);
+              if (JSON.stringify(actual) === JSON.stringify(ids)) {
+                return value.trackedElicitations || [];
+              }
+            } catch {}
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          throw new Error(`timed out waiting for ${ids}; last=${last}`);
+        }
+
+        const synthetic = (await waitFor([
+          "synthetic::durable-ask-user::call-pending"
+        ]))[0];
+
+        namedListeners.get("elicitation.requested")?.({
+          id:"real-request",type:"elicitation.requested",
+          timestamp:"2026-08-25T01:00:05.500Z",
+          data:{
+            requestId:"real-request",
+            message:"Pending terminal question",
+            mode:"form",
+            requestedSchema:{type:"object",properties:{choice:{type:"string"}}}
+          }
+        });
+        const real = (await waitFor(["real-request"]))[0];
+        const lateObservationStart = observedElicitationIds.length;
+        append({
+          id:"pending-start-late",type:"tool.execution_start",
+          timestamp:"2026-08-25T01:00:05.000Z",
+          data:{
+            toolCallId:"call-pending",toolName:"ask_user",
+            arguments:{message:"Pending terminal question"}
+          }
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const afterLateScan = await waitFor(["real-request"]);
+        namedListeners.get("elicitation.completed")?.({
+          id:"real-complete",type:"elicitation.completed",
+          timestamp:"2026-08-25T01:00:08.000Z",
+          data:{requestId:"real-request"}
+        });
+        await waitFor([]);
+
+        namedListeners.get("user_input.requested")?.({
+          id:"stale-live-request",type:"user_input.requested",
+          timestamp:"2026-08-25T01:00:08.500Z",
+          data:{
+            requestId:"stale-live-request",
+            question:"Previously answered root question",
+            choices:["yes","no"]
+          }
+        });
+        append({
+          id:"second-start",type:"tool.execution_start",
+          timestamp:"2026-08-25T01:00:09.000Z",
+          data:{
+            toolCallId:"call-second",toolName:"ask_user",
+            arguments:{message:"Second durable question"}
+          }
+        });
+        append({
+          id:"second-agent-noise",type:"assistant.message",
+          timestamp:"2026-08-25T01:00:10.000Z",
+          agentId:"agent-1",data:{content:"background"}
+        });
+        const second = (await waitFor([
+          "synthetic::durable-ask-user::call-second"
+        ]))[0];
+        const snapshotWithStaleRoot = JSON.parse(
+          readFileSync(activityPath, "utf8")
+        );
+        namedListeners.get("elicitation.requested")?.({
+          id:"subagent-request",type:"elicitation.requested",
+          timestamp:"2026-08-25T01:00:10.500Z",agentId:"agent-1",
+          data:{
+            requestId:"subagent-request",message:"Subagent question",mode:"form",
+            requestedSchema:{type:"object",properties:{choice:{type:"string"}}}
+          }
+        });
+        const withSubagent = await waitFor([
+          "subagent-request",
+          "synthetic::durable-ask-user::call-second"
+        ]);
+        namedListeners.get("elicitation.completed")?.({
+          id:"subagent-complete",type:"elicitation.completed",
+          timestamp:"2026-08-25T01:00:10.750Z",agentId:"agent-1",
+          data:{requestId:"subagent-request"}
+        });
+        await waitFor(["synthetic::durable-ask-user::call-second"]);
+        append({
+          id:"second-post-tool",type:"hook.start",
+          timestamp:"2026-08-25T01:00:11.000Z",
+          data:{hookType:"postToolUse"}
+        });
+        await waitFor([]);
+
+        append({
+          id:"third-start",type:"tool.execution_start",
+          timestamp:"2026-08-25T01:00:12.000Z",
+          data:{
+            toolCallId:"call-third",toolName:"ask_user",
+            arguments:{message:"Third durable question"}
+          }
+        });
+        await waitFor(["synthetic::durable-ask-user::call-third"]);
+        namedListeners.get("elicitation.completed")?.({
+          id:"unmatched-root-complete",type:"elicitation.completed",
+          timestamp:"2026-08-25T01:00:13.000Z",
+          data:{requestId:"untracked-root-request"}
+        });
+        await waitFor([]);
+
+        namedListeners.get("elicitation.completed")?.({
+          id:"older-root-complete",type:"elicitation.completed",
+          timestamp:"2026-08-25T01:00:11.500Z",
+          data:{requestId:"older-untracked-root-request"}
+        });
+        append({
+          id:"stale-start",type:"tool.execution_start",
+          timestamp:"2026-08-25T01:00:12.500Z",
+          data:{
+            toolCallId:"call-stale",toolName:"ask_user",
+            arguments:{message:"Stale durable question"}
+          }
+        });
+        const staleObservationStart = observedElicitationIds.length;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await waitFor([]);
+
+        append({
+          id:"fourth-start",type:"tool.execution_start",
+          timestamp:"2026-08-25T01:00:14.000Z",
+          data:{
+            toolCallId:"call-fourth",toolName:"ask_user",
+            arguments:{message:"Fourth durable question"}
+          }
+        });
+        const fourth = (await waitFor([
+          "synthetic::durable-ask-user::call-fourth"
+        ]))[0];
+        namedListeners.get("elicitation.completed")?.({
+          id:"out-of-order-root-complete",type:"elicitation.completed",
+          timestamp:"2026-08-25T01:00:13.500Z",
+          data:{requestId:"out-of-order-root-request"}
+        });
+        const afterOutOfOrder = await waitFor([
+          "synthetic::durable-ask-user::call-fourth"
+        ]);
+        const transcript = JSON.parse(readFileSync(transcriptPath, "utf8"));
+        const askUserToolCount = (transcript.turns || [])
+          .flatMap((turn) => turn.tools || [])
+          .filter((tool) => tool.name === "ask_user").length;
+        namedListeners.get("elicitation.requested")?.({
+          id:"rejected-root-request",type:"elicitation.requested",
+          timestamp:"2026-08-25T01:00:14.500Z",
+          data:{
+            requestId:"rejected-root-request",
+            message:"Terminal-only live question",
+            mode:"form"
+          }
+        });
+        await waitFor([]);
+        append({
+          id:"fifth-start",type:"tool.execution_start",
+          timestamp:"2026-08-25T01:00:15.000Z",
+          data:{
+            toolCallId:"call-fifth",toolName:"ask_user",
+            arguments:{message:"Fifth durable question"}
+          }
+        });
+        await waitFor(["synthetic::durable-ask-user::call-fifth"]);
+        writeFileSync(durablePath, "");
+        await waitFor([]);
+
+        const guardedRequestId =
+          "synthetic::durable-ask-user::spoofed-live-request";
+        namedListeners.get("elicitation.requested")?.({
+          id:"guarded-request",type:"elicitation.requested",
+          timestamp:"2026-08-25T01:00:16.000Z",
+          data:{
+            requestId:guardedRequestId,message:"Spoofed live request",mode:"form",
+            requestedSchema:{type:"object",properties:{choice:{type:"string"}}}
+          }
+        });
+        await waitFor([guardedRequestId]);
+        writeFileSync(responsePath, JSON.stringify({
+          schemaVersion:1, copilotSessionId,
+          requestId:guardedRequestId, action:"decline"
+        }));
+        for (let attempt = 0; attempt < 200 && fileExistsSync(responsePath);
+            attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        const guardedStillPending = await waitFor([guardedRequestId]);
+        const lateObservations = observedElicitationIds.slice(
+          lateObservationStart
+        );
+        const staleObservations = observedElicitationIds.slice(
+          staleObservationStart
+        );
+
+        console.log(JSON.stringify({
+          synthetic, real, second, fourth,
+          afterLateScanCount: afterLateScan.length,
+          withSubagentCount: withSubagent.length,
+          staleRootUserInputCount:
+            (snapshotWithStaleRoot.trackedUserInputs || []).length,
+          afterOutOfOrderCount: afterOutOfOrder.length,
+          guardedStillPendingCount: guardedStillPending.length,
+          lateSyntheticSeen: lateObservations.some(
+            (ids) => ids.includes(
+              "synthetic::durable-ask-user::call-pending"
+            )
+          ),
+          staleSyntheticSeen: staleObservations.some(
+            (ids) => ids.includes(
+              "synthetic::durable-ask-user::call-stale"
+            )
+          ),
+          askUserToolCount,
+          handledElicitations,
+          responseRemoved: !fileExistsSync(responsePath)
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("durable-ask.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL, atomically: true, encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "HOME": root.path,
+            "COPILOT_HOME": copilotHome.path,
+            "COPILOT_PROJECTS_SESSION": appSessionId,
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errors = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus, 0,
+            String(data: errors, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let result = try JSONSerialization.jsonObject(with: output) as? [String: Any]
+        let synthetic = try XCTUnwrap(result?["synthetic"] as? [String: Any])
+        XCTAssertEqual(
+            synthetic["requestId"] as? String,
+            "synthetic::durable-ask-user::call-pending"
+        )
+        XCTAssertEqual(synthetic["message"] as? String, "Pending terminal question")
+        XCTAssertEqual(synthetic["mode"] as? String, "terminal")
+        XCTAssertNil(synthetic["schema"])
+        XCTAssertEqual(
+            (result?["real"] as? [String: Any])?["requestId"] as? String,
+            "real-request"
+        )
+        XCTAssertEqual(
+            (result?["second"] as? [String: Any])?["message"] as? String,
+            "Second durable question"
+        )
+        XCTAssertEqual(
+            (result?["fourth"] as? [String: Any])?["message"] as? String,
+            "Fourth durable question"
+        )
+        XCTAssertEqual(result?["afterLateScanCount"] as? Int, 1)
+        XCTAssertEqual(result?["withSubagentCount"] as? Int, 2)
+        XCTAssertEqual(result?["staleRootUserInputCount"] as? Int, 1)
+        XCTAssertEqual(result?["afterOutOfOrderCount"] as? Int, 1)
+        XCTAssertEqual(result?["guardedStillPendingCount"] as? Int, 1)
+        XCTAssertEqual(result?["lateSyntheticSeen"] as? Bool, false)
+        XCTAssertEqual(result?["staleSyntheticSeen"] as? Bool, false)
+        XCTAssertGreaterThan(result?["askUserToolCount"] as? Int ?? 0, 0)
+        XCTAssertEqual(result?["handledElicitations"] as? Int, 0)
+        XCTAssertEqual(result?["responseRemoved"] as? Bool, true)
     }
 
     func testCopilotExtensionRejectsLegacySnapshotWhenHistoryFails() throws {
