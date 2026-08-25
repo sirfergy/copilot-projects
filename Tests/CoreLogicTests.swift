@@ -220,7 +220,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains(
             "appSessionResolution.native ? {appSessionId} : {}"
         ))
-        XCTAssertTrue(CopilotExtension.script.contains("const copilotSessionId = typeof session.sessionId"))
+        XCTAssertTrue(CopilotExtension.script.contains("let copilotSessionId = typeof session.sessionId"))
         XCTAssertTrue(CopilotExtension.script.contains(#""resolve-session", "--pid""#))
         XCTAssertTrue(CopilotExtension.script.contains("schemaVersion: 3"))
         XCTAssertTrue(CopilotExtension.script.contains("publishTranscript();"))
@@ -311,7 +311,21 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertFalse(CopilotExtension.script.contains("schemaVersion: 2"))
         XCTAssertFalse(CopilotExtension.script.contains("joinSession({"))
         XCTAssertFalse(CopilotExtension.script.contains("process.env.SESSION_ID"))
-        XCTAssertFalse(CopilotExtension.script.contains("removeFile(transcriptPath)"))
+        // The host's shared transcript snapshot is discarded in exactly one
+        // place — the named rotation helper — so no publish/cleanup path can
+        // ever delete a live conversation's drawer.
+        XCTAssertTrue(CopilotExtension.script.contains(
+            "function discardRotatedTranscript() {"
+        ))
+        XCTAssertEqual(
+            CopilotExtension.script.components(
+                separatedBy: "removeFile(transcriptPath)"
+            ).count - 1,
+            1
+        )
+        // Copilot's durable per-session history is never deleted by rotation.
+        XCTAssertFalse(CopilotExtension.script.contains("removeFile(durableEventsPath"))
+        XCTAssertFalse(CopilotExtension.script.contains("rmSync(eventsPath"))
     }
 
     func testCopilotExtensionUsesNativeSessionResolver() throws {
@@ -1026,6 +1040,903 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertGreaterThan(summary["allowAllChecks"] as? Int ?? 0, 0)
     }
 
+    /// Runs an embedded-extension harness under Node and returns the JSON
+    /// summary it prints. Shared by the conversation-rotation tests, which
+    /// differ only in fixtures, harness body and assertions — never in how the
+    /// process is launched. Pre-existing harness tests keep their inline setup.
+    private func runExtensionHarness(
+        name: String,
+        root: URL,
+        copilotHome: URL,
+        appSessionId: String,
+        source: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> [String: Any] {
+        let scriptURL = root.appendingPathComponent("\(name).mjs")
+        try source.write(to: scriptURL, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "HOME": root.path,
+            "COPILOT_HOME": copilotHome.path,
+            "COPILOT_PROJECTS_SESSION": appSessionId,
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed",
+            file: file,
+            line: line
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        return try XCTUnwrap(
+            JSONSerialization.jsonObject(with: output) as? [String: Any],
+            file: file,
+            line: line
+        )
+    }
+
+    /// `/new` and `/resume` swap the CLI's Copilot conversation underneath a
+    /// single long-lived extension process. The stable tab must follow: owner
+    /// marker, `.copilot-session`, allow-all and the published transcript all
+    /// rotate to the new conversation, the previous conversation's turns never
+    /// leak into it (including a durable replay that was still streaming when
+    /// the rotation landed), and — crucially — the previous conversation's
+    /// durable history is left untouched so `/resume` rehydrates it verbatim.
+    /// Both SDK dispatch orders (named listener first, generic listener first)
+    /// must produce identical results.
+    func testCopilotExtensionRotatesConversationOnNewAndResume() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-rotate-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let copilotHome = root.appendingPathComponent(".copilot", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: sessions,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let appSessionId = "12345678-1234-1234-1234-123456789abc"
+        let sessionA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let sessionB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        let sessionC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+
+        func durableDirectory(_ copilotSessionId: String) throws -> URL {
+            let directory = copilotHome
+                .appendingPathComponent("session-state", isDirectory: true)
+                .appendingPathComponent(copilotSessionId, isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            return directory
+        }
+        func timestamp(_ offset: Int) -> String {
+            ISO8601DateFormatter().string(
+                from: Date(timeIntervalSince1970: 1_700_000 + Double(offset))
+            )
+        }
+
+        var alphaLines: [String] = []
+        let filler = String(repeating: "f", count: 1_000)
+        for index in 0..<4 {
+            alphaLines.append(
+                #"{"id":"a-user-\#(index)","type":"user.message","timestamp":"\#(timestamp(index * 3))","data":{"source":null,"content":"filler \#(index)"}}"#
+            )
+            alphaLines.append(
+                #"{"id":"a-msg-\#(index)","type":"assistant.message","timestamp":"\#(timestamp(index * 3 + 1))","data":{"messageId":"a-m-\#(index)","content":"\#(filler)"}}"#
+            )
+            alphaLines.append(
+                #"{"id":"a-idle-\#(index)","type":"session.idle","timestamp":"\#(timestamp(index * 3 + 2))","data":{"aborted":false}}"#
+            )
+        }
+        alphaLines.append(
+            #"{"id":"a-user-final","type":"user.message","timestamp":"\#(timestamp(9000))","data":{"source":null,"content":"alpha question"}}"#
+        )
+        alphaLines.append(
+            #"{"id":"a-msg-final","type":"assistant.message","timestamp":"\#(timestamp(9001))","data":{"messageId":"a-m-final","content":"alpha answer"}}"#
+        )
+        alphaLines.append(
+            #"{"id":"a-idle-final","type":"session.idle","timestamp":"\#(timestamp(9002))","data":{"aborted":false}}"#
+        )
+        try Data((alphaLines.joined(separator: "\n") + "\n").utf8).write(
+            to: durableDirectory(sessionA).appendingPathComponent("events.jsonl")
+        )
+
+        let betaLines = [
+            #"{"id":"b-user","type":"user.message","timestamp":"\#(timestamp(20000))","data":{"source":null,"content":"beta question"}}"#,
+            #"{"id":"b-msg","type":"assistant.message","timestamp":"\#(timestamp(20001))","data":{"messageId":"b-m","content":"beta answer"}}"#,
+            #"{"id":"b-idle","type":"session.idle","timestamp":"\#(timestamp(20002))","data":{"aborted":false}}"#,
+        ]
+        try Data((betaLines.joined(separator: "\n") + "\n").utf8).write(
+            to: durableDirectory(sessionB).appendingPathComponent("events.jsonl")
+        )
+
+        let prelude = #"""
+        const SESSION_A = "__SESSION_A__";
+        const SESSION_B = "__SESSION_B__";
+        const SESSION_C = "__SESSION_C__";
+        let transcriptListener = null;
+        const namedListeners = new Map();
+        const historyBySession = {
+          [SESSION_A]: [
+            {id:"a-start",type:"session.start",
+             timestamp:"2026-07-12T00:00:00.000Z",
+             data:{sessionId:SESSION_A,selectedModel:"alpha-model"}}
+          ],
+          [SESSION_B]: [
+            {id:"b-start",type:"session.start",
+             timestamp:"2026-07-12T02:00:00.000Z",
+             data:{sessionId:SESSION_B,selectedModel:"beta-model"}}
+          ],
+        };
+        const fakeSession = {
+          // Mutable: `/new` and `/resume` replace the live conversation.
+          sessionId: SESSION_A,
+          rpc: {
+            schedule: { list: async () => ({entries:[]}) },
+            permissions: { getAllowAll: async () => ({enabled:true}) },
+            model: { list: async () => ({list:[]}) },
+            eventLog: {
+              registerInterest: async ({eventType}) => ({handle:eventType}),
+              releaseInterest: async () => ({success:true})
+            }
+          },
+          on(name, handler) {
+            if (typeof name === "function") transcriptListener = name;
+            else namedListeners.set(name, handler);
+          },
+          async getEvents() {
+            return historyBySession[fakeSession.sessionId] || [];
+          }
+        };
+        """#
+        .replacingOccurrences(of: "__SESSION_A__", with: sessionA)
+        .replacingOccurrences(of: "__SESSION_B__", with: sessionB)
+        .replacingOccurrences(of: "__SESSION_C__", with: sessionC)
+
+        let extensionScript = CopilotExtension.script
+            .replacingOccurrences(
+                of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                with: "const joinSession = async () => fakeSession;"
+            )
+            .replacingOccurrences(
+                of: "const DURABLE_RECONCILE_DEBOUNCE_MS = 200;",
+                with: "const DURABLE_RECONCILE_DEBOUNCE_MS = 5;"
+            )
+
+        let epilogue = #"""
+
+        // Mirrors the debounce patched into the script above.
+        const DEBOUNCE_MS = 5;
+        const sessionsDir = `${process.env.COPILOT_PROJECTS_ROOT}/sessions`;
+        const base = `${sessionsDir}/${process.env.COPILOT_PROJECTS_SESSION}`;
+        const transcriptFile = `${base}.transcript.json`;
+        const activityFile = `${base}.agent-activity.json`;
+        const ownerFile = `${base}.transcript-owner.json`;
+        const copilotSessionFile = `${base}.copilot-session`;
+        const allowAllFile = `${base}.copilot-allow-all`;
+        const quarantineFile = `${base}.transcript-quarantine.json`;
+        const durableFile = (id) =>
+          join(process.env.COPILOT_HOME, "session-state", id, "events.jsonl");
+        const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
+
+        async function waitFor(produce, label) {
+          for (let attempt = 0; attempt < 800; attempt += 1) {
+            try {
+              const value = produce();
+              if (value) return value;
+            } catch {}
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          throw new Error(`timed out waiting for ${label}`);
+        }
+        const transcriptFor = (id, content) => () => {
+          const snapshot = readJson(transcriptFile);
+          return snapshot.copilotSessionId === id
+            && (content === null
+              || snapshot.turns.some((turn) => turn.userContent === content))
+            ? snapshot
+            : null;
+        };
+        const contains = (snapshot, content) => snapshot.turns.some(
+          (turn) => turn.userContent === content
+            || turn.assistantMessages.some(
+              (message) => message.content === content
+            )
+        );
+        const hasFenceContent = (snapshot) => snapshot.turns.some(
+          (turn) => typeof turn.userContent === "string"
+            && turn.userContent.startsWith("FENCE-USER-")
+        );
+        const hasResumeSeparator = (snapshot) => snapshot.turns.some(
+          (turn) => turn.id.startsWith("session-resume-")
+        );
+        const emit = (event, namedFirst) => {
+          const named = namedListeners.get(event.type);
+          if (namedFirst) {
+            if (named) named(event);
+            transcriptListener(event);
+          } else {
+            transcriptListener(event);
+            if (named) named(event);
+          }
+        };
+
+        const alphaSnapshot = await waitFor(
+          transcriptFor(SESSION_A, "alpha question"),
+          "session A transcript"
+        );
+        const alphaOwner = readJson(ownerFile);
+
+        // A's baseline is complete. Append a large, distinctive batch so the
+        // next replay definitely spans many stream chunks, kick it off, and
+        // rotate WITHOUT waiting for it — the in-flight old-generation replay
+        // must never land in the new conversation.
+        // ~1.3 MB: comfortably many 64 KB stream chunks for the fence to abort
+        // on, while staying under the 200-turn cap so A's baseline survives.
+        const fenceBody = "F".repeat(32_000);
+        const fenceLines = [];
+        for (let index = 0; index < 40; index += 1) {
+          fenceLines.push(JSON.stringify({
+            id:`a-fence-u-${index}`,type:"user.message",
+            timestamp:"2026-07-12T00:30:00.000Z",
+            data:{source:null,content:`FENCE-USER-${index}`}
+          }));
+          fenceLines.push(JSON.stringify({
+            id:`a-fence-m-${index}`,type:"assistant.message",
+            timestamp:"2026-07-12T00:30:01.000Z",
+            data:{messageId:`a-fence-m-${index}`,content:fenceBody}
+          }));
+          fenceLines.push(JSON.stringify({
+            id:`a-fence-i-${index}`,type:"session.idle",
+            timestamp:"2026-07-12T00:30:02.000Z",data:{aborted:false}
+          }));
+        }
+        // Let any reconcile armed during startup drain FIRST. Everything from
+        // the append below to the rotation timer then happens without yielding,
+        // so `a-tick` is what arms the replay of this batch and the rotation
+        // timer registered right after it runs in the same timers phase —
+        // before the poll phase can deliver a single chunk.
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        writeFileSync(
+          durableFile(SESSION_A),
+          fenceLines.join("\n") + "\n",
+          {flag:"a"}
+        );
+        // Captured AFTER the append: everything from here on must leave A's
+        // durable history byte-identical.
+        const alphaDurableBefore = readFileSync(durableFile(SESSION_A), "utf8");
+        transcriptListener({
+          id:"a-tick",type:"assistant.turn_end",
+          timestamp:"2026-07-12T01:00:00.000Z",data:{}
+        });
+
+        // Watch every published snapshot across the rotation window: a transient
+        // frame carrying A's still-streaming batch under another conversation's
+        // identity is exactly what the generation fence must prevent, and it
+        // would be invisible to a single end-state assertion.
+        let fenceLeakObserved = false;
+        const leakWatch = setInterval(() => {
+          try {
+            const snapshot = readJson(transcriptFile);
+            if (snapshot.copilotSessionId !== SESSION_A
+                && hasFenceContent(snapshot)) {
+              fenceLeakObserved = true;
+            }
+          } catch {}
+        }, 2);
+
+        // The `a-tick` event above armed the debounced replay of that batch.
+        // Rotate from a timer registered immediately afterwards with the SAME
+        // deadline: Node runs both callbacks in one timers phase, before the
+        // poll phase can deliver a single stream chunk, so the rotation is
+        // guaranteed to land with the previous conversation's replay suspended
+        // mid-stream rather than racing a sleep against disk speed.
+        let fenceStillStreaming = false;
+        await new Promise((resolve) => setTimeout(() => {
+          // Non-vacuity guard: if the appended batch had already been replayed
+          // and published, the rotation would race nothing and every leak
+          // assertion below would pass for the wrong reason.
+          fenceStillStreaming = !hasFenceContent(readJson(transcriptFile));
+          // `/new` onto B, named listener first.
+          fakeSession.sessionId = SESSION_B;
+          emit({
+            id:"start-b",type:"session.start",
+            timestamp:"2026-07-12T02:00:00.000Z",
+            data:{sessionId:SESSION_B,selectedModel:"beta-model"}
+          }, true);
+          resolve();
+        }, DEBOUNCE_MS));
+
+        const betaSnapshot = await waitFor(
+          transcriptFor(SESSION_B, "beta question"),
+          "session B transcript"
+        );
+        const betaOwner = await waitFor(
+          () => {
+            const owner = readJson(ownerFile);
+            return owner.copilotSessionId === SESSION_B ? owner : null;
+          },
+          "owner marker for session B"
+        );
+        const betaSessionMarker = await waitFor(
+          () => readFileSync(copilotSessionFile, "utf8") === SESSION_B
+            ? SESSION_B
+            : null,
+          "copilot-session marker for session B"
+        );
+        const betaAllowAllMarker = await waitFor(
+          () => readFileSync(allowAllFile, "utf8") === SESSION_B
+            ? SESSION_B
+            : null,
+          "allow-all marker for session B"
+        );
+        const betaActivity = readJson(activityFile);
+        const alphaDurableAfterNew = readFileSync(durableFile(SESSION_A), "utf8");
+
+        // Gated question events use process-level listeners that rotation does
+        // not touch; a question raised in the NEW conversation must still be
+        // published without re-registering interest.
+        namedListeners.get("user_input.requested")({
+          id:"b-question",type:"user_input.requested",
+          timestamp:"2026-07-12T02:00:10.000Z",
+          data:{requestId:"b-request",question:"beta?",choices:["yes","no"],
+            allowFreeform:false}
+        });
+        namedListeners.get("elicitation.requested")({
+          id:"b-elicitation",type:"elicitation.requested",
+          timestamp:"2026-07-12T02:00:11.000Z",
+          data:{requestId:"b-elicit",message:"beta form",mode:"form",
+            requestedSchema:{type:"object"}}
+        });
+        const betaQuestionActivity = await waitFor(
+          () => {
+            const activity = readJson(activityFile);
+            return activity.trackedUserInputs.some(
+                (entry) => entry.requestId === "b-request"
+              ) && activity.trackedElicitations.some(
+                (entry) => entry.requestId === "b-elicit"
+              )
+              ? activity
+              : null;
+          },
+          "post-rotation gated question state"
+        );
+
+        // A second `/new` onto a conversation with no durable history at all,
+        // this time generic listener first. Keep the leak watcher running: the
+        // stale A replay races this bootstrap too, and C never resets a durable
+        // cursor that would mask a leak.
+        fakeSession.sessionId = SESSION_C;
+        emit({
+          id:"start-c",type:"session.start",
+          timestamp:"2026-07-12T02:30:00.000Z",
+          data:{sessionId:SESSION_C,selectedModel:"gamma-model"}
+        }, false);
+
+        const gammaSnapshot = await waitFor(
+          transcriptFor(SESSION_C, null),
+          "empty session C transcript"
+        );
+        const gammaActivity = await waitFor(
+          () => {
+            const activity = readJson(activityFile);
+            return activity.model?.name === "gamma-model" ? activity : null;
+          },
+          "session C model"
+        );
+        const gammaSessionMarker = await waitFor(
+          () => readFileSync(copilotSessionFile, "utf8") === SESSION_C
+            ? SESSION_C
+            : null,
+          "copilot-session marker for session C"
+        );
+
+        clearInterval(leakWatch);
+
+        // `/resume` back to A, named listener first (the order that previously
+        // let the rotation event fall through and append a resume separator).
+        fakeSession.sessionId = SESSION_A;
+        emit({
+          id:"resume-a",type:"session.resume",
+          timestamp:"2026-07-12T03:00:00.000Z",
+          data:{sessionId:SESSION_A,selectedModel:"alpha-model"}
+        }, true);
+
+        const resumedSnapshot = await waitFor(
+          () => {
+            const snapshot = readJson(transcriptFile);
+            return snapshot.copilotSessionId === SESSION_A
+              && contains(snapshot, "alpha question")
+              && contains(snapshot, "FENCE-USER-39")
+              ? snapshot
+              : null;
+          },
+          "session A rehydrated after resume"
+        );
+        const resumedOwner = await waitFor(
+          () => {
+            const owner = readJson(ownerFile);
+            return owner.copilotSessionId === SESSION_A ? owner : null;
+          },
+          "owner marker back on session A"
+        );
+
+        // `/resume` onto C, named listener first, with NO durable history: the
+        // sharpest case for dispatch-order symmetry, because the generic
+        // listener would otherwise queue the very event that caused the
+        // rotation and replay it as conversation content.
+        fakeSession.sessionId = SESSION_C;
+        emit({
+          id:"resume-c",type:"session.resume",
+          timestamp:"2026-07-12T03:30:00.000Z",
+          data:{sessionId:SESSION_C,selectedModel:"gamma-model"}
+        }, true);
+        const resumedGamma = await waitFor(
+          transcriptFor(SESSION_C, null),
+          "session C rehydrated after resume"
+        );
+        // Give any queued replay a chance to land before asserting emptiness.
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        const settledGamma = readJson(transcriptFile);
+
+        // `/resume` onto B, generic listener first: same semantics.
+        fakeSession.sessionId = SESSION_B;
+        emit({
+          id:"resume-b",type:"session.resume",
+          timestamp:"2026-07-12T04:00:00.000Z",
+          data:{sessionId:SESSION_B,selectedModel:"beta-model"}
+        }, false);
+        const reresumedSnapshot = await waitFor(
+          transcriptFor(SESSION_B, "beta question"),
+          "session B rehydrated after resume"
+        );
+
+        console.log(JSON.stringify({
+          alphaOwnerSessionId: alphaOwner.copilotSessionId,
+          alphaTurnsPresent: contains(alphaSnapshot, "alpha answer"),
+          betaOwnerSessionId: betaOwner.copilotSessionId,
+          betaOwnerPidIsCurrent: betaOwner.pid === process.pid,
+          betaSessionMarker,
+          betaAllowAllMarker,
+          betaTranscriptSessionId: betaSnapshot.copilotSessionId,
+          betaHasBetaAnswer: contains(betaSnapshot, "beta answer"),
+          alphaQuestionLeaked: contains(betaSnapshot, "alpha question"),
+          alphaAnswerLeaked: contains(betaSnapshot, "alpha answer"),
+          fenceLeakedIntoBeta: hasFenceContent(betaSnapshot),
+          fenceLeakObserved,
+          fenceStillStreaming,
+          betaHasResumeSeparator: hasResumeSeparator(betaSnapshot),
+          betaModel: betaActivity.model?.name,
+          betaSubagents: betaActivity.activeSubagents.length,
+          betaPendingPermissions: betaActivity.pendingPermissionRequestIds.length,
+          betaTrackedQuestion: betaQuestionActivity.trackedUserInputs.length,
+          betaTrackedElicitation: betaQuestionActivity.trackedElicitations.length,
+          quarantineRecorded: fileExistsSync(quarantineFile),
+          gammaTranscriptSessionId: gammaSnapshot.copilotSessionId,
+          gammaTurnCount: gammaSnapshot.turns.length,
+          gammaModel: gammaActivity.model?.name,
+          gammaSessionMarker,
+          gammaDurableAbsent: !fileExistsSync(durableFile(SESSION_C)),
+          gammaTrackedQuestions: gammaActivity.trackedUserInputs.length,
+          gammaTrackedElicitations: gammaActivity.trackedElicitations.length,
+          fenceLeakedIntoGamma: hasFenceContent(gammaSnapshot),
+          alphaDurableUnchangedAfterNew:
+            alphaDurableAfterNew === alphaDurableBefore,
+          alphaDurableUnchangedAtEnd:
+            readFileSync(durableFile(SESSION_A), "utf8") === alphaDurableBefore,
+          resumedTranscriptSessionId: resumedSnapshot.copilotSessionId,
+          resumedHasAlphaAnswer: contains(resumedSnapshot, "alpha answer"),
+          resumedHasFenceContent: hasFenceContent(resumedSnapshot),
+          resumedHasResumeSeparator: hasResumeSeparator(resumedSnapshot),
+          betaLeakedAfterResume: contains(resumedSnapshot, "beta question")
+            || contains(resumedSnapshot, "beta answer"),
+          resumedOwnerSessionId: resumedOwner.copilotSessionId,
+          resumedGammaSessionId: resumedGamma.copilotSessionId,
+          settledGammaSessionId: settledGamma.copilotSessionId,
+          settledGammaTurnCount: settledGamma.turns.length,
+          settledGammaHasResumeSeparator: hasResumeSeparator(settledGamma),
+          reresumedTranscriptSessionId: reresumedSnapshot.copilotSessionId,
+          reresumedHasResumeSeparator: hasResumeSeparator(reresumedSnapshot),
+          reresumedFenceLeaked: hasFenceContent(reresumedSnapshot),
+          liveSessionIdentity: copilotSessionId
+        }));
+        process.exit(0);
+        """#
+
+        let summary = try runExtensionHarness(
+            name: "rotate",
+            root: root,
+            copilotHome: copilotHome,
+            appSessionId: appSessionId,
+            source: prelude + extensionScript + epilogue
+        )
+        XCTAssertEqual(summary["alphaOwnerSessionId"] as? String, sessionA)
+        XCTAssertEqual(summary["alphaTurnsPresent"] as? Bool, true)
+        // Everything the tab publishes rotates to the new conversation.
+        XCTAssertEqual(summary["betaOwnerSessionId"] as? String, sessionB)
+        XCTAssertEqual(summary["betaOwnerPidIsCurrent"] as? Bool, true)
+        XCTAssertEqual(summary["betaSessionMarker"] as? String, sessionB)
+        XCTAssertEqual(summary["betaAllowAllMarker"] as? String, sessionB)
+        XCTAssertEqual(summary["betaTranscriptSessionId"] as? String, sessionB)
+        XCTAssertEqual(summary["betaHasBetaAnswer"] as? Bool, true)
+        // The previous conversation must not be appended to the new one — not
+        // its baseline, and not the batch whose replay was still streaming.
+        XCTAssertEqual(summary["alphaQuestionLeaked"] as? Bool, false)
+        XCTAssertEqual(summary["alphaAnswerLeaked"] as? Bool, false)
+        XCTAssertEqual(summary["fenceLeakedIntoBeta"] as? Bool, false)
+        XCTAssertEqual(summary["fenceLeakedIntoGamma"] as? Bool, false)
+        XCTAssertEqual(summary["fenceLeakObserved"] as? Bool, false)
+        // ...and the rotation really did land while that replay was in flight.
+        XCTAssertEqual(summary["fenceStillStreaming"] as? Bool, true)
+        XCTAssertEqual(summary["betaHasResumeSeparator"] as? Bool, false)
+        XCTAssertEqual(summary["betaModel"] as? String, "beta-model")
+        XCTAssertEqual(summary["betaSubagents"] as? Int, 0)
+        XCTAssertEqual(summary["betaPendingPermissions"] as? Int, 0)
+        // Gated question listeners keep working after a rotation.
+        XCTAssertEqual(summary["betaTrackedQuestion"] as? Int, 1)
+        XCTAssertEqual(summary["betaTrackedElicitation"] as? Int, 1)
+        // Rotation must not look like foreign content to the host.
+        XCTAssertEqual(summary["quarantineRecorded"] as? Bool, false)
+        // A conversation with no durable history publishes an empty drawer
+        // under its own identity, keeps the announced model, and starts with no
+        // inherited questions.
+        XCTAssertEqual(summary["gammaTranscriptSessionId"] as? String, sessionC)
+        XCTAssertEqual(summary["gammaTurnCount"] as? Int, 0)
+        XCTAssertEqual(summary["gammaModel"] as? String, "gamma-model")
+        XCTAssertEqual(summary["gammaSessionMarker"] as? String, sessionC)
+        XCTAssertEqual(summary["gammaDurableAbsent"] as? Bool, true)
+        XCTAssertEqual(summary["gammaTrackedQuestions"] as? Int, 0)
+        XCTAssertEqual(summary["gammaTrackedElicitations"] as? Int, 0)
+        // Copilot's durable per-session history is never touched.
+        XCTAssertEqual(summary["alphaDurableUnchangedAfterNew"] as? Bool, true)
+        XCTAssertEqual(summary["alphaDurableUnchangedAtEnd"] as? Bool, true)
+        // `/resume` brings the original conversation back, intact and complete.
+        XCTAssertEqual(summary["resumedTranscriptSessionId"] as? String, sessionA)
+        XCTAssertEqual(summary["resumedHasAlphaAnswer"] as? Bool, true)
+        XCTAssertEqual(summary["resumedHasFenceContent"] as? Bool, true)
+        XCTAssertEqual(summary["betaLeakedAfterResume"] as? Bool, false)
+        XCTAssertEqual(summary["resumedOwnerSessionId"] as? String, sessionA)
+        // Neither dispatch order may synthesize a resume separator for the
+        // conversation the rotation event itself announced.
+        XCTAssertEqual(summary["resumedHasResumeSeparator"] as? Bool, false)
+        XCTAssertEqual(summary["resumedGammaSessionId"] as? String, sessionC)
+        XCTAssertEqual(summary["settledGammaSessionId"] as? String, sessionC)
+        XCTAssertEqual(summary["settledGammaTurnCount"] as? Int, 0)
+        XCTAssertEqual(summary["settledGammaHasResumeSeparator"] as? Bool, false)
+        XCTAssertEqual(summary["reresumedTranscriptSessionId"] as? String, sessionB)
+        XCTAssertEqual(summary["reresumedHasResumeSeparator"] as? Bool, false)
+        XCTAssertEqual(summary["reresumedFenceLeaked"] as? Bool, false)
+        XCTAssertEqual(summary["liveSessionIdentity"] as? String, sessionB)
+    }
+
+    /// A same-tab helper (a spawned `copilot -p` classifier) shares the app
+    /// session id but runs in its own process. When it rotates its own Copilot
+    /// conversation it must NOT take over the tab: the interactive owner is
+    /// live, so every shared file stays exactly as the owner left it. Rotation
+    /// is a self-update, keyed on pid, never a takeover.
+    func testCopilotExtensionHelperRotationDoesNotDisplaceLiveOwner() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-helper-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let copilotHome = root.appendingPathComponent(".copilot", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: sessions,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let appSessionId = "12345678-1234-1234-1234-123456789abc"
+        let interactiveSessionId = "11111111-1111-4111-8111-111111111111"
+        let helperSessionId = "22222222-2222-4222-8222-222222222222"
+        let helperRotatedSessionId = "33333333-3333-4333-8333-333333333333"
+
+        let base = sessions.appendingPathComponent(appSessionId)
+        // pid 1 is always alive (process.kill(1, 0) throws EPERM), standing in
+        // for the live interactive Copilot that owns this tab.
+        try Data(#"{"copilotSessionId":"\#(interactiveSessionId)","pid":1}"#.utf8)
+            .write(to: URL(fileURLWithPath: base.path + ".transcript-owner.json"))
+        try Data(#"""
+        {"schemaVersion":3,"updatedAt":"2026-07-12T00:00:00.000Z",
+         "copilotSessionId":"\#(interactiveSessionId)","ownerPid":1,
+         "turns":[{"id":"owned","startedAt":"2026-07-12T00:00:00.000Z",
+         "endedAt":null,"kind":"foreground","userContent":"OWNED",
+         "assistantMessages":[],"tools":[],"isAborted":false}]}
+        """#.utf8).write(to: URL(fileURLWithPath: base.path + ".transcript.json"))
+        try Data(interactiveSessionId.utf8)
+            .write(to: URL(fileURLWithPath: base.path + ".copilot-session"))
+        try Data(interactiveSessionId.utf8)
+            .write(to: URL(fileURLWithPath: base.path + ".copilot-allow-all"))
+
+        // The helper's rotated-to conversation even has durable history, so a
+        // takeover would be clearly visible in the published transcript.
+        let durableDir = copilotHome
+            .appendingPathComponent("session-state", isDirectory: true)
+            .appendingPathComponent(helperRotatedSessionId, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: durableDir,
+            withIntermediateDirectories: true
+        )
+        let helperDurable = #"""
+        {"id":"h-user","type":"user.message","timestamp":"2026-07-12T05:00:00.000Z","data":{"source":null,"content":"HELPER CONTENT"}}
+        {"id":"h-idle","type":"session.idle","timestamp":"2026-07-12T05:00:01.000Z","data":{"aborted":false}}
+        """# + "\n"
+        try Data(helperDurable.utf8).write(
+            to: durableDir.appendingPathComponent("events.jsonl")
+        )
+
+        let prelude = #"""
+        let transcriptListener = null;
+        const namedListeners = new Map();
+        const fakeSession = {
+          sessionId: "__HELPER_SESSION__",
+          rpc: {
+            schedule: { list: async () => ({entries:[]}) },
+            permissions: { getAllowAll: async () => ({enabled:true}) },
+            model: { list: async () => ({list:[]}) },
+            eventLog: {
+              registerInterest: async ({eventType}) => ({handle:eventType}),
+              releaseInterest: async () => ({success:true})
+            }
+          },
+          on(name, handler) {
+            if (typeof name === "function") transcriptListener = name;
+            else namedListeners.set(name, handler);
+          },
+          async getEvents() { return []; }
+        };
+        """#.replacingOccurrences(of: "__HELPER_SESSION__", with: helperSessionId)
+
+        let extensionScript = CopilotExtension.script
+            .replacingOccurrences(
+                of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                with: "const joinSession = async () => fakeSession;"
+            )
+            .replacingOccurrences(
+                of: "const DURABLE_RECONCILE_DEBOUNCE_MS = 200;",
+                with: "const DURABLE_RECONCILE_DEBOUNCE_MS = 5;"
+            )
+            .replacingOccurrences(
+                of: "const DURABLE_RECONCILE_POLL_MS = 5_000;",
+                with: "const DURABLE_RECONCILE_POLL_MS = 25;"
+            )
+
+        let epilogue = #"""
+
+        const base = `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+          + `${process.env.COPILOT_PROJECTS_SESSION}`;
+        const read = (suffix) => readFileSync(`${base}${suffix}`, "utf8");
+
+        const rotateEvent = {
+          id:"helper-start",type:"session.start",
+          timestamp:"2026-07-12T05:00:00.000Z",
+          data:{sessionId:"__HELPER_ROTATED__",selectedModel:"helper-model"}
+        };
+        fakeSession.sessionId = "__HELPER_ROTATED__";
+        namedListeners.get("session.start")(rotateEvent);
+        transcriptListener(rotateEvent);
+
+        // Give the rotation's bootstrap, marker refresh and durable replay every
+        // chance to (incorrectly) publish before sampling.
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        const snapshot = JSON.parse(read(".transcript.json"));
+        const owner = JSON.parse(read(".transcript-owner.json"));
+        console.log(JSON.stringify({
+          ownerSessionId: owner.copilotSessionId,
+          ownerPid: owner.pid,
+          transcriptSessionId: snapshot.copilotSessionId,
+          firstUserContent: snapshot.turns[0]?.userContent,
+          helperContentLeaked: snapshot.turns.some(
+            (turn) => turn.userContent === "HELPER CONTENT"
+          ),
+          copilotSessionMarker: read(".copilot-session"),
+          allowAllMarker: read(".copilot-allow-all"),
+          activityPublished: fileExistsSync(`${base}.agent-activity.json`),
+          helperIdentity: copilotSessionId
+        }));
+        process.exit(0);
+        """#.replacingOccurrences(
+            of: "__HELPER_ROTATED__",
+            with: helperRotatedSessionId
+        )
+
+        let summary = try runExtensionHarness(
+            name: "helper",
+            root: root,
+            copilotHome: copilotHome,
+            appSessionId: appSessionId,
+            source: prelude + extensionScript + epilogue
+        )
+        // The helper rotated its own identity...
+        XCTAssertEqual(summary["helperIdentity"] as? String, helperRotatedSessionId)
+        // ...but every shared file still belongs to the live interactive owner.
+        XCTAssertEqual(summary["ownerSessionId"] as? String, interactiveSessionId)
+        XCTAssertEqual(summary["ownerPid"] as? Int, 1)
+        XCTAssertEqual(
+            summary["transcriptSessionId"] as? String,
+            interactiveSessionId
+        )
+        XCTAssertEqual(summary["firstUserContent"] as? String, "OWNED")
+        XCTAssertEqual(summary["helperContentLeaked"] as? Bool, false)
+        XCTAssertEqual(
+            summary["copilotSessionMarker"] as? String,
+            interactiveSessionId
+        )
+        XCTAssertEqual(
+            summary["allowAllMarker"] as? String,
+            interactiveSessionId
+        )
+        XCTAssertEqual(summary["activityPublished"] as? Bool, false)
+    }
+
+    /// Safety net for a `/new` / `/resume` whose lifecycle event never reaches
+    /// us: the periodic poll adopts the live `session.sessionId`, but only when
+    /// it is a valid id this process has never held — a lagging SDK value must
+    /// never rotate the tab backward onto a conversation it already left.
+    func testCopilotExtensionAdoptsMissedRotationFromPollButNeverGoesBackward() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-poll-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let copilotHome = root.appendingPathComponent(".copilot", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: sessions,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let appSessionId = "12345678-1234-1234-1234-123456789abc"
+        let sessionA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let sessionB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+        func writeDurable(_ copilotSessionId: String, _ content: String) throws {
+            let directory = copilotHome
+                .appendingPathComponent("session-state", isDirectory: true)
+                .appendingPathComponent(copilotSessionId, isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            let lines = """
+            {"id":"\(copilotSessionId)-user","type":"user.message","timestamp":"2026-07-12T00:00:00.000Z","data":{"source":null,"content":"\(content)"}}
+            {"id":"\(copilotSessionId)-idle","type":"session.idle","timestamp":"2026-07-12T00:00:01.000Z","data":{"aborted":false}}
+
+            """
+            try Data(lines.utf8).write(
+                to: directory.appendingPathComponent("events.jsonl")
+            )
+        }
+        try writeDurable(sessionA, "alpha content")
+        try writeDurable(sessionB, "beta content")
+
+        let prelude = #"""
+        const SESSION_A = "__SESSION_A__";
+        const SESSION_B = "__SESSION_B__";
+        let transcriptListener = null;
+        const namedListeners = new Map();
+        const fakeSession = {
+          sessionId: SESSION_A,
+          rpc: {
+            schedule: { list: async () => ({entries:[]}) },
+            permissions: { getAllowAll: async () => ({enabled:true}) },
+            model: { list: async () => ({list:[]}) },
+            eventLog: {
+              registerInterest: async ({eventType}) => ({handle:eventType}),
+              releaseInterest: async () => ({success:true})
+            }
+          },
+          on(name, handler) {
+            if (typeof name === "function") transcriptListener = name;
+            else namedListeners.set(name, handler);
+          },
+          async getEvents() { return []; }
+        };
+        """#
+        .replacingOccurrences(of: "__SESSION_A__", with: sessionA)
+        .replacingOccurrences(of: "__SESSION_B__", with: sessionB)
+
+        let extensionScript = CopilotExtension.script
+            .replacingOccurrences(
+                of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                with: "const joinSession = async () => fakeSession;"
+            )
+            .replacingOccurrences(
+                of: "const DURABLE_RECONCILE_DEBOUNCE_MS = 200;",
+                with: "const DURABLE_RECONCILE_DEBOUNCE_MS = 5;"
+            )
+            .replacingOccurrences(
+                of: "const DURABLE_RECONCILE_POLL_MS = 5_000;",
+                with: "const DURABLE_RECONCILE_POLL_MS = 20;"
+            )
+
+        let epilogue = #"""
+
+        const base = `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+          + `${process.env.COPILOT_PROJECTS_SESSION}`;
+        const transcriptFile = `${base}.transcript.json`;
+        const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
+        async function waitFor(produce, label) {
+          for (let attempt = 0; attempt < 400; attempt += 1) {
+            try {
+              const value = produce();
+              if (value) return value;
+            } catch {}
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          throw new Error(`timed out waiting for ${label}`);
+        }
+        const transcriptFor = (id) => () => {
+          const snapshot = readJson(transcriptFile);
+          return snapshot.copilotSessionId === id ? snapshot : null;
+        };
+
+        await waitFor(transcriptFor(SESSION_A), "session A transcript");
+
+        // The CLI moved to B but we never saw a lifecycle event for it.
+        fakeSession.sessionId = SESSION_B;
+        const rotated = await waitFor(
+          transcriptFor(SESSION_B),
+          "poll-driven rotation onto session B"
+        );
+        const rotatedOwner = readJson(`${base}.transcript-owner.json`);
+
+        // A lagging `session.sessionId` reporting an id we already left must be
+        // ignored: no rotation backward onto A.
+        fakeSession.sessionId = SESSION_A;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        const afterLaggingValue = readJson(transcriptFile);
+
+        console.log(JSON.stringify({
+          rotatedTranscriptSessionId: rotated.copilotSessionId,
+          rotatedHasBetaContent: rotated.turns.some(
+            (turn) => turn.userContent === "beta content"
+          ),
+          rotatedOwnerSessionId: rotatedOwner.copilotSessionId,
+          rotatedOwnerPidIsCurrent: rotatedOwner.pid === process.pid,
+          rotatedSessionMarker: readFileSync(`${base}.copilot-session`, "utf8"),
+          afterLaggingSessionId: afterLaggingValue.copilotSessionId,
+          afterLaggingHasAlphaContent: afterLaggingValue.turns.some(
+            (turn) => turn.userContent === "alpha content"
+          ),
+          liveIdentity: copilotSessionId
+        }));
+        process.exit(0);
+        """#
+
+        let summary = try runExtensionHarness(
+            name: "poll",
+            root: root,
+            copilotHome: copilotHome,
+            appSessionId: appSessionId,
+            source: prelude + extensionScript + epilogue
+        )
+        XCTAssertEqual(summary["rotatedTranscriptSessionId"] as? String, sessionB)
+        XCTAssertEqual(summary["rotatedHasBetaContent"] as? Bool, true)
+        XCTAssertEqual(summary["rotatedOwnerSessionId"] as? String, sessionB)
+        XCTAssertEqual(summary["rotatedOwnerPidIsCurrent"] as? Bool, true)
+        XCTAssertEqual(summary["rotatedSessionMarker"] as? String, sessionB)
+        // The lagging value never rotates us backward.
+        XCTAssertEqual(summary["afterLaggingSessionId"] as? String, sessionB)
+        XCTAssertEqual(summary["afterLaggingHasAlphaContent"] as? Bool, false)
+        XCTAssertEqual(summary["liveIdentity"] as? String, sessionB)
+    }
     // Reclaim must be able to swap the marker without any window where a
     // concurrent reader could observe no marker at all — verified indirectly
     // here by asserting the write-then-rename temp file never lingers.

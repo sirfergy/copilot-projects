@@ -131,7 +131,8 @@ final class TranscriptController: ObservableObject {
         }
         guard transcriptOwnerAllowsSnapshot(
             sessionId: sessionId,
-            copilotSessionId: snapshot.copilotSessionId
+            copilotSessionId: snapshot.copilotSessionId,
+            expectedSignature: signature
         ) else {
             return LoadResult(signature: signature, snapshot: nil)
         }
@@ -182,7 +183,8 @@ final class TranscriptController: ObservableObject {
         }
         guard transcriptOwnerAllowsSnapshot(
             sessionId: sessionId,
-            copilotSessionId: snapshot.copilotSessionId
+            copilotSessionId: snapshot.copilotSessionId,
+            expectedSignature: signature
         ) else {
             return emptyRemoteSnapshot()
         }
@@ -260,9 +262,17 @@ final class TranscriptController: ObservableObject {
     /// content even though the owner file itself now looks legitimate. Reject
     /// (and quarantine) whenever the owner records a different Copilot session
     /// id than the transcript we actually read.
+    ///
+    /// `expectedSignature` is the signature sampled *before* the transcript
+    /// bytes were read. When it no longer matches, the mismatch says nothing
+    /// about provenance — the files simply moved underneath the read (a Copilot
+    /// `/new` / `/resume` rotation replaces this tab's own marker and rewrites
+    /// `transcript.json`) — so the read is rejected without persisting a
+    /// quarantine that would permanently hide a session `/resume` can return to.
     nonisolated private static func transcriptOwnerAllowsSnapshot(
         sessionId: String,
         copilotSessionId: String,
+        expectedSignature: LoadSignature?,
         directory: URL = Paths.sessionsDir
     ) -> Bool {
         guard let owner = readOwnerMarker(sessionId: sessionId, directory: directory),
@@ -272,6 +282,16 @@ final class TranscriptController: ObservableObject {
             return true
         }
         if ownerCopilotSessionId == copilotSessionId { return true }
+
+        // Stale read: the owner marker (and/or the transcript) changed after the
+        // bytes we decoded were sampled. Reject, but never quarantine.
+        if let expectedSignature,
+           loadSignature(
+               sessionId: sessionId,
+               transcriptPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
+           ) != expectedSignature {
+            return false
+        }
 
         // The owner's recorded Copilot session differs from the transcript we
         // read. Whether that is a genuine reclamation race (quarantine) or a
@@ -298,6 +318,28 @@ final class TranscriptController: ObservableObject {
             )
             return false
         }
+    }
+
+    /// Runs the owner cross-check exactly the way a transcript read does:
+    /// sample the file signature first, then validate the decoded snapshot's
+    /// Copilot session id against the owner marker. `duringRead` runs between
+    /// those two steps so callers (tests) can reproduce a Copilot `/new` /
+    /// `/resume` rotation that lands mid-read.
+    nonisolated static func snapshotPassesOwnerCrossCheck(
+        sessionId: String,
+        copilotSessionId: String,
+        duringRead: () -> Void = {}
+    ) -> Bool {
+        let signature = loadSignature(
+            sessionId: sessionId,
+            transcriptPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
+        )
+        duringRead()
+        return transcriptOwnerAllowsSnapshot(
+            sessionId: sessionId,
+            copilotSessionId: copilotSessionId,
+            expectedSignature: signature
+        )
     }
 
     private enum OwnerCorroboration {

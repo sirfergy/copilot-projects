@@ -92,10 +92,27 @@ public enum CopilotExtension {
     const validSessionId = /^[0-9A-Fa-f-]{36}$/.test(appSessionId || "");
 
     const session = await joinSession();
-    const copilotSessionId = typeof session.sessionId === "string"
+    // The Copilot conversation this process is currently tracking. `/new` and
+    // `/resume` swap the conversation underneath a single long-lived extension
+    // process, so this is the ONE mutable source of truth for the current
+    // identity. `session.sessionId` is read only to seed it (and as a last
+    // resort when a lifecycle event omits the id); no other reader may consult
+    // it, otherwise a rotation would leave part of the extension pinned to the
+    // previous conversation.
+    let copilotSessionId = typeof session.sessionId === "string"
         ? session.sessionId
         : "";
-    const validCopilotSessionId = /^[0-9A-Fa-f-]{36}$/.test(copilotSessionId);
+    let validCopilotSessionId = sessionIdPattern.test(copilotSessionId);
+    // Every Copilot session id this process has held. Deliberately uncapped and
+    // never evicted: it is what proves an owner marker left under a previous
+    // conversation is our own — so `/new` can roll it forward even after an
+    // earlier rotation failed to take — and what stops the poll safety net from
+    // ever rotating BACKWARD onto a conversation we already left. A bounded set
+    // would silently lose both guarantees once enough switches had happened;
+    // the entries are 36-byte ids, so unbounded growth is irrelevant here.
+    const ownedCopilotSessionIds = new Set(
+        validCopilotSessionId ? [copilotSessionId] : []
+    );
 
     if (validSessionId && socketPath) {
         const sessionsDir = join(dirname(socketPath), "sessions");
@@ -161,11 +178,17 @@ public enum CopilotExtension {
         // `session.rpc.model.list()`. Null until the first successful fetch so the
         // client shows the read-only model line rather than an empty picker.
         let availableModels = null;
-        let refreshingSchedules = false;
-        let refreshingModels = false;
-        // Guards against processing two set-model requests concurrently for the
-        // same file write burst (mirrors inFlightUserInputResponses).
-        let inFlightSetModelRequest = false;
+        // Single-flight guards. These hold the conversation generation that owns
+        // the in-flight call rather than a plain boolean: after a `/new` /
+        // `/resume` rotation the previous conversation's RPC may still be
+        // outstanding, and a boolean would make the new conversation wait for it
+        // (leaving the picker/schedules empty until the next 5s poll) and would
+        // then be cleared by the OLD call's `finally`, releasing a lock it no
+        // longer owns. Overlapping one old and one new call is safe because
+        // every result mutation is fenced on `conversationGeneration`.
+        let schedulesRefreshGeneration = null;
+        let modelsRefreshGeneration = null;
+        let setModelRequestGeneration = null;
         let schedules = [];
         const transcriptTurns = [];
         const transcriptEventIds = new Set();
@@ -177,7 +200,7 @@ public enum CopilotExtension {
         let transcriptInitialized = false;
         let transcriptPublishTimer = null;
         let durableReconcileTimer = null;
-        let durableReconcileInFlight = false;
+        let durableReconcileRun = null;
         let durableReconcileQueued = false;
         let durableFailureStreak = 0;
         let durableTranscriptAuthoritative = false;
@@ -195,6 +218,19 @@ public enum CopilotExtension {
         let sharedFilesOwnershipInitializedFor = null;
         let allowAllRefreshQueued = false;
         let allowAllUpdateGeneration = 0;
+        // Monotonic id for the conversation currently loaded into the state
+        // above. Bumped by every `/new` / `/resume` identity rotation so async
+        // work started for a previous conversation (durable replay, SDK history
+        // bootstrap, schedule/model/allow-all refreshes) can detect that it is
+        // stale and abort before mutating the new conversation's state.
+        let conversationGeneration = 0;
+        // Id of the lifecycle event that performed the most recent rotation. The
+        // SDK delivers one event to BOTH the named and the generic listener; the
+        // one that fires second must not re-enter it as ordinary conversation
+        // content, or a `/resume` would append a spurious resume separator to
+        // the conversation that was just loaded — making behavior depend on a
+        // dispatch order the SDK does not guarantee.
+        let rotationConsumedEventId = null;
 
         const MAX_TRANSCRIPT_TURNS = 200;
         const MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024;
@@ -253,7 +289,7 @@ public enum CopilotExtension {
                 const snapshot = JSON.parse(encoded);
                 if (snapshot.schemaVersion !== 3
                         || snapshot.copilotSessionId
-                            !== boundedMetadataText(session.sessionId)
+                            !== boundedMetadataText(copilotSessionId)
                         || !Array.isArray(snapshot.turns)) return false;
                 transcriptTurns.push(
                     ...snapshot.turns.slice(-MAX_TRANSCRIPT_TURNS)
@@ -356,7 +392,7 @@ public enum CopilotExtension {
 
         function ownerMatchesCurrentProcess(owner) {
             return Boolean(owner)
-                && owner.copilotSessionId === session.sessionId
+                && owner.copilotSessionId === copilotSessionId
                 && owner.pid === process.pid;
         }
 
@@ -376,7 +412,7 @@ public enum CopilotExtension {
         function ownerMarkerPayload() {
             return {
                 ...(appSessionResolution.native ? {appSessionId} : {}),
-                copilotSessionId: session.sessionId,
+                copilotSessionId,
                 pid: process.pid,
                 bootTime: currentBootTime() ?? undefined,
             };
@@ -421,7 +457,7 @@ public enum CopilotExtension {
                     transcriptOwnerLockPath,
                     JSON.stringify({
                         ...(appSessionResolution.native ? {appSessionId} : {}),
-                        copilotSessionId: session.sessionId,
+                        copilotSessionId,
                         pid: process.pid,
                     }),
                     { flag: "wx", mode: 0o600 }
@@ -447,6 +483,47 @@ public enum CopilotExtension {
             });
         }
 
+        // Is this marker one WE wrote for a conversation we have since left
+        // (`/new` / `/resume`)? Several Copilot processes legitimately share one
+        // app session id, so the pid check is what makes this a self-update: a
+        // same-tab helper has a different pid and can never take this path, and
+        // therefore can never displace the interactive owner. The session id
+        // must be one this process actually held, and (when our tab identity is
+        // natively resolved) the marker must name our tab.
+        function ownerIsPreviousSelf(owner) {
+            return Boolean(owner)
+                && owner.pid === process.pid
+                && typeof owner.copilotSessionId === "string"
+                && owner.copilotSessionId !== copilotSessionId
+                && ownedCopilotSessionIds.has(owner.copilotSessionId)
+                && (!appSessionResolution.native
+                    || owner.appSessionId === appSessionId);
+        }
+
+        // The shared snapshot on disk still describes the conversation we just
+        // left. Leaving it in place under an owner marker that now names a
+        // different Copilot session is exactly the provenance mismatch the host
+        // is entitled to quarantine permanently, so discard it. Idempotent, and
+        // it only ever touches the host's snapshot — Copilot's durable
+        // per-session history is never removed.
+        function discardRotatedTranscript() {
+            removeFile(transcriptPath);
+        }
+
+        // Roll our own marker forward onto the newly adopted conversation. The
+        // host's shared snapshot is discarded inside the SAME critical section
+        // as the marker write so no reader can sample the previous
+        // conversation's transcript under the new marker.
+        function rotateOwnerMarker(previousCopilotSessionId) {
+            return withTranscriptOwnerLock(() => {
+                const owner = recordedOwner();
+                if (!ownerIsPreviousSelf(owner)) return false;
+                if (owner.copilotSessionId !== previousCopilotSessionId) return false;
+                discardRotatedTranscript();
+                return replaceOwnerMarker();
+            });
+        }
+
         // Claiming: returns true if this process may write shared files. Claims
         // ownership atomically (exclusive create) when the marker is absent,
         // held by a dead process, or held by a live process that does not belong
@@ -461,6 +538,17 @@ public enum CopilotExtension {
                     if (ownerMatchesCurrentProcess(owner)) {
                         activateSharedFilesOwnership();
                         return true;
+                    }
+                    // Our own marker from a conversation we have left. Without
+                    // this, `ownerHoldsClaim` would see a live process that
+                    // belongs to this tab (us) and block the rotated
+                    // conversation from ever publishing for this tab.
+                    if (ownerIsPreviousSelf(owner)) {
+                        if (rotateOwnerMarker(owner.copilotSessionId)) {
+                            activateSharedFilesOwnership(true);
+                            return true;
+                        }
+                        continue;
                     }
                     if (ownerHoldsClaim(owner)) return false;
                     if (reclaimDisplaceableOwner(owner)) {
@@ -661,7 +749,7 @@ public enum CopilotExtension {
             }
             const requestId = response.requestId;
             if (inFlightUserInputResponses.has(requestId)) return;
-            if (response.copilotSessionId !== session.sessionId) {
+            if (response.copilotSessionId !== copilotSessionId) {
                 removeFile(userInputResponsePath);
                 return;
             }
@@ -899,7 +987,7 @@ public enum CopilotExtension {
                 return;
             }
             if (inFlightElicitationResponses.has(requestId)) return;
-            if (response.copilotSessionId !== session.sessionId) {
+            if (response.copilotSessionId !== copilotSessionId) {
                 removeFile(elicitationResponsePath);
                 return;
             }
@@ -1012,7 +1100,7 @@ public enum CopilotExtension {
             const build = () => ({
                 schemaVersion: 3,
                 updatedAt: new Date().toISOString(),
-                copilotSessionId: boundedMetadataText(session.sessionId),
+                copilotSessionId: boundedMetadataText(copilotSessionId),
                 ownerPid: process.pid,
                 turns: pending ? [...transcriptTurns, pending] : transcriptTurns.slice(),
             });
@@ -1432,6 +1520,14 @@ public enum CopilotExtension {
         }
 
         session.on((event) => {
+            // Identity first: a `/new` / `/resume` event must rotate before any
+            // of the state below can be attributed to the wrong conversation.
+            // The rotation reloads history itself, so the event is not queued.
+            if (maybeRotateCopilotSession(event)) return;
+            if (typeof event?.id === "string"
+                    && event.id === rotationConsumedEventId) {
+                return;
+            }
             if (!transcriptInitialized) {
                 queuedTranscriptEvents.push(event);
             } else {
@@ -1446,28 +1542,36 @@ public enum CopilotExtension {
         });
 
         async function refreshSchedules() {
-            if (refreshingSchedules) return;
-            refreshingSchedules = true;
+            const generation = conversationGeneration;
+            if (schedulesRefreshGeneration === generation) return;
+            schedulesRefreshGeneration = generation;
             try {
                 const result = await session.rpc.schedule.list();
+                if (generation !== conversationGeneration) return;
                 schedules = result.entries;
                 publish();
             } catch (error) {
+                if (generation !== conversationGeneration) return;
                 publish(error);
             } finally {
-                refreshingSchedules = false;
+                // Release only OUR lock; a newer generation's refresh keeps its.
+                if (schedulesRefreshGeneration === generation) {
+                    schedulesRefreshGeneration = null;
+                }
             }
         }
 
         async function refreshAllowAll() {
             if (!ownsSharedFiles()) return;
             const generation = ++allowAllUpdateGeneration;
+            const conversation = conversationGeneration;
             // Fail closed if the RPC is unavailable: a stale marker must never grant
             // full permissions to a different session in the same tab.
             removeFile(allowAllPath);
             try {
                 const result = await session.rpc.permissions.getAllowAll();
-                if (generation === allowAllUpdateGeneration) {
+                if (generation === allowAllUpdateGeneration
+                        && conversation === conversationGeneration) {
                     applyAllowAllMarker(result.enabled === true);
                 }
             } catch {}
@@ -1561,6 +1665,13 @@ public enum CopilotExtension {
         }
 
         async function reconcileDurableHistoryOnce() {
+            // A `/new` / `/resume` rotation swaps the durable file this replay
+            // is streaming AND clears the state it feeds. Anything read for the
+            // previous conversation must be discarded rather than appended to
+            // the new one, so re-check the generation at every point where the
+            // stream would otherwise mutate shared state.
+            const generation = conversationGeneration;
+            const stale = () => generation !== conversationGeneration;
             const eventsPath = durableEventsPath();
             let attributes;
             try {
@@ -1610,6 +1721,9 @@ public enum CopilotExtension {
             let changed = false;
             try {
                 for await (const chunk of input) {
+                    // Abort before touching any state: the conversation this
+                    // stream belongs to is no longer the one being tracked.
+                    if (stale()) return;
                     durableHistoryOffset += chunk.length;
                     let offset = 0;
                     while (offset < chunk.length) {
@@ -1656,6 +1770,7 @@ public enum CopilotExtension {
                     }
                 }
                 const completedBaseline = !durableBaselineComplete;
+                if (stale()) return;
                 durableBaselineComplete = true;
                 const questionChanged =
                     durableAskUser?.requestId !== durableAskUserScan?.requestId;
@@ -1674,33 +1789,49 @@ public enum CopilotExtension {
             }
         }
 
-        async function reconcileDurableHistory() {
-            if (durableReconcileInFlight) {
+        // Returns a promise that resolves only once a replay has run for the
+        // CALLER's conversation generation. When a replay for a conversation we
+        // have since left is still streaming, queue another pass and hand back
+        // the shared run promise: returning early instead would leave the
+        // rotated drawer blank until the next 5s poll. The old stream's own
+        // mutations stay fenced by `conversationGeneration`.
+        function reconcileDurableHistory() {
+            if (durableReconcileRun) {
                 durableReconcileQueued = true;
-                return;
+                return durableReconcileRun;
             }
-            durableReconcileInFlight = true;
-            try {
-                do {
-                    durableReconcileQueued = false;
-                    const previousOffset = durableHistoryOffset;
-                    try {
-                        await reconcileDurableHistoryOnce();
-                        durableFailureStreak = 0;
-                    } catch {
-                        if (durableHistoryOffset > previousOffset) {
+            // The loop body is inlined so the `while` re-check and the release
+            // of `durableReconcileRun` happen in one synchronous step; a caller
+            // can never observe a run that is about to end but still latched.
+            durableReconcileRun = (async () => {
+                try {
+                    do {
+                        durableReconcileQueued = false;
+                        const previousOffset = durableHistoryOffset;
+                        const generation = conversationGeneration;
+                        try {
+                            await reconcileDurableHistoryOnce();
+                            if (generation !== conversationGeneration) continue;
                             durableFailureStreak = 0;
-                        } else {
-                            durableFailureStreak += 1;
-                            if (durableFailureStreak >= 3) {
-                                loseDurableAuthority(true);
+                        } catch {
+                            // A failure recorded against a conversation we have
+                            // since left must not disable the new one's history.
+                            if (generation !== conversationGeneration) continue;
+                            if (durableHistoryOffset > previousOffset) {
+                                durableFailureStreak = 0;
+                            } else {
+                                durableFailureStreak += 1;
+                                if (durableFailureStreak >= 3) {
+                                    loseDurableAuthority(true);
+                                }
                             }
                         }
-                    }
-                } while (durableReconcileQueued);
-            } finally {
-                durableReconcileInFlight = false;
-            }
+                    } while (durableReconcileQueued);
+                } finally {
+                    durableReconcileRun = null;
+                }
+            })();
+            return durableReconcileRun;
         }
 
         function scheduleDurableReconcile(
@@ -1711,6 +1842,244 @@ public enum CopilotExtension {
                 durableReconcileTimer = null;
                 reconcileDurableHistory();
             }, delay);
+        }
+
+        // Loads whichever conversation `copilotSessionId` currently names into
+        // the (already cleared) live state, then publishes it. Startup and
+        // `/new` / `/resume` rotation share this one path so the two can't
+        // drift. Every await is fenced by `generation`: once the conversation
+        // rotates again, an older bootstrap aborts instead of landing the
+        // previous conversation's history in the new state.
+        async function bootstrapConversation(generation, options = {}) {
+            const stale = () => generation !== conversationGeneration;
+            if (stale()) return;
+            const preservedTurns = options.preservedTurns || [];
+            // Whatever model is already established survives a history fetch
+            // that returns nothing: a brand-new conversation's `getEvents()` is
+            // empty and would otherwise blank the model line the rotation event
+            // just taught us.
+            const preservedModel = currentModel;
+
+            durableTranscriptAuthoritative = durableHistoryAvailable();
+            // Startup only: publish a deliberate empty snapshot so a snapshot
+            // left by a DIFFERENT Copilot session cannot linger on screen while
+            // history loads. Rotation must not repeat it — it has already
+            // discarded the shared snapshot for quarantine safety, so the
+            // drawer is briefly empty regardless, and a second empty frame
+            // would just be redundant churn before history lands.
+            if (options.publishEmptyPlaceholder && preservedTurns.length === 0) {
+                publishTranscript(true);
+            }
+            const durableStartup = durableTranscriptAuthoritative
+                ? reconcileDurableHistory()
+                : null;
+            let historyLoaded = false;
+            try {
+                const history = await sdkHistoryWithTimeout();
+                if (stale()) return;
+                if (durableTranscriptAuthoritative) {
+                    for (const event of history) {
+                        if (!event || typeof event !== "object"
+                                || typeof event.type !== "string") {
+                            continue;
+                        }
+                        try {
+                            applyPermissionEvent(event, false);
+                            applyModelFromEvent(event);
+                        } catch {}
+                    }
+                } else {
+                    resetTranscriptReplayState([], preservedModel);
+                    for (const event of history) {
+                        replayHistoryEvent(event, true);
+                    }
+                }
+                historyLoaded = true;
+            } catch {
+                if (stale()) return;
+            }
+            if (!durableTranscriptAuthoritative && !historyLoaded) {
+                resetTranscriptReplayState(preservedTurns, preservedModel);
+            }
+            if (durableStartup) {
+                try {
+                    await durableStartup;
+                } catch {
+                    if (stale()) return;
+                    if (!durableBaselineComplete) {
+                        loseDurableAuthority();
+                    }
+                }
+                if (stale()) return;
+                if (!durableTranscriptAuthoritative && !historyLoaded) {
+                    resetTranscriptReplayState(
+                        preservedTurns,
+                        preservedModel
+                    );
+                }
+            }
+            transcriptInitialized = true;
+            for (const event of queuedTranscriptEvents) {
+                if (durableTranscriptAuthoritative) {
+                    applyPermissionEvent(event, false);
+                    applyModelFromEvent(event);
+                } else {
+                    replayHistoryEvent(event, true);
+                }
+            }
+            queuedTranscriptEvents.length = 0;
+            publish();
+            if (durableTranscriptAuthoritative) {
+                scheduleDurableReconcile(0);
+            } else {
+                publishTranscript();
+            }
+        }
+
+        // Drop every scrap of the previous conversation. Per-process resources
+        // (response watcher, poll timer, gated event-interest handles, paths)
+        // are deliberately untouched: they belong to the extension process, not
+        // to the conversation, and the SDK contract does not require
+        // re-registering interest when the conversation rotates.
+        function resetConversationState(transitionAt) {
+            activeSubagents.clear();
+            pendingUserInputs.clear();
+            inFlightUserInputResponses.clear();
+            pendingElicitations.clear();
+            inFlightElicitationResponses.clear();
+            pendingPermissionRequestIds.clear();
+            completedPermissionRequestIds.clear();
+
+            foregroundTurnActive = false;
+            scheduledTurnActive = false;
+            currentTurnKind = null;
+            lastIdleAborted = false;
+            lastIdleTurnKind = null;
+            foregroundTransitionAt = transitionAt;
+            // `idleGeneration` stays monotonic on purpose: the host compares it
+            // against a per-tab baseline with `>`, so rewinding it would make
+            // the new conversation's first idle look like no idle at all.
+
+            currentModel = null;
+            availableModels = null;
+            schedules = [];
+            lastLiveQuestionAt = null;
+
+            clearTimeout(transcriptPublishTimer);
+            transcriptPublishTimer = null;
+            clearTimeout(durableReconcileTimer);
+            durableReconcileTimer = null;
+            durableReconcileQueued = false;
+            transcriptInitialized = false;
+            queuedTranscriptEvents.length = 0;
+            resetTranscriptReplayState([], null);
+
+            durableTranscriptAuthoritative = false;
+            durableHistoryIdentity = null;
+            durableDisabledIdentity = null;
+            durableHistoryOffset = 0;
+            durablePending = Buffer.alloc(0);
+            durableDroppingOversizedLine = false;
+            durableBaselineComplete = false;
+            durableFailureStreak = 0;
+            durableFallbackTurns = [];
+            durableFallbackModel = null;
+            durableAskUser = null;
+            durableAskUserScan = null;
+
+            // Any allow-all answer still in flight belongs to the previous
+            // conversation and must not be applied to the new one.
+            allowAllUpdateGeneration += 1;
+        }
+
+        // The current Copilot conversation id according to a root
+        // `session.start` / `session.resume` event. The SDK spells the id
+        // differently across payload shapes, so read the event first and only
+        // fall back to the (possibly already-rotated) live `session.sessionId`.
+        function lifecycleSessionId(event) {
+            if (!event || event.agentId) return null;
+            if (event.type !== "session.start"
+                    && event.type !== "session.resume") {
+                return null;
+            }
+            return [event.data?.sessionId, event.sessionId, session.sessionId]
+                .find((candidate) => typeof candidate === "string"
+                    && sessionIdPattern.test(candidate)) ?? null;
+        }
+
+        // `/new` and `/resume` replace the CLI's conversation without restarting
+        // this process. Adopt the new identity, drop everything that described
+        // the old one, roll our owner marker forward, and reload the drawer from
+        // the new conversation's history. `event` is the lifecycle event that
+        // announced the change, or null when the rotation was recovered from the
+        // live session object. Returns true when a rotation happened.
+        function rotateCopilotSession(nextCopilotSessionId, transitionAt, event) {
+            const previousCopilotSessionId = copilotSessionId;
+            copilotSessionId = nextCopilotSessionId;
+            validCopilotSessionId = true;
+            ownedCopilotSessionIds.add(nextCopilotSessionId);
+            conversationGeneration += 1;
+            const generation = conversationGeneration;
+            rotationConsumedEventId = typeof event?.id === "string"
+                ? event.id
+                : null;
+
+            resetConversationState(transitionAt);
+            rotateOwnerMarker(previousCopilotSessionId);
+            if (ownsSharedFiles()) {
+                // `rotateOwnerMarker` already discarded the snapshot under the
+                // lock on the prior-self path. It bails when the marker was
+                // absent or held by a dead/foreign owner we reclaimed here
+                // instead — in that case the snapshot on disk still belongs to
+                // the previous conversation while the marker now names the new
+                // one, so discard it before anything can read the pair.
+                discardRotatedTranscript();
+                setScheduledTurnMarker(false);
+                // Every handler re-validates `copilotSessionId` before acting,
+                // so these files can never be applied to the wrong
+                // conversation — but a remote client that answered the previous
+                // conversation would otherwise see its response sit unresolved
+                // for up to a full poll interval. Drop them now.
+                removeFile(userInputResponsePath);
+                removeFile(elicitationResponsePath);
+                removeFile(setModelRequestPath);
+            }
+            if (event) applyModelFromEvent(event);
+            // Republish the (now empty) per-conversation state immediately so
+            // the host stops showing the previous conversation's subagents and
+            // questions while history loads. Only the transcript waits for
+            // history; this heartbeat must not.
+            publish();
+            bootstrapConversation(generation).catch(() => {});
+            refreshSchedules();
+            refreshModels();
+            return true;
+        }
+
+        function maybeRotateCopilotSession(event) {
+            const resolved = lifecycleSessionId(event);
+            if (!resolved || resolved === copilotSessionId) return false;
+            return rotateCopilotSession(
+                resolved,
+                normalizedTimestamp(event.timestamp),
+                event
+            );
+        }
+
+        // Safety net for a lifecycle event we never saw (dropped, or delivered
+        // before our listeners attached): the live session object still knows
+        // which conversation the CLI is on. Adopt it ONLY when it is a valid id
+        // this process has never held — a `session.sessionId` that lags behind
+        // must never rotate us backward onto a conversation we already left.
+        function reconcileSessionIdentityFromSdk() {
+            const live = session.sessionId;
+            if (typeof live !== "string"
+                    || !sessionIdPattern.test(live)
+                    || live === copilotSessionId
+                    || ownedCopilotSessionIds.has(live)) {
+                return false;
+            }
+            return rotateCopilotSession(live, new Date().toISOString(), null);
         }
 
         // `rpc.model.list()` types its entries as `unknown[]` and returns the raw
@@ -1785,10 +2154,12 @@ public enum CopilotExtension {
         }
 
         async function refreshModels() {
-            if (refreshingModels) return;
-            refreshingModels = true;
+            const generation = conversationGeneration;
+            if (modelsRefreshGeneration === generation) return;
+            modelsRefreshGeneration = generation;
             try {
                 const result = await session.rpc.model.list();
+                if (generation !== conversationGeneration) return;
                 const normalized = normalizeAvailableModels(
                     result && Array.isArray(result.list) ? result.list : null
                 );
@@ -1799,7 +2170,9 @@ public enum CopilotExtension {
                 }
             } catch {
             } finally {
-                refreshingModels = false;
+                if (modelsRefreshGeneration === generation) {
+                    modelsRefreshGeneration = null;
+                }
             }
         }
 
@@ -1809,7 +2182,9 @@ public enum CopilotExtension {
         // fails so the client can issue a fresh one (the model is unchanged on
         // failure, so retrying is safe).
         async function processSetModelRequest() {
-            if (!ownsSharedFiles() || inFlightSetModelRequest) return;
+            const generation = conversationGeneration;
+            if (!ownsSharedFiles()
+                    || setModelRequestGeneration === generation) return;
             let encoded;
             try {
                 encoded = readFileSync(setModelRequestPath, "utf8");
@@ -1828,7 +2203,7 @@ public enum CopilotExtension {
                     || typeof request.modelId !== "string"
                     || request.modelId.length === 0
                     || request.modelId.length > 200
-                    || request.copilotSessionId !== session.sessionId) {
+                    || request.copilotSessionId !== copilotSessionId) {
                 removeFile(setModelRequestPath);
                 return;
             }
@@ -1842,16 +2217,19 @@ public enum CopilotExtension {
                     || request.contextTier === "long_context") {
                 params.contextTier = request.contextTier;
             }
-            inFlightSetModelRequest = true;
+            setModelRequestGeneration = generation;
             try {
                 await session.rpc.model.switchTo(params);
                 removeFile(setModelRequestPath);
+                if (generation !== conversationGeneration) return;
                 // Quotas / preferred default can shift after a switch.
                 await refreshModels();
             } catch {
                 removeFile(setModelRequestPath);
             } finally {
-                inFlightSetModelRequest = false;
+                if (setModelRequestGeneration === generation) {
+                    setModelRequestGeneration = null;
+                }
             }
         }
 
@@ -1925,8 +2303,16 @@ public enum CopilotExtension {
             }
         }
 
-        session.on("session.start", applyModelFromEvent);
-        session.on("session.resume", applyModelFromEvent);
+        // The SDK's dispatch order between the generic listener and these named
+        // ones is not contractual, so rotate from whichever fires first;
+        // `maybeRotateCopilotSession` is a no-op once the id already matches.
+        function handleSessionLifecycleEvent(event) {
+            if (maybeRotateCopilotSession(event)) return;
+            applyModelFromEvent(event);
+        }
+
+        session.on("session.start", handleSessionLifecycleEvent);
+        session.on("session.resume", handleSessionLifecycleEvent);
         session.on("session.model_change", applyModelFromEvent);
 
         session.on("session.permissions_changed", (event) => {
@@ -2142,78 +2528,23 @@ public enum CopilotExtension {
             await registerEventInterest(eventType);
         }
 
+        const startupGeneration = conversationGeneration;
         await refreshAllowAll();
-        // Keep this Copilot session's last good drawer visible while history is
-        // fetched, but clear a snapshot left by a different Copilot session.
-        const preservedTranscriptTurns = restoreMatchingTranscript()
-            ? [...transcriptTurns]
-            : [];
-        const preservedCurrentModel = currentModel;
-        durableTranscriptAuthoritative = durableHistoryAvailable();
-        if (preservedTranscriptTurns.length === 0) {
-            publishTranscript(true);
-        }
-        const durableStartup = durableTranscriptAuthoritative
-            ? reconcileDurableHistory()
-            : null;
-        let historyLoaded = false;
-        try {
-            const history = await sdkHistoryWithTimeout();
-            if (durableTranscriptAuthoritative) {
-                for (const event of history) {
-                    if (!event || typeof event !== "object"
-                            || typeof event.type !== "string") {
-                        continue;
-                    }
-                    try {
-                        applyPermissionEvent(event, false);
-                        applyModelFromEvent(event);
-                    } catch {}
-                }
-            } else {
-                resetTranscriptReplayState([], preservedCurrentModel);
-                for (const event of history) {
-                    replayHistoryEvent(event, true);
-                }
-            }
-            historyLoaded = true;
-        } catch {}
-        if (!durableTranscriptAuthoritative && !historyLoaded) {
-            resetTranscriptReplayState(
-                preservedTranscriptTurns,
-                preservedCurrentModel
-            );
-        }
-        if (durableStartup) {
-            try {
-                await durableStartup;
-            } catch {
-                if (!durableBaselineComplete) {
-                    loseDurableAuthority();
-                }
-            }
-            if (!durableTranscriptAuthoritative && !historyLoaded) {
-                resetTranscriptReplayState(
-                    preservedTranscriptTurns,
-                    preservedCurrentModel
-                );
-            }
-        }
-        transcriptInitialized = true;
-        for (const event of queuedTranscriptEvents) {
-            if (durableTranscriptAuthoritative) {
-                applyPermissionEvent(event, false);
-                applyModelFromEvent(event);
-            } else {
-                replayHistoryEvent(event, true);
-            }
-        }
-        queuedTranscriptEvents.length = 0;
-        publish();
-        if (durableTranscriptAuthoritative) {
-            scheduleDurableReconcile(0);
-        } else {
-            publishTranscript();
+        // A lifecycle event can already have rotated the conversation while we
+        // awaited above; that rotation owns the bootstrap from here on, and
+        // restoring the previous snapshot into `transcriptTurns` would pollute
+        // the conversation it just cleared.
+        if (startupGeneration === conversationGeneration) {
+            // Keep this Copilot session's last good drawer visible while history
+            // is fetched, but clear a snapshot left by a different Copilot
+            // session.
+            const preservedTranscriptTurns = restoreMatchingTranscript()
+                ? [...transcriptTurns]
+                : [];
+            await bootstrapConversation(startupGeneration, {
+                preservedTurns: preservedTranscriptTurns,
+                publishEmptyPlaceholder: true,
+            });
         }
 
         refreshSchedules();
@@ -2224,6 +2555,10 @@ public enum CopilotExtension {
         processSetModelRequest();
 
         timer = setInterval(() => {
+            // Cheap safety net first: if the identity moved without a lifecycle
+            // event reaching us, everything below must run against the new
+            // conversation, not the one we just left.
+            if (reconcileSessionIdentityFromSdk()) return;
             refreshSchedules();
             refreshModels();
             processUserInputResponse();
