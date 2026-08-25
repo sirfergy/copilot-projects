@@ -816,20 +816,25 @@ public enum CopilotExtension {
             return changed;
         }
 
-        function durableAskUserEntry(event) {
+        function durableAskUserMessage(event) {
             const data = event.data;
             if (!data || typeof data !== "object"
                     || data.toolName !== "ask_user"
                     || data.parentToolCallId != null) {
                 return null;
             }
-            const toolCallId = data.toolCallId;
             const message = data.arguments?.message;
-            if (typeof toolCallId !== "string" || !toolCallId
-                    || toolCallId.length > 200
-                    || typeof message !== "string"
+            return typeof message === "string" ? message : null;
+        }
+
+        function durableAskUserEntry(event) {
+            const message = durableAskUserMessage(event);
+            const toolCallId = event.data?.toolCallId;
+            if (message === null
                     || userInputByteLength(message)
-                        > MAX_ELICITATION_MESSAGE_BYTES) {
+                        > MAX_ELICITATION_MESSAGE_BYTES
+                    || typeof toolCallId !== "string" || !toolCallId
+                    || toolCallId.length > 200) {
                 return null;
             }
             const requestedAt = normalizedTimestamp(event.timestamp);
@@ -1309,6 +1314,17 @@ public enum CopilotExtension {
                 const existing = pendingTranscriptTurn.tools.find(
                     (tool) => tool.id === toolId
                 );
+                const askUserMessage = durableAskUserMessage(event);
+                const messageId = boundedMetadataText(
+                    event.data.messageId || event.id
+                );
+                if (askUserMessage !== null
+                        && !existing
+                        && !pendingTranscriptTurn.assistantMessages.some(
+                            (message) => message.id === messageId
+                        )) {
+                    appendTranscriptAssistantMessage(event, askUserMessage);
+                }
                 if (!existing
                         && pendingTranscriptTurn.tools.length
                             < MAX_TRANSCRIPT_TOOLS) {

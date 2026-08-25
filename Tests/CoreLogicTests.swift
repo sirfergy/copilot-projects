@@ -1978,6 +1978,14 @@ final class CoreLogicTests: XCTestCase {
         {"id":"cancelled-start","type":"tool.execution_start","timestamp":"2026-08-25T01:00:02.000Z","data":{"toolCallId":"call-cancelled","toolName":"ask_user","arguments":{"message":"Cancelled question"}}}
         {"id":"cancelled-abort","type":"abort","timestamp":"2026-08-25T01:00:03.000Z","data":{}}
         {"id":"cancelled-shutdown","type":"session.shutdown","timestamp":"2026-08-25T01:00:04.000Z","data":{}}
+        {"id":"malformed-start","type":"tool.execution_start","timestamp":"2026-08-25T01:00:04.250Z","data":{"toolCallId":"call-malformed","toolName":"ask_user","arguments":"not-an-object"}}
+        {"id":"malformed-done","type":"tool.execution_complete","timestamp":"2026-08-25T01:00:04.500Z","data":{"toolCallId":"call-malformed","success":false}}
+        {"id":"subagent-start","type":"tool.execution_start","timestamp":"2026-08-25T01:00:04.600Z","agentId":"agent-1","data":{"toolCallId":"call-subagent","toolName":"ask_user","arguments":{"message":"Subagent question must stay hidden"}}}
+        {"id":"nested-start","type":"tool.execution_start","timestamp":"2026-08-25T01:00:04.700Z","data":{"toolCallId":"call-nested","toolName":"ask_user","parentToolCallId":"call-parent","arguments":{"message":"Nested question must stay hidden"}}}
+        {"id":"repeat-one","type":"tool.execution_start","timestamp":"2026-08-25T01:00:04.800Z","data":{"toolCallId":"call-repeat-one","toolName":"ask_user","arguments":{"message":"Repeated question"}}}
+        {"id":"repeat-one-done","type":"tool.execution_complete","timestamp":"2026-08-25T01:00:04.850Z","data":{"toolCallId":"call-repeat-one","success":true}}
+        {"id":"repeat-two","type":"tool.execution_start","timestamp":"2026-08-25T01:00:04.900Z","data":{"toolCallId":"call-repeat-two","toolName":"ask_user","arguments":{"message":"Repeated question"}}}
+        {"id":"repeat-two-done","type":"tool.execution_complete","timestamp":"2026-08-25T01:00:04.950Z","data":{"toolCallId":"call-repeat-two","success":true}}
         {"id":"pending-start","type":"tool.execution_start","timestamp":"2026-08-25T01:00:05.000Z","data":{"toolCallId":"call-pending","toolName":"ask_user","arguments":{"message":"Pending terminal question","requestedSchema":{"properties":{"choice":{"type":"string"}}}}}}
         {"id":"pending-pre","type":"hook.start","timestamp":"2026-08-25T01:00:06.000Z","data":{"hookType":"preToolUse"}}
         {"id":"pending-notify","type":"hook.end","timestamp":"2026-08-25T01:00:07.000Z","data":{"hookType":"notification"}}
@@ -2209,6 +2217,12 @@ final class CoreLogicTests: XCTestCase {
         const askUserToolCount = (transcript.turns || [])
           .flatMap((turn) => turn.tools || [])
           .filter((tool) => tool.name === "ask_user").length;
+        const assistantContents = (transcript.turns || [])
+          .flatMap((turn) => turn.assistantMessages || [])
+          .map((message) => message.content);
+        const malformedTool = (transcript.turns || [])
+          .flatMap((turn) => turn.tools || [])
+          .find((tool) => tool.id === "call-malformed");
         namedListeners.get("elicitation.requested")?.({
           id:"rejected-root-request",type:"elicitation.requested",
           timestamp:"2026-08-25T01:00:14.500Z",
@@ -2277,6 +2291,8 @@ final class CoreLogicTests: XCTestCase {
             )
           ),
           askUserToolCount,
+          assistantContents,
+          malformedTool,
           handledElicitations,
           responseRemoved: !fileExistsSync(responsePath)
         }));
@@ -2339,6 +2355,22 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(result?["lateSyntheticSeen"] as? Bool, false)
         XCTAssertEqual(result?["staleSyntheticSeen"] as? Bool, false)
         XCTAssertGreaterThan(result?["askUserToolCount"] as? Int ?? 0, 0)
+        XCTAssertEqual(result?["assistantContents"] as? [String], [
+            "Completed question",
+            "Cancelled question",
+            "Repeated question",
+            "Repeated question",
+            "Pending terminal question",
+            "Second durable question",
+            "Third durable question",
+            "Stale durable question",
+            "Fourth durable question",
+        ])
+        let malformedTool = try XCTUnwrap(
+            result?["malformedTool"] as? [String: Any]
+        )
+        XCTAssertEqual(malformedTool["name"] as? String, "ask_user")
+        XCTAssertEqual(malformedTool["success"] as? Bool, false)
         XCTAssertEqual(result?["handledElicitations"] as? Int, 0)
         XCTAssertEqual(result?["responseRemoved"] as? Bool, true)
     }
