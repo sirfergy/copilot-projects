@@ -67,6 +67,18 @@ private final class ScanCounter {
     }
 }
 
+private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
+
 final class AppLogicTests: XCTestCase {
     func testRendererLRUKeepsThreeMostRecentLiveSessions() {
         let live: Set<String> = ["a", "b", "c", "d"]
@@ -5507,6 +5519,55 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(auth.normalizedPath("app.js"))
     }
 
+    func testRemoteIOSAuthenticationEncryptsTokenForRequestingClient() throws {
+        let token = "header.payload.signature"
+        let state = "09E58A90-16DB-4E37-BBA2-04CF1BB63BE2"
+        let clientPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        let clientPublicKey = RemoteIOSAuthentication.base64URLEncode(
+            clientPrivateKey.publicKey.rawRepresentation
+        )
+
+        let location = try XCTUnwrap(
+            RemoteIOSAuthentication.callbackLocation(
+                token: token,
+                request: try XCTUnwrap(
+                    RemoteIOSAuthentication.request(
+                        state: state,
+                        encodedClientPublicKey: clientPublicKey
+                    )
+                )
+            )
+        )
+        XCTAssertFalse(location.contains(token))
+        XCTAssertEqual(
+            try decryptRemoteIOSCallback(
+                location: location,
+                clientPrivateKey: clientPrivateKey,
+                state: state
+            ),
+            token
+        )
+
+        XCTAssertNil(RemoteIOSAuthentication.request(
+            state: "\r\nInjected",
+            encodedClientPublicKey: clientPublicKey
+        ))
+        XCTAssertNil(RemoteIOSAuthentication.request(
+            state: state,
+            encodedClientPublicKey: "short"
+        ))
+        XCTAssertEqual(RemoteIOSAuthentication.path, "/auth/ios")
+        XCTAssertEqual(
+            RemoteIOSAuthentication.callbackScheme,
+            "copilot-projects"
+        )
+        XCTAssertEqual(RemoteIOSAuthentication.callbackHost, "auth")
+        XCTAssertEqual(
+            RemoteIOSAuthentication.keyDerivationInfo,
+            Data("copilot-projects-ios-auth-v1".utf8)
+        )
+    }
+
     func testRemoteAccessConfigurationRequiresAllSettings() throws {
         let suiteName = "RemoteAccessConfigurationTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -6277,6 +6338,102 @@ final class AppLogicTests: XCTestCase {
                 token: "invalid"
             )
             XCTAssertEqual(invalidToken, 403)
+            let authPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+            let authState = UUID().uuidString
+            let authKey = RemoteIOSAuthentication.base64URLEncode(
+                authPrivateKey.publicKey.rawRepresentation
+            )
+            let authPath =
+                "\(RemoteIOSAuthentication.path)?state=\(authState)&key=\(authKey)"
+            let missingAuthToken = try await remoteHTTPStatus(
+                port: port,
+                path: authPath
+            )
+            XCTAssertEqual(missingAuthToken, 403)
+            let malformedAuthState = try await remoteHTTPStatus(
+                port: port,
+                path: "\(RemoteIOSAuthentication.path)?state=%0D%0AInjected&key=\(authKey)",
+                token: token
+            )
+            XCTAssertEqual(malformedAuthState, 400)
+            let malformedAuthKey = try await remoteHTTPStatus(
+                port: port,
+                path: "\(RemoteIOSAuthentication.path)?state=\(authState)&key=short",
+                token: token
+            )
+            XCTAssertEqual(malformedAuthKey, 400)
+            let authHead = try await remoteHTTPStatus(
+                port: port,
+                path: authPath,
+                method: "HEAD",
+                token: token
+            )
+            XCTAssertEqual(authHead, 405)
+            let authForm = Data(
+                "state=\(authState)&key=\(authKey)".utf8
+            )
+            let missingAuthPostOrigin = try await remoteHTTPStatus(
+                port: port,
+                path: authPath,
+                method: "POST",
+                token: token,
+                body: authForm
+            )
+            XCTAssertEqual(missingAuthPostOrigin, 403)
+            let wrongAuthOrigin = try await remoteHTTPStatus(
+                port: port,
+                path: authPath,
+                token: token,
+                origin: "https://evil.example.com"
+            )
+            XCTAssertEqual(wrongAuthOrigin, 403)
+            let (authPageResponse, authPage) =
+                try await remoteHTTPResponseWithBody(
+                    port: port,
+                    path: authPath,
+                    token: token
+                )
+            XCTAssertEqual(authPageResponse.statusCode, 200)
+            let authPageText = try XCTUnwrap(
+                String(data: authPage, encoding: .utf8)
+            )
+            XCTAssertTrue(authPageText.contains(
+                "Continue to Copilot Projects"
+            ))
+            XCTAssertTrue(authPageText.contains(authState))
+            XCTAssertTrue(authPageText.contains(authKey))
+            XCTAssertFalse(authPageText.contains(token))
+            let authResponse = try await remoteHTTPResponse(
+                port: port,
+                path: authPath,
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: authForm,
+                contentType: "application/x-www-form-urlencoded",
+                followRedirects: false
+            )
+            XCTAssertEqual(authResponse.statusCode, 302)
+            XCTAssertEqual(
+                authResponse.value(forHTTPHeaderField: "Cache-Control"),
+                "no-store, max-age=0"
+            )
+            XCTAssertEqual(
+                authResponse.value(forHTTPHeaderField: "Referrer-Policy"),
+                "no-referrer"
+            )
+            let authLocation = try XCTUnwrap(
+                authResponse.value(forHTTPHeaderField: "Location")
+            )
+            XCTAssertFalse(authLocation.contains(token))
+            XCTAssertEqual(
+                try decryptRemoteIOSCallback(
+                    location: authLocation,
+                    clientPrivateKey: authPrivateKey,
+                    state: authState
+                ),
+                token
+            )
             let allowedAsset = try await remoteHTTPResponse(
                 port: port,
                 path: "/app.js",
@@ -9765,18 +9922,72 @@ final class AppLogicTests: XCTestCase {
         return response.statusCode
     }
 
+    private func decryptRemoteIOSCallback(
+        location: String,
+        clientPrivateKey: Curve25519.KeyAgreement.PrivateKey,
+        state: String
+    ) throws -> String {
+        let callback = try XCTUnwrap(URLComponents(string: location))
+        XCTAssertEqual(callback.scheme, RemoteIOSAuthentication.callbackScheme)
+        XCTAssertEqual(callback.host, RemoteIOSAuthentication.callbackHost)
+        var fragment = URLComponents()
+        fragment.percentEncodedQuery = callback.percentEncodedFragment
+        let items = Dictionary(
+            uniqueKeysWithValues: try XCTUnwrap(fragment.queryItems).map {
+                ($0.name, $0.value ?? "")
+            }
+        )
+        XCTAssertEqual(items["state"], state)
+        let serverPublicKey = try Curve25519.KeyAgreement.PublicKey(
+            rawRepresentation: try XCTUnwrap(
+                items["key"].flatMap(
+                    RemoteIOSAuthentication.base64URLDecode
+                )
+            )
+        )
+        let sharedSecret = try clientPrivateKey.sharedSecretFromKeyAgreement(
+            with: serverPublicKey
+        )
+        let key = sharedSecret.hkdfDerivedSymmetricKey(
+            using: SHA256.self,
+            salt: Data(state.utf8),
+            sharedInfo: RemoteIOSAuthentication.keyDerivationInfo,
+            outputByteCount: 32
+        )
+        let payload = try XCTUnwrap(
+            items["payload"].flatMap(
+                RemoteIOSAuthentication.base64URLDecode
+            )
+        )
+        return try String(
+            decoding: ChaChaPoly.open(
+                try ChaChaPoly.SealedBox(combined: payload),
+                using: key
+            ),
+            as: UTF8.self
+        )
+    }
+
     private func remoteHTTPResponse(
         port: Int,
         path: String,
         method: String = "GET",
         token: String? = nil,
         origin: String? = nil,
-        body: Data? = nil
+        body: Data? = nil,
+        contentType: String? = nil,
+        followRedirects: Bool = true
     ) async throws -> HTTPURLResponse {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 5
         configuration.timeoutIntervalForResource = 5
-        let session = URLSession(configuration: configuration)
+        let session = followRedirects
+            ? URLSession(configuration: configuration)
+            : URLSession(
+                configuration: configuration,
+                delegate: NoRedirectDelegate(),
+                delegateQueue: nil
+            )
         defer { session.invalidateAndCancel() }
 
         let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)\(path)"))
@@ -9791,7 +10002,10 @@ final class AppLogicTests: XCTestCase {
             request.setValue(origin, forHTTPHeaderField: "Origin")
         }
         if body != nil {
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(
+                contentType ?? "application/json",
+                forHTTPHeaderField: "Content-Type"
+            )
         }
         let (_, response) = try await session.data(for: request)
         return try XCTUnwrap(response as? HTTPURLResponse)
