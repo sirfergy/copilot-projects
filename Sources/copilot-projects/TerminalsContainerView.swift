@@ -151,7 +151,7 @@ final class TerminalsContainerView: NSView {
     }
 
     /// Size, synchronously draw, and focus the newly revealed terminal. A deferred
-    /// retry inside `forceRedraw` handles a drawable unavailable during activation.
+    /// SwiftTerm's frame coordinator retries drawables unavailable during activation.
     private func reveal(_ view: ProjectsTerminalView) {
         view.frame = bounds
         view.layoutSubtreeIfNeeded()

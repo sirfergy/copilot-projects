@@ -619,14 +619,6 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         applyRendererState()
     }
 
-    deinit {
-        NotificationCenter.default.removeObserver(
-            self,
-            name: .terminalViewMetalRendererStatusDidChange,
-            object: self
-        )
-    }
-
     private func observeMetalRendererStatusIfNeeded() {
         guard !isObservingMetalRendererStatus else { return }
         isObservingMetalRendererStatus = true
@@ -644,10 +636,19 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
 
     func handleMetalRendererStatus(_ state: MetalRendererStatus.State) {
         guard state == .fellBackToCoreGraphics, rendererMode == .metal else { return }
+        NotificationCenter.default.removeObserver(
+            self,
+            name: .terminalViewMetalRendererStatusDidChange,
+            object: self
+        )
+        enterCoreGraphicsFallback()
+        NSLog("copilot-projects: SwiftTerm fell back to CoreGraphics after repeated Metal stalls")
+    }
+
+    private func enterCoreGraphicsFallback() {
         rendererMode = .coreGraphicsFallback
         rendererName = "coregraphics-fallback"
         disableFullRedrawOnAnyChanges = false
-        NSLog("copilot-projects: SwiftTerm fell back to CoreGraphics after repeated Metal stalls")
     }
 
     /// Keeps the terminal model, parser, scrollback, and PTY alive while releasing
@@ -673,8 +674,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             rendererName = "coregraphics-forced"
             disableFullRedrawOnAnyChanges = false
         case .coreGraphicsFallback:
-            rendererName = "coregraphics-fallback"
-            disableFullRedrawOnAnyChanges = false
+            enterCoreGraphicsFallback()
         case .metal:
             guard rendererShouldBeActive else {
                 parkMetalRenderer()
@@ -690,9 +690,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                 }
                 rendererName = "metal"
             } catch {
-                rendererMode = .coreGraphicsFallback
-                rendererName = "coregraphics-fallback"
-                disableFullRedrawOnAnyChanges = false
+                enterCoreGraphicsFallback()
                 NSLog("copilot-projects: Metal renderer unavailable, using CoreGraphics: \(error)")
             }
         }
@@ -723,6 +721,13 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         applyRendererState()
         if isUsingMetalRenderer {
             invalidateMetalRenderCaches()
+            // A zero-bounds CoreText result is deliberately cached as empty. Give
+            // wake/scale transitions one runloop turn to settle, then clear and
+            // rebuild once more without reaching into SwiftTerm's MTKView tree.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isUsingMetalRenderer, self.window != nil else { return }
+                self.invalidateMetalRenderCaches()
+            }
         } else {
             terminal?.updateFullScreen()
             needsDisplay = true
@@ -731,8 +736,9 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     }
 
     /// Strong manual recovery for a surface that stayed blank after reveal:
-    /// invalidate the full model, draw the paused Metal view immediately, and
-    /// retain the normal deferred retry for a temporarily unavailable drawable.
+    /// invalidate the full model and draw the paused Metal view immediately.
+    /// SwiftTerm handles missing-drawable backoff; `refreshSurface` retries
+    /// zero-bounds glyph results once on the next runloop turn.
     func forceRedraw() {
         refreshSurface()
         if isUsingMetalRenderer {

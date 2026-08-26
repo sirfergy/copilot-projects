@@ -145,6 +145,14 @@ final class AppLogicTests: XCTestCase {
     @MainActor
     func testSwiftTermMetalFallbackRemainsOnCoreGraphics() {
         let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+        let window = NSWindow(
+            contentRect: view.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = view
+        defer { window.contentView = nil }
 
         view.handleMetalRendererStatus(.fellBackToCoreGraphics)
         view.setRendererActive(true)
