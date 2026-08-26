@@ -142,6 +142,17 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(views.values.filter(\.rendererShouldBeActiveForTesting).count, 3)
     }
 
+    @MainActor
+    func testSwiftTermMetalFallbackRemainsOnCoreGraphics() {
+        let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+
+        view.handleMetalRendererStatus(.fellBackToCoreGraphics)
+        view.setRendererActive(true)
+
+        XCTAssertEqual(view.rendererName, "coregraphics-fallback")
+        XCTAssertFalse(view.isUsingMetalRenderer)
+    }
+
     func testFooterClassification() {
         XCTAssertEqual(
             TerminalController.classifyFooter("◎ Working   esc cancel"),

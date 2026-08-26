@@ -14,13 +14,11 @@ let package = Package(
         ),
     ],
     dependencies: [
-        // Based on upstream v1.18.0, which includes the Kitty truecolor
-        // placeholder ID fix from migueldeicaza/SwiftTerm#607. The fork retains
-        // the empty-ink glyph cache and blank-Metal-surface recovery fixes from
-        // sirfergy/SwiftTerm#1 and sirfergy/SwiftTerm#2.
+        // Based on upstream v1.20.0. The fork retains Copilot Projects' empty-ink
+        // cache, blank-surface recovery, and renderer-recreation fixes.
         .package(
             url: "https://github.com/sirfergy/SwiftTerm",
-            revision: "2f7dd30c7cb4c9df15b3c33ed1a79109a90a87d9"
+            revision: "e49fcaa735dda6fdbcf2e058983aac0598cb2fa9"
         ),
         .package(
             url: "https://github.com/apple/swift-nio",
