@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 import NIOCore
 import NIOPosix
 import NIOHTTP1
@@ -470,6 +471,123 @@ struct RemoteRequestAuth: Sendable {
     }
 }
 
+enum RemoteIOSAuthentication {
+    struct Request {
+        let state: String
+        let encodedClientPublicKey: String
+        let clientPublicKey: Curve25519.KeyAgreement.PublicKey
+    }
+
+    static let path = "/auth/ios"
+    static let callbackScheme = "copilot-projects"
+    static let callbackHost = "auth"
+    static let keyDerivationInfo = Data(
+        "copilot-projects-ios-auth-v1".utf8
+    )
+
+    static func request(
+        state: String?,
+        encodedClientPublicKey: String?
+    ) -> Request? {
+        guard let state,
+              UUID(uuidString: state) != nil,
+              let encodedClientPublicKey,
+              let clientPublicKeyData = base64URLDecode(
+                encodedClientPublicKey
+              ),
+              clientPublicKeyData.count == 32,
+              let clientPublicKey = try? Curve25519.KeyAgreement.PublicKey(
+                rawRepresentation: clientPublicKeyData
+              ) else {
+            return nil
+        }
+        return Request(
+            state: state,
+            encodedClientPublicKey: encodedClientPublicKey,
+            clientPublicKey: clientPublicKey
+        )
+    }
+
+    static func confirmationPage(for request: Request) -> String {
+        """
+        <!doctype html>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Continue to Copilot Projects</title>
+        <main>
+          <h1>Continue to Copilot Projects?</h1>
+          <p>Your verified Cloudflare session will be returned securely to the app.</p>
+          <form method="post" action="\(path)">
+            <input type="hidden" name="state" value="\(request.state)">
+            <input type="hidden" name="key" value="\(request.encodedClientPublicKey)">
+            <button type="submit">Continue to Copilot Projects</button>
+          </form>
+        </main>
+        """
+    }
+
+    static func callbackLocation(
+        token: String,
+        request: Request
+    ) -> String? {
+        guard token.utf8.count <= 16_384 else {
+            return nil
+        }
+
+        let serverPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        guard let sharedSecret = try? serverPrivateKey.sharedSecretFromKeyAgreement(
+            with: request.clientPublicKey
+        ) else {
+            return nil
+        }
+        let encryptionKey = sharedSecret.hkdfDerivedSymmetricKey(
+            using: SHA256.self,
+            salt: Data(request.state.utf8),
+            sharedInfo: keyDerivationInfo,
+            outputByteCount: 32
+        )
+        guard let sealed = try? ChaChaPoly.seal(
+            Data(token.utf8),
+            using: encryptionKey
+        ) else {
+            return nil
+        }
+
+        let serverPublicKey = base64URLEncode(
+            serverPrivateKey.publicKey.rawRepresentation
+        )
+        let payload = base64URLEncode(sealed.combined)
+        var components = URLComponents()
+        components.scheme = callbackScheme
+        components.host = callbackHost
+        components.percentEncodedFragment =
+            "state=\(request.state)&key=\(serverPublicKey)&payload=\(payload)"
+        return components.string
+    }
+
+    static func base64URLEncode(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    static func base64URLDecode(_ string: String) -> Data? {
+        guard string.allSatisfy({
+            $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_")
+        }) else {
+            return nil
+        }
+        var base64 = string
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padding = base64.count % 4
+        if padding > 0 {
+            base64 += String(repeating: "=", count: 4 - padding)
+        }
+        return Data(base64Encoded: base64)
+    }
+}
+
 private let remoteCSP =
     "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; "
     + "worker-src 'self'; manifest-src 'self'; img-src 'self' blob:; "
@@ -598,6 +716,34 @@ private final class RemoteHTTPHandler:
                 handleAPNsRegistration(context: context, subscribe: false)
             case "/\(NotificationSyncContract.dismissPath)":
                 handleNotificationDismissal(context: context)
+            case RemoteIOSAuthentication.path:
+                let form = String(bytes: body, encoding: .utf8)
+                let parameters = form.map {
+                    RemoteRequestAuth.queryItems("/?\($0)")
+                }
+                guard head.headers.first(name: "Content-Type")?
+                        .lowercased()
+                        .hasPrefix("application/x-www-form-urlencoded") == true,
+                      !bodyTooLarge,
+                      let parameters,
+                      let request = RemoteIOSAuthentication.request(
+                        state: parameters["state"],
+                        encodedClientPublicKey: parameters["key"]
+                      ),
+                      let token = head.headers.first(
+                        name: "Cf-Access-Jwt-Assertion"
+                      ),
+                      let location =
+                        RemoteIOSAuthentication.callbackLocation(
+                            token: token,
+                            request: request
+                        ) else {
+                    respond(context: context, method: head.method,
+                            status: .badRequest,
+                            contentType: "text/plain", body: "Bad request")
+                    return
+                }
+                redirect(context: context, location: location)
             default:
                 respond(context: context, method: head.method, status: .notFound,
                         contentType: "text/plain", body: "Not found")
@@ -615,6 +761,32 @@ private final class RemoteHTTPHandler:
         }
 
         switch path {
+        case RemoteIOSAuthentication.path:
+            guard head.method == .GET else {
+                respond(context: context, method: head.method,
+                        status: .methodNotAllowed,
+                        contentType: "text/plain", body: "Method not allowed")
+                return
+            }
+            let query = RemoteRequestAuth.queryItems(head.uri)
+            guard let request = RemoteIOSAuthentication.request(
+                    state: query["state"],
+                    encodedClientPublicKey: query["key"]
+                  ) else {
+                respond(context: context, method: head.method,
+                        status: .badRequest,
+                        contentType: "text/plain", body: "Bad request")
+                return
+            }
+            respond(
+                context: context,
+                method: head.method,
+                status: .ok,
+                contentType: "text/html; charset=utf-8",
+                body: RemoteIOSAuthentication.confirmationPage(
+                    for: request
+                )
+            )
         case "/":
             respond(context: context, method: head.method, status: .ok,
                     contentType: "text/html; charset=utf-8", body: RemoteWebAssets.html)
@@ -1628,6 +1800,25 @@ private final class RemoteHTTPHandler:
     }
 
     // MARK: - Fixed-length responses
+
+    private func redirect(
+        context: ChannelHandlerContext,
+        location: String
+    ) {
+        var headers = HTTPHeaders()
+        headers.add(name: "Location", value: location)
+        headers.add(name: "Content-Length", value: "0")
+        headers.add(name: "Cache-Control", value: "no-store, max-age=0")
+        headers.add(name: "Referrer-Policy", value: "no-referrer")
+        headers.add(name: "Content-Security-Policy", value: "default-src 'none'")
+        let response = HTTPResponseHead(
+            version: .http1_1,
+            status: .found,
+            headers: headers
+        )
+        context.write(wrapOutboundOut(.head(response)), promise: nil)
+        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+    }
 
     private func respond(
         context: ChannelHandlerContext,
