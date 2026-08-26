@@ -1,5 +1,4 @@
 import AppKit
-import MetalKit
 import SwiftTerm
 
 /// A `LocalProcessTerminalView` that makes the scroll wheel work inside
@@ -34,7 +33,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             : .metal
     }()
     private var rendererShouldBeActive = false
-    private var surfaceRefreshGeneration = 0
+    private var isObservingMetalRendererStatus = false
     /// True from the moment a remote prompt's paste is written until its submit
     /// Enter fires, so an overlapping remote prompt can't interleave its paste
     /// bytes into a half-submitted one. Main-actor only.
@@ -616,7 +615,40 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        observeMetalRendererStatusIfNeeded()
         applyRendererState()
+    }
+
+    private func observeMetalRendererStatusIfNeeded() {
+        guard !isObservingMetalRendererStatus else { return }
+        isObservingMetalRendererStatus = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(metalRendererStatusDidChange(_:)),
+            name: .terminalViewMetalRendererStatusDidChange,
+            object: self
+        )
+    }
+
+    @objc private func metalRendererStatusDidChange(_ notification: Notification) {
+        handleMetalRendererStatus(metalRendererStatus.state)
+    }
+
+    func handleMetalRendererStatus(_ state: MetalRendererStatus.State) {
+        guard state == .fellBackToCoreGraphics, rendererMode == .metal else { return }
+        NotificationCenter.default.removeObserver(
+            self,
+            name: .terminalViewMetalRendererStatusDidChange,
+            object: self
+        )
+        enterCoreGraphicsFallback()
+        NSLog("copilot-projects: SwiftTerm fell back to CoreGraphics after repeated Metal stalls")
+    }
+
+    private func enterCoreGraphicsFallback() {
+        rendererMode = .coreGraphicsFallback
+        rendererName = "coregraphics-fallback"
+        disableFullRedrawOnAnyChanges = false
     }
 
     /// Keeps the terminal model, parser, scrollback, and PTY alive while releasing
@@ -642,8 +674,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             rendererName = "coregraphics-forced"
             disableFullRedrawOnAnyChanges = false
         case .coreGraphicsFallback:
-            rendererName = "coregraphics-fallback"
-            disableFullRedrawOnAnyChanges = false
+            enterCoreGraphicsFallback()
         case .metal:
             guard rendererShouldBeActive else {
                 parkMetalRenderer()
@@ -655,14 +686,11 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             }
             do {
                 if !isUsingMetalRenderer {
-                    surfaceRefreshGeneration += 1
                     try setUseMetal(true)
                 }
                 rendererName = "metal"
             } catch {
-                rendererMode = .coreGraphicsFallback
-                rendererName = "coregraphics-fallback"
-                disableFullRedrawOnAnyChanges = false
+                enterCoreGraphicsFallback()
                 NSLog("copilot-projects: Metal renderer unavailable, using CoreGraphics: \(error)")
             }
         }
@@ -674,7 +702,6 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             return
         }
         do {
-            surfaceRefreshGeneration += 1
             try setUseMetal(false)
             rendererName = "parked"
         } catch {
@@ -692,47 +719,14 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     func refreshSurface() {
         guard rendererShouldBeActive, window != nil else { return }
         applyRendererState()
-        if isUsingMetalRenderer,
-           let metalView: MTKView = firstDescendant(of: MTKView.self) {
-            // `terminal.updateFullScreen()` marks the terminal's rows dirty but
-            // does NOT reach the Metal renderer's rebuild path: `metalDirtyRange`
-            // is only set inside the view's `updateDisplay()`, which this
-            // reveal/redraw path never calls, and the renderer only does a full
-            // rebuild when its cache signature changes or `rowCache` is empty. For
-            // an idle, unchanged buffer neither holds, so a plain `setNeedsDisplay`
-            // just repaints the *cached* rows. If a transient CoreText failure ever
-            // baked empty glyph buffers into those rows (or poisoned the
-            // never-cleared empty-ink cache), the surface stays blank — only the
-            // textureless cursor quad paints — and no reveal/redraw recovers it
-            // short of a restart. Dropping the row + empty-ink caches forces the
-            // next draw to rebuild every visible row from the current model,
-            // re-rasterizing any wrongly-memoized glyph (the valid glyph atlas is
-            // retained, so healthy glyphs are not re-rasterized).
+        if isUsingMetalRenderer {
             invalidateMetalRenderCaches()
-            surfaceRefreshGeneration += 1
-            let generation = surfaceRefreshGeneration
-            metalView.setNeedsDisplay(metalView.bounds)
-            // A paused MTKView can be asked to draw before its just-unhidden
-            // CAMetalLayer has a drawable. Retry once after AppKit commits the
-            // visibility/layout transaction; rapid switches invalidate older retries.
+            // A zero-bounds CoreText result is deliberately cached as empty. Give
+            // wake/scale transitions one runloop turn to settle, then clear and
+            // rebuild once more without reaching into SwiftTerm's MTKView tree.
             DispatchQueue.main.async { [weak self] in
-                guard let self,
-                      self.surfaceRefreshGeneration == generation,
-                      self.window != nil,
-                      !self.isHiddenOrHasHiddenAncestor,
-                      self.bounds.width > 0,
-                      self.bounds.height > 0,
-                      let currentMetalView: MTKView = self.firstDescendant(of: MTKView.self),
-                      currentMetalView.bounds.width > 0,
-                      currentMetalView.bounds.height > 0
-                else { return }
-                // Re-invalidate: if the immediate draw already ran and rebuilt the
-                // rows empty (e.g. the transient failure was still in effect), the
-                // rows are cached again and this retry would otherwise be a no-op
-                // (idle buffer ⇒ no signature change, rows cacheValid). Cheap: the
-                // glyph atlas is retained.
+                guard let self, self.isUsingMetalRenderer, self.window != nil else { return }
                 self.invalidateMetalRenderCaches()
-                currentMetalView.setNeedsDisplay(currentMetalView.bounds)
             }
         } else {
             terminal?.updateFullScreen()
@@ -742,26 +736,14 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     }
 
     /// Strong manual recovery for a surface that stayed blank after reveal:
-    /// invalidate the full model, draw the paused Metal view immediately, and
-    /// retain the normal deferred retry for a temporarily unavailable drawable.
+    /// invalidate the full model and draw the paused Metal view immediately.
+    /// SwiftTerm handles missing-drawable backoff; `refreshSurface` retries
+    /// zero-bounds glyph results once on the next runloop turn.
     func forceRedraw() {
         refreshSurface()
-        if isUsingMetalRenderer,
-           let metalView: MTKView = firstDescendant(of: MTKView.self) {
-            metalView.draw()
+        if isUsingMetalRenderer {
+            drawMetalFrameNow()
         }
-    }
-
-    private func firstDescendant<T: NSView>(of type: T.Type) -> T? {
-        firstDescendant(of: type, below: self)
-    }
-
-    private func firstDescendant<T: NSView>(of type: T.Type, below view: NSView) -> T? {
-        for child in view.subviews {
-            if let match = child as? T { return match }
-            if let match = firstDescendant(of: type, below: child) { return match }
-        }
-        return nil
     }
 
     /// Returns true if the wheel event was handled (and so should be consumed).
