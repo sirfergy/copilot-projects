@@ -18,7 +18,7 @@ let package = Package(
         // cache, blank-surface recovery, and renderer-recreation fixes.
         .package(
             url: "https://github.com/sirfergy/SwiftTerm",
-            revision: "05d2898ba1c81f55560b9aaa960575740046f77f"
+            revision: "cd053dc4709ddea6e5ad80d8d9df20cd81a9da2c"
         ),
         .package(
             url: "https://github.com/apple/swift-nio",
