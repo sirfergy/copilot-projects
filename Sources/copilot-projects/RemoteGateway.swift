@@ -1152,9 +1152,7 @@ private final class RemoteHTTPHandler:
                 RemoteCreateSessionRequest.self, from: Data(body)
               ),
               !request.projectId.isEmpty,
-              request.projectId.utf8.count <= 200,
-              (request.pullRequestURL?.utf8.count ?? 0)
-                <= PullRequestReviewTarget.maximumInputBytes else {
+              request.projectId.utf8.count <= 200 else {
             respond(context: context, method: .POST, status: .badRequest,
                     contentType: "text/plain", body: "Bad request")
             return

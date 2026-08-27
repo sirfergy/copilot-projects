@@ -86,10 +86,14 @@ public struct PullRequestReviewTarget: Equatable, Sendable {
     }
 
     private static func isSafePathComponent(_ value: String) -> Bool {
-        let allowed = CharacterSet.alphanumerics.union(
-            CharacterSet(charactersIn: "._-")
+        let allowed = CharacterSet(
+            charactersIn:
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
         )
-        return !value.isEmpty && value.unicodeScalars.allSatisfy(allowed.contains)
+        return !value.isEmpty
+            && value != "."
+            && value != ".."
+            && value.unicodeScalars.allSatisfy(allowed.contains)
     }
 }
 

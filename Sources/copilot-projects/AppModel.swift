@@ -820,14 +820,6 @@ final class AppModel: ObservableObject {
             )
             return
         }
-        guard remoteReposDirectory() != nil else {
-            presentAlert(
-                title: "Repos Folder Is Unavailable",
-                message: "Create ~/Repos before starting a local pull request review."
-            )
-            return
-        }
-
         var initialText = ""
         while let input = promptForText(
             title: "Review Pull Request",
@@ -857,11 +849,11 @@ final class AppModel: ObservableObject {
         guard let pi = projectIndex(pid),
               let target = PullRequestReviewTarget.parse(pullRequestURL),
               remoteSessionBackendAvailable(),
-              let copilotExecutable = remoteCopilotExecutable(),
-              let cwd = remoteReposDirectory() else {
+              let copilotExecutable = remoteCopilotExecutable() else {
             return nil
         }
 
+        let cwd = defaultCwd(forProjectIndex: pi)
         let session = Session(title: target.title, cwd: cwd)
         projects[pi].sessions.append(session)
         projects[pi].selectedSessionId = session.id

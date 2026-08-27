@@ -3994,6 +3994,12 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertNil(PullRequestReviewTarget.parse(
             "https://github.com/owner%2Frepo/name/pull/1"
         ))
+        XCTAssertNil(PullRequestReviewTarget.parse(
+            "https://github.com/../repo/pull/1"
+        ))
+        XCTAssertNil(PullRequestReviewTarget.parse(
+            "https://github.com/Üntergang/repo/pull/1"
+        ))
     }
 
     func testResolveCopilotExecutablePrefersOverrideThenLocalThenPath() throws {

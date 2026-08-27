@@ -7369,6 +7369,60 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testAddLocalAdversarialReviewSessionUsesProjectContext() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let existing = Session(id: "existing", title: "shell", cwd: "/tmp/old")
+        let project = Project(
+            id: "p1",
+            name: "Reviews",
+            cwd: "/tmp/project-checkout",
+            sessions: [existing],
+            selectedSessionId: existing.id
+        )
+        let ledger = SessionCreationLedger(
+            url: root.appendingPathComponent("ledger.json")
+        )
+        var launches: [(sessionId: String, executable: String, prompt: String?)] = []
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [project],
+            selectedProjectId: "p1",
+            reposDirectory: { nil },
+            ledger: ledger,
+            onLaunch: { launches.append(($0, $1, $2)) }
+        )
+
+        let pullRequestURL = "https://github.com/github/github/pull/123"
+        let sessionId = try XCTUnwrap(model.addAdversarialReviewSession(
+            toProjectId: "p1",
+            pullRequestURL: pullRequestURL
+        ))
+        let session = try XCTUnwrap(
+            model.project("p1")?.sessions.first { $0.id == sessionId }
+        )
+        XCTAssertEqual(session.title, "Review github/github#123")
+        XCTAssertEqual(session.cwd, "/tmp/old")
+        XCTAssertEqual(model.project("p1")?.selectedSessionId, sessionId)
+        XCTAssertEqual(launches.count, 1)
+        XCTAssertEqual(
+            launches.first?.prompt,
+            AppModel.adversarialReviewPrompt(
+                for: try XCTUnwrap(PullRequestReviewTarget.parse(pullRequestURL))
+            )
+        )
+
+        XCTAssertNil(model.addAdversarialReviewSession(
+            toProjectId: "p1",
+            pullRequestURL: "https://example.com/not-a-pr"
+        ))
+        XCTAssertEqual(launches.count, 1)
+    }
+
+    @MainActor
     func testCreateRemoteSessionSelectsOnlyWhenProjectEmpty() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
