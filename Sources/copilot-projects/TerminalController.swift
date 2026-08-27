@@ -115,6 +115,7 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     init(sessionId: String, cwd: String, extraEnvironment: [String: String],
          dtachExecutable: String?, dtachSocket: String?, copilotSessionId: String? = nil,
          copilotSessionAllowAll: Bool = false, launchCopilotExecutable: String? = nil,
+         launchCopilotInitialPrompt: String? = nil,
          kittyImageDiskStore: RemoteKittyImageDiskStore = .shared) {
         self.sessionId = sessionId
         self.terminalView = ProjectsTerminalView(
@@ -152,14 +153,16 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
               dtachExecutable: dtachExecutable, dtachSocket: dtachSocket,
               copilotSessionId: copilotSessionId,
               copilotSessionAllowAll: copilotSessionAllowAll,
-              launchCopilotExecutable: launchCopilotExecutable)
+              launchCopilotExecutable: launchCopilotExecutable,
+              launchCopilotInitialPrompt: launchCopilotInitialPrompt)
     }
 
     private func start(cwd: String, extraEnvironment: [String: String],
                        dtachExecutable: String?, dtachSocket: String?,
                        copilotSessionId: String? = nil,
                        copilotSessionAllowAll: Bool = false,
-                       launchCopilotExecutable: String? = nil) {
+                       launchCopilotExecutable: String? = nil,
+                       launchCopilotInitialPrompt: String? = nil) {
         let processEnv = ProcessInfo.processInfo.environment
         let shell = processEnv["SHELL"] ?? "/bin/zsh"
         let shellName = (shell as NSString).lastPathComponent
@@ -197,7 +200,8 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
                 copilotSessionId: copilotSessionId,
                 copilotSessionAllowAll: copilotSessionAllowAll,
                 resumeCopilotExecutable: resumeCopilotExecutable,
-                launchCopilotExecutable: launchCopilotExecutable
+                launchCopilotExecutable: launchCopilotExecutable,
+                launchCopilotInitialPrompt: launchCopilotInitialPrompt
             )
             terminalView.startProcess(
                 executable: dtach,
@@ -334,7 +338,8 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         copilotSessionId: String?,
         copilotSessionAllowAll: Bool,
         resumeCopilotExecutable: String? = nil,
-        launchCopilotExecutable: String?
+        launchCopilotExecutable: String?,
+        launchCopilotInitialPrompt: String? = nil
     ) -> [String] {
         if let cid = copilotSessionId, isSafeSessionId(cid) {
             // Quote the shell path (spaces/apostrophes) and warn — without blocking
@@ -351,7 +356,8 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
             return [shell, "-l", "-c", launchCommand(
                 executable: executable,
                 shell: shell,
-                allowAll: copilotSessionAllowAll
+                allowAll: copilotSessionAllowAll,
+                initialPrompt: launchCopilotInitialPrompt
             )]
         }
         return [shell, "-l"]
@@ -364,10 +370,14 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     nonisolated static func launchCommand(
         executable: String,
         shell: String,
-        allowAll: Bool = false
+        allowAll: Bool = false,
+        initialPrompt: String? = nil
     ) -> String {
         var arguments = ["--no-remote", "--no-remote-export"]
         if allowAll { arguments.append("--allow-all") }
+        if let initialPrompt, !initialPrompt.isEmpty {
+            arguments.append(contentsOf: ["--interactive", initialPrompt])
+        }
         return profiledCopilotCommand(executable, arguments: arguments)
             + " || printf '\\n[Copilot Projects] could not launch Copilot\\n';"
             + " exec \(shellSingleQuote(shell)) -l"

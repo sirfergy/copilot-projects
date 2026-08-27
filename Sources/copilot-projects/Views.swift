@@ -446,6 +446,19 @@ struct SessionTabBar: View {
             .accessibilityLabel("Redraw Terminal")
             .padding(.trailing, 4)
 
+            Button {
+                model.addAdversarialReviewSessionInteractive(toProjectId: project.id)
+            } label: {
+                Image(systemName: "checkmark.shield")
+                    .font(.caption)
+                    .frame(width: 24, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .hoverHighlight()
+            .help("Review Pull Request")
+            .accessibilityLabel("Review Pull Request")
+            .padding(.trailing, 4)
+
             Button { model.addSession(toProjectId: project.id) } label: {
                 Image(systemName: "plus")
                     .font(.caption)

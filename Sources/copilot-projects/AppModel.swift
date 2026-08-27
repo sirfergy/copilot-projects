@@ -131,6 +131,8 @@ enum RemoteSessionCreationOutcome: Equatable {
     /// The request is well-formed but cannot be honored — the required `$HOME/Repos`
     /// working directory is missing. Nothing was created. (422)
     case invalid
+    /// The request does not match the endpoint or contains an invalid PR URL. (400)
+    case badRequest
     /// The deterministic session id already exists in a DIFFERENT project. (409)
     case conflict
     /// The ledger shows this request was already processed but the session is gone;
@@ -384,7 +386,8 @@ final class AppModel: ObservableObject {
     /// Overrides the controller launch for a freshly-created remote session (tests
     /// record it instead of spawning a real terminal). Nil in production, where the
     /// real cached terminal controller is created with a one-shot Copilot launch.
-    private let remoteSessionLauncher: ((_ sessionId: String, _ copilotExecutable: String) -> Void)?
+    private let remoteSessionLauncher:
+        ((_ sessionId: String, _ copilotExecutable: String, _ initialPrompt: String?) -> Void)?
     /// Persistent idempotency/tombstone store behind remote session creation.
     private let sessionCreationLedger: SessionCreationLedger
 
@@ -439,7 +442,7 @@ final class AppModel: ObservableObject {
         remoteSessionBackendAvailable: @escaping () -> Bool = {
             Paths.dtachExecutable != nil
         },
-        remoteSessionLauncher: ((String, String) -> Void)? = nil,
+        remoteSessionLauncher: ((String, String, String?) -> Void)? = nil,
         sessionCreationLedger: SessionCreationLedger = SessionCreationLedger(),
         agentActivityRefreshThrottle: TimeInterval = 0.5,
         agentActivityCooldownScheduler: @escaping (
@@ -596,7 +599,8 @@ final class AppModel: ObservableObject {
         for sessionId: String,
         launchCopilotIfCreated: Bool = false,
         copilotExecutable: String? = nil,
-        launchWithAllowAll: Bool = false
+        launchWithAllowAll: Bool = false,
+        launchCopilotInitialPrompt: String? = nil
     ) -> TerminalController? {
         if let c = controllers[sessionId] { return c }
         guard !isTerminating else { return nil }
@@ -648,6 +652,7 @@ final class AppModel: ObservableObject {
             copilotSessionId: (recordedCopilot?.isEmpty == false) ? recordedCopilot : nil,
             copilotSessionAllowAll: resumeWithAllowAll || launchWithAllowAll,
             launchCopilotExecutable: launchCopilotIfCreated ? copilotExecutable : nil,
+            launchCopilotInitialPrompt: launchCopilotInitialPrompt,
             kittyImageDiskStore: kittyImageDiskStore
         )
         c.onTitle = { [weak self] title in self?.updateTitle(sessionId: sessionId, title: title) }
@@ -806,6 +811,92 @@ final class AppModel: ObservableObject {
         return session.id
     }
 
+    func addAdversarialReviewSessionInteractive(toProjectId pid: String) {
+        guard remoteSessionBackendAvailable(),
+              remoteCopilotExecutable() != nil else {
+            presentAlert(
+                title: "Copilot Is Unavailable",
+                message: "Install or configure the Copilot CLI before starting a pull request review."
+            )
+            return
+        }
+        guard remoteReposDirectory() != nil else {
+            presentAlert(
+                title: "Repos Folder Is Unavailable",
+                message: "Create ~/Repos before starting a local pull request review."
+            )
+            return
+        }
+
+        var initialText = ""
+        while let input = promptForText(
+            title: "Review Pull Request",
+            message: "Paste a GitHub pull request URL. Copilot will start a read-only local adversarial review.",
+            confirmTitle: "Review",
+            initialText: initialText
+        ) {
+            if addAdversarialReviewSession(
+                toProjectId: pid,
+                pullRequestURL: input
+            ) != nil {
+                return
+            }
+            initialText = input
+            presentAlert(
+                title: "Invalid Pull Request URL",
+                message: "Use an HTTPS github.com URL such as https://github.com/owner/repo/pull/123."
+            )
+        }
+    }
+
+    @discardableResult
+    func addAdversarialReviewSession(
+        toProjectId pid: String,
+        pullRequestURL: String
+    ) -> String? {
+        guard let pi = projectIndex(pid),
+              let target = PullRequestReviewTarget.parse(pullRequestURL),
+              remoteSessionBackendAvailable(),
+              let copilotExecutable = remoteCopilotExecutable(),
+              let cwd = remoteReposDirectory() else {
+            return nil
+        }
+
+        let session = Session(title: target.title, cwd: cwd)
+        projects[pi].sessions.append(session)
+        projects[pi].selectedSessionId = session.id
+        let prompt = Self.adversarialReviewPrompt(for: target)
+        if let remoteSessionLauncher {
+            remoteSessionLauncher(session.id, copilotExecutable, prompt)
+        } else {
+            controller(
+                for: session.id,
+                launchCopilotIfCreated: true,
+                copilotExecutable: copilotExecutable,
+                launchCopilotInitialPrompt: prompt
+            )
+        }
+        refreshSelectedTranscriptController()
+        save()
+        return session.id
+    }
+
+    nonisolated static func adversarialReviewPrompt(
+        for target: PullRequestReviewTarget
+    ) -> String {
+        "Perform a read-only local adversarial review of \(target.url). "
+            + "Use the adversarial-review skill. Inspect the pull request from a local checkout "
+            + "or isolated worktree. Do not edit files, push changes, or post anything to GitHub. "
+            + "Report the findings in this session."
+    }
+
+    private func presentAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.runModal()
+    }
+
     /// Create (or idempotently resolve) a session for a remote `POST /sessions/create`.
     /// Runs synchronously on the MainActor and mutates state directly.
     ///
@@ -819,6 +910,38 @@ final class AppModel: ObservableObject {
     func createRemoteSession(
         _ request: RemoteCreateSessionRequest,
         now: Date = Date()
+    ) -> RemoteSessionCreationOutcome {
+        guard request.pullRequestURL == nil else { return .badRequest }
+        return createRemoteSession(
+            request,
+            title: "Copilot",
+            initialPrompt: nil,
+            now: now
+        )
+    }
+
+    func createRemoteAdversarialReviewSession(
+        _ request: RemoteCreateSessionRequest,
+        now: Date = Date()
+    ) -> RemoteSessionCreationOutcome {
+        guard let rawURL = request.pullRequestURL,
+              let target = PullRequestReviewTarget.parse(rawURL),
+              rawURL == target.url else {
+            return .badRequest
+        }
+        return createRemoteSession(
+            request,
+            title: target.title,
+            initialPrompt: Self.adversarialReviewPrompt(for: target),
+            now: now
+        )
+    }
+
+    private func createRemoteSession(
+        _ request: RemoteCreateSessionRequest,
+        title: String,
+        initialPrompt: String?,
+        now: Date
     ) -> RemoteSessionCreationOutcome {
         let sessionId = request.requestId.uuidString
 
@@ -856,7 +979,7 @@ final class AppModel: ObservableObject {
         guard let copilotExecutable = remoteCopilotExecutable() else { return .unavailable }
         guard let cwd = remoteReposDirectory() else { return .invalid }
 
-        let session = Session(id: sessionId, title: "Copilot", cwd: cwd)
+        let session = Session(id: sessionId, title: title, cwd: cwd)
         projects[pi].sessions.append(session)
         // Do NOT steal the Mac's selected tab: only adopt the new session when the
         // project currently has no selection.
@@ -868,13 +991,14 @@ final class AppModel: ObservableObject {
         // Remote (phone/web) sessions start in allow-all so they run unattended
         // without tool-approval prompts nobody is at the Mac to answer.
         if let remoteSessionLauncher {
-            remoteSessionLauncher(sessionId, copilotExecutable)
+            remoteSessionLauncher(sessionId, copilotExecutable, initialPrompt)
         } else {
             controller(
                 for: sessionId,
                 launchCopilotIfCreated: true,
                 copilotExecutable: copilotExecutable,
-                launchWithAllowAll: true
+                launchWithAllowAll: true,
+                launchCopilotInitialPrompt: initialPrompt
             )
         }
         refreshSelectedTranscriptController()
