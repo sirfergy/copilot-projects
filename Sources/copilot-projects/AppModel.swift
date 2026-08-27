@@ -823,7 +823,7 @@ final class AppModel: ObservableObject {
         var initialText = ""
         while let input = promptForText(
             title: "Review Pull Request",
-            message: "Paste a GitHub pull request URL. Copilot will start a read-only local adversarial review.",
+            message: "Paste a GitHub pull request URL. Copilot will start a local adversarial review.",
             confirmTitle: "Review",
             initialText: initialText
         ) {

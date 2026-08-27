@@ -21,7 +21,7 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   (prev) / **`⌃1`–`⌃9`** / `⌘⇧[` / `⌘⇧]`, close with `⌘W` or the tab's ✕. Background tabs keep
   running. Hold **⌘** (projects) or **⌃** (tabs) to see the number on each.
 - **Local PR reviews:** the shield button beside **New Session** accepts a GitHub pull request
-  URL and opens a new Copilot CLI tab with a read-only local adversarial-review prompt.
+  URL and opens a new Copilot CLI tab with a local adversarial-review prompt.
 - **Status:** each session reports `idle` / `running` / `waiting`. Running and waiting
   counts appear in the sidebar; a blue dot on the session tab marks work that finished
   while you were away. With the Copilot CLI hooks installed (below), this is driven automatically.
