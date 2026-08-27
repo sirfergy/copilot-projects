@@ -4110,8 +4110,13 @@ final class CoreLogicTests: XCTestCase {
 
     func testRemoteCreateSessionContractRoundTrips() throws {
         XCTAssertEqual(RemoteSessionContract.createPath, "sessions/create")
+        XCTAssertEqual(RemoteSessionContract.reviewPath, "sessions/review")
         let requestId = UUID()
-        let request = RemoteCreateSessionRequest(requestId: requestId, projectId: "project-1")
+        let request = RemoteCreateSessionRequest(
+            requestId: requestId,
+            projectId: "project-1",
+            pullRequestURL: "https://github.com/github/github/pull/123"
+        )
         let decodedRequest = try JSONDecoder().decode(
             RemoteCreateSessionRequest.self,
             from: JSONEncoder().encode(request)
@@ -4129,6 +4134,53 @@ final class CoreLogicTests: XCTestCase {
         )
         XCTAssertEqual(decodedResponse, response)
         XCTAssertEqual(decodedResponse.sessionId, requestId.uuidString)
+    }
+
+    func testPullRequestReviewTargetNormalizesGitHubPRURLs() {
+        let normalized = PullRequestReviewTarget.parse(
+            "  https://github.com/github/github/pull/123/files?diff=split#discussion  "
+        )
+        XCTAssertEqual(normalized?.owner, "github")
+        XCTAssertEqual(normalized?.repository, "github")
+        XCTAssertEqual(normalized?.number, 123)
+        XCTAssertEqual(
+            normalized?.url,
+            "https://github.com/github/github/pull/123"
+        )
+        XCTAssertEqual(
+            PullRequestReviewTarget.parse(
+                "https://GITHUB.com/owner/repo-name/pull/0007/commits"
+            )?.url,
+            "https://github.com/owner/repo-name/pull/7"
+        )
+        XCTAssertEqual(
+            PullRequestReviewTarget.parse(
+                "https://github.com/owner/repo_name/pull/42"
+            )?.title,
+            "Review owner/repo_name#42"
+        )
+
+        XCTAssertNil(PullRequestReviewTarget.parse(
+            "http://github.com/owner/repo/pull/1"
+        ))
+        XCTAssertNil(PullRequestReviewTarget.parse(
+            "https://example.com/owner/repo/pull/1"
+        ))
+        XCTAssertNil(PullRequestReviewTarget.parse(
+            "https://user@github.com/owner/repo/pull/1"
+        ))
+        XCTAssertNil(PullRequestReviewTarget.parse(
+            "https://github.com/owner/repo/pull/0"
+        ))
+        XCTAssertNil(PullRequestReviewTarget.parse(
+            "https://github.com/owner%2Frepo/name/pull/1"
+        ))
+        XCTAssertNil(PullRequestReviewTarget.parse(
+            "https://github.com/../repo/pull/1"
+        ))
+        XCTAssertNil(PullRequestReviewTarget.parse(
+            "https://github.com/Üntergang/repo/pull/1"
+        ))
     }
 
     func testResolveCopilotExecutablePrefersOverrideThenLocalThenPath() throws {

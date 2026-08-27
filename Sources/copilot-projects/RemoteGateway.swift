@@ -55,6 +55,12 @@ final class RemoteModelBridge: @unchecked Sendable {
         model?.createRemoteSession(request) ?? .unavailable
     }
 
+    func createAdversarialReviewSession(
+        _ request: RemoteCreateSessionRequest
+    ) -> RemoteSessionCreationOutcome {
+        model?.createRemoteAdversarialReviewSession(request) ?? .unavailable
+    }
+
     func screenRevision(sessionId: String) -> RemoteTerminalRevision? {
         guard let model,
               let view = model.controller(for: sessionId)?.terminalView,
@@ -705,7 +711,9 @@ private final class RemoteHTTPHandler:
             case "/control":
                 handleControl(context: context)
             case "/\(RemoteSessionContract.createPath)":
-                handleCreateSession(context: context)
+                handleCreateSession(context: context, isReview: false)
+            case "/\(RemoteSessionContract.reviewPath)":
+                handleCreateSession(context: context, isReview: true)
             case "/push/subscribe":
                 handlePushRegistration(context: context, subscribe: true)
             case "/push/unsubscribe":
@@ -1131,7 +1139,10 @@ private final class RemoteHTTPHandler:
     /// Authenticated same-origin session creation, independent of the writer lease so
     /// it works for empty projects. The AppModel mutation runs on the MainActor via a
     /// hop off the NIO event loop; the reply is written back on the channel's loop.
-    private func handleCreateSession(context: ChannelHandlerContext) {
+    private func handleCreateSession(
+        context: ChannelHandlerContext,
+        isReview: Bool
+    ) {
         guard !bodyTooLarge else {
             respond(context: context, method: .POST, status: .payloadTooLarge,
                     contentType: "text/plain", body: "too large")
@@ -1149,7 +1160,9 @@ private final class RemoteHTTPHandler:
         let channel = context.channel
         let bridge = self.bridge
         Task { @MainActor in
-            let outcome = bridge.createSession(request)
+            let outcome = isReview
+                ? bridge.createAdversarialReviewSession(request)
+                : bridge.createSession(request)
             channel.eventLoop.execute {
                 self.respondCreateSession(channel: channel, outcome: outcome)
             }
@@ -1186,6 +1199,8 @@ private final class RemoteHTTPHandler:
             send(.unprocessableEntity, text: "Unknown project")
         case .invalid:
             send(.unprocessableEntity, text: "Repos working directory is unavailable")
+        case .badRequest:
+            send(.badRequest, text: "Invalid session creation request")
         case .unavailable:
             send(.serviceUnavailable, text: "Copilot is unavailable")
         }

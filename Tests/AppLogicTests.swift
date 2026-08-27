@@ -4794,6 +4794,42 @@ final class AppLogicTests: XCTestCase {
                 executable: executable, shell: shell, allowAll: true
              )]
         )
+        let initialPrompt = "Review https://github.com/owner/repo/pull/12; don't edit"
+        XCTAssertEqual(
+            TerminalController.launchCommand(
+                executable: executable,
+                shell: shell,
+                initialPrompt: initialPrompt
+            ),
+            TerminalController.profiledCopilotCommand(
+                executable,
+                arguments: [
+                    "--no-remote",
+                    "--no-remote-export",
+                    "--interactive",
+                    initialPrompt,
+                ]
+            )
+                + " || printf '\\n[Copilot Projects] could not launch Copilot\\n';"
+                + " exec '/bin/zsh' -l"
+        )
+        let promptedProgram = TerminalController.startupProgram(
+            shell: shell,
+            copilotSessionId: nil,
+            copilotSessionAllowAll: true,
+            launchCopilotExecutable: executable,
+            launchCopilotInitialPrompt: initialPrompt
+        )
+        XCTAssertEqual(
+            promptedProgram,
+            [shell, "-l", "-c",
+             TerminalController.launchCommand(
+                executable: executable,
+                shell: shell,
+                allowAll: true,
+                initialPrompt: initialPrompt
+             )]
+        )
         // A recorded resume session ALWAYS wins over a one-shot launch executable.
         let sessionId = UUID().uuidString
         let resumeExecutable = "/opt/resume copilot/copilot"
@@ -4802,11 +4838,13 @@ final class AppLogicTests: XCTestCase {
             copilotSessionId: sessionId,
             copilotSessionAllowAll: false,
             resumeCopilotExecutable: resumeExecutable,
-            launchCopilotExecutable: executable
+            launchCopilotExecutable: executable,
+            launchCopilotInitialPrompt: initialPrompt
         )
         let joined = resumeProgram.joined(separator: " ")
         XCTAssertTrue(joined.contains("resume copilot"))
         XCTAssertFalse(joined.contains("my copilot/copilot"))
+        XCTAssertFalse(joined.contains(initialPrompt))
     }
 
     func testSessionEnvironmentStripsLeakedCopilotVars() {
@@ -7188,7 +7226,7 @@ final class AppLogicTests: XCTestCase {
         reposDirectory: @escaping () -> String?,
         backendAvailable: @escaping () -> Bool = { true },
         ledger: SessionCreationLedger,
-        onLaunch: @escaping (String, String) -> Void
+        onLaunch: @escaping (String, String, String?) -> Void
     ) throws -> AppModel {
         let repository = StateRepository(path: root.appendingPathComponent("state.json"))
         try repository.save(PersistedState(
@@ -7220,14 +7258,14 @@ final class AppLogicTests: XCTestCase {
             id: "p1", name: "First", cwd: "/tmp",
             sessions: [existing], selectedSessionId: "existing")
         let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
-        var launches: [(sessionId: String, executable: String)] = []
+        var launches: [(sessionId: String, executable: String, prompt: String?)] = []
         let model = try makeRemoteCreateModel(
             root: root,
             projects: [project],
             selectedProjectId: "p1",
             reposDirectory: { repos.path },
             ledger: ledger,
-            onLaunch: { launches.append(($0, $1)) }
+            onLaunch: { launches.append(($0, $1, $2)) }
         )
 
         let requestId = UUID()
@@ -7247,12 +7285,140 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(model.project("p1")?.selectedSessionId, "existing")
         XCTAssertEqual(launches.map(\.sessionId), [requestId.uuidString])
         XCTAssertEqual(launches.first?.executable, "/opt/copilot/bin/copilot")
+        XCTAssertNil(launches.first?.prompt)
         XCTAssertNotNil(ledger.record(for: requestId))
 
         // Idempotent replay: existing, no new session, no relaunch.
         XCTAssertEqual(model.createRemoteSession(request), .existing(expected))
         XCTAssertEqual(
             model.project("p1")?.sessions.filter { $0.id == requestId.uuidString }.count, 1)
+        XCTAssertEqual(launches.count, 1)
+    }
+
+    @MainActor
+    func testCreateRemoteAdversarialReviewSessionLaunchesFixedPrompt() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let project = Project(
+            id: "p1",
+            name: "Reviews",
+            cwd: "/tmp",
+            sessions: []
+        )
+        let ledger = SessionCreationLedger(
+            url: root.appendingPathComponent("ledger.json")
+        )
+        var launches: [(sessionId: String, executable: String, prompt: String?)] = []
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [project],
+            selectedProjectId: "p1",
+            reposDirectory: { repos.path },
+            ledger: ledger,
+            onLaunch: { launches.append(($0, $1, $2)) }
+        )
+
+        let requestId = UUID()
+        let pullRequestURL = "https://github.com/github/github/pull/123"
+        let request = RemoteCreateSessionRequest(
+            requestId: requestId,
+            projectId: "p1",
+            pullRequestURL: pullRequestURL
+        )
+        let outcome = model.createRemoteAdversarialReviewSession(request)
+        let expected = RemoteCreateSessionResponse(
+            requestId: requestId,
+            projectId: "p1",
+            sessionId: requestId.uuidString
+        )
+        XCTAssertEqual(outcome, .created(expected))
+
+        let created = try XCTUnwrap(
+            model.project("p1")?.sessions.first { $0.id == requestId.uuidString }
+        )
+        XCTAssertEqual(created.title, "Review github/github#123")
+        XCTAssertEqual(created.cwd, repos.path)
+        XCTAssertEqual(launches.count, 1)
+        XCTAssertEqual(
+            launches.first?.prompt,
+            AppModel.adversarialReviewPrompt(
+                for: try XCTUnwrap(PullRequestReviewTarget.parse(pullRequestURL))
+            )
+        )
+
+        XCTAssertEqual(
+            model.createRemoteAdversarialReviewSession(request),
+            .existing(expected)
+        )
+        XCTAssertEqual(launches.count, 1)
+        XCTAssertEqual(model.createRemoteSession(request), .badRequest)
+        XCTAssertEqual(
+            model.createRemoteAdversarialReviewSession(
+                RemoteCreateSessionRequest(
+                    requestId: UUID(),
+                    projectId: "p1",
+                    pullRequestURL: "https://example.com/not-a-pr"
+                )
+            ),
+            .badRequest
+        )
+    }
+
+    @MainActor
+    func testAddLocalAdversarialReviewSessionUsesProjectContext() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let existing = Session(id: "existing", title: "shell", cwd: "/tmp/old")
+        let project = Project(
+            id: "p1",
+            name: "Reviews",
+            cwd: "/tmp/project-checkout",
+            sessions: [existing],
+            selectedSessionId: existing.id
+        )
+        let ledger = SessionCreationLedger(
+            url: root.appendingPathComponent("ledger.json")
+        )
+        var launches: [(sessionId: String, executable: String, prompt: String?)] = []
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [project],
+            selectedProjectId: "p1",
+            reposDirectory: { nil },
+            ledger: ledger,
+            onLaunch: { launches.append(($0, $1, $2)) }
+        )
+
+        let pullRequestURL = "https://github.com/github/github/pull/123"
+        let sessionId = try XCTUnwrap(model.addAdversarialReviewSession(
+            toProjectId: "p1",
+            pullRequestURL: pullRequestURL
+        ))
+        let session = try XCTUnwrap(
+            model.project("p1")?.sessions.first { $0.id == sessionId }
+        )
+        XCTAssertEqual(session.title, "Review github/github#123")
+        XCTAssertEqual(session.cwd, "/tmp/old")
+        XCTAssertEqual(model.project("p1")?.selectedSessionId, sessionId)
+        XCTAssertEqual(launches.count, 1)
+        XCTAssertEqual(
+            launches.first?.prompt,
+            AppModel.adversarialReviewPrompt(
+                for: try XCTUnwrap(PullRequestReviewTarget.parse(pullRequestURL))
+            )
+        )
+
+        XCTAssertNil(model.addAdversarialReviewSession(
+            toProjectId: "p1",
+            pullRequestURL: "https://example.com/not-a-pr"
+        ))
         XCTAssertEqual(launches.count, 1)
     }
 
@@ -7268,7 +7434,7 @@ final class AppLogicTests: XCTestCase {
         let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
         let model = try makeRemoteCreateModel(
             root: root, projects: [project], selectedProjectId: "p1",
-            reposDirectory: { repos.path }, ledger: ledger, onLaunch: { _, _ in })
+            reposDirectory: { repos.path }, ledger: ledger, onLaunch: { _, _, _ in })
 
         let requestId = UUID()
         _ = model.createRemoteSession(
@@ -7295,7 +7461,7 @@ final class AppLogicTests: XCTestCase {
             selectedProjectId: "p1",
             reposDirectory: { repos.path },
             ledger: ledger,
-            onLaunch: { _, _ in })
+            onLaunch: { _, _, _ in })
 
         let requestId = UUID()
         _ = model.createRemoteSession(
@@ -7328,7 +7494,7 @@ final class AppLogicTests: XCTestCase {
             selectedProjectId: "p1",
             reposDirectory: { repos.path },
             ledger: ledger,
-            onLaunch: { _, _ in }
+            onLaunch: { _, _, _ in }
         )
         let request = RemoteCreateSessionRequest(
             requestId: UUID(),
@@ -7387,7 +7553,7 @@ final class AppLogicTests: XCTestCase {
             selectedProjectId: "p1",
             reposDirectory: { repos.path },
             ledger: ledger,
-            onLaunch: { _, _ in launches += 1 })
+            onLaunch: { _, _, _ in launches += 1 })
 
         XCTAssertEqual(
             model.createRemoteSession(
@@ -7417,7 +7583,7 @@ final class AppLogicTests: XCTestCase {
             copilotExecutable: { copilot },
             reposDirectory: { reposPath },
             ledger: ledger,
-            onLaunch: { _, _ in launches += 1 })
+            onLaunch: { _, _, _ in launches += 1 })
 
         // Unknown project → nothing created.
         XCTAssertEqual(
@@ -7446,7 +7612,7 @@ final class AppLogicTests: XCTestCase {
             reposDirectory: { reposPath },
             backendAvailable: { false },
             ledger: ledger,
-            onLaunch: { _, _ in }
+            onLaunch: { _, _, _ in }
         )
         XCTAssertEqual(
             noBackendModel.createRemoteSession(
@@ -7479,7 +7645,7 @@ final class AppLogicTests: XCTestCase {
         var copilot: String? = "/opt/copilot/bin/copilot"
         var reposPath: String? = repos.path
         let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
-        var launched: [String] = []
+        var launched: [(sessionId: String, prompt: String?)] = []
         let model = try makeRemoteCreateModel(
             root: root,
             projects: [
@@ -7490,7 +7656,9 @@ final class AppLogicTests: XCTestCase {
             copilotExecutable: { copilot },
             reposDirectory: { reposPath },
             ledger: ledger,
-            onLaunch: { sessionId, _ in launched.append(sessionId) })
+            onLaunch: { sessionId, _, prompt in
+                launched.append((sessionId, prompt))
+            })
 
         let config = CloudflareAccessConfig(
             teamDomain: "team.cloudflareaccess.com",
@@ -7520,9 +7688,18 @@ final class AppLogicTests: XCTestCase {
             port: 0
         )
         let origin = "https://projects.example.com"
-        func createBody(_ requestId: UUID, _ projectId: String) throws -> Data {
+        func createBody(
+            _ requestId: UUID,
+            _ projectId: String,
+            pullRequestURL: String? = nil
+        ) throws -> Data {
             try JSONEncoder().encode(
-                RemoteCreateSessionRequest(requestId: requestId, projectId: projectId))
+                RemoteCreateSessionRequest(
+                    requestId: requestId,
+                    projectId: projectId,
+                    pullRequestURL: pullRequestURL
+                )
+            )
         }
         do {
             // Same-origin is required for the write.
@@ -7535,6 +7712,23 @@ final class AppLogicTests: XCTestCase {
                 port: port, path: "/sessions/create", method: "POST",
                 token: token, origin: origin, body: Data("{".utf8))
             XCTAssertEqual(badBody, 400)
+            let reviewURL = "https://github.com/github/github/pull/123"
+            let reviewOnCreatePath = try await remoteHTTPStatus(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, origin: origin,
+                body: try createBody(
+                    UUID(),
+                    "p1",
+                    pullRequestURL: reviewURL
+                )
+            )
+            XCTAssertEqual(reviewOnCreatePath, 400)
+            let missingReviewURL = try await remoteHTTPStatus(
+                port: port, path: "/sessions/review", method: "POST",
+                token: token, origin: origin,
+                body: try createBody(UUID(), "p1")
+            )
+            XCTAssertEqual(missingReviewURL, 400)
             // Unknown project → 422.
             let unknown = try await remoteHTTPStatus(
                 port: port, path: "/sessions/create", method: "POST",
@@ -7551,13 +7745,48 @@ final class AppLogicTests: XCTestCase {
             XCTAssertEqual(response.requestId, requestId)
             XCTAssertEqual(response.projectId, "p1")
             XCTAssertEqual(response.sessionId, requestId.uuidString)
-            XCTAssertEqual(launched, [requestId.uuidString])
+            XCTAssertEqual(launched.map(\.sessionId), [requestId.uuidString])
+            XCTAssertNil(launched.first?.prompt)
             // Idempotent replay → 200, never relaunched.
             let replay = try await remoteHTTPStatus(
                 port: port, path: "/sessions/create", method: "POST",
                 token: token, origin: origin, body: try createBody(requestId, "p1"))
             XCTAssertEqual(replay, 200)
-            XCTAssertEqual(launched, [requestId.uuidString])
+            XCTAssertEqual(launched.map(\.sessionId), [requestId.uuidString])
+            let reviewRequestId = UUID()
+            let reviewCreated = try await remoteHTTPResponseWithBody(
+                port: port, path: "/sessions/review", method: "POST",
+                token: token, origin: origin,
+                body: try createBody(
+                    reviewRequestId,
+                    "p1",
+                    pullRequestURL: reviewURL
+                )
+            )
+            XCTAssertEqual(reviewCreated.0.statusCode, 201)
+            XCTAssertEqual(
+                launched.map(\.sessionId),
+                [requestId.uuidString, reviewRequestId.uuidString]
+            )
+            XCTAssertEqual(
+                launched.last?.prompt,
+                AppModel.adversarialReviewPrompt(
+                    for: try XCTUnwrap(
+                        PullRequestReviewTarget.parse(reviewURL)
+                    )
+                )
+            )
+            let reviewReplay = try await remoteHTTPStatus(
+                port: port, path: "/sessions/review", method: "POST",
+                token: token, origin: origin,
+                body: try createBody(
+                    reviewRequestId,
+                    "p1",
+                    pullRequestURL: reviewURL
+                )
+            )
+            XCTAssertEqual(reviewReplay, 200)
+            XCTAssertEqual(launched.count, 2)
             // Same id, different project → 409.
             let conflict = try await remoteHTTPStatus(
                 port: port, path: "/sessions/create", method: "POST",
