@@ -222,6 +222,8 @@ final class CoreLogicTests: XCTestCase {
         ))
         XCTAssertTrue(CopilotExtension.script.contains("let copilotSessionId = typeof session.sessionId"))
         XCTAssertTrue(CopilotExtension.script.contains(#""resolve-session", "--pid""#))
+        XCTAssertTrue(CopilotExtension.script.contains("COPILOT_EXTENSION_PARENT_PID"))
+        XCTAssertTrue(CopilotExtension.script.contains(#""session.getForeground""#))
         XCTAssertTrue(CopilotExtension.script.contains("schemaVersion: 3"))
         XCTAssertTrue(CopilotExtension.script.contains("publishTranscript();"))
         XCTAssertTrue(CopilotExtension.script.contains("removeFile(temporaryPath)"))
@@ -1059,6 +1061,7 @@ final class CoreLogicTests: XCTestCase {
         copilotHome: URL,
         appSessionId: String,
         source: String,
+        environment: [String: String] = [:],
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws -> [String: Any] {
@@ -1076,7 +1079,7 @@ final class CoreLogicTests: XCTestCase {
             "COPILOT_PROJECTS_SESSION": appSessionId,
             "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
             "COPILOT_PROJECTS_ROOT": root.path,
-        ]) { _, new in new }
+        ]) { _, new in new }.merging(environment) { _, new in new }
         process.standardOutput = stdout
         process.standardError = stderr
         try process.run()
@@ -1634,6 +1637,168 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["liveSessionIdentity"] as? String, sessionB)
     }
 
+    /// `/new` creates a second SDK session and extension process while the
+    /// previous session remains alive in the background. A foreground process
+    /// from the same CLI must replace that prior live owner and publish the new
+    /// conversation under the stable app-tab id.
+    func testCopilotExtensionForegroundProcessReplacesPriorSessionOwner() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-foreground-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let copilotHome = root.appendingPathComponent(".copilot", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: sessions,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let appSessionId = "12345678-1234-1234-1234-123456789abc"
+        let previousSessionId = "11111111-1111-4111-8111-111111111111"
+        let foregroundSessionId = "22222222-2222-4222-8222-222222222222"
+        let extensionParentPid = 4_444
+        let base = sessions.appendingPathComponent(appSessionId)
+
+        try Data(#"""
+        {"copilotSessionId":"\#(previousSessionId)","pid":1,
+         "parentPid":\#(extensionParentPid)}
+        """#.utf8).write(
+            to: URL(fileURLWithPath: base.path + ".transcript-owner.json")
+        )
+        try Data(#"""
+        {"schemaVersion":3,"updatedAt":"2026-08-27T00:00:00.000Z",
+         "copilotSessionId":"\#(previousSessionId)","ownerPid":1,
+         "turns":[{"id":"old","startedAt":"2026-08-27T00:00:00.000Z",
+         "endedAt":null,"kind":"foreground","userContent":"old conversation",
+         "assistantMessages":[],"tools":[],"isAborted":false}]}
+        """#.utf8).write(
+            to: URL(fileURLWithPath: base.path + ".transcript.json")
+        )
+        try Data(previousSessionId.utf8).write(
+            to: URL(fileURLWithPath: base.path + ".copilot-session")
+        )
+
+        let prelude = #"""
+        let transcriptListener = null;
+        const namedListeners = new Map();
+        const fakeSession = {
+          sessionId: "__FOREGROUND_SESSION__",
+          connection: {
+            async sendRequest(name) {
+              if (name !== "session.getForeground") {
+                throw new Error(`unexpected request: ${name}`);
+              }
+              return {sessionId: fakeSession.sessionId};
+            }
+          },
+          rpc: {
+            schedule: {list: async () => ({entries:[]})},
+            permissions: {getAllowAll: async () => ({enabled:false})},
+            model: {list: async () => ({list:[]})},
+            eventLog: {
+              registerInterest: async ({eventType}) => ({handle:eventType}),
+              releaseInterest: async () => ({success:true})
+            }
+          },
+          on(name, handler) {
+            if (typeof name === "function") transcriptListener = name;
+            else namedListeners.set(name, handler);
+          },
+          async getEvents() {
+            return [
+              {id:"new-user",type:"user.message",
+               timestamp:"2026-08-27T01:00:00.000Z",
+               data:{source:null,content:"new conversation"}},
+              {id:"new-idle",type:"session.idle",
+               timestamp:"2026-08-27T01:00:01.000Z",
+               data:{aborted:false}}
+            ];
+          }
+        };
+        """#.replacingOccurrences(
+            of: "__FOREGROUND_SESSION__",
+            with: foregroundSessionId
+        )
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: "const joinSession = async () => fakeSession;"
+        )
+        let epilogue = #"""
+
+        const base = `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+          + process.env.COPILOT_PROJECTS_SESSION;
+        const readJson = (suffix) =>
+          JSON.parse(readFileSync(`${base}${suffix}`, "utf8"));
+        let transcript = null;
+        let owner = null;
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          try {
+            transcript = readJson(".transcript.json");
+            owner = readJson(".transcript-owner.json");
+            if (transcript.copilotSessionId === "__FOREGROUND_SESSION__"
+                && owner.copilotSessionId === "__FOREGROUND_SESSION__") break;
+          } catch {}
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        const ownerPath = `${base}.transcript-owner.json`;
+        writeFileSync(ownerPath, JSON.stringify({
+          copilotSessionId:"__PREVIOUS_SESSION__",pid:1,
+          parentPid:Number(process.env.COPILOT_EXTENSION_PARENT_PID),
+          claimedAt:Date.now() + 60_000
+        }));
+        transcriptListener({
+          id:"stale-foreground",type:"session.resume",
+          timestamp:"2026-08-27T01:00:02.000Z",
+          data:{sessionId:"__FOREGROUND_SESSION__"}
+        });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const staleOwner = readJson(".transcript-owner.json");
+        console.log(JSON.stringify({
+          ownerSessionId: owner?.copilotSessionId,
+          ownerPidIsCurrent: owner?.pid === process.pid,
+          ownerParentPid: owner?.parentPid,
+          transcriptSessionId: transcript?.copilotSessionId,
+          transcriptContents: transcript?.turns.map((turn) => turn.userContent),
+          copilotSessionMarker: readFileSync(`${base}.copilot-session`, "utf8"),
+          staleOwnerSessionId: staleOwner.copilotSessionId
+        }));
+        process.exit(0);
+        """#.replacingOccurrences(
+            of: "__FOREGROUND_SESSION__",
+            with: foregroundSessionId
+        ).replacingOccurrences(
+            of: "__PREVIOUS_SESSION__",
+            with: previousSessionId
+        )
+
+        let summary = try runExtensionHarness(
+            name: "foreground",
+            root: root,
+            copilotHome: copilotHome,
+            appSessionId: appSessionId,
+            source: prelude + extensionScript + epilogue,
+            environment: [
+                "COPILOT_EXTENSION_PARENT_PID": String(extensionParentPid),
+            ]
+        )
+        XCTAssertEqual(summary["ownerSessionId"] as? String, foregroundSessionId)
+        XCTAssertEqual(summary["ownerPidIsCurrent"] as? Bool, true)
+        XCTAssertEqual(summary["ownerParentPid"] as? Int, extensionParentPid)
+        XCTAssertEqual(
+            summary["transcriptSessionId"] as? String,
+            foregroundSessionId
+        )
+        XCTAssertEqual(
+            summary["transcriptContents"] as? [String],
+            ["new conversation"]
+        )
+        XCTAssertEqual(
+            summary["copilotSessionMarker"] as? String,
+            foregroundSessionId
+        )
+        XCTAssertEqual(summary["staleOwnerSessionId"] as? String, previousSessionId)
+    }
+
     /// A same-tab helper (a spawned `copilot -p` classifier) shares the app
     /// session id but runs in its own process. When it rotates its own Copilot
     /// conversation it must NOT take over the tab: the interactive owner is
@@ -1655,11 +1820,16 @@ final class CoreLogicTests: XCTestCase {
         let interactiveSessionId = "11111111-1111-4111-8111-111111111111"
         let helperSessionId = "22222222-2222-4222-8222-222222222222"
         let helperRotatedSessionId = "33333333-3333-4333-8333-333333333333"
+        let interactiveParentPid = 4_444
+        let helperParentPid = 7_777
 
         let base = sessions.appendingPathComponent(appSessionId)
         // pid 1 is always alive (process.kill(1, 0) throws EPERM), standing in
         // for the live interactive Copilot that owns this tab.
-        try Data(#"{"copilotSessionId":"\#(interactiveSessionId)","pid":1}"#.utf8)
+        try Data(#"""
+        {"copilotSessionId":"\#(interactiveSessionId)","pid":1,
+         "parentPid":\#(interactiveParentPid)}
+        """#.utf8)
             .write(to: URL(fileURLWithPath: base.path + ".transcript-owner.json"))
         try Data(#"""
         {"schemaVersion":3,"updatedAt":"2026-07-12T00:00:00.000Z",
@@ -1695,6 +1865,14 @@ final class CoreLogicTests: XCTestCase {
         const namedListeners = new Map();
         const fakeSession = {
           sessionId: "__HELPER_SESSION__",
+          connection: {
+            async sendRequest(name) {
+              if (name !== "session.getForeground") {
+                throw new Error(`unexpected request: ${name}`);
+              }
+              return {sessionId: fakeSession.sessionId};
+            }
+          },
           rpc: {
             schedule: { list: async () => ({entries:[]}) },
             permissions: { getAllowAll: async () => ({enabled:true}) },
@@ -1771,7 +1949,10 @@ final class CoreLogicTests: XCTestCase {
             root: root,
             copilotHome: copilotHome,
             appSessionId: appSessionId,
-            source: prelude + extensionScript + epilogue
+            source: prelude + extensionScript + epilogue,
+            environment: [
+                "COPILOT_EXTENSION_PARENT_PID": String(helperParentPid),
+            ]
         )
         // The helper rotated its own identity...
         XCTAssertEqual(summary["helperIdentity"] as? String, helperRotatedSessionId)
