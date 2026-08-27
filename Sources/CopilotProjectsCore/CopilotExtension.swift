@@ -92,6 +92,9 @@ public enum CopilotExtension {
     const validSessionId = /^[0-9A-Fa-f-]{36}$/.test(appSessionId || "");
 
     const session = await joinSession();
+    const extensionParentPid = Number(process.env.COPILOT_EXTENSION_PARENT_PID);
+    const validExtensionParentPid = Number.isSafeInteger(extensionParentPid)
+        && extensionParentPid > 1;
     // The Copilot conversation this process is currently tracking. `/new` and
     // `/resume` swap the conversation underneath a single long-lived extension
     // process, so this is the ONE mutable source of truth for the current
@@ -219,6 +222,11 @@ public enum CopilotExtension {
         let sharedFilesOwnershipInitializedFor = null;
         let allowAllRefreshQueued = false;
         let allowAllUpdateGeneration = 0;
+        let foregroundSessionActive = false;
+        let foregroundObservationStartedAt = 0;
+        let foregroundRefreshQueued = false;
+        let foregroundRefreshPending = false;
+        let foregroundHandlingReady = false;
         // Monotonic id for the conversation currently loaded into the state
         // above. Bumped by every `/new` / `/resume` identity rotation so async
         // work started for a previous conversation (durable replay, SDK history
@@ -410,12 +418,18 @@ public enum CopilotExtension {
             return ownerMatchesCurrentProcess(recordedOwner());
         }
 
-        function ownerMarkerPayload() {
+        function ownerMarkerPayload(claimedAt = Date.now()) {
             return {
                 ...(appSessionResolution.native ? {appSessionId} : {}),
                 copilotSessionId,
                 pid: process.pid,
                 bootTime: currentBootTime() ?? undefined,
+                ...(validExtensionParentPid
+                    ? { parentPid: extensionParentPid }
+                    : {}),
+                ...(Number.isFinite(claimedAt) && claimedAt > 0
+                    ? { claimedAt }
+                    : {}),
             };
         }
 
@@ -436,12 +450,12 @@ public enum CopilotExtension {
         // reader never observes a moment with no marker present at all (as a
         // plain remove-then-recreate would produce). `renameSync` within the
         // same directory is atomic on the filesystems this app supports.
-        function replaceOwnerMarker() {
+        function replaceOwnerMarker(claimedAt) {
             const temporaryPath = `${transcriptOwnerPath}.${process.pid}.tmp`;
             try {
                 writeFileSync(
                     temporaryPath,
-                    JSON.stringify(ownerMarkerPayload()),
+                    JSON.stringify(ownerMarkerPayload(claimedAt)),
                     { mode: 0o600 }
                 );
                 renameSync(temporaryPath, transcriptOwnerPath);
@@ -568,6 +582,95 @@ public enum CopilotExtension {
             return owns;
         }
 
+        // A foreground query is the only authority allowed to displace another
+        // live process from this tab. The parent-pid match keeps a nested
+        // `copilot -p` process (whose own server also calls itself foreground)
+        // from stealing the interactive CLI's shared files.
+        function foregroundOwnerBlocksClaim(owner) {
+            return Boolean(owner) && ownerHoldsClaim(owner)
+                && (owner.copilotSessionId === copilotSessionId
+                    || !validExtensionParentPid
+                    || owner.parentPid !== extensionParentPid
+                    || (Number.isFinite(owner.claimedAt)
+                        && foregroundObservationStartedAt <= owner.claimedAt));
+        }
+
+        function claimForegroundOwnership() {
+            if (!foregroundSessionActive) return false;
+            if (isRecordedOwner()) {
+                activateSharedFilesOwnership();
+                return true;
+            }
+            if (foregroundOwnerBlocksClaim(recordedOwner())) return false;
+            const claimed = withTranscriptOwnerLock(() => {
+                const owner = recordedOwner();
+                if (ownerMatchesCurrentProcess(owner)) return true;
+                if (foregroundOwnerBlocksClaim(owner)) return false;
+                // Keep the marker and transcript provenance in lockstep. A
+                // reader that sees the new marker alongside the old bytes would
+                // permanently quarantine the previous conversation.
+                discardRotatedTranscript();
+                return replaceOwnerMarker(foregroundObservationStartedAt);
+            });
+            if (claimed) activateSharedFilesOwnership(true);
+            return claimed;
+        }
+
+        function activateForegroundSharedFiles() {
+            if (!claimForegroundOwnership()) return;
+            setScheduledTurnMarker(scheduledTurnActive);
+            publish();
+            publishTranscript(true);
+        }
+
+        async function refreshForegroundAuthority() {
+            const observedAt = Date.now();
+            let timeout = null;
+            let shouldActivate = false;
+            try {
+                const timeoutPromise = new Promise((_, reject) => {
+                    timeout = setTimeout(
+                        () => reject(new Error("foreground query timed out")),
+                        10_000
+                    );
+                    timeout.unref?.();
+                });
+                const response = await Promise.race([
+                    session.connection.sendRequest("session.getForeground", {}),
+                    timeoutPromise,
+                ]);
+                if (typeof response?.sessionId !== "string") return;
+                const wasActive = foregroundSessionActive;
+                foregroundSessionActive = response.sessionId === copilotSessionId;
+                foregroundObservationStartedAt = observedAt;
+                shouldActivate = foregroundHandlingReady
+                    && foregroundSessionActive
+                    && (!wasActive || !isRecordedOwner());
+            } catch {
+                // Older SDK servers have no foreground query. The existing
+                // owner election remains authoritative in that compatibility mode.
+            } finally {
+                if (timeout) clearTimeout(timeout);
+            }
+            if (shouldActivate) activateForegroundSharedFiles();
+        }
+
+        function refreshForegroundAuthoritySoon() {
+            if (foregroundRefreshQueued) {
+                foregroundRefreshPending = true;
+                return;
+            }
+            foregroundRefreshQueued = true;
+            refreshForegroundAuthority()
+                .finally(() => {
+                    foregroundRefreshQueued = false;
+                    if (foregroundRefreshPending) {
+                        foregroundRefreshPending = false;
+                        refreshForegroundAuthoritySoon();
+                    }
+                });
+        }
+
         function normalizedTimestamp(value) {
             const date = new Date(value);
             return Number.isNaN(date.getTime())
@@ -635,6 +738,7 @@ public enum CopilotExtension {
         if (validCopilotSessionId && ownsSharedFiles()) {
             writeMarker(copilotSessionPath, copilotSessionId);
         }
+        refreshForegroundAuthoritySoon();
 
         function isTerminalDisconnect(error) {
             if (!error) return false;
@@ -1590,6 +1694,11 @@ public enum CopilotExtension {
         }
 
         session.on((event) => {
+            if (!event.agentId && (event.type === "user.message"
+                    || event.type === "session.start"
+                    || event.type === "session.resume")) {
+                refreshForegroundAuthoritySoon();
+            }
             // Any delivered event proves the SDK connection is live again.
             terminalDisconnectError = null;
             // Identity first: a `/new` / `/resume` event must rotate before any
@@ -2630,6 +2739,7 @@ public enum CopilotExtension {
         processSetModelRequest();
 
         timer = setInterval(() => {
+            refreshForegroundAuthoritySoon();
             // Cheap safety net first: if the identity moved without a lifecycle
             // event reaching us, everything below must run against the new
             // conversation, not the one we just left.
@@ -2641,6 +2751,8 @@ public enum CopilotExtension {
             processSetModelRequest();
             scheduleDurableReconcile(0);
         }, DURABLE_RECONCILE_POLL_MS);
+        foregroundHandlingReady = true;
+        activateForegroundSharedFiles();
     }
     """#
 
