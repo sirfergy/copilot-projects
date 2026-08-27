@@ -111,6 +111,12 @@ struct RemotePromptTarget {
     let send: (String) -> Bool
 }
 
+struct RemoteElicitationTerminalTarget {
+    let isAtLiveBottom: Bool
+    let screen: RemoteTerminalScreen?
+    let sendEnter: () -> Bool
+}
+
 /// Outcome of a remote `POST /sessions/create`. Each case maps to a distinct HTTP
 /// status at the gateway so the client can react precisely (select, retry, or show
 /// an unsupported/unavailable message).
@@ -364,7 +370,10 @@ final class AppModel: ObservableObject {
     private(set) var isPoweringOff = false
     private let remotePromptLiveSessions: ((Set<String>) -> Set<String>)?
     private let remotePromptTarget: ((String) -> RemotePromptTarget?)?
+    private let remoteElicitationTarget:
+        ((String) -> RemoteElicitationTerminalTarget?)?
     private var remoteCommandRequestLedger = RemoteCommandRequestLedger()
+    private var remoteElicitationRequestLedger = RemoteCommandRequestLedger()
 
     /// Resolves the absolute Copilot executable for a remotely-created session, and
     /// the absolute `$HOME/Repos` working directory. Injected so tests can drive the
@@ -423,6 +432,8 @@ final class AppModel: ObservableObject {
         resumeMarkerDirectory: URL = Paths.sessionsDir,
         remotePromptLiveSessions: ((Set<String>) -> Set<String>)? = nil,
         remotePromptTarget: ((String) -> RemotePromptTarget?)? = nil,
+        remoteElicitationTarget:
+            ((String) -> RemoteElicitationTerminalTarget?)? = nil,
         remoteCopilotExecutable: @escaping () -> String? = { Paths.copilotExecutable },
         remoteReposDirectory: @escaping () -> String? = { Paths.reposDirectory },
         remoteSessionBackendAvailable: @escaping () -> Bool = {
@@ -454,6 +465,7 @@ final class AppModel: ObservableObject {
         self.resumeMarkerDirectory = resumeMarkerDirectory
         self.remotePromptLiveSessions = remotePromptLiveSessions
         self.remotePromptTarget = remotePromptTarget
+        self.remoteElicitationTarget = remoteElicitationTarget
         self.remoteCopilotExecutable = remoteCopilotExecutable
         self.remoteReposDirectory = remoteReposDirectory
         self.remoteSessionBackendAvailable = remoteSessionBackendAvailable
@@ -1200,8 +1212,12 @@ final class AppModel: ObservableObject {
         controller(for: sessionId)?.terminalView.sendRemoteInput(value)
     }
 
-    func sendRemoteKey(sessionId: String, key: String) {
-        controller(for: sessionId)?.terminalView.sendRemoteKey(
+    @discardableResult
+    func sendRemoteKey(sessionId: String, key: String) -> Bool {
+        guard let terminalView = controller(for: sessionId)?.terminalView else {
+            return false
+        }
+        return terminalView.sendRemoteKey(
             key,
             forceFocusReporting: key == "enter"
                 && remoteSessionHasLiveAgent(sessionId)
@@ -1413,6 +1429,7 @@ final class AppModel: ObservableObject {
               let request = snapshot.trackedUserInputs?
                 .first(where: { $0.requestId == answer.requestId })
         else { return .invalid }
+        guard !snapshot.reportsTerminalDisconnect else { return .invalid }
 
         guard answer.answer.utf8.count <= 8_192 else { return .invalid }
         if answer.wasFreeform {
@@ -1458,11 +1475,7 @@ final class AppModel: ObservableObject {
         answer: RemoteElicitationAnswer,
         now: Date = Date()
     ) -> RemoteUserInputResult {
-        guard locateIndex(sessionId) != nil,
-              !answer.requestId.hasPrefix(
-                "synthetic::durable-ask-user::"
-              )
-        else { return .invalid }
+        guard let location = locateIndex(sessionId) else { return .invalid }
 
         let snapshotURL = agentActivityDirectory
             .appendingPathComponent("\(sessionId).agent-activity.json")
@@ -1477,7 +1490,12 @@ final class AppModel: ObservableObject {
         // Accept must carry content; decline/cancel must not.
         switch answer.action {
         case .accept:
-            if request.mode == "url" || request.url != nil {
+            if answer.requestId.hasPrefix("synthetic::durable-ask-user::") {
+                guard Self.durableDefaultBooleanSelection(
+                    request: request,
+                    answer: answer
+                ) != nil else { return .invalid }
+            } else if request.mode == "url" || request.url != nil {
                 guard answer.content == nil else { return .invalid }
             } else {
                 guard let content = answer.content,
@@ -1489,6 +1507,55 @@ final class AppModel: ObservableObject {
         case .decline, .cancel:
             guard answer.content == nil else { return .invalid }
         }
+
+        if answer.requestId.hasPrefix("synthetic::durable-ask-user::") {
+            let ledgerId = "\(sessionId):elicitation:\(answer.requestId)"
+            if remoteElicitationRequestLedger.contains(ledgerId) {
+                return .conflict
+            }
+            let terminalTarget: RemoteElicitationTerminalTarget?
+            if let remoteElicitationTarget {
+                terminalTarget = remoteElicitationTarget(sessionId)
+            } else if let terminalView = terminalView(for: sessionId) {
+                terminalTarget = RemoteElicitationTerminalTarget(
+                    isAtLiveBottom: Self.durableElicitationIsAtLiveBottom(
+                        canScroll: terminalView.canScroll,
+                        scrollPosition: terminalView.scrollPosition
+                    ),
+                    screen: remoteScreen(sessionId: sessionId),
+                    sendEnter: {
+                        terminalView.sendRemoteKey(
+                            "enter",
+                            forceFocusReporting: true
+                        )
+                    }
+                )
+            } else {
+                terminalTarget = nil
+            }
+            guard snapshot.isFresh(at: now, ttl: 10),
+                  snapshot.pendingPermissionRequestIds?.isEmpty == true,
+                  projects[location.p].sessions[location.s].status == .waiting,
+                  let terminalTarget,
+                  remoteSessionHasLiveAgent(sessionId),
+                  terminalTarget.isAtLiveBottom,
+                  let selected = Self.durableDefaultBooleanSelection(
+                    request: request,
+                    answer: answer
+                  ),
+                  let screen = terminalTarget.screen,
+                  screen.scrollMode == .terminal,
+                  Self.durableBooleanPromptIsVisible(
+                    lines: screen.lines,
+                    request: request,
+                    selected: selected
+                  )
+            else { return .invalid }
+            guard terminalTarget.sendEnter() else { return .invalid }
+            remoteElicitationRequestLedger.record(ledgerId)
+            return .accepted
+        }
+        guard !snapshot.reportsTerminalDisconnect else { return .invalid }
 
         let markerURL = resumeMarkerDirectory
             .appendingPathComponent("\(sessionId).copilot-session")
@@ -1512,6 +1579,72 @@ final class AppModel: ObservableObject {
             return .invalid
         }
         return .accepted
+    }
+
+    nonisolated static func durableDefaultBooleanSelection(
+        request: TrackedElicitation,
+        answer: RemoteElicitationAnswer
+    ) -> Bool? {
+        guard request.requestId.hasPrefix("synthetic::durable-ask-user::"),
+              request.mode == "terminal-default",
+              answer.action == .accept,
+              let content = answer.content,
+              content.count == 1,
+              case .object(let root)? = request.schema,
+              Set(root.keys) == [
+                "properties", "x-copilot-projects-terminal-default"
+              ],
+              root["x-copilot-projects-terminal-default"] == .bool(true),
+              case .object(let properties)? = root["properties"],
+              properties.count == 1,
+              let fieldName = properties.keys.first,
+              case .object(let field)? = properties[fieldName],
+              field["type"] == .string("boolean"),
+              case .bool(let defaultValue)? = field["default"],
+              case .bool(let selected)? = content[fieldName],
+              selected == defaultValue
+        else { return nil }
+        return selected
+    }
+
+    nonisolated static func durableBooleanPromptIsVisible(
+        lines: [String],
+        request: TrackedElicitation,
+        selected: Bool
+    ) -> Bool {
+        let normalizedLines = lines.map(normalizedTerminalText)
+        let message = normalizedTerminalText(request.message)
+        let selectedRow = selected ? "❯ Yes" : "❯ No"
+        guard !message.isEmpty,
+              let headerIndex = normalizedLines.lastIndex(
+                of: "Copilot needs information."
+              )
+        else { return false }
+
+        let promptLines = Array(normalizedLines.dropFirst(headerIndex + 1))
+        let highlightedRows = promptLines.filter { $0.hasPrefix("❯ ") }
+        guard highlightedRows == [selectedRow],
+              let selectionIndex = promptLines.firstIndex(of: selectedRow)
+        else { return false }
+
+        let trailingLines = promptLines.dropFirst(selectionIndex + 1)
+            .filter { !$0.isEmpty }
+        guard trailingLines.allSatisfy({ $0 == "Yes" || $0 == "No" }) else {
+            return false
+        }
+        let promptText = promptLines[..<selectionIndex].joined(separator: " ")
+        return promptText == message || promptText.hasPrefix(message + " ")
+    }
+
+    nonisolated static func durableElicitationIsAtLiveBottom(
+        canScroll: Bool,
+        scrollPosition: Double
+    ) -> Bool {
+        !canScroll || scrollPosition >= 1
+    }
+
+    private nonisolated static func normalizedTerminalText(_ value: String) -> String {
+        value.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     /// Submit a remote model switch. Mirrors `answerUserInput`/`answerElicitation`:

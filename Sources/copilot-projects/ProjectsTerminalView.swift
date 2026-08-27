@@ -552,14 +552,15 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         return bytes
     }
 
-    func sendRemoteKey(_ key: String, forceFocusReporting: Bool = false) {
-        if key == "enter", forceFocusReporting,
-           let terminal {
+    @discardableResult
+    func sendRemoteKey(_ key: String, forceFocusReporting: Bool = false) -> Bool {
+        if key == "enter", forceFocusReporting {
+            guard let terminal else { return false }
             send(Self.remoteSubmitBytes(
                 keyboardEnhancementFlags: terminal.keyboardEnhancementFlags,
                 scopedFocus: !hasActualTerminalFocus
             ))
-            return
+            return true
         }
         let selector: Selector?
         switch key {
@@ -573,7 +574,9 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         case "right": selector = #selector(moveRight(_:))
         default: selector = nil
         }
-        if let selector { doCommand(by: selector) }
+        guard let selector else { return false }
+        doCommand(by: selector)
+        return true
     }
 
     /// Forwards a web-client wheel gesture into a TUI without attaching or

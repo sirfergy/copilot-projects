@@ -3336,7 +3336,7 @@ final class AppLogicTests: XCTestCase {
             .appendingPathComponent("\(session.id).user-input-response.json")
         let markerURL = directory.appendingPathComponent("\(session.id).copilot-session")
 
-        func writeSnapshot(updatedAt: Date) throws {
+        func writeSnapshot(updatedAt: Date, error: String? = nil) throws {
             let snapshot = AgentActivitySnapshot(
                 schemaVersion: 1,
                 updatedAt: ISO8601DateFormatter().string(from: updatedAt),
@@ -3347,7 +3347,7 @@ final class AppLogicTests: XCTestCase {
                 idleGeneration: 0,
                 lastIdleAborted: false,
                 lastIdleTurnKind: nil,
-                error: nil,
+                error: error,
                 trackedUserInputs: [
                     TrackedUserInput(
                         requestId: "req-choice",
@@ -3421,6 +3421,19 @@ final class AppLogicTests: XCTestCase {
             .invalid
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
+
+        try writeSnapshot(updatedAt: Date(), error: "Error: Connection is closed.")
+        XCTAssertEqual(
+            model.answerUserInput(
+                sessionId: session.id,
+                answer: RemoteUserInputAnswer(
+                    requestId: "req-choice", answer: "Yes, deploy", wasFreeform: false
+                )
+            ),
+            .invalid
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
+        try writeSnapshot(updatedAt: Date())
 
         // A valid verbatim-choice answer is accepted and atomically written 0600.
         XCTAssertEqual(
@@ -3672,7 +3685,7 @@ final class AppLogicTests: XCTestCase {
             .appendingPathComponent("\(session.id).elicitation-response.json")
         let markerURL = directory.appendingPathComponent("\(session.id).copilot-session")
 
-        func writeSnapshot(updatedAt: Date) throws {
+        func writeSnapshot(updatedAt: Date, error: String? = nil) throws {
             let snapshot = AgentActivitySnapshot(
                 schemaVersion: 1,
                 updatedAt: ISO8601DateFormatter().string(from: updatedAt),
@@ -3683,7 +3696,7 @@ final class AppLogicTests: XCTestCase {
                 idleGeneration: 0,
                 lastIdleAborted: false,
                 lastIdleTurnKind: nil,
-                error: nil,
+                error: error,
                 trackedUserInputs: nil,
                 trackedElicitations: [
                     TrackedElicitation(
@@ -3801,6 +3814,30 @@ final class AppLogicTests: XCTestCase {
             .invalid
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
+
+        try writeSnapshot(updatedAt: Date(), error: "Error: Connection is closed.")
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(
+                    requestId: "req-form", action: .accept,
+                    content: [
+                        "fruit": .string("apple"),
+                        "ripe": .bool(true),
+                        "count": .number(2),
+                        "colors": .array([.string("red")]),
+                        "emojiCodepoints": .string("ok"),
+                        "email": .string("user@example.com"),
+                        "uri": .string("https://example.com/elicit"),
+                        "date": .string("2026-07-13"),
+                        "dateTime": .string("2026-07-13T21:00:00Z"),
+                    ]
+                )
+            ),
+            .invalid
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
+        try writeSnapshot(updatedAt: Date())
 
         // Unknown request id → invalid.
         XCTAssertEqual(
@@ -3984,6 +4021,418 @@ final class AppLogicTests: XCTestCase {
             ),
             .invalid
         )
+    }
+
+    func testDurableBooleanElicitationOnlyAcceptsVisibleDefault() {
+        let request = TrackedElicitation(
+            requestId: "synthetic::durable-ask-user::call-rerun",
+            message: "Rerun failed jobs?",
+            mode: "terminal-default",
+            url: nil,
+            schema: .object([
+                "x-copilot-projects-terminal-default": .bool(true),
+                "properties": .object([
+                    "rerunFailedJobs": .object([
+                        "type": .string("boolean"),
+                        "title": .string("Rerun failed CI jobs"),
+                        "default": .bool(true),
+                    ]),
+                ]),
+            ]),
+            elicitationSource: "durable-ask-user",
+            requestedAt: "2026-08-27T00:17:32.945Z",
+            agentId: nil
+        )
+
+        XCTAssertEqual(
+            AppModel.durableDefaultBooleanSelection(
+                request: request,
+                answer: RemoteElicitationAnswer(
+                    requestId: request.requestId,
+                    action: .accept,
+                    content: ["rerunFailedJobs": .bool(true)]
+                )
+            ),
+            true
+        )
+        XCTAssertNil(
+            AppModel.durableDefaultBooleanSelection(
+                request: request,
+                answer: RemoteElicitationAnswer(
+                    requestId: request.requestId,
+                    action: .accept,
+                    content: ["rerunFailedJobs": .bool(false)]
+                )
+            )
+        )
+        XCTAssertNil(
+            AppModel.durableDefaultBooleanSelection(
+                request: request,
+                answer: RemoteElicitationAnswer(
+                    requestId: request.requestId,
+                    action: .decline
+                )
+            )
+        )
+        XCTAssertTrue(
+            AppModel.durableBooleanPromptIsVisible(
+                lines: [
+                    "Copilot needs information.",
+                    "Rerun failed jobs?",
+                    "❯ Yes",
+                    "  No",
+                ],
+                request: request,
+                selected: true
+            )
+        )
+        XCTAssertFalse(
+            AppModel.durableBooleanPromptIsVisible(
+                lines: [
+                    "Copilot needs information.",
+                    "Another question",
+                    "❯ Yes",
+                ],
+                request: request,
+                selected: true
+            )
+        )
+        XCTAssertFalse(
+            AppModel.durableBooleanPromptIsVisible(
+                lines: [
+                    "Copilot needs information.",
+                    "This is destructive. Rerun failed jobs?",
+                    "❯ Yes",
+                    "  No",
+                ],
+                request: request,
+                selected: true
+            )
+        )
+        XCTAssertFalse(
+            AppModel.durableBooleanPromptIsVisible(
+                lines: [
+                    "Rerun failed jobs?",
+                    "Copilot needs information.",
+                    "Another question",
+                    "❯ Yes",
+                ],
+                request: request,
+                selected: true
+            )
+        )
+        XCTAssertFalse(
+            AppModel.durableBooleanPromptIsVisible(
+                lines: [
+                    "Copilot needs information.",
+                    "Rerun failed jobs?",
+                    "❯ Yes, and don't ask again",
+                    "  No",
+                ],
+                request: request,
+                selected: true
+            )
+        )
+
+        let falseRequest = TrackedElicitation(
+            requestId: "synthetic::durable-ask-user::call-cancel",
+            message: "Cancel deployment?",
+            mode: "terminal-default",
+            url: nil,
+            schema: .object([
+                "x-copilot-projects-terminal-default": .bool(true),
+                "properties": .object([
+                    "cancelDeployment": .object([
+                        "type": .string("boolean"),
+                        "default": .bool(false),
+                    ]),
+                ]),
+            ]),
+            elicitationSource: "durable-ask-user",
+            requestedAt: "2026-08-27T00:17:32.945Z",
+            agentId: nil
+        )
+        XCTAssertEqual(
+            AppModel.durableDefaultBooleanSelection(
+                request: falseRequest,
+                answer: RemoteElicitationAnswer(
+                    requestId: falseRequest.requestId,
+                    action: .accept,
+                    content: ["cancelDeployment": .bool(false)]
+                )
+            ),
+            false
+        )
+        XCTAssertTrue(
+            AppModel.durableBooleanPromptIsVisible(
+                lines: [
+                    "Copilot needs information.",
+                    "Cancel",
+                    "deployment?",
+                    "  Yes",
+                    "❯ No",
+                ],
+                request: falseRequest,
+                selected: false
+            )
+        )
+        XCTAssertFalse(
+            AppModel.durableBooleanPromptIsVisible(
+                lines: [
+                    "Copilot needs information.",
+                    "Cancel deployment?",
+                    "  Yes",
+                    "❯ No",
+                    "$ echo newer shell input",
+                ],
+                request: falseRequest,
+                selected: false
+            )
+        )
+    }
+
+    @MainActor
+    func testDurableBooleanElicitationComposesAllAuthorizationGates() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(id: "session-durable-elicit", title: "target", cwd: "/tmp")
+        let project = Project(name: "target", cwd: "/tmp", sessions: [session])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+        let request = TrackedElicitation(
+            requestId: "synthetic::durable-ask-user::call-rerun",
+            message: "Rerun failed jobs?",
+            mode: "terminal-default",
+            url: nil,
+            schema: .object([
+                "x-copilot-projects-terminal-default": .bool(true),
+                "properties": .object([
+                    "rerunFailedJobs": .object([
+                        "type": .string("boolean"),
+                        "default": .bool(true),
+                    ]),
+                ]),
+            ]),
+            elicitationSource: "durable-ask-user",
+            requestedAt: "2026-08-27T00:17:32.945Z",
+            agentId: nil
+        )
+        let answer = RemoteElicitationAnswer(
+            requestId: request.requestId,
+            action: .accept,
+            content: ["rerunFailedJobs": .bool(true)]
+        )
+        let validScreen = RemoteTerminalScreen(
+            sessionId: session.id,
+            cols: 80,
+            rows: 4,
+            scrollMode: .terminal,
+            historyStartLine: 0,
+            firstLine: 0,
+            liveTopLine: 0,
+            reset: true,
+            lines: [
+                "Copilot needs information.",
+                "Rerun failed jobs?",
+                "❯ Yes",
+                "  No",
+            ]
+        )
+
+        let snapshotURL = directory
+            .appendingPathComponent("\(session.id).agent-activity.json")
+        let responseURL = directory
+            .appendingPathComponent("\(session.id).elicitation-response.json")
+        var snapshotWrite = 0
+        func writeSnapshot(
+            updatedAt: Date,
+            pendingPermissionRequestIds: [String]?
+        ) throws {
+            let snapshot = AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: ISO8601DateFormatter().string(from: updatedAt),
+                foregroundTurnActive: false,
+                scheduledTurnActive: false,
+                activeSubagents: [],
+                schedules: [],
+                idleGeneration: 0,
+                lastIdleAborted: false,
+                lastIdleTurnKind: nil,
+                error: "Error: Connection is closed.",
+                trackedUserInputs: nil,
+                trackedElicitations: [request],
+                pendingPermissionRequestIds: pendingPermissionRequestIds
+            )
+            try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+            snapshotWrite += 1
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: 2_000_000_000
+                    + Double(snapshotWrite))],
+                ofItemAtPath: snapshotURL.path
+            )
+        }
+
+        var hasTarget = true
+        var hasLiveAgent = true
+        var isAtLiveBottom = true
+        var screen: RemoteTerminalScreen? = validScreen
+        var enterCount = 0
+        var sendSucceeds = true
+        let model = AppModel(
+            stateRepository: repository,
+            persistPermissionStatus: { _, _, _, _ in },
+            agentActivityDirectory: directory,
+            resumeMarkerDirectory: directory,
+            remotePromptLiveSessions: { _ in
+                hasLiveAgent ? [session.id] : []
+            },
+            remoteElicitationTarget: { requestedSessionId in
+                guard requestedSessionId == session.id, hasTarget else { return nil }
+                return RemoteElicitationTerminalTarget(
+                    isAtLiveBottom: isAtLiveBottom,
+                    screen: screen,
+                    sendEnter: {
+                        guard sendSucceeds else { return false }
+                        enterCount += 1
+                        return true
+                    }
+                )
+            }
+        )
+        XCTAssertTrue(
+            AppModel.durableElicitationIsAtLiveBottom(
+                canScroll: false,
+                scrollPosition: 0
+            )
+        )
+        XCTAssertTrue(
+            AppModel.durableElicitationIsAtLiveBottom(
+                canScroll: true,
+                scrollPosition: 1
+            )
+        )
+        XCTAssertFalse(
+            AppModel.durableElicitationIsAtLiveBottom(
+                canScroll: true,
+                scrollPosition: 0.99
+            )
+        )
+        model.setStatus(
+            sessionId: session.id,
+            status: .waiting,
+            text: nil,
+            timestamp: 1
+        )
+        let now = Date()
+
+        try writeSnapshot(
+            updatedAt: now.addingTimeInterval(-11),
+            pendingPermissionRequestIds: []
+        )
+        XCTAssertEqual(
+            model.answerElicitation(sessionId: session.id, answer: answer, now: now),
+            .invalid
+        )
+
+        try writeSnapshot(updatedAt: now, pendingPermissionRequestIds: nil)
+        XCTAssertEqual(
+            model.answerElicitation(sessionId: session.id, answer: answer, now: now),
+            .invalid
+        )
+
+        try writeSnapshot(updatedAt: now, pendingPermissionRequestIds: ["permission"])
+        XCTAssertEqual(
+            model.answerElicitation(sessionId: session.id, answer: answer, now: now),
+            .invalid
+        )
+
+        try writeSnapshot(updatedAt: now, pendingPermissionRequestIds: [])
+        model.setStatus(
+            sessionId: session.id,
+            status: .running,
+            text: nil,
+            timestamp: 2
+        )
+        XCTAssertEqual(
+            model.answerElicitation(sessionId: session.id, answer: answer, now: now),
+            .invalid
+        )
+        model.setStatus(
+            sessionId: session.id,
+            status: .waiting,
+            text: nil,
+            timestamp: 3
+        )
+
+        hasTarget = false
+        XCTAssertEqual(
+            model.answerElicitation(sessionId: session.id, answer: answer, now: now),
+            .invalid
+        )
+        XCTAssertNil(model.terminalView(for: session.id))
+
+        hasTarget = true
+        hasLiveAgent = false
+        XCTAssertEqual(
+            model.answerElicitation(sessionId: session.id, answer: answer, now: now),
+            .invalid
+        )
+
+        hasLiveAgent = true
+        isAtLiveBottom = false
+        XCTAssertEqual(
+            model.answerElicitation(sessionId: session.id, answer: answer, now: now),
+            .invalid
+        )
+
+        isAtLiveBottom = true
+        screen = RemoteTerminalScreen(
+            sessionId: session.id,
+            cols: 80,
+            rows: 4,
+            scrollMode: .history,
+            historyStartLine: 0,
+            firstLine: 0,
+            liveTopLine: 0,
+            reset: true,
+            lines: validScreen.lines
+        )
+        XCTAssertEqual(
+            model.answerElicitation(sessionId: session.id, answer: answer, now: now),
+            .invalid
+        )
+
+        screen = validScreen
+        sendSucceeds = false
+        XCTAssertEqual(
+            model.answerElicitation(sessionId: session.id, answer: answer, now: now),
+            .invalid
+        )
+        XCTAssertEqual(enterCount, 0)
+
+        sendSucceeds = true
+        XCTAssertEqual(
+            model.answerElicitation(sessionId: session.id, answer: answer, now: now),
+            .accepted
+        )
+        XCTAssertEqual(enterCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
+        XCTAssertNil(model.terminalView(for: session.id))
+
+        XCTAssertEqual(
+            model.answerElicitation(sessionId: session.id, answer: answer, now: now),
+            .conflict
+        )
+        XCTAssertEqual(enterCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
     }
 
     @MainActor
@@ -7628,6 +8077,18 @@ final class AppLogicTests: XCTestCase {
             "fallback.textContent = 'Answer this one in the Copilot terminal.';"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("if ('$ref' in prop) return null;"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "function terminalDefaultBoolean(request) {"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+           "request.schema['x-copilot-projects-terminal-default'] !== true"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "accept.textContent = `Use default: ${entry.terminalDefault.value ? 'Yes' : 'No'}`;"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+           "open.onclick = () => setViewMode('terminal');"
+        ))
         // url-mode only opens safe http(s) links in a new tab.
         XCTAssertTrue(RemoteWebAssets.javascript.contains("open.textContent = 'Open in browser';"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
