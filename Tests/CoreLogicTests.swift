@@ -253,6 +253,15 @@ final class CoreLogicTests: XCTestCase {
             "synthetic::durable-ask-user::"
         ))
         XCTAssertTrue(CopilotExtension.script.contains(
+            "requestId.startsWith(DURABLE_ASK_USER_PREFIX)"
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains(
+            #"mode === "terminal-default""#
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains(
+            #""x-copilot-projects-terminal-default""#
+        ))
+        XCTAssertTrue(CopilotExtension.script.contains(
             "registerInterest({ eventType })"
         ))
         XCTAssertTrue(CopilotExtension.script.contains(
@@ -2897,7 +2906,7 @@ final class CoreLogicTests: XCTestCase {
         {"id":"repeat-one-done","type":"tool.execution_complete","timestamp":"2026-08-25T01:00:04.850Z","data":{"toolCallId":"call-repeat-one","success":true}}
         {"id":"repeat-two","type":"tool.execution_start","timestamp":"2026-08-25T01:00:04.900Z","data":{"toolCallId":"call-repeat-two","toolName":"ask_user","arguments":{"message":"Repeated question"}}}
         {"id":"repeat-two-done","type":"tool.execution_complete","timestamp":"2026-08-25T01:00:04.950Z","data":{"toolCallId":"call-repeat-two","success":true}}
-        {"id":"pending-start","type":"tool.execution_start","timestamp":"2026-08-25T01:00:05.000Z","data":{"toolCallId":"call-pending","toolName":"ask_user","arguments":{"message":"Pending terminal question","requestedSchema":{"properties":{"choice":{"type":"string"}}}}}}
+        {"id":"pending-start","type":"tool.execution_start","timestamp":"2026-08-25T01:00:05.000Z","data":{"toolCallId":"call-pending","toolName":"ask_user","arguments":{"message":"Pending terminal question","requestedSchema":{"properties":{"rerunFailedJobs":{"type":"boolean","title":"Rerun failed CI jobs","description":"Retries only failed jobs.","default":true}}}}}}
         {"id":"pending-pre","type":"hook.start","timestamp":"2026-08-25T01:00:06.000Z","data":{"hookType":"preToolUse"}}
         {"id":"pending-notify","type":"hook.end","timestamp":"2026-08-25T01:00:07.000Z","data":{"hookType":"notification"}}
         """# + "\n").utf8).write(to: source.appendingPathComponent("events.jsonl"))
@@ -3033,7 +3042,12 @@ final class CoreLogicTests: XCTestCase {
           timestamp:"2026-08-25T01:00:09.000Z",
           data:{
             toolCallId:"call-second",toolName:"ask_user",
-            arguments:{message:"Second durable question"}
+            arguments:{
+              message:"Second durable question",
+              requestedSchema:{
+                properties:{confirm:{type:"boolean"}}
+              }
+            }
           }
         });
         append({
@@ -3166,7 +3180,27 @@ final class CoreLogicTests: XCTestCase {
             requestedSchema:{type:"object",properties:{choice:{type:"string"}}}
           }
         });
-        await waitFor([guardedRequestId]);
+        namedListeners.get("elicitation.requested")?.({
+          id:"guarded-mode",type:"elicitation.requested",
+          timestamp:"2026-08-25T01:00:16.100Z",
+          data:{
+            requestId:"spoofed-terminal-default",message:"Spoofed mode",
+            mode:"terminal-default",
+            requestedSchema:{properties:{choice:{type:"boolean",default:true}}}
+          }
+        });
+        namedListeners.get("elicitation.requested")?.({
+          id:"guarded-marker",type:"elicitation.requested",
+          timestamp:"2026-08-25T01:00:16.200Z",
+          data:{
+            requestId:"spoofed-marker",message:"Spoofed marker",mode:"form",
+            requestedSchema:{
+              "x-copilot-projects-terminal-default":true,
+              properties:{choice:{type:"boolean",default:true}}
+            }
+          }
+        });
+        await waitFor([]);
         writeFileSync(responsePath, JSON.stringify({
           schemaVersion:1, copilotSessionId,
           requestId:guardedRequestId, action:"decline"
@@ -3175,7 +3209,7 @@ final class CoreLogicTests: XCTestCase {
             attempt += 1) {
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
-        const guardedStillPending = await waitFor([guardedRequestId]);
+        const guardedStillPending = await waitFor([]);
         const lateObservations = observedElicitationIds.slice(
           lateObservationStart
         );
@@ -3244,8 +3278,16 @@ final class CoreLogicTests: XCTestCase {
             "synthetic::durable-ask-user::call-pending"
         )
         XCTAssertEqual(synthetic["message"] as? String, "Pending terminal question")
-        XCTAssertEqual(synthetic["mode"] as? String, "terminal")
-        XCTAssertNil(synthetic["schema"])
+        XCTAssertEqual(synthetic["mode"] as? String, "terminal-default")
+        let syntheticSchema = synthetic["schema"] as? [String: Any]
+        XCTAssertEqual(
+            syntheticSchema?["x-copilot-projects-terminal-default"] as? Bool,
+            true
+        )
+        let syntheticProperties = syntheticSchema?["properties"] as? [String: Any]
+        let syntheticField = syntheticProperties?["rerunFailedJobs"] as? [String: Any]
+        XCTAssertEqual(syntheticField?["type"] as? String, "boolean")
+        XCTAssertEqual(syntheticField?["default"] as? Bool, true)
         XCTAssertEqual(
             (result?["real"] as? [String: Any])?["requestId"] as? String,
             "real-request"
@@ -3255,6 +3297,11 @@ final class CoreLogicTests: XCTestCase {
             "Second durable question"
         )
         XCTAssertEqual(
+            (result?["second"] as? [String: Any])?["mode"] as? String,
+            "terminal"
+        )
+        XCTAssertNil((result?["second"] as? [String: Any])?["schema"])
+        XCTAssertEqual(
             (result?["fourth"] as? [String: Any])?["message"] as? String,
             "Fourth durable question"
         )
@@ -3262,7 +3309,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(result?["withSubagentCount"] as? Int, 2)
         XCTAssertEqual(result?["staleRootUserInputCount"] as? Int, 1)
         XCTAssertEqual(result?["afterOutOfOrderCount"] as? Int, 1)
-        XCTAssertEqual(result?["guardedStillPendingCount"] as? Int, 1)
+        XCTAssertEqual(result?["guardedStillPendingCount"] as? Int, 0)
         XCTAssertEqual(result?["lateSyntheticSeen"] as? Bool, false)
         XCTAssertEqual(result?["staleSyntheticSeen"] as? Bool, false)
         XCTAssertGreaterThan(result?["askUserToolCount"] as? Int ?? 0, 0)

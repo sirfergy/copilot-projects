@@ -155,6 +155,7 @@ public enum CopilotExtension {
         // from the CLI's terminal UI.
         const pendingPermissionRequestIds = new Set();
         const completedPermissionRequestIds = new Set();
+        let terminalDisconnectError = null;
         let foregroundTurnActive = false;
         // Wall-clock time of the most recent `foregroundTurnActive` transition
         // (root turn_start/turn_end/session.idle). Distinct from `updatedAt`,
@@ -635,8 +636,19 @@ public enum CopilotExtension {
             writeMarker(copilotSessionPath, copilotSessionId);
         }
 
+        function isTerminalDisconnect(error) {
+            if (!error) return false;
+            const message = String(error).toLowerCase();
+            return message.includes("connection is closed")
+                || message.includes("connection is disposed");
+        }
+
         function publish(error) {
             if (!ownsSharedFiles()) return;
+            if (isTerminalDisconnect(error)) {
+                terminalDisconnectError = String(error);
+            }
+            const reportedError = error ? String(error) : terminalDisconnectError;
             const snapshot = {
                 schemaVersion: 1,
                 updatedAt: new Date().toISOString(),
@@ -657,7 +669,7 @@ public enum CopilotExtension {
                 pendingPermissionRequestIds: [...pendingPermissionRequestIds],
                 ...(currentModel ? { model: currentModel } : {}),
                 ...(availableModels ? { availableModels } : {}),
-                ...(error ? { error: String(error) } : {}),
+                ...(reportedError ? { error: reportedError } : {}),
             };
             const temporaryPath = `${snapshotPath}.${process.pid}.tmp`;
             try {
@@ -682,6 +694,7 @@ public enum CopilotExtension {
             const requestId = data.requestId;
             if (typeof requestId !== "string" || !requestId
                     || requestId.length > 200) return null;
+            if (requestId.startsWith(DURABLE_ASK_USER_PREFIX)) return null;
             const question = data.question;
             if (typeof question !== "string") return null;
             let totalBytes = userInputByteLength(question);
@@ -825,10 +838,12 @@ public enum CopilotExtension {
             const requestId = data.requestId;
             if (typeof requestId !== "string" || !requestId
                     || requestId.length > 200) return null;
+            if (requestId.startsWith(DURABLE_ASK_USER_PREFIX)) return null;
             const message = data.message;
             if (typeof message !== "string") return null;
             if (userInputByteLength(message) > MAX_ELICITATION_MESSAGE_BYTES) return null;
             const mode = typeof data.mode === "string" ? data.mode : null;
+            if (mode === "terminal-default") return null;
             let url = null;
             if (data.url != null) {
                 if (typeof data.url !== "string") return null;
@@ -851,6 +866,10 @@ public enum CopilotExtension {
                 // question. The remote form only renders a flat schema anyway.
                 if (jsonDepth(data.requestedSchema) > MAX_ELICITATION_SCHEMA_DEPTH) return null;
                 schema = data.requestedSchema;
+                if (Object.prototype.hasOwnProperty.call(
+                    schema,
+                    "x-copilot-projects-terminal-default"
+                )) return null;
             }
             // A form-mode elicitation with neither a schema nor a url isn't
             // remotely answerable; leave it to the terminal.
@@ -915,6 +934,47 @@ public enum CopilotExtension {
             return typeof message === "string" ? message : null;
         }
 
+        function durableAskUserBooleanSchema(event) {
+            const schema = event.data?.arguments?.requestedSchema;
+            if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+                return null;
+            }
+            if (Object.keys(schema).some((key) => key !== "properties")) {
+                return null;
+            }
+            const properties = schema.properties;
+            if (!properties || typeof properties !== "object"
+                    || Array.isArray(properties)
+                    || Object.keys(properties).length !== 1) {
+                return null;
+            }
+            const field = properties[Object.keys(properties)[0]];
+            if (!field || typeof field !== "object" || Array.isArray(field)
+                    || field.type !== "boolean"
+                    || Object.keys(field).some((key) =>
+                        !["type", "title", "description", "default"].includes(key))
+                    || (field.title != null && typeof field.title !== "string")
+                    || (field.description != null
+                        && typeof field.description !== "string")
+                    || typeof field.default !== "boolean") {
+                return null;
+            }
+            const publishedSchema = {
+                ...schema,
+                "x-copilot-projects-terminal-default": true,
+            };
+            let serialized;
+            try {
+                serialized = JSON.stringify(publishedSchema);
+            } catch {
+                return null;
+            }
+            if (Buffer.byteLength(serialized) > MAX_ELICITATION_SCHEMA_BYTES) {
+                return null;
+            }
+            return publishedSchema;
+        }
+
         function durableAskUserEntry(event) {
             const message = durableAskUserMessage(event);
             const toolCallId = event.data?.toolCallId;
@@ -929,10 +989,12 @@ public enum CopilotExtension {
             if (lastLiveQuestionAt && requestedAt <= lastLiveQuestionAt) {
                 return null;
             }
+            const schema = durableAskUserBooleanSchema(event);
             return {
                 requestId: DURABLE_ASK_USER_PREFIX + toolCallId,
                 message,
-                mode: "terminal",
+                mode: schema ? "terminal-default" : "terminal",
+                ...(schema ? { schema } : {}),
                 elicitationSource: "durable-ask-user",
                 requestedAt,
             };
@@ -1501,13 +1563,21 @@ public enum CopilotExtension {
             }
         }
 
-        function replayHistoryEvent(event, includePermissions) {
+        function replayHistoryEvent(
+            event,
+            includePermissions,
+            includePermissionIdle = includePermissions
+        ) {
             if (!event || typeof event !== "object"
                     || typeof event.type !== "string") {
                 return false;
             }
             try {
-                if (includePermissions) applyPermissionEvent(event, false);
+                if (includePermissions
+                        && (includePermissionIdle
+                            || event.type !== "session.idle")) {
+                    applyPermissionEvent(event, false);
+                }
                 applyModelFromEvent(event);
                 processTranscriptEvent(event, false);
                 return !event.agentId;
@@ -1520,6 +1590,8 @@ public enum CopilotExtension {
         }
 
         session.on((event) => {
+            // Any delivered event proves the SDK connection is live again.
+            terminalDisconnectError = null;
             // Identity first: a `/new` / `/resume` event must rotate before any
             // of the state below can be attributed to the wrong conversation.
             // The rotation reloads history itself, so the event is not queued.
@@ -1549,6 +1621,7 @@ public enum CopilotExtension {
                 const result = await session.rpc.schedule.list();
                 if (generation !== conversationGeneration) return;
                 schedules = result.entries;
+                terminalDisconnectError = null;
                 publish();
             } catch (error) {
                 if (generation !== conversationGeneration) return;
@@ -1755,6 +1828,7 @@ public enum CopilotExtension {
                                         applyDurableAskUserEvent(event);
                                         changed = replayHistoryEvent(
                                             event,
+                                            true,
                                             false
                                         ) || changed;
                                     }
@@ -1964,6 +2038,7 @@ public enum CopilotExtension {
             availableModels = null;
             schedules = [];
             lastLiveQuestionAt = null;
+            terminalDisconnectError = null;
 
             clearTimeout(transcriptPublishTimer);
             transcriptPublishTimer = null;

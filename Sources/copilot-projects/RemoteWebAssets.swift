@@ -2998,6 +2998,20 @@ enum RemoteWebAssets {
       }
       return fields.length ? { fields } : null;
     }
+    function terminalDefaultBoolean(request) {
+      if (request.mode !== 'terminal-default'
+          || !isPlainObject(request.schema)
+          || request.schema['x-copilot-projects-terminal-default'] !== true
+          || Object.keys(request.schema).length !== 2
+          || !isPlainObject(request.schema.properties)) return null;
+      const keys = Object.keys(request.schema.properties);
+      if (keys.length !== 1) return null;
+      const field = request.schema.properties[keys[0]];
+      if (!isPlainObject(field)
+          || field.type !== 'boolean'
+          || typeof field.default !== 'boolean') return null;
+      return { key: keys[0], value: field.default };
+    }
     function elicitationAccepts(kind, value) {
       switch (kind.type) {
         case 'stringEnum':
@@ -3154,6 +3168,8 @@ enum RemoteWebAssets {
       });
       if (entry.submitButton) {
         if (entry.isURLMode) {
+          entry.submitButton.disabled = disabled;
+        } else if (entry.terminalDefault) {
           entry.submitButton.disabled = disabled;
         } else if (entry.form) {
           entry.submitButton.disabled = disabled
@@ -3424,11 +3440,38 @@ enum RemoteWebAssets {
         card.append(buildElicitationActions(entry, 'Done', false));
       }
     }
+    function buildTerminalDefaultControls(entry, card) {
+      const fallback = document.createElement('div');
+      fallback.className = 'elicitation-fallback';
+      fallback.textContent =
+        'This question is being handled in the terminal. You can safely accept '
+        + 'the highlighted default here or use the terminal for another answer.';
+      card.append(fallback);
+      const actions = document.createElement('div');
+      actions.className = 'elicitation-actions';
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'elicitation-open';
+      open.textContent = 'Open terminal';
+      open.onclick = () => setViewMode('terminal');
+      const spacer = document.createElement('span');
+      spacer.className = 'spacer';
+      const accept = document.createElement('button');
+      accept.type = 'button';
+      accept.className = 'elicitation-submit';
+      accept.textContent = `Use default: ${entry.terminalDefault.value ? 'Yes' : 'No'}`;
+      accept.onclick = () => submitElicitation(entry.request.requestId, 'accept');
+      actions.append(open, spacer, accept);
+      card.append(actions);
+      entry.submitButton = accept;
+    }
     // Untrusted message/field text is only ever inserted with textContent.
     function buildElicitationCard(request) {
+      const form = parseElicitationForm(request.schema);
       const entry = {
         request,
-        form: parseElicitationForm(request.schema),
+        form,
+        terminalDefault: terminalDefaultBoolean(request),
         isURLMode: request.mode === 'url'
           || (typeof request.url === 'string' && request.url.length > 0),
         values: {},
@@ -3462,6 +3505,8 @@ enum RemoteWebAssets {
       card.append(message);
       if (entry.isURLMode) {
         buildElicitationURLControls(entry, card);
+      } else if (entry.terminalDefault) {
+        buildTerminalDefaultControls(entry, card);
       } else if (entry.form) {
         const fields = document.createElement('div');
         fields.className = 'elicitation-fields';
@@ -3477,6 +3522,12 @@ enum RemoteWebAssets {
         fallback.className = 'elicitation-fallback';
         fallback.textContent = 'Answer this one in the Copilot terminal.';
         card.append(fallback);
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'elicitation-open';
+        open.textContent = 'Open terminal';
+        open.onclick = () => setViewMode('terminal');
+        card.append(open);
       }
       const status = document.createElement('div');
       status.className = 'user-input-status';
@@ -3523,7 +3574,11 @@ enum RemoteWebAssets {
       const entry = elicitationCards.get(requestId);
       if (!entry) return;
       let content = null;
-      if (action === 'accept' && entry.form) {
+      if (action === 'accept' && entry.terminalDefault) {
+        content = {
+          [entry.terminalDefault.key]: entry.terminalDefault.value
+        };
+      } else if (action === 'accept' && entry.form) {
         content = validatedElicitationContent(entry.form, entry.values, entry.touched);
         if (content === null) return;
         let encoded;
