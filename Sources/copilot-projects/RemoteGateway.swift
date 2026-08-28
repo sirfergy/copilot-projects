@@ -477,6 +477,52 @@ struct RemoteRequestAuth: Sendable {
     }
 }
 
+/// Request shaping for `GET /transcript`.
+///
+/// The window is opt-in: a request without `limit` gets the entire transcript
+/// exactly as before (iOS and older web clients depend on that shape). A
+/// `limit` outside `1...200` is a client bug, not something to silently clamp,
+/// so it fails the request cleanly.
+enum RemoteTranscriptRequest {
+    enum Limit: Equatable {
+        case absent
+        case turns(Int)
+        case invalid
+    }
+
+    static func limit(query: [String: String]) -> Limit {
+        guard let raw = query["limit"] else { return .absent }
+        guard raw.count <= 3,
+              !raw.isEmpty,
+              raw.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let value = Int(raw),
+              value >= 1,
+              value <= TranscriptSnapshot.maximumRemoteTurnLimit else {
+            return .invalid
+        }
+        return .turns(value)
+    }
+
+    /// Builds the JSON body for one `/transcript` response.
+    ///
+    /// Image association runs against the FULL transcript and only then is the
+    /// window applied, so a turn's inline images never depend on how many turns
+    /// the client asked for: associating after slicing would re-anchor images
+    /// displayed during dropped turns onto whatever turn happened to become the
+    /// oldest one in the window.
+    static func encodedResponse(
+        snapshot: TranscriptSnapshot,
+        images: [RemoteKittyImageCapture.RetainedImageInfo],
+        limit: Int?
+    ) -> Data? {
+        let augmented = TranscriptImageAssociation.attach(images: images, to: snapshot)
+        let windowed = limit.map { augmented.limitedToMostRecentTurns($0) } ?? augmented
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return try? encoder.encode(windowed)
+    }
+}
+
 enum RemoteIOSAuthentication {
     struct Request {
         let state: String
@@ -890,6 +936,17 @@ private final class RemoteHTTPHandler:
                     contentType: "text/plain", body: "Bad request")
             return
         }
+        let requestedLimit: Int?
+        switch RemoteTranscriptRequest.limit(query: query) {
+        case .invalid:
+            respond(context: context, method: head.method, status: .badRequest,
+                    contentType: "text/plain", body: "Bad request")
+            return
+        case .absent:
+            requestedLimit = nil
+        case .turns(let value):
+            requestedLimit = value
+        }
         let channel = context.channel
         let method = head.method
         Task { @MainActor in
@@ -907,14 +964,11 @@ private final class RemoteHTTPHandler:
             }
             let imageMetadata = self.bridge.retainedImageMetadata(sessionId: sessionId) ?? []
             let encodedData = await Task.detached {
-                let snapshot = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
-                let augmented = TranscriptImageAssociation.attach(
+                RemoteTranscriptRequest.encodedResponse(
+                    snapshot: TranscriptController.loadRemoteSnapshot(sessionId: sessionId),
                     images: imageMetadata,
-                    to: snapshot
+                    limit: requestedLimit
                 )
-                let encoder = JSONEncoder()
-                encoder.dateEncodingStrategy = .iso8601
-                return try? encoder.encode(augmented)
             }.value
             guard let data = encodedData else {
                 channel.eventLoop.execute {

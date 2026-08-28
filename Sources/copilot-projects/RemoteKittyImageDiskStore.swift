@@ -68,7 +68,8 @@ struct RemoteKittyRestoredSessionImages: Equatable {
 /// shell with an empty SwiftTerm buffer), not just this process's lifetime.
 ///
 /// Every mutation (`persistRetain`, `persistEviction`, `persistClearSession`,
-/// `replaceCurrentSelections`) and the async `restore(sessionId:)` read are
+/// `replaceCurrentSelections`, `clearCurrentSelections`) and the async
+/// `restore(sessionId:)` read are
 /// serialized onto a single FIFO chain of detached background tasks (see
 /// `enqueue`, mirroring `NotificationDeliveryQueue`'s pattern elsewhere in
 /// this target) — so operations issued in a given order from the main actor
@@ -158,6 +159,7 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
     private var persistenceDisabledSessionIds: Set<String> = []
     private var overflowCleanupScheduledSessionIds: Set<String> = []
     private var futureRetainsDisabled = false
+    private var manifestPersistCount = 0
     private let activationLock = NSLock()
     private var activated = false
 
@@ -186,7 +188,7 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
         self.maxQueuedMutations = maxQueuedMutations
         dataDir = root.appendingPathComponent("data", isDirectory: true)
         tombstoneDir = root.appendingPathComponent("tombstones", isDirectory: true)
-        manifestURL = root.appendingPathComponent("manifest.json")
+        manifestURL = root.appendingPathComponent("manifest.json", isDirectory: false)
         manifest = Self.loadManifestFailClosed(at: manifestURL)
         // Deliberately does NOT eagerly create any directory here: every
         // real write path below (`writeAtomically`, `persistManifest`,
@@ -439,6 +441,17 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
         }
     }
 
+    /// Clears every persisted current-selection record for the specified
+    /// image ids in one FIFO mutation and one manifest persist. This is the
+    /// durable counterpart of a single Kitty placement-clear operation that
+    /// naturally affects multiple ids.
+    func clearCurrentSelections(sessionId: String, imageIds: Set<UInt32>) {
+        guard !imageIds.isEmpty else { return }
+        enqueueMutation(sessionId: sessionId, failClosedOnDrop: true) { [self] in
+            performClearCurrentSelections(sessionId: sessionId, imageIds: imageIds)
+        }
+    }
+
     /// Synchronously (before returning) writes a durable marker recording
     /// that `sessionId` was deliberately destroyed — surviving even an
     /// immediate app exit — then asynchronously enqueues removal of every
@@ -533,7 +546,10 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
 
     func tombstoneMarkerExistsForTesting(sessionId: String) -> Bool {
         FileManager.default.fileExists(
-            atPath: tombstoneDir.appendingPathComponent(Self.token(for: sessionId)).path
+            atPath: tombstoneDir.appendingPathComponent(
+                Self.token(for: sessionId),
+                isDirectory: false
+            ).path
         )
     }
 
@@ -547,6 +563,14 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
         chainLock.lock()
         defer { chainLock.unlock() }
         return queuedRetainBytes
+    }
+
+    func manifestPersistCountForTesting() async -> Int {
+        await withCheckedContinuation { continuation in
+            enqueue { [self] in
+                continuation.resume(returning: manifestPersistCount)
+            }
+        }
     }
 
     /// The exact on-disk path an entry's bytes are (or would be) stored at.
@@ -564,7 +588,10 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
         tombstonedSessionIdsLock.unlock()
         if isTombstonedInMemory { return true }
         return FileManager.default.fileExists(
-            atPath: tombstoneDir.appendingPathComponent(Self.token(for: sessionId)).path
+            atPath: tombstoneDir.appendingPathComponent(
+                Self.token(for: sessionId),
+                isDirectory: false
+            ).path
         )
     }
 
@@ -728,6 +755,20 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
         // *other* image ids first so a burst of activity on one id can never
         // starve every other id's selection.
         enforceSelectionBound(sessionId: sessionId)
+        guard persistManifest() else {
+            manifest = originalManifest
+            refreshSessionIndexLocked()
+            failClosedSessionAfterPersistenceFailure(sessionId)
+            return
+        }
+    }
+
+    private func performClearCurrentSelections(sessionId: String, imageIds: Set<UInt32>) {
+        guard !isTombstoned(sessionId: sessionId) else { return }
+        let originalManifest = manifest
+        manifest.selections.removeAll {
+            $0.sessionId == sessionId && imageIds.contains($0.imageId)
+        }
         guard persistManifest() else {
             manifest = originalManifest
             refreshSessionIndexLocked()
@@ -1022,7 +1063,10 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
-            let path = tombstoneDir.appendingPathComponent(Self.token(for: sessionId)).path
+            let path = tombstoneDir.appendingPathComponent(
+                Self.token(for: sessionId),
+                isDirectory: false
+            ).path
             guard FileManager.default.createFile(
                 atPath: path,
                 contents: Data(),
@@ -1038,7 +1082,10 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
     }
 
     private func removeTombstoneMarker(sessionId: String) {
-        let url = tombstoneDir.appendingPathComponent(Self.token(for: sessionId))
+        let url = tombstoneDir.appendingPathComponent(
+            Self.token(for: sessionId),
+            isDirectory: false
+        )
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         do {
             try FileManager.default.removeItem(at: url)
@@ -1075,7 +1122,10 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
     }
 
     private func dataFileURL(sessionId: String, imageId: UInt32, version: UInt64) -> URL {
-        dataDir.appendingPathComponent(dataFileName(sessionId: sessionId, imageId: imageId, version: version))
+        dataDir.appendingPathComponent(
+            dataFileName(sessionId: sessionId, imageId: imageId, version: version),
+            isDirectory: false
+        )
     }
 
     /// Atomic write via a staging temp file (`.tmp-<uuid>`) renamed into
@@ -1088,7 +1138,10 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
         try? FileManager.default.createDirectory(
             at: dataDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
         )
-        let staging = dataDir.appendingPathComponent(".tmp-\(UUID().uuidString)")
+        let staging = dataDir.appendingPathComponent(
+            ".tmp-\(UUID().uuidString)",
+            isDirectory: false
+        )
         do {
             try data.write(to: staging, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staging.path)
@@ -1105,6 +1158,7 @@ final class RemoteKittyImageDiskStore: @unchecked Sendable {
 
     @discardableResult
     private func persistManifest() -> Bool {
+        manifestPersistCount += 1
         refreshSessionIndexLocked()
         do {
             try FileManager.default.createDirectory(
