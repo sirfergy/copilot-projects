@@ -8,6 +8,7 @@ import vm from "node:vm";
 import {
   assembledJavaScript,
   fragmentOrder,
+  joinJavaScriptFragments,
   readFragment,
   repositoryRoot,
   trackerResourceDir,
@@ -72,6 +73,16 @@ test("the Swift facade and the resource directory agree on fragment order", () =
 test("the assembled /app.js response parses as a single script", () => {
   const assembled = assembledJavaScript();
   assert.doesNotThrow(() => new vm.Script(assembled, { filename: "app.js" }));
+});
+
+test("fragment seams end line comments before the next script", () => {
+  const context = {};
+  vm.runInNewContext(joinJavaScriptFragments([
+    "globalThis.firstLoaded = true; // trailing comment\n",
+    "globalThis.secondLoaded = true;\n",
+  ]), context);
+  assert.equal(context.firstLoaded, true);
+  assert.equal(context.secondLoaded, true);
 });
 
 test("the tracker extension is a valid ES module", () => {

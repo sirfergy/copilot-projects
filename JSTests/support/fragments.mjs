@@ -52,16 +52,17 @@ export function readFragment(name) {
   return readFileSync(join(webResourceDir, "js", `${name}.js`), "utf8");
 }
 
+export function joinJavaScriptFragments(sources) {
+  return sources
+    .map((source) => source.endsWith("\n") ? source.slice(0, -1) : source)
+    .join("\n");
+}
+
 /// `RemoteWebAssets` drops each fragment's trailing newline and inserts one
 /// newline boundary between files, so the assembled script here matches the
 /// served `/app.js` byte for byte.
 export function assembledJavaScript() {
-  return fragmentOrder
-    .map((name) => {
-      const source = readFragment(name);
-      return source.endsWith("\n") ? source.slice(0, -1) : source;
-    })
-    .join("\n");
+  return joinJavaScriptFragments(fragmentOrder.map(readFragment));
 }
 
 /// Evaluates fragments in order in a fresh realm seeded with `globals`.

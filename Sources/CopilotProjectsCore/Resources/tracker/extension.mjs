@@ -1040,10 +1040,11 @@ if (validSessionId && socketPath) {
         }
     }
 
-    // Answer a pending question from the host-written response file. Invalid or
-    // stale responses only remove the response file; the pending question and its
-    // exact terminal fallback are preserved. `user_input.completed` stays
-    // authoritative for removing a question.
+    // Answer a pending question from the host-written response file. Legacy
+    // invalid/stale responses only remove the file; correlated validation
+    // failures publish a rejected receipt. The pending question and its exact
+    // terminal fallback are preserved until an applied result or
+    // `user_input.completed`.
     async function processUserInputResponse() {
         // Only the owner reconciles remote answers: a spawned classifier helper
         // shares this session dir and would otherwise delete the owner's pending
