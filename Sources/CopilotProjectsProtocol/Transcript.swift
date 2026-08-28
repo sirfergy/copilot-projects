@@ -1,21 +1,52 @@
 import Foundation
 
 public struct TranscriptSnapshot: Codable, Equatable, Sendable {
+    /// Largest window a remote client may request in one `/transcript` response.
+    /// Matches the CLI writer's own per-session turn cap, so a client can never
+    /// ask for more than a full snapshot could contain.
+    public static let maximumRemoteTurnLimit = 200
+
     public let schemaVersion: Int
     public let updatedAt: Date
     public let copilotSessionId: String
     public let turns: [TranscriptTurn]
+    /// How many turns exist in the full transcript when `turns` carries only a
+    /// window of it. Absent (`nil`) means `turns` *is* the whole transcript —
+    /// the exact legacy response shape, which clients that never send a window
+    /// request (iOS, older web clients) keep receiving. Optional with a `nil`
+    /// default so every existing constructor and decoder keeps working, and so
+    /// encoding omits the key entirely rather than emitting `null`.
+    public let totalTurns: Int?
 
     public init(
         schemaVersion: Int,
         updatedAt: Date,
         copilotSessionId: String,
-        turns: [TranscriptTurn]
+        turns: [TranscriptTurn],
+        totalTurns: Int? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.updatedAt = updatedAt
         self.copilotSessionId = copilotSessionId
         self.turns = turns
+        self.totalTurns = totalTurns
+    }
+
+    /// The most recent `limit` turns, tagged with the full turn count so a
+    /// client knows how many older turns it can still ask for. Always reports
+    /// `totalTurns` — even when nothing was dropped — so a client that asked for
+    /// a window can distinguish "this is everything" from "an older host ignored
+    /// my request and sent the whole transcript" (which omits the field).
+    public func limitedToMostRecentTurns(_ limit: Int) -> TranscriptSnapshot {
+        let bounded = max(0, limit)
+        let dropped = max(0, turns.count - bounded)
+        return TranscriptSnapshot(
+            schemaVersion: schemaVersion,
+            updatedAt: updatedAt,
+            copilotSessionId: copilotSessionId,
+            turns: dropped > 0 ? Array(turns.suffix(bounded)) : turns,
+            totalTurns: turns.count
+        )
     }
 }
 

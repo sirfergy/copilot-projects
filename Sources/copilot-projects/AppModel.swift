@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import AppKit
 import ScreenCaptureKit
 import CopilotProjectsCore
@@ -222,7 +223,14 @@ enum PermissionNotificationDecision: Equatable {
 /// terminal controllers (NOT observed, kept out of the SwiftUI graph).
 @MainActor
 final class AppModel: ObservableObject {
-    @Published private(set) var projects: [Project] = []
+    private var projectStorage: [Project] = []
+    private(set) var projects: [Project] {
+        get { projectStorage }
+        set {
+            objectWillChange.send()
+            projectStorage = newValue
+        }
+    }
     @Published private(set) var selectedProjectId: String?
     @Published var numberHint: NumberHint = .none
     @Published private(set) var transcriptOpenSessions: Set<String> = []
@@ -2649,23 +2657,28 @@ final class AppModel: ObservableObject {
         agentActivityScanObserver?()
         let decoder = JSONDecoder()
         let fm = FileManager.default
+        var nextProjects = projects
+        var activityChanged = false
         var seenSessionIds: Set<String> = []
-        for pi in projects.indices {
-            for si in projects[pi].sessions.indices {
-                let sessionId = projects[pi].sessions[si].id
+        for pi in nextProjects.indices {
+            for si in nextProjects[pi].sessions.indices {
+                let sessionId = nextProjects[pi].sessions[si].id
                 seenSessionIds.insert(sessionId)
                 let path = agentActivityDirectory
-                    .appendingPathComponent("\(sessionId).agent-activity.json").path
+                    .appendingPathComponent("\(sessionId).agent-activity.json", isDirectory: false).path
                 let snapshot = loadAgentActivitySnapshot(
                     sessionId: sessionId, path: path, decoder: decoder, fm: fm
                 )
                 let fresh = snapshot?.isFresh(at: now) == true ? snapshot : nil
-                if projects[pi].sessions[si].agentActivity != fresh {
-                    projects[pi].sessions[si].agentActivity = fresh
+                if nextProjects[pi].sessions[si].agentActivity != fresh {
+                    var previous = nextProjects[pi].sessions[si].agentActivity
+                    if let fresh { previous?.updatedAt = fresh.updatedAt }
+                    activityChanged = activityChanged || previous != fresh
+                    nextProjects[pi].sessions[si].agentActivity = fresh
                 }
 
                 let scheduledMarkerURL = agentActivityDirectory
-                    .appendingPathComponent("\(sessionId).scheduled-turn")
+                    .appendingPathComponent("\(sessionId).scheduled-turn", isDirectory: false)
                 let scheduledMarker = fm.fileExists(atPath: scheduledMarkerURL.path)
                 if fresh?.scheduledTurnActive == false {
                     scheduledSnapshotsSuppressed.remove(sessionId)
@@ -2673,11 +2686,18 @@ final class AppModel: ObservableObject {
                 let snapshotScheduled = fresh?.scheduledTurnActive == true
                     && !scheduledSnapshotsSuppressed.contains(sessionId)
                 let scheduledActive = scheduledMarker || snapshotScheduled
-                if projects[pi].sessions[si].scheduledTurnActive != scheduledActive {
-                    projects[pi].sessions[si].scheduledTurnActive = scheduledActive
+                if nextProjects[pi].sessions[si].scheduledTurnActive != scheduledActive {
+                    nextProjects[pi].sessions[si].scheduledTurnActive = scheduledActive
+                    activityChanged = true
                 }
-
             }
+        }
+        if activityChanged {
+            projects = nextProjects
+        } else {
+            // Keep one authoritative snapshot, including its latest freshness and
+            // disconnect timestamps, without redrawing for heartbeat-only changes.
+            projectStorage = nextProjects
         }
         // Drop cache entries for sessions no longer present so the cache can't grow
         // across a long-lived app run that opens and closes many sessions. Filtering

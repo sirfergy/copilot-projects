@@ -15221,7 +15221,7 @@ private func remoteKittyTestCapture(epoch: UInt32 = 0) -> RemoteKittyImageCaptur
 /// so it satisfies `RemoteKittyImageCapture.validatePNG`'s ImageIO-based
 /// "structurally complete PNG" check (which a truncated fixture no longer
 /// passes). A solid fill compresses to a tiny file regardless of dimensions.
-private func remoteKittyTestPNGBytes(width: Int, height: Int) -> Data {
+func remoteKittyTestPNGBytes(width: Int, height: Int) -> Data {
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     guard let context = CGContext(
         data: nil,
@@ -15273,7 +15273,7 @@ private func remoteKittyTruncatedPNGFixtureBytes(width: UInt32, height: UInt32) 
 }
 
 /// Builds one 7-bit APC Kitty graphics frame: `ESC _ G <control>[;<base64>] ESC \`.
-private func remoteKittyFrameBytes(control: String, base64Payload: String = "") -> [UInt8] {
+func remoteKittyFrameBytes(control: String, base64Payload: String = "") -> [UInt8] {
     var bytes: [UInt8] = [0x1B, 0x5F, 0x47] // ESC _ G
     bytes.append(contentsOf: Array(control.utf8))
     if !base64Payload.isEmpty {

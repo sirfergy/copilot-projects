@@ -1,6 +1,7 @@
 import Foundation
 import Security
 import WebPush
+import NIOPosix
 import Darwin
 import CopilotProjectsCore
 import CopilotProjectsProtocol
@@ -221,15 +222,30 @@ final class WebPushService: @unchecked Sendable {
         let configuration = try loadOrCreateVAPIDConfiguration(
             contactEmail: contactEmail
         )
+        return live(vapidConfiguration: configuration, store: store)
+    }
+
+    static func live(
+        vapidConfiguration: VAPID.Configuration,
+        store: WebPushSubscriptionStore
+    ) -> WebPushService {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let manager = WebPushManager(
-            vapidConfiguration: configuration,
-            backgroundActivityLogger: nil
+            vapidConfiguration: vapidConfiguration,
+            backgroundActivityLogger: nil,
+            eventLoopGroupProvider: .shared(group)
         )
         let task = Task.detached {
             do {
                 try await manager.run()
             } catch {
                 NSLog("copilot-projects: WebPush manager stopped: %@", "\(error)")
+            }
+            // run() closes the manager's HTTP client before releasing its group.
+            do {
+                try await group.shutdownGracefully()
+            } catch {
+                NSLog("copilot-projects: WebPush event-loop shutdown failed: %@", "\(error)")
             }
         }
         return WebPushService(
@@ -258,6 +274,11 @@ final class WebPushService: @unchecked Sendable {
 
     func shutdown() {
         managerTask?.cancel()
+    }
+
+    func shutdownAndWait() async {
+        shutdown()
+        await managerTask?.value
     }
 
     func register(data: Data) throws {

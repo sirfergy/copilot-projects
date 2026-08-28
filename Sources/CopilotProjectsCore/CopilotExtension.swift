@@ -18,6 +18,7 @@ public enum CopilotExtension {
     import { execFileSync } from "node:child_process";
     import { homedir } from "node:os";
     import { dirname, join } from "node:path";
+    import { isDeepStrictEqual } from "node:util";
     import {
         createReadStream, existsSync as fileExistsSync, lstatSync,
         mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync
@@ -1262,27 +1263,100 @@ public enum CopilotExtension {
         // turn as a whole. Whole-turn drops mutate transcriptTurns and payload
         // shedding mutates the shared turn objects, so repeated publishes don't
         // redo the work.
+        //
+        // Reduction is driven by exact encoded-byte accounting instead of
+        // re-encoding the whole document after every removal. A transcript that
+        // has to shed hundreds of messages used to cost hundreds of full
+        // `JSON.stringify` passes over a multi-megabyte document (gigabytes of
+        // throwaway string churn for a single publish). Here every item is
+        // measured once — `JSON.stringify` of the item itself, counted in UTF-8
+        // bytes exactly as the enclosing document counts it, escaping and lone
+        // surrogates included — and each removal subtracts that item's bytes
+        // plus the separating comma it takes with it, so the running total
+        // tracks the final encoding byte for byte.
         function encodedTranscriptWithinBudget(pending) {
-            const build = () => ({
+            // The envelope, `updatedAt` included, is captured once: all the
+            // accounting below is anchored to this exact prefix, and a
+            // timestamp that drifted mid-trim would invalidate it.
+            const snapshot = {
                 schemaVersion: 3,
                 updatedAt: new Date().toISOString(),
                 copilotSessionId: boundedMetadataText(copilotSessionId),
                 ownerPid: process.pid,
                 turns: pending ? [...transcriptTurns, pending] : transcriptTurns.slice(),
-            });
-            let snapshot = build();
+            };
             let encoded = JSON.stringify(snapshot);
-            const overBudget = () => Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES;
-            const reencode = () => { encoded = JSON.stringify(snapshot); };
+            // Overwhelmingly common case: one encode, exactly as before.
+            if (Buffer.byteLength(encoded) <= MAX_TRANSCRIPT_BYTES) return encoded;
+
+            // `n` array members carry `n - 1` separating commas.
+            const separators = (count) => (count > 0 ? count - 1 : 0);
+            const encodedBytes = (value) => {
+                const item = JSON.stringify(value);
+                // A member that stringifies to `undefined` is emitted as `null`
+                // by the enclosing array.
+                return Buffer.byteLength(item === undefined ? "null" : item);
+            };
+            const sum = (values) => values.reduce((carry, value) => carry + value, 0);
+            // Measures one turn: the shell it encodes to with both payload
+            // arrays empty, plus every member's own encoded size. A turn from a
+            // restored snapshot whose payload is not an array is measured
+            // verbatim inside the shell and simply has nothing to shed.
+            const measure = (turn) => {
+                const messages = Array.isArray(turn.assistantMessages)
+                    ? turn.assistantMessages
+                    : null;
+                const tools = Array.isArray(turn.tools) ? turn.tools : null;
+                const shell = { ...turn };
+                if (messages) shell.assistantMessages = [];
+                if (tools) shell.tools = [];
+                const messageBytes = messages ? messages.map(encodedBytes) : [];
+                const toolBytes = tools ? tools.map(encodedBytes) : [];
+                return {
+                    turn,
+                    messages,
+                    tools,
+                    messageBytes,
+                    toolBytes,
+                    bytes: Buffer.byteLength(JSON.stringify(shell))
+                        + sum(messageBytes) + separators(messageBytes.length)
+                        + sum(toolBytes) + separators(toolBytes.length),
+                };
+            };
+
+            const turns = snapshot.turns;
+            const entries = turns.map(measure);
+            // `turns` mirrors `transcriptTurns` with `pending` appended, so a
+            // stored turn shares its index across both arrays.
+            let storedCount = pending ? turns.length - 1 : turns.length;
+            let total = Buffer.byteLength(JSON.stringify({ ...snapshot, turns: [] }))
+                + sum(entries.map((entry) => entry.bytes))
+                + separators(entries.length);
+            const overBudget = () => total > MAX_TRANSCRIPT_BYTES;
+            const dropStoredTurn = (index) => {
+                total -= entries[index].bytes + (turns.length > 1 ? 1 : 0);
+                transcriptTurns.splice(index, 1);
+                turns.splice(index, 1);
+                entries.splice(index, 1);
+                storedCount -= 1;
+            };
+            const droppableStoredIndex = (predicate) => entries.findIndex(
+                (entry, index) => index < storedCount && predicate(entry.turn)
+            );
             const shedOldestPayload = (predicate) => {
-                for (const turn of snapshot.turns) {
-                    if (!predicate(turn)) continue;
-                    if (turn.assistantMessages.length > 0) {
-                        turn.assistantMessages.shift();
-                        return true;
-                    }
-                    if (turn.tools.length > 0) {
-                        turn.tools.shift();
+                for (const entry of entries) {
+                    if (!predicate(entry.turn)) continue;
+                    for (const [sizes, items] of [
+                        [entry.messageBytes, entry.messages],
+                        [entry.toolBytes, entry.tools],
+                    ]) {
+                        if (sizes.length === 0) continue;
+                        // The comma disappears with the member only while
+                        // another member survives beside it.
+                        const removed = sizes.shift() + (sizes.length > 0 ? 1 : 0);
+                        items.shift();
+                        entry.bytes -= removed;
+                        total -= removed;
                         return true;
                     }
                 }
@@ -1291,39 +1365,41 @@ public enum CopilotExtension {
 
             // Phase 1: drop whole non-foreground stored turns (oldest first).
             while (overBudget()) {
-                const index = transcriptTurns.findIndex(
+                const index = droppableStoredIndex(
                     (turn) => turn.kind !== "foreground"
                         && turn.id !== latestResumeTranscriptTurnId
                 );
                 if (index === -1) break;
-                transcriptTurns.splice(index, 1);
-                snapshot = build();
-                reencode();
+                dropStoredTurn(index);
             }
             // Phase 2: shed payload from any remaining non-foreground turn (i.e. an
             // in-progress scheduled/automated turn) before touching foreground.
-            while (overBudget()
-                    && shedOldestPayload(
-                        (turn) => turn.kind !== "foreground"
-                            && turn.id !== latestResumeTranscriptTurnId
-                    )) {
-                reencode();
+            while (overBudget()) {
+                if (!shedOldestPayload(
+                    (turn) => turn.kind !== "foreground"
+                        && turn.id !== latestResumeTranscriptTurnId
+                )) break;
             }
             // Phase 3: drop whole foreground stored turns (oldest), never pending,
             // leaving at least one turn for payload shedding below.
             const minStored = pending ? 0 : 1;
-            while (overBudget() && transcriptTurns.length > minStored) {
-                const index = transcriptTurns.findIndex(
+            while (overBudget() && storedCount > minStored) {
+                const index = droppableStoredIndex(
                     (turn) => turn.id !== latestResumeTranscriptTurnId
                 );
                 if (index === -1) break;
-                transcriptTurns.splice(index, 1);
-                snapshot = build();
-                reencode();
+                dropStoredTurn(index);
             }
             // Phase 4: shed payload from the last remaining turn(s).
-            while (overBudget() && shedOldestPayload(() => true)) {
-                reencode();
+            while (overBudget()) {
+                if (!shedOldestPayload(() => true)) break;
+            }
+
+            encoded = JSON.stringify(snapshot);
+            // Reject an impossible budget rather than discard protected turns or
+            // overwrite the last good snapshot with an oversized document.
+            if (Buffer.byteLength(encoded) > MAX_TRANSCRIPT_BYTES) {
+                throw new RangeError("Transcript exceeds its byte budget after trimming");
             }
             return encoded;
         }
@@ -1331,12 +1407,13 @@ public enum CopilotExtension {
         function writeTranscriptSnapshot() {
             const pending = serializedPendingTurn();
             trimTranscriptTurns(pending ? MAX_TRANSCRIPT_TURNS - 1 : MAX_TRANSCRIPT_TURNS);
-            const encoded = encodedTranscriptWithinBudget(pending);
             const temporaryPath = `${transcriptPath}.${process.pid}.tmp`;
             try {
+                const encoded = encodedTranscriptWithinBudget(pending);
                 writeFileSync(temporaryPath, encoded, { mode: 0o600 });
                 renameSync(temporaryPath, transcriptPath);
-            } catch {
+            } catch (error) {
+                console.error("copilot-projects: could not publish transcript", error);
                 removeFile(temporaryPath);
             }
         }
@@ -1729,9 +1806,18 @@ public enum CopilotExtension {
             try {
                 const result = await session.rpc.schedule.list();
                 if (generation !== conversationGeneration) return;
-                schedules = result.entries;
+                const entries = result.entries;
+                // A successful call also proves the connection recovered, so a
+                // cleared terminal disconnect counts as a change even when the
+                // entries are identical.
+                const changed = terminalDisconnectError !== null
+                    || !isDeepStrictEqual(entries, schedules);
+                schedules = entries;
                 terminalDisconnectError = null;
-                publish();
+                // The poll's own heartbeat already refreshed `updatedAt` this
+                // tick; republishing an identical snapshot would only double the
+                // background write rate.
+                if (changed) publish();
             } catch (error) {
                 if (generation !== conversationGeneration) return;
                 publish(error);
@@ -2349,8 +2435,11 @@ public enum CopilotExtension {
                 );
                 // Keep the last good catalog if a refresh returns nothing usable.
                 if (normalized) {
+                    const changed = !isDeepStrictEqual(normalized, availableModels);
                     availableModels = normalized;
-                    publish();
+                    // Identical catalogs are the steady state; the poll's
+                    // heartbeat already published this tick.
+                    if (changed) publish();
                 }
             } catch {
             } finally {
@@ -2744,6 +2833,15 @@ public enum CopilotExtension {
             // event reaching us, everything below must run against the new
             // conversation, not the one we just left.
             if (reconcileSessionIdentityFromSdk()) return;
+            // Heartbeat. The host reads `updatedAt` as proof this session is
+            // still alive (its staleness thresholds are 10s/15s), so liveness
+            // must not ride on an RPC: `schedule.list` can hang, and either
+            // refresh can be suppressed outright by its single-flight guard
+            // while a previous call is still outstanding. Publishing here and
+            // letting the refreshes publish only on an actual change keeps the
+            // heartbeat exact while collapsing the steady-state cost from two
+            // full snapshot writes per tick to one.
+            publish();
             refreshSchedules();
             refreshModels();
             processUserInputResponse();

@@ -279,7 +279,10 @@ The companion Copilot extension records completed root turns through the support
 event API. It atomically writes a bounded per-tab transcript snapshot after each turn, including
 stopped turns and compact tool summaries but excluding raw tool arguments and results. Copilot
 Projects renders that snapshot in the drawer without parsing private CLI session files or
-changing the terminal's PTY size.
+changing the terminal's PTY size. The remote web view fetches the latest 50 turns and loads
+older retained turns with **Show earlier**. The transcript endpoint accepts an optional
+`limit` from 1 to 200 and includes `totalTurns` for a windowed response; clients that omit
+`limit` continue to receive the full snapshot.
 
 The app also installs a read-only Copilot extension at
 `~/.copilot/extensions/copilot-projects-tracker/extension.mjs`. It uses Copilot's session event

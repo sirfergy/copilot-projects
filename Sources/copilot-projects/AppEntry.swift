@@ -366,6 +366,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             await self.model.detachAllClientsAndDrain()
             await self.model.flushKittyImagePersistence()
+            await self.webPushService?.shutdownAndWait()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

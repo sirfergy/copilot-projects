@@ -1,6 +1,15 @@
 import Foundation
 import CopilotProjectsProtocol
 
+private enum AgentTimestamp {
+    static let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    static let plain = Date.ISO8601FormatStyle()
+
+    static func parse(_ value: String) -> Date? {
+        (try? fractional.parse(value)) ?? (try? plain.parse(value))
+    }
+}
+
 struct AgentActivitySnapshot: Codable, Equatable {
     static let currentSchemaVersion = 1
 
@@ -43,7 +52,7 @@ struct AgentActivitySnapshot: Codable, Equatable {
 
     func isFresh(at now: Date = Date(), ttl: TimeInterval = 15) -> Bool {
         guard schemaVersion == Self.currentSchemaVersion,
-              let updated = Self.date(from: updatedAt) else { return false }
+              let updated = AgentTimestamp.parse(updatedAt) else { return false }
         return now.timeIntervalSince(updated) <= ttl
     }
 
@@ -70,7 +79,7 @@ struct AgentActivitySnapshot: Codable, Equatable {
     /// snapshots predating the field return nil and cannot drive reconciliation.
     var foregroundTransitionMilliseconds: Int64? {
         guard let value = foregroundTransitionAt,
-              let transition = Self.date(from: value) else { return nil }
+              let transition = AgentTimestamp.parse(value) else { return nil }
         return Int64(transition.timeIntervalSince1970 * 1_000)
     }
 
@@ -80,7 +89,7 @@ struct AgentActivitySnapshot: Codable, Equatable {
     /// terminal-disconnect error (no clean turn transition), used to order the
     /// disconnect demotion against the status-event clock.
     var updatedAtMilliseconds: Int64? {
-        guard let updated = Self.date(from: updatedAt) else { return nil }
+        guard let updated = AgentTimestamp.parse(updatedAt) else { return nil }
         return Int64(updated.timeIntervalSince1970 * 1_000)
     }
 
@@ -117,12 +126,6 @@ struct AgentActivitySnapshot: Codable, Equatable {
         let mapped = availableModels.compactMap { $0.remoteAvailableModel() }
         return mapped.isEmpty ? nil : mapped
     }
-
-    private static func date(from value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
-    }
 }
 
 /// One outstanding structured question, mirrored from the extension's heartbeat.
@@ -143,15 +146,9 @@ struct TrackedUserInput: Codable, Equatable, Identifiable {
             question: question,
             choices: choices,
             allowFreeform: allowFreeform,
-            requestedAt: Self.date(from: requestedAt) ?? Date(),
+            requestedAt: AgentTimestamp.parse(requestedAt) ?? Date(),
             agentId: agentId
         )
-    }
-
-    private static func date(from value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 }
 
@@ -177,15 +174,9 @@ struct TrackedElicitation: Codable, Equatable, Identifiable {
             url: url,
             schema: schema,
             elicitationSource: elicitationSource,
-            requestedAt: Self.date(from: requestedAt) ?? Date(),
+            requestedAt: AgentTimestamp.parse(requestedAt) ?? Date(),
             agentId: agentId
         )
-    }
-
-    private static func date(from value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 }
 
@@ -266,10 +257,7 @@ struct TrackedSchedule: Codable, Equatable, Identifiable {
     }
 
     var nextRunDescription: String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = formatter.date(from: nextRunAt)
-                ?? ISO8601DateFormatter().date(from: nextRunAt) else {
+        guard let date = AgentTimestamp.parse(nextRunAt) else {
             return nextRunAt
         }
         return date.formatted(date: .omitted, time: .shortened)

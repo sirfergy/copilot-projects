@@ -935,7 +935,7 @@ final class RemoteKittyImageCapture {
         deletedPlacements = deletedPlacements.filter { $0.imageId != imageId }
         placementDimensions = placementDimensions.filter { $0.key.imageId != imageId }
         var changedAdvertised = hadOwnAdvertised
-        syncPersistedSelections(imageId: imageId)
+        var clearedPersistenceIds: Set<UInt32> = [imageId]
 
         if exactActivePlacements.count + deletedPlacements.count >= remoteKittyMaxPlacementActivityEntries {
             let affectedIds = wildcardActiveImageIds.union(exactActivePlacements.map(\.imageId))
@@ -946,8 +946,9 @@ final class RemoteKittyImageCapture {
             deletedPlacements.removeAll()
             placementDimensions.removeAll()
             changedAdvertised = changedAdvertised || hadOtherAdvertised
-            for affectedId in affectedIds { syncPersistedSelections(imageId: affectedId) }
+            clearedPersistenceIds.formUnion(affectedIds)
         }
+        clearPersistedSelections(imageIds: clearedPersistenceIds)
 
         if changedAdvertised {
             imageAvailabilityGeneration &+= 1
@@ -958,14 +959,16 @@ final class RemoteKittyImageCapture {
         guard placementDimensions[key] == nil,
               placementDimensions.count >= remoteKittyMaxPlacementActivityEntries
         else { return }
-        let affectedIds = Set(placementDimensions.keys.map(\.imageId))
+        var clearedPersistenceIds: Set<UInt32> = []
+        if placementDimensions.keys.contains(where: { $0.imageId == key.imageId }) {
+            clearedPersistenceIds.insert(key.imageId)
+        }
         placementDimensions = placementDimensions.filter { $0.key.imageId != key.imageId }
         if placementDimensions.count >= remoteKittyMaxPlacementActivityEntries {
+            clearedPersistenceIds.formUnion(placementDimensions.keys.map(\.imageId))
             placementDimensions.removeAll()
         }
-        for imageId in affectedIds {
-            syncPersistedSelections(imageId: imageId)
-        }
+        clearPersistedSelections(imageIds: clearedPersistenceIds)
     }
 
     /// Exposes this instance's fixed epoch (otherwise `private`) so tests can
@@ -1699,7 +1702,7 @@ final class RemoteKittyImageCapture {
         deletedPlacements.removeAll()
         placementDimensions.removeAll()
         if hadAnyAdvertised { imageAvailabilityGeneration &+= 1 }
-        for affectedId in affectedIds { syncPersistedSelections(imageId: affectedId) }
+        clearPersistedSelections(imageIds: affectedIds)
     }
 
     private func clearAll() {
@@ -1810,6 +1813,13 @@ final class RemoteKittyImageCapture {
             imageId: imageId,
             selections: persistedSelections(imageId: imageId)
         )
+    }
+
+    /// Mirrors one natural multi-image placement clear as one FIFO disk-store
+    /// mutation, avoiding a full manifest commit for every affected image id.
+    private func clearPersistedSelections(imageIds: Set<UInt32>) {
+        guard !suppressPersistToDisk, let diskStore else { return }
+        diskStore.clearCurrentSelections(sessionId: sessionId, imageIds: imageIds)
     }
 
     private func persistedSelections(imageId: UInt32) -> [RemoteKittyPersistedPlacementSelection] {
