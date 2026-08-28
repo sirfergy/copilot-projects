@@ -7226,7 +7226,7 @@ final class AppLogicTests: XCTestCase {
         reposDirectory: @escaping () -> String?,
         backendAvailable: @escaping () -> Bool = { true },
         ledger: SessionCreationLedger,
-        onLaunch: @escaping (String, String, String?) -> Void
+        onLaunch: @escaping (String, String, String?, Bool) -> Void
     ) throws -> AppModel {
         let repository = StateRepository(path: root.appendingPathComponent("state.json"))
         try repository.save(PersistedState(
@@ -7258,14 +7258,14 @@ final class AppLogicTests: XCTestCase {
             id: "p1", name: "First", cwd: "/tmp",
             sessions: [existing], selectedSessionId: "existing")
         let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
-        var launches: [(sessionId: String, executable: String, prompt: String?)] = []
+        var launches: [(sessionId: String, executable: String, prompt: String?, allowAll: Bool)] = []
         let model = try makeRemoteCreateModel(
             root: root,
             projects: [project],
             selectedProjectId: "p1",
             reposDirectory: { repos.path },
             ledger: ledger,
-            onLaunch: { launches.append(($0, $1, $2)) }
+            onLaunch: { launches.append(($0, $1, $2, $3)) }
         )
 
         let requestId = UUID()
@@ -7285,6 +7285,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(model.project("p1")?.selectedSessionId, "existing")
         XCTAssertEqual(launches.map(\.sessionId), [requestId.uuidString])
         XCTAssertEqual(launches.first?.executable, "/opt/copilot/bin/copilot")
+        XCTAssertEqual(launches.first?.allowAll, true)
         XCTAssertNil(launches.first?.prompt)
         XCTAssertNotNil(ledger.record(for: requestId))
 
@@ -7312,14 +7313,14 @@ final class AppLogicTests: XCTestCase {
         let ledger = SessionCreationLedger(
             url: root.appendingPathComponent("ledger.json")
         )
-        var launches: [(sessionId: String, executable: String, prompt: String?)] = []
+        var launches: [(sessionId: String, executable: String, prompt: String?, allowAll: Bool)] = []
         let model = try makeRemoteCreateModel(
             root: root,
             projects: [project],
             selectedProjectId: "p1",
             reposDirectory: { repos.path },
             ledger: ledger,
-            onLaunch: { launches.append(($0, $1, $2)) }
+            onLaunch: { launches.append(($0, $1, $2, $3)) }
         )
 
         let requestId = UUID()
@@ -7343,6 +7344,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(created.title, "Review github/github#123")
         XCTAssertEqual(created.cwd, repos.path)
         XCTAssertEqual(launches.count, 1)
+        XCTAssertEqual(launches.first?.allowAll, true)
         XCTAssertEqual(
             launches.first?.prompt,
             AppModel.adversarialReviewPrompt(
@@ -7386,14 +7388,14 @@ final class AppLogicTests: XCTestCase {
         let ledger = SessionCreationLedger(
             url: root.appendingPathComponent("ledger.json")
         )
-        var launches: [(sessionId: String, executable: String, prompt: String?)] = []
+        var launches: [(sessionId: String, executable: String, prompt: String?, allowAll: Bool)] = []
         let model = try makeRemoteCreateModel(
             root: root,
             projects: [project],
             selectedProjectId: "p1",
             reposDirectory: { nil },
             ledger: ledger,
-            onLaunch: { launches.append(($0, $1, $2)) }
+            onLaunch: { launches.append(($0, $1, $2, $3)) }
         )
 
         let pullRequestURL = "https://github.com/github/github/pull/123"
@@ -7408,6 +7410,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(session.cwd, "/tmp/old")
         XCTAssertEqual(model.project("p1")?.selectedSessionId, sessionId)
         XCTAssertEqual(launches.count, 1)
+        XCTAssertEqual(launches.first?.allowAll, true)
         XCTAssertEqual(
             launches.first?.prompt,
             AppModel.adversarialReviewPrompt(
@@ -7434,7 +7437,7 @@ final class AppLogicTests: XCTestCase {
         let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
         let model = try makeRemoteCreateModel(
             root: root, projects: [project], selectedProjectId: "p1",
-            reposDirectory: { repos.path }, ledger: ledger, onLaunch: { _, _, _ in })
+            reposDirectory: { repos.path }, ledger: ledger, onLaunch: { _, _, _, _ in })
 
         let requestId = UUID()
         _ = model.createRemoteSession(
@@ -7461,7 +7464,7 @@ final class AppLogicTests: XCTestCase {
             selectedProjectId: "p1",
             reposDirectory: { repos.path },
             ledger: ledger,
-            onLaunch: { _, _, _ in })
+            onLaunch: { _, _, _, _ in })
 
         let requestId = UUID()
         _ = model.createRemoteSession(
@@ -7494,7 +7497,7 @@ final class AppLogicTests: XCTestCase {
             selectedProjectId: "p1",
             reposDirectory: { repos.path },
             ledger: ledger,
-            onLaunch: { _, _, _ in }
+            onLaunch: { _, _, _, _ in }
         )
         let request = RemoteCreateSessionRequest(
             requestId: UUID(),
@@ -7553,7 +7556,7 @@ final class AppLogicTests: XCTestCase {
             selectedProjectId: "p1",
             reposDirectory: { repos.path },
             ledger: ledger,
-            onLaunch: { _, _, _ in launches += 1 })
+            onLaunch: { _, _, _, _ in launches += 1 })
 
         XCTAssertEqual(
             model.createRemoteSession(
@@ -7583,7 +7586,7 @@ final class AppLogicTests: XCTestCase {
             copilotExecutable: { copilot },
             reposDirectory: { reposPath },
             ledger: ledger,
-            onLaunch: { _, _, _ in launches += 1 })
+            onLaunch: { _, _, _, _ in launches += 1 })
 
         // Unknown project → nothing created.
         XCTAssertEqual(
@@ -7612,7 +7615,7 @@ final class AppLogicTests: XCTestCase {
             reposDirectory: { reposPath },
             backendAvailable: { false },
             ledger: ledger,
-            onLaunch: { _, _, _ in }
+            onLaunch: { _, _, _, _ in }
         )
         XCTAssertEqual(
             noBackendModel.createRemoteSession(
@@ -7656,7 +7659,7 @@ final class AppLogicTests: XCTestCase {
             copilotExecutable: { copilot },
             reposDirectory: { reposPath },
             ledger: ledger,
-            onLaunch: { sessionId, _, prompt in
+            onLaunch: { sessionId, _, prompt, _ in
                 launched.append((sessionId, prompt))
             })
 

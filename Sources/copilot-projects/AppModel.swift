@@ -402,11 +402,12 @@ final class AppModel: ObservableObject {
     private let remoteCopilotExecutable: () -> String?
     private let remoteReposDirectory: () -> String?
     private let remoteSessionBackendAvailable: () -> Bool
-    /// Overrides the controller launch for a freshly-created remote session (tests
+    /// Overrides the controller launch for a freshly-created Copilot session (tests
     /// record it instead of spawning a real terminal). Nil in production, where the
     /// real cached terminal controller is created with a one-shot Copilot launch.
     private let remoteSessionLauncher:
-        ((_ sessionId: String, _ copilotExecutable: String, _ initialPrompt: String?) -> Void)?
+        ((_ sessionId: String, _ copilotExecutable: String,
+          _ initialPrompt: String?, _ allowAll: Bool) -> Void)?
     /// Persistent idempotency/tombstone store behind remote session creation.
     private let sessionCreationLedger: SessionCreationLedger
 
@@ -461,7 +462,7 @@ final class AppModel: ObservableObject {
         remoteSessionBackendAvailable: @escaping () -> Bool = {
             Paths.dtachExecutable != nil
         },
-        remoteSessionLauncher: ((String, String, String?) -> Void)? = nil,
+        remoteSessionLauncher: ((String, String, String?, Bool) -> Void)? = nil,
         sessionCreationLedger: SessionCreationLedger = SessionCreationLedger(),
         agentActivityRefreshThrottle: TimeInterval = 0.5,
         agentActivityCooldownScheduler: @escaping (
@@ -877,19 +878,34 @@ final class AppModel: ObservableObject {
         projects[pi].sessions.append(session)
         projects[pi].selectedSessionId = session.id
         let prompt = Self.adversarialReviewPrompt(for: target)
-        if let remoteSessionLauncher {
-            remoteSessionLauncher(session.id, copilotExecutable, prompt)
-        } else {
-            controller(
-                for: session.id,
-                launchCopilotIfCreated: true,
-                copilotExecutable: copilotExecutable,
-                launchCopilotInitialPrompt: prompt
-            )
-        }
+        launchCopilotSession(
+            session.id,
+            executable: copilotExecutable,
+            initialPrompt: prompt,
+            allowAll: true
+        )
         refreshSelectedTranscriptController()
         save()
         return session.id
+    }
+
+    private func launchCopilotSession(
+        _ sessionId: String,
+        executable: String,
+        initialPrompt: String?,
+        allowAll: Bool
+    ) {
+        if let remoteSessionLauncher {
+            remoteSessionLauncher(sessionId, executable, initialPrompt, allowAll)
+        } else {
+            controller(
+                for: sessionId,
+                launchCopilotIfCreated: true,
+                copilotExecutable: executable,
+                launchWithAllowAll: allowAll,
+                launchCopilotInitialPrompt: initialPrompt
+            )
+        }
     }
 
     nonisolated static func adversarialReviewPrompt(
@@ -1001,17 +1017,12 @@ final class AppModel: ObservableObject {
         // Bring up the terminal with a one-shot Copilot launch on its fresh master.
         // Remote (phone/web) sessions start in allow-all so they run unattended
         // without tool-approval prompts nobody is at the Mac to answer.
-        if let remoteSessionLauncher {
-            remoteSessionLauncher(sessionId, copilotExecutable, initialPrompt)
-        } else {
-            controller(
-                for: sessionId,
-                launchCopilotIfCreated: true,
-                copilotExecutable: copilotExecutable,
-                launchWithAllowAll: true,
-                launchCopilotInitialPrompt: initialPrompt
-            )
-        }
+        launchCopilotSession(
+            sessionId,
+            executable: copilotExecutable,
+            initialPrompt: initialPrompt,
+            allowAll: true
+        )
         refreshSelectedTranscriptController()
         save()
 
