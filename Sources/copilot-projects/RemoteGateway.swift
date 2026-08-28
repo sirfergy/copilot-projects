@@ -169,23 +169,38 @@ final class RemoteModelBridge: @unchecked Sendable {
 
     func answerUserInput(
         sessionId: String,
-        answer: RemoteUserInputAnswer
+        answer: RemoteUserInputAnswer,
+        operation: CLIOperationRequest?
     ) -> RemoteUserInputResult {
-        model?.answerUserInput(sessionId: sessionId, answer: answer) ?? .invalid
+        model?.answerUserInput(
+            sessionId: sessionId,
+            answer: answer,
+            operation: operation
+        ) ?? .invalid
     }
 
     func answerElicitation(
         sessionId: String,
-        answer: RemoteElicitationAnswer
+        answer: RemoteElicitationAnswer,
+        operation: CLIOperationRequest?
     ) -> RemoteUserInputResult {
-        model?.answerElicitation(sessionId: sessionId, answer: answer) ?? .invalid
+        model?.answerElicitation(
+            sessionId: sessionId,
+            answer: answer,
+            operation: operation
+        ) ?? .invalid
     }
 
     func setModel(
         sessionId: String,
-        selection: RemoteModelSelection
+        selection: RemoteModelSelection,
+        operation: CLIOperationRequest?
     ) -> RemoteUserInputResult {
-        model?.setModel(sessionId: sessionId, selection: selection) ?? .invalid
+        model?.setModel(
+            sessionId: sessionId,
+            selection: selection,
+            operation: operation
+        ) ?? .invalid
     }
 
     /// The exact retained PNG bytes for `(imageId, version)` in `sessionId`'s
@@ -649,6 +664,62 @@ private let remoteCSP =
 private let remoteMaxBodyBytes = 80 * 1_024
 private let remoteMaxEncodedUserInputAnswerBytes = 64 * 1_024
 private let remoteWorkspaceRefreshInterval: TimeInterval = 2
+
+enum RemoteSDKControlValidation {
+    static func operation(_ message: RemoteClientMessage) -> CLIOperationRequestParse {
+        CLIOperationRequest.parse(
+            operationId: message.requestId,
+            conversationEpoch: message.conversationEpoch
+        )
+    }
+
+    static func userInputAnswer(_ message: RemoteClientMessage) -> RemoteUserInputAnswer? {
+        guard let payload = message.data,
+              payload.utf8.count <= remoteMaxEncodedUserInputAnswerBytes,
+              let answer = try? JSONDecoder().decode(
+                RemoteUserInputAnswer.self,
+                from: Data(payload.utf8)
+              ),
+              !answer.requestId.isEmpty,
+              answer.requestId.utf8.count <= 200,
+              answer.answer.utf8.count <= 8_192 else {
+            return nil
+        }
+        return answer
+    }
+
+    static func elicitationAnswer(
+        _ message: RemoteClientMessage
+    ) -> RemoteElicitationAnswer? {
+        guard let payload = message.data,
+              payload.utf8.count <= remoteMaxEncodedUserInputAnswerBytes,
+              let answer = try? JSONDecoder().decode(
+                RemoteElicitationAnswer.self,
+                from: Data(payload.utf8)
+              ),
+              !answer.requestId.isEmpty,
+              answer.requestId.utf8.count <= 200 else {
+            return nil
+        }
+        return answer
+    }
+
+    static func modelSelection(_ message: RemoteClientMessage) -> RemoteModelSelection? {
+        guard let payload = message.data,
+              payload.utf8.count <= 4_096,
+              let selection = try? JSONDecoder().decode(
+                RemoteModelSelection.self,
+                from: Data(payload.utf8)
+              ),
+              !selection.modelId.isEmpty,
+              selection.modelId.utf8.count <= 200,
+              (selection.reasoningEffort?.utf8.count ?? 0) <= 64,
+              (selection.contextTier?.utf8.count ?? 0) <= 64 else {
+            return nil
+        }
+        return selection
+    }
+}
 
 struct RemoteEventStreamOptions: Equatable {
     let sessionId: String?
@@ -1399,15 +1470,20 @@ private final class RemoteHTTPHandler:
                 }
             }
         case "answer-user-input":
-            guard let payload = message.data,
-                  payload.utf8.count <= remoteMaxEncodedUserInputAnswerBytes,
-                  let answer = try? JSONDecoder().decode(
-                    RemoteUserInputAnswer.self, from: Data(payload.utf8)
-                  ),
-                  answer.requestId.utf8.count <= 200,
-                  answer.answer.utf8.count <= 8_192 else {
+            guard let answer = RemoteSDKControlValidation.userInputAnswer(message) else {
                 respond(context: context, method: .POST, status: .badRequest,
                         contentType: "text/plain", body: "Bad request")
+                return
+            }
+            let operation: CLIOperationRequest?
+            switch RemoteSDKControlValidation.operation(message) {
+            case .legacy:
+                operation = nil
+            case .correlated(let request):
+                operation = request
+            case .invalid:
+                respond(context: context, method: .POST, status: .badRequest,
+                        contentType: "text/plain", body: "Bad operation identity")
                 return
             }
             guard leases.holds(sessionId: sessionId, clientId: clientId) else {
@@ -1422,7 +1498,11 @@ private final class RemoteHTTPHandler:
                     sessionId: sessionId,
                     clientId: clientId
                 ) {
-                    self.bridge.answerUserInput(sessionId: sessionId, answer: answer)
+                    self.bridge.answerUserInput(
+                        sessionId: sessionId,
+                        answer: answer,
+                        operation: operation
+                    )
                 }
                 channel.eventLoop.execute {
                     let response: (HTTPResponseStatus, String)
@@ -1430,7 +1510,7 @@ private final class RemoteHTTPHandler:
                     case .some(.accepted):
                         response = (.noContent, "")
                     case .some(.conflict):
-                        response = (.conflict, "Another answer is still processing")
+                        response = (.conflict, "Operation conflicts with current conversation")
                     case .some(.invalid):
                         response = (.unprocessableEntity, "Answer was not accepted")
                     case .none:
@@ -1446,14 +1526,20 @@ private final class RemoteHTTPHandler:
                 }
             }
         case "answer-elicitation":
-            guard let payload = message.data,
-                  payload.utf8.count <= remoteMaxEncodedUserInputAnswerBytes,
-                  let answer = try? JSONDecoder().decode(
-                    RemoteElicitationAnswer.self, from: Data(payload.utf8)
-                  ),
-                  answer.requestId.utf8.count <= 200 else {
+            guard let answer = RemoteSDKControlValidation.elicitationAnswer(message) else {
                 respond(context: context, method: .POST, status: .badRequest,
                         contentType: "text/plain", body: "Bad request")
+                return
+            }
+            let operation: CLIOperationRequest?
+            switch RemoteSDKControlValidation.operation(message) {
+            case .legacy:
+                operation = nil
+            case .correlated(let request):
+                operation = request
+            case .invalid:
+                respond(context: context, method: .POST, status: .badRequest,
+                        contentType: "text/plain", body: "Bad operation identity")
                 return
             }
             guard leases.holds(sessionId: sessionId, clientId: clientId) else {
@@ -1468,7 +1554,11 @@ private final class RemoteHTTPHandler:
                     sessionId: sessionId,
                     clientId: clientId
                 ) {
-                    self.bridge.answerElicitation(sessionId: sessionId, answer: answer)
+                    self.bridge.answerElicitation(
+                        sessionId: sessionId,
+                        answer: answer,
+                        operation: operation
+                    )
                 }
                 channel.eventLoop.execute {
                     let response: (HTTPResponseStatus, String)
@@ -1476,7 +1566,7 @@ private final class RemoteHTTPHandler:
                     case .some(.accepted):
                         response = (.noContent, "")
                     case .some(.conflict):
-                        response = (.conflict, "Another answer is still processing")
+                        response = (.conflict, "Operation conflicts with current conversation")
                     case .some(.invalid):
                         response = (.unprocessableEntity, "Answer was not accepted")
                     case .none:
@@ -1492,17 +1582,20 @@ private final class RemoteHTTPHandler:
                 }
             }
         case "set-model":
-            guard let payload = message.data,
-                  payload.utf8.count <= 4_096,
-                  let selection = try? JSONDecoder().decode(
-                    RemoteModelSelection.self, from: Data(payload.utf8)
-                  ),
-                  !selection.modelId.isEmpty,
-                  selection.modelId.utf8.count <= 200,
-                  (selection.reasoningEffort?.utf8.count ?? 0) <= 64,
-                  (selection.contextTier?.utf8.count ?? 0) <= 64 else {
+            guard let selection = RemoteSDKControlValidation.modelSelection(message) else {
                 respond(context: context, method: .POST, status: .badRequest,
                         contentType: "text/plain", body: "Bad request")
+                return
+            }
+            let operation: CLIOperationRequest?
+            switch RemoteSDKControlValidation.operation(message) {
+            case .legacy:
+                operation = nil
+            case .correlated(let request):
+                operation = request
+            case .invalid:
+                respond(context: context, method: .POST, status: .badRequest,
+                        contentType: "text/plain", body: "Bad operation identity")
                 return
             }
             guard leases.holds(sessionId: sessionId, clientId: clientId) else {
@@ -1517,7 +1610,11 @@ private final class RemoteHTTPHandler:
                     sessionId: sessionId,
                     clientId: clientId
                 ) {
-                    self.bridge.setModel(sessionId: sessionId, selection: selection)
+                    self.bridge.setModel(
+                        sessionId: sessionId,
+                        selection: selection,
+                        operation: operation
+                    )
                 }
                 channel.eventLoop.execute {
                     let response: (HTTPResponseStatus, String)
@@ -1525,7 +1622,7 @@ private final class RemoteHTTPHandler:
                     case .some(.accepted):
                         response = (.noContent, "")
                     case .some(.conflict):
-                        response = (.conflict, "Another model switch is still processing")
+                        response = (.conflict, "Operation conflicts with current conversation")
                     case .some(.invalid):
                         response = (.unprocessableEntity, "Model switch was not accepted")
                     case .none:

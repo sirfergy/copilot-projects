@@ -49,6 +49,17 @@ struct AgentActivitySnapshot: Codable, Equatable {
     /// default) so older heartbeats without it still decode and so a session that
     /// hasn't reported its catalog yet simply exposes no picker.
     var availableModels: [TrackedAvailableModel]? = nil
+    /// The SDK session currently attached to this tab. Receipt-capable trackers
+    /// publish this with `conversationEpoch` so host handoffs can bind to both.
+    var copilotSessionId: String? = nil
+    /// Opaque identity for the current conversation within `copilotSessionId`.
+    /// Rotates on `/new`, `/resume`, and any equivalent SDK conversation change.
+    var conversationEpoch: String? = nil
+    /// Receipt protocol version. Version 1 is the first host/tracker contract.
+    var operationReceiptVersion: Int? = nil
+    /// Tracker-published operation outcomes. `payloadFingerprint` remains private
+    /// host/tracker idempotency metadata and is stripped from remote DTOs.
+    var operationReceipts: [TrackedOperationReceipt]? = nil
 
     func isFresh(at now: Date = Date(), ttl: TimeInterval = 15) -> Bool {
         guard schemaVersion == Self.currentSchemaVersion,
@@ -126,6 +137,80 @@ struct AgentActivitySnapshot: Codable, Equatable {
         let mapped = availableModels.compactMap { $0.remoteAvailableModel() }
         return mapped.isEmpty ? nil : mapped
     }
+
+    func remoteOperationProjection(at now: Date = Date()) -> AgentOperationProjection {
+        guard isFresh(at: now), !reportsTerminalDisconnect else {
+            return .unavailable
+        }
+
+        let hasReceiptMetadata = copilotSessionId != nil
+            || conversationEpoch != nil
+            || operationReceiptVersion != nil
+            || operationReceipts != nil
+        guard hasReceiptMetadata else {
+            return AgentOperationProjection(
+                conversationEpoch: nil,
+                support: .legacy,
+                receipts: nil
+            )
+        }
+
+        guard operationReceiptVersion == 1,
+              Self.nonEmpty(copilotSessionId) != nil,
+              let conversationEpoch = Self.nonEmpty(conversationEpoch) else {
+            return .unavailable
+        }
+
+        var newestByOperationId: [String: RemoteOperationReceipt] = [:]
+        for tracked in operationReceipts ?? [] {
+            guard let receipt = tracked.remoteReceipt(expectedEpoch: conversationEpoch) else {
+                continue
+            }
+            if let existing = newestByOperationId[receipt.operationId],
+               existing.updatedAtMilliseconds >= receipt.updatedAtMilliseconds {
+                continue
+            }
+            newestByOperationId[receipt.operationId] = receipt
+        }
+        let receipts = newestByOperationId.values
+            .sorted {
+                if ($0.state == .accepted) != ($1.state == .accepted) {
+                    return $0.state != .accepted
+                }
+                if $0.updatedAtMilliseconds != $1.updatedAtMilliseconds {
+                    return $0.updatedAtMilliseconds > $1.updatedAtMilliseconds
+                }
+                return $0.operationId < $1.operationId
+            }
+            .prefix(64)
+
+        return AgentOperationProjection(
+            conversationEpoch: conversationEpoch,
+            support: .receipts,
+            receipts: Array(receipts)
+        )
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value,
+              !value.isEmpty,
+              value == value.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return nil
+        }
+        return value
+    }
+}
+
+struct AgentOperationProjection: Equatable {
+    let conversationEpoch: String?
+    let support: RemoteOperationSupport
+    let receipts: [RemoteOperationReceipt]?
+
+    static let unavailable = AgentOperationProjection(
+        conversationEpoch: nil,
+        support: .unavailable,
+        receipts: nil
+    )
 }
 
 /// One outstanding structured question, mirrored from the extension's heartbeat.
@@ -217,6 +302,41 @@ struct TrackedAvailableModel: Codable, Equatable {
             longContextAvailable: longContextAvailable,
             disabled: disabled,
             category: category
+        )
+    }
+}
+
+struct TrackedOperationReceipt: Codable, Equatable {
+    var operationId: String?
+    var conversationEpoch: String?
+    var kind: String?
+    var state: RemoteOperationState?
+    var updatedAtMilliseconds: Int64?
+    var errorCode: String?
+    var payloadFingerprint: String?
+
+    func remoteReceipt(expectedEpoch: String) -> RemoteOperationReceipt? {
+        guard let operationId,
+              !operationId.isEmpty,
+              operationId.utf8.count <= 128,
+              let conversationEpoch,
+              conversationEpoch == expectedEpoch,
+              let kind,
+              !kind.isEmpty,
+              kind.utf8.count <= 64,
+              let state,
+              let updatedAtMilliseconds,
+              updatedAtMilliseconds >= 0,
+              (errorCode?.utf8.count ?? 0) <= 128 else {
+            return nil
+        }
+        return RemoteOperationReceipt(
+            operationId: operationId,
+            conversationEpoch: conversationEpoch,
+            kind: kind,
+            state: state,
+            updatedAtMilliseconds: updatedAtMilliseconds,
+            errorCode: errorCode
         )
     }
 }

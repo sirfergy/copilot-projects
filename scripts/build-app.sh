@@ -162,6 +162,49 @@ if [ -d "$RESOURCE_BUILD_DIR/SwiftTerm_SwiftTerm.bundle" ]; then
   fi
 fi
 
+# SwiftPM resource bundles this app loads at runtime: the Copilot CLI tracker
+# extension (CopilotProjectsCore) and the remote web client (copilot-projects).
+# They are resolved from Contents/Resources only — there is no developer-path
+# fallback — so a bundle that failed to make it into the .app must fail the
+# build here rather than at first use on a user's machine.
+REQUIRED_RESOURCE_BUNDLES=(
+  "copilot-projects_CopilotProjectsCore.bundle"
+  "copilot-projects_copilot-projects.bundle"
+)
+for bundle in "${REQUIRED_RESOURCE_BUNDLES[@]}"; do
+  if [ ! -d "$RESOURCE_BUILD_DIR/$bundle" ]; then
+    echo "error: $RESOURCE_BUILD_DIR/$bundle is missing; the SwiftPM target lost its resources declaration." >&2
+    exit 1
+  fi
+  rm -rf "$RES/$bundle"
+  cp -R "$RESOURCE_BUILD_DIR/$bundle" "$RES/"
+done
+
+# The specific assets the runtime asks for by name, so a renamed or dropped file
+# is caught while assembling instead of by a trap in the running app.
+REQUIRED_RESOURCE_FILES=(
+  "PWAIcon-192.png"
+  "PWAIcon-512.png"
+  "copilot-projects_CopilotProjectsCore.bundle/tracker/extension.mjs"
+  "copilot-projects_copilot-projects.bundle/web/index.html"
+  "copilot-projects_copilot-projects.bundle/web/app.css"
+  "copilot-projects_copilot-projects.bundle/web/app.webmanifest"
+  "copilot-projects_copilot-projects.bundle/web/service-worker.js"
+  "copilot-projects_copilot-projects.bundle/web/js/markdown.js"
+  "copilot-projects_copilot-projects.bundle/web/js/draft.js"
+  "copilot-projects_copilot-projects.bundle/web/js/operations.js"
+  "copilot-projects_copilot-projects.bundle/web/js/session-creation.js"
+  "copilot-projects_copilot-projects.bundle/web/js/terminal-image.js"
+  "copilot-projects_copilot-projects.bundle/web/js/transcript.js"
+  "copilot-projects_copilot-projects.bundle/web/js/main.js"
+)
+for required in "${REQUIRED_RESOURCE_FILES[@]}"; do
+  if [ ! -s "$RES/$required" ]; then
+    echo "error: packaged resource $RES/$required is missing or empty" >&2
+    exit 1
+  fi
+done
+
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

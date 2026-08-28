@@ -16,7 +16,10 @@ signal(SIGPIPE, SIG_IGN)
 // second GUI for a typo such as `--version` can create competing dtach clients.
 let cliArgs = Array(CommandLine.arguments.dropFirst())
 if let first = cliArgs.first, CLIMain.isCommand(first) {
-    exit(CLIMain.run(cliArgs))
+    exit(CLIMain.run(cliArgs, checkAssets: {
+        CopilotExtension.packagedAssetAvailable()
+            && RemoteWebAssets.packagedAssetsAvailable()
+    }))
 }
 if !cliArgs.isEmpty, !CLIMain.isCocoaLaunchArguments(cliArgs) {
     FileHandle.standardError.write(

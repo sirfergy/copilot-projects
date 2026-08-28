@@ -6,10 +6,11 @@ import CopilotProjectsProtocol
 
 struct CopilotProjectsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @AppStorage(HostLifetimePolicy.settingKey) private var keepRunning = false
 
     var body: some Scene {
         Window("Copilot Projects", id: "main") {
-            RootView(model: appDelegate.model)
+            MainWindowContent(appDelegate: appDelegate)
                 .frame(minWidth: 820, minHeight: 520)
         }
         .windowStyle(.hiddenTitleBar)
@@ -17,6 +18,9 @@ struct CopilotProjectsApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Project…") { appDelegate.model.addProjectInteractive() }
                     .keyboardShortcut("n", modifiers: .command)
+            }
+            CommandGroup(after: .appSettings) {
+                Toggle("Keep Running When Window Closes", isOn: $keepRunning)
             }
             CommandMenu("Session") {
                 Button("New Session") { appDelegate.model.addSessionToSelected() }
@@ -29,6 +33,9 @@ struct CopilotProjectsApp: App {
                 Button("Previous Session") { appDelegate.model.selectAdjacentSession(-1) }
                     .keyboardShortcut("[", modifiers: [.command, .shift])
             }
+        }
+        MenuBarExtra("Copilot Projects", systemImage: "terminal", isInserted: $keepRunning) {
+            HostStatusMenu(keepRunning: $keepRunning)
         }
     }
 }
@@ -376,7 +383,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.prepareForSystemPowerOff()
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows {
+            if let requestMainWindow = model.requestMainWindow {
+                requestMainWindow()
+            } else {
+                NSLog("copilot-projects: main window reopen action is not available yet")
+            }
+        }
+        return true
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        HostLifetimePolicy.shouldTerminateAfterLastWindowClosed()
     }
 }

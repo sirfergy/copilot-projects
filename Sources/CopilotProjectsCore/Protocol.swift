@@ -1,12 +1,9 @@
 import Foundation
 import CopilotProjectsProtocol
+import SessionDomain
 
 /// Lifecycle status a session can report. Mirrors cmux's running/idle/needsInput.
-public enum SessionStatus: String, Codable, Sendable, CaseIterable {
-    case idle
-    case running
-    case waiting   // waiting for user input
-}
+public typealias SessionStatus = SessionDomain.SessionStatus
 
 public typealias StatusNotificationKind =
     CopilotProjectsProtocol.StatusNotificationKind

@@ -1,0 +1,22 @@
+{
+  "protocolInfo": {
+    "revision": 1,
+    "capabilities": ["conversation-epochs", "sdk-operation-receipts", "transcript-window"]
+  },
+  "projects": [{
+    "id": "project", "name": "Example", "selectedSessionId": "tab",
+    "sessions": [{
+      "id": "tab", "title": "Example", "status": "waiting",
+      "unread": false, "ready": false, "background": false, "scheduled": false,
+      "promptable": false, "conversationEpoch": "tracker-instance:2",
+      "operationSupport": "receipts",
+      "operationReceipts": [
+        {"operationId": "00000000-0000-4000-8000-000000000001", "conversationEpoch": "tracker-instance:2", "kind": "answer-user-input", "state": "accepted", "updatedAtMilliseconds": 1787788800000},
+        {"operationId": "00000000-0000-4000-8000-000000000002", "conversationEpoch": "tracker-instance:2", "kind": "answer-elicitation", "state": "applied", "updatedAtMilliseconds": 1787788800001},
+        {"operationId": "00000000-0000-4000-8000-000000000003", "conversationEpoch": "tracker-instance:2", "kind": "set-model", "state": "rejected", "updatedAtMilliseconds": 1787788800002, "errorCode": "invalid-request"},
+        {"operationId": "00000000-0000-4000-8000-000000000004", "conversationEpoch": "tracker-instance:2", "kind": "set-model", "state": "indeterminate", "updatedAtMilliseconds": 1787788800003, "errorCode": "rpc-indeterminate"}
+      ]
+    }]
+  }],
+  "selectedProjectId": "project"
+}

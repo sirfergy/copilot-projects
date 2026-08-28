@@ -46,6 +46,10 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   Relaunch reattaches. You can also `ssh` into the machine and `copilot-projects attach` to reconnect
   from another host.
 - **Persistence:** projects/sessions are restored on relaunch.
+- **Window lifetime:** closing the last window quits by default. Enable **Keep Running When
+  Window Closes** to keep remote access and sessions available from the menu bar; Dock reopen,
+  menu-bar Open, notifications, and CLI focus all restore the main window. **Quit Copilot
+  Projects** still performs the normal graceful detach and persistence drain.
 
 ## Install
 
@@ -70,6 +74,19 @@ Requires Xcode 26+, macOS 26+.
 `build-app.sh` runs `swift build`, assembles `dist/Copilot Projects.app`, precompiles
 SwiftTerm's Metal shaders, and signs the nested executables inner-first. Local builds
 default to ad-hoc signing; set `CODESIGN_IDENTITY` for Developer ID signing.
+
+The runtime assets are regular SwiftPM resources rather than embedded Swift literals. The
+tracker remains one atomic `extension.mjs` install, while the PWA is assembled from reviewed
+HTML/CSS/JavaScript files. The session-status rules live in the headless `SessionDomain`
+package, and the Mac/iOS/PWA protocol examples share `ContractFixtures`.
+
+```bash
+swift test --package-path Packages/SessionDomain
+./scripts/check-web-assets.sh
+swift test
+CODESIGN_IDENTITY=- ./scripts/build-app.sh --release
+./scripts/verify-app-resources.sh
+```
 
 On first launch the app symlinks its binary to `~/.local/bin/copilot-projects`. Put that on your
 `PATH` to use the CLI from anywhere:
@@ -201,6 +218,13 @@ delivered back to the exact live Copilot session over a lease-gated control mess
 whose choices or payload are too large is never exposed remotely so the terminal fallback stays
 exact. Answers are re-validated host-side against the fresh heartbeat before an atomic, private
 response file hands them to the extension.
+
+Receipt-capable clients bind SDK answers, elicitations, and model switches to the current
+conversation epoch. HTTP acceptance only means the host queued the handoff: the UI reports
+success only after an `applied` receipt, permits an explicit retry after `rejected`, and blocks
+automatic retry after `indeterminate` because the SDK may already have applied the operation.
+Known older hosts keep the legacy optimistic path; a new host with missing or unknown tracker
+metadata fails closed instead of silently downgrading.
 
 The remote client also answers schema-form `elicitation.requested` questions the same way the
 native iOS client does. A bounded, flat subset of the request's `requestedSchema`

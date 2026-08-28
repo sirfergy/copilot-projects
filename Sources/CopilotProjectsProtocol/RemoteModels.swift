@@ -3,10 +3,16 @@ import Foundation
 public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
     public let projects: [RemoteProjectSnapshot]
     public let selectedProjectId: String?
+    public let protocolInfo: RemoteProtocolInfo?
 
-    public init(projects: [RemoteProjectSnapshot], selectedProjectId: String?) {
+    public init(
+        projects: [RemoteProjectSnapshot],
+        selectedProjectId: String?,
+        protocolInfo: RemoteProtocolInfo? = nil
+    ) {
         self.projects = projects
         self.selectedProjectId = selectedProjectId
+        self.protocolInfo = protocolInfo
     }
 }
 public struct RemoteProjectSnapshot: Codable, Equatable, Sendable {
@@ -51,6 +57,9 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     /// Optional (omitted when absent) so older clients decode without this field
     /// and so a session that hasn't reported its catalog yet simply has no picker.
     public let availableModels: [RemoteAvailableModel]?
+    public let conversationEpoch: String?
+    public let operationSupport: RemoteOperationSupport?
+    public let operationReceipts: [RemoteOperationReceipt]?
 
     public init(
         id: String,
@@ -65,7 +74,10 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         pendingUserInputs: [RemoteUserInputRequest]? = nil,
         pendingElicitations: [RemoteElicitationRequest]? = nil,
         model: RemoteModelInfo? = nil,
-        availableModels: [RemoteAvailableModel]? = nil
+        availableModels: [RemoteAvailableModel]? = nil,
+        conversationEpoch: String? = nil,
+        operationSupport: RemoteOperationSupport? = nil,
+        operationReceipts: [RemoteOperationReceipt]? = nil
     ) {
         self.id = id
         self.title = title
@@ -80,6 +92,9 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.pendingElicitations = pendingElicitations
         self.model = model
         self.availableModels = availableModels
+        self.conversationEpoch = conversationEpoch
+        self.operationSupport = operationSupport
+        self.operationReceipts = operationReceipts
     }
 }
 
@@ -361,6 +376,7 @@ public struct RemoteClientMessage: Codable, Equatable, Sendable {
     public let clientId: String?
     public let sessionId: String?
     public let requestId: String?
+    public let conversationEpoch: String?
     public let data: String?
     public let delta: Int?
 
@@ -370,12 +386,14 @@ public struct RemoteClientMessage: Codable, Equatable, Sendable {
         sessionId: String? = nil,
         requestId: String? = nil,
         data: String? = nil,
-        delta: Int? = nil
+        delta: Int? = nil,
+        conversationEpoch: String? = nil
     ) {
         self.type = type
         self.clientId = clientId
         self.sessionId = sessionId
         self.requestId = requestId
+        self.conversationEpoch = conversationEpoch
         self.data = data
         self.delta = delta
     }

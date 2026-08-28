@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 3,
+  "updatedAt": "2026-08-27T00:00:00Z",
+  "copilotSessionId": "conversation",
+  "totalTurns": 4,
+  "turns": [{
+    "id": "turn-4", "startedAt": "2026-08-27T00:00:00Z",
+    "kind": "foreground", "userContent": "Example",
+    "assistantMessages": [], "tools": [], "isAborted": false, "images": []
+  }]
+}

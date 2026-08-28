@@ -12,6 +12,10 @@ let package = Package(
             name: "CopilotProjectsProtocol",
             targets: ["CopilotProjectsProtocol"]
         ),
+        .library(
+            name: "CopilotProjectsProtocolFixtures",
+            targets: ["CopilotProjectsProtocolFixtures"]
+        ),
     ],
     dependencies: [
         // Based on upstream v1.20.0. The fork retains Copilot Projects' empty-ink
@@ -31,26 +35,41 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "SessionDomain",
+            path: "Packages/SessionDomain/Sources/SessionDomain"
+        ),
+        .target(
             name: "CopilotProjectsProtocol",
             path: "Sources/CopilotProjectsProtocol"
         ),
         .target(
+            name: "CopilotProjectsProtocolFixtures",
+            path: "ContractFixtures",
+            resources: [.copy("Fixtures")]
+        ),
+        .target(
             name: "CopilotProjectsCore",
-            dependencies: ["CopilotProjectsProtocol"],
-            path: "Sources/CopilotProjectsCore"
+            dependencies: [
+                "CopilotProjectsProtocol",
+                "SessionDomain",
+            ],
+            path: "Sources/CopilotProjectsCore",
+            resources: [.copy("Resources/tracker")]
         ),
         .executableTarget(
             name: "copilot-projects",
             dependencies: [
                 "CopilotProjectsCore",
                 "CopilotProjectsProtocol",
+                "SessionDomain",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "WebPush", package: "swift-webpush")
             ],
-            path: "Sources/copilot-projects"
+            path: "Sources/copilot-projects",
+            resources: [.copy("Resources/web")]
         ),
         .executableTarget(
             name: "copilot-projects-link",
@@ -62,6 +81,7 @@ let package = Package(
             dependencies: [
                 "CopilotProjectsCore",
                 "CopilotProjectsProtocol",
+                "CopilotProjectsProtocolFixtures",
                 "copilot-projects",
                 .product(name: "WebPush", package: "swift-webpush"),
             ],
