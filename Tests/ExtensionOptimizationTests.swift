@@ -1,7 +1,7 @@
 import XCTest
 @testable import CopilotProjectsCore
 
-/// Guards for the two background-overhead optimizations in the embedded Copilot
+/// Guards for the two background-overhead optimizations in the packaged Copilot
 /// extension: the 5s poll's snapshot write rate, and the transcript byte-budget
 /// trim. Both run the *real* extension source under Node — the poll tests boot
 /// the whole extension against a fake SDK session, and the transcript tests
@@ -130,10 +130,8 @@ final class ExtensionOptimizationTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws -> [String: Any] {
-        // Markers never carry leading whitespace: the script is a raw literal
-        // whose indentation is stripped when Swift builds the string, so the
-        // shipped `CopilotExtension.script` is not indented like the source
-        // file it lives in. The `function ` prefixes keep each marker on the
+        // Markers never carry leading whitespace, so slicing is independent of
+        // source formatting. The `function ` prefixes keep each marker on the
         // declaration rather than a call site.
         let helpers = try extensionSlice(
             from: "function truncatedText(",
@@ -218,12 +216,9 @@ final class ExtensionOptimizationTests: XCTestCase {
         )
     }
 
-    /// Slices the shipped script between two markers. Markers must be given
-    /// without leading whitespace: `CopilotExtension.script` is a raw multi-line
-    /// literal, so Swift strips the source file's indentation and the runtime
-    /// string is not indented the way the file reads. The end marker is searched
-    /// after the start so a marker that also appears earlier cannot invert the
-    /// range.
+    /// Slices the shipped resource between two indentation-agnostic markers.
+    /// The end marker is searched after the start so a marker that also appears
+    /// earlier cannot invert the range.
     private func extensionSlice(
         from: String,
         to: String,
@@ -317,7 +312,7 @@ final class ExtensionOptimizationTests: XCTestCase {
     private static let appSessionId = "12345678-1234-1234-1234-123456789abc"
 
     /// The snapshot write, matched without leading whitespace so the test does
-    /// not depend on how the raw literal is indented in the source file.
+    /// not depend on how the resource source is indented.
     private static let snapshotWriteCall =
         "writeFileSync(temporaryPath, JSON.stringify(snapshot), { mode: 0o600 });"
 }

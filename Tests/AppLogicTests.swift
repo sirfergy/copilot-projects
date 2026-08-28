@@ -7890,7 +7890,8 @@ final class AppLogicTests: XCTestCase {
                             ready: false,
                             background: true,
                             scheduled: false,
-                            promptable: false
+                            promptable: false,
+                            operationSupport: .unavailable
                         ),
                         RemoteSessionSnapshot(
                             id: completed.id,
@@ -7901,7 +7902,8 @@ final class AppLogicTests: XCTestCase {
                             ready: true,
                             background: false,
                             scheduled: false,
-                            promptable: false
+                            promptable: false,
+                            operationSupport: .unavailable
                         ),
                     ]
                 ),
@@ -7912,7 +7914,8 @@ final class AppLogicTests: XCTestCase {
                     sessions: []
                 ),
             ],
-            selectedProjectId: selected.id
+            selectedProjectId: selected.id,
+            protocolInfo: .current
         ))
     }
 
@@ -8241,7 +8244,7 @@ final class AppLogicTests: XCTestCase {
             "selectionGeneration !== submittedGeneration"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "if (selected !== id || selectionGeneration !== submittedGeneration) return;"
+            "conversationRequestGeneration !== submittedConversationGeneration"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "if ((state?.pendingUserInputs || []).length > 0) return;"
@@ -8262,20 +8265,18 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "submitUserInput(request.requestId, value, true)"
         ))
-        XCTAssertTrue(RemoteWebAssets.javascript.contains("type: 'answer-user-input'"))
-        XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "data: JSON.stringify({ requestId, answer, wasFreeform })"
-        ))
         // Composer is suppressed while questions are pending.
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "promptForm.classList.toggle('hidden', hasQuestions)"
         ))
         // Retry/removal semantics: 15s fallback, snapshot-driven removal, error codes.
-        XCTAssertTrue(RemoteWebAssets.javascript.contains("}, 15000);"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains("}, 15000)"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "sessionHasUserInput(submittedSession, requestId)"
         ))
-        XCTAssertTrue(RemoteWebAssets.javascript.contains("if (!ids.has(requestId)) {"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "sdkOperations.shouldPreserveTarget(target)"
+        ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("entry.token !== token"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "latestUserInputAttempts.get(requestId) !== token"
@@ -8324,8 +8325,6 @@ final class AppLogicTests: XCTestCase {
             "if (scheme !== 'https:' && scheme !== 'http:') return null;"
         ))
         // accept / decline are delivered over the lease-gated control message.
-        XCTAssertTrue(RemoteWebAssets.javascript.contains("type: 'answer-elicitation'"))
-        XCTAssertTrue(RemoteWebAssets.javascript.contains("data: JSON.stringify(payload)"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "submitElicitation(entry.request.requestId, 'accept')"
         ))

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#111111">
+  <title>Copilot Projects</title>
+  <link rel="stylesheet" href="app.css">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icon-192.png">
+</head>
+<body>
+  <header>
+    <strong>Copilot Projects</strong>
+    <select id="new-session-project" aria-label="New session project" disabled></select>
+    <button id="new-session" aria-label="New session" title="New session" disabled>
+      New Session
+    </button>
+    <button id="close-session" aria-label="Close session"
+      title="Close session" disabled>
+      Close Session
+    </button>
+    <span id="create-status" class="create-status" role="status" aria-live="polite"
+      aria-atomic="true"></span>
+    <span id="connection" class="connection connecting" role="status"
+      aria-label="Connecting" title="Connecting">
+      <span class="connection-dot" aria-hidden="true"></span>
+      <span class="visually-hidden">Connecting</span>
+    </span>
+  </header>
+  <main>
+    <nav id="sessions"></nav>
+    <div id="content" data-mode="conversation">
+      <div id="pivot">
+        <div id="pivot-tabs" role="tablist" aria-label="Session view">
+          <button id="tab-conversation" class="pivot-tab" type="button" role="tab"
+            aria-selected="true" aria-controls="transcript-pane"
+            data-mode="conversation">Conversation</button>
+          <button id="tab-terminal" class="pivot-tab" type="button" role="tab"
+            aria-selected="false" aria-controls="terminal-pane"
+            data-mode="terminal">Terminal</button>
+        </div>
+        <button id="notifications" aria-label="Enable web notifications"
+          title="Enable web notifications">🔔</button>
+      </div>
+      <aside id="transcript-pane" role="tabpanel" aria-label="Conversation">
+        <div id="transcript-header">
+          <strong>Completed turns</strong>
+          <span id="prompt-status" role="status" aria-live="polite" aria-atomic="true">
+            Select a Copilot session
+          </span>
+        </div>
+        <div id="transcript" aria-live="polite">Select a session</div>
+        <div id="user-input" role="group" aria-label="Copilot questions"></div>
+        <div id="prompt-queue" role="list" aria-label="Queued messages" hidden></div>
+        <form id="prompt-form">
+          <textarea id="prompt" rows="3" maxlength="8192" aria-describedby="prompt-warning"
+            aria-label="Message Copilot" placeholder="Message Copilot"></textarea>
+          <div id="prompt-footer">
+            <div id="prompt-warning">Sending clears any unsent desktop draft.</div>
+            <button id="model-line" type="button" hidden aria-haspopup="dialog">
+              <span id="model-line-name">Model</span>
+              <span id="model-line-chevron" aria-hidden="true">&#9662;</span>
+            </button>
+          </div>
+          <button id="prompt-submit" disabled>Send message</button>
+        </form>
+      </aside>
+      <section id="terminal-pane" role="tabpanel" aria-label="Terminal">
+        <div id="toolbar">
+          <button data-key="esc">Esc</button>
+          <button data-key="ctrl-c">Ctrl-C</button>
+          <button data-key="tab">Tab</button>
+          <button data-key="enter" aria-label="Enter" title="Enter">⏎</button>
+          <button data-key="up">↑</button>
+          <button data-key="down">↓</button>
+          <span id="lease">view only</span>
+        </div>
+        <div id="terminal" role="region" aria-live="off"
+          aria-label="Terminal output" tabindex="0">
+          <div id="terminal-grid">
+            <div id="terminal-lines" class="terminal-lines">Select a session</div>
+            <div id="terminal-image-overlay" class="terminal-image-overlay"
+              aria-hidden="true"></div>
+          </div>
+        </div>
+        <div id="terminal-cell-probe" class="terminal-cell-probe"
+          aria-hidden="true">MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM</div>
+        <form id="input-form">
+          <input id="input" autocomplete="off" autocapitalize="none" spellcheck="false"
+            aria-label="Command input" placeholder="Send a command">
+          <button>Send</button>
+        </form>
+      </section>
+    </div>
+  </main>
+  <div id="image-lightbox" role="dialog" aria-modal="true"
+    aria-label="Image viewer" aria-hidden="true">
+    <button class="image-lightbox-close" type="button"
+      aria-label="Close image viewer">&times;</button>
+    <img class="image-lightbox-img" alt="Expanded terminal image" draggable="false">
+    <div class="image-lightbox-hint">Scroll or pinch to zoom · drag to pan · Esc to close</div>
+  </div>
+  <dialog id="model-picker" aria-labelledby="model-picker-title">
+    <div id="model-picker-head">
+      <button id="model-picker-back" type="button" hidden
+        aria-label="Back to model list">&#8249;</button>
+      <strong id="model-picker-title">Model</strong>
+      <button id="model-picker-close" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div id="model-picker-body"></div>
+    <div id="model-picker-status" role="status" aria-live="polite"></div>
+  </dialog>
+  <script src="app.js"></script>
+</body>
+</html>

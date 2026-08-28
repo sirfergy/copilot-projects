@@ -1,0 +1,11 @@
+{
+  "projects": [{
+    "id": "project", "name": "Example", "selectedSessionId": "tab",
+    "sessions": [{
+      "id": "tab", "title": "Example", "status": "idle",
+      "unread": false, "ready": false, "background": false, "scheduled": false,
+      "promptable": true
+    }]
+  }],
+  "selectedProjectId": "project"
+}

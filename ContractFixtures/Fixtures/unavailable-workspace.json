@@ -1,0 +1,12 @@
+{
+  "protocolInfo": {"revision": 1, "capabilities": ["conversation-epochs", "sdk-operation-receipts"]},
+  "projects": [{
+    "id": "project", "name": "Example", "selectedSessionId": "tab",
+    "sessions": [{
+      "id": "tab", "title": "Example", "status": "idle",
+      "unread": false, "ready": false, "background": false, "scheduled": false,
+      "promptable": false, "operationSupport": "unavailable"
+    }]
+  }],
+  "selectedProjectId": "project"
+}

@@ -68,7 +68,7 @@ struct RemoteCommandRequestLedger {
 
 /// Outcome of accepting a remote answer to a structured `ask_user` question.
 enum RemoteUserInputResult: Equatable {
-    /// The answer passed validation and a response file was written for the extension.
+    /// The request was published, or an identical correlated operation was replayed.
     case accepted
     /// A response for this tab is already awaiting the extension, or the question
     /// context changed underneath the answer.
@@ -82,6 +82,10 @@ enum RemoteUserInputResult: Equatable {
 private struct UserInputResponseFile: Codable {
     let schemaVersion: Int
     let copilotSessionId: String
+    let operationId: String?
+    let conversationEpoch: String?
+    let kind: String?
+    let payloadFingerprint: String?
     let requestId: String
     let answer: String
     let wasFreeform: Bool
@@ -92,6 +96,10 @@ private struct UserInputResponseFile: Codable {
 private struct ElicitationResponseFile: Codable {
     let schemaVersion: Int
     let copilotSessionId: String
+    let operationId: String?
+    let conversationEpoch: String?
+    let kind: String?
+    let payloadFingerprint: String?
     let requestId: String
     let action: String
     let content: [String: RemoteJSONValue]?
@@ -102,6 +110,10 @@ private struct ElicitationResponseFile: Codable {
 private struct SetModelRequestFile: Codable {
     let schemaVersion: Int
     let copilotSessionId: String
+    let operationId: String?
+    let conversationEpoch: String?
+    let kind: String?
+    let payloadFingerprint: String?
     let modelId: String
     let reasoningEffort: String?
     let contextTier: String?
@@ -234,6 +246,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var selectedProjectId: String?
     @Published var numberHint: NumberHint = .none
     @Published private(set) var transcriptOpenSessions: Set<String> = []
+    var requestMainWindow: (() -> Void)?
 
     private var controllers: [String: TerminalController] = [:]
     private var selectedTranscriptController: TranscriptController?
@@ -347,9 +360,7 @@ final class AppModel: ObservableObject {
     private var agentActivitySnapshotCache:
         [String: (signature: FileSignature, snapshot: AgentActivitySnapshot?)] = [:]
 
-    private var activityTracker = ActivityTracker()
-    private var statusEventClock = StatusEventClock()
-    private var promptStatusEventClock = StatusEventClock()
+    private var sessionSemantics = SessionSemanticsState()
     private var backgroundAgentsSuppressed: Set<String> = []
     private var completionPending: Set<String> = []
     private var scheduledSnapshotsSuppressed: Set<String> = []
@@ -1050,8 +1061,7 @@ final class AppModel: ObservableObject {
             selectedTranscriptController = nil
         }
         transcriptOpenSessions.remove(sid)
-        statusEventClock.reset(sessionId: sid)
-        promptStatusEventClock.reset(sessionId: sid)
+        sessionSemantics.reset(sessionId: sid)
         backgroundAgentsSuppressed.remove(sid)
         completionPending.remove(sid)
         permissionNotificationTokens[sid] = nil
@@ -1193,7 +1203,10 @@ final class AppModel: ObservableObject {
                     name: project.name,
                     selectedSessionId: project.selectedSessionId,
                     sessions: project.sessions.map { session in
-                        RemoteSessionSnapshot(
+                        let operation = session.agentActivity?
+                            .remoteOperationProjection(at: promptNow)
+                            ?? .unavailable
+                        return RemoteSessionSnapshot(
                             id: session.id,
                             title: session.title,
                             status: session.status.rawValue,
@@ -1213,7 +1226,9 @@ final class AppModel: ObservableObject {
                                     backgroundAgentsActive: session.backgroundAgentsActive,
                                     now: promptNow,
                                     nowMs: promptNowMs,
-                                    clockMs: promptStatusEventClock.timestamp(for: session.id)
+                                    clockMs: sessionSemantics.promptSafetyClock.timestamp(
+                                        for: session.id
+                                    )
                                 ),
                                 footerActivity: controllers[session.id]?.agentActivity
                                     ?? .unknown
@@ -1224,12 +1239,16 @@ final class AppModel: ObservableObject {
                                 .remoteElicitationRequests(),
                             model: session.agentActivity?.remoteModelInfo(),
                             availableModels: session.agentActivity?
-                                .remoteAvailableModels()
+                                .remoteAvailableModels(),
+                            conversationEpoch: operation.conversationEpoch,
+                            operationSupport: operation.support,
+                            operationReceipts: operation.receipts
                         )
                     }
                 )
             },
-            selectedProjectId: selectedProjectId
+            selectedProjectId: selectedProjectId,
+            protocolInfo: .current
         )
     }
 
@@ -1424,7 +1443,7 @@ final class AppModel: ObservableObject {
                 backgroundAgentsActive: session.backgroundAgentsActive,
                 now: promptNow,
                 nowMs: promptNowMs,
-                clockMs: promptStatusEventClock.timestamp(for: sessionId)
+                clockMs: sessionSemantics.promptSafetyClock.timestamp(for: sessionId)
             ),
             footerActivity: target?.activity ?? .unknown
         )
@@ -1461,24 +1480,14 @@ final class AppModel: ObservableObject {
         backgroundOnly: Bool = false,
         footerActivity: FooterActivity
     ) -> RemotePromptResult {
-        guard hasLiveAgent else { return .noLiveCopilot }
-        // Never inject a free-form message over a foreground user prompt: a structured
-        // ask_user/elicitation must be answered via its card; and `status == .waiting`
-        // covers raw permission
-        // prompts that no structured-question signal sees — even when the footer
-        // momentarily reads idle behind the dialog.
-        guard !hasPendingQuestions, status != .waiting else {
-            return .busy
-        }
-        guard !scheduledTurnActive || backgroundOnly else { return .busy }
-        guard status != .running || backgroundOnly else { return .busy }
-        // For the remaining states the terminal footer is the authoritative "Copilot
-        // is at a prompt" signal. Bypassing scheduled/running state requires a fresh,
-        // clock-ordered heartbeat proving the foreground is inactive while background
-        // work remains.
-        // `sendRemotePrompt` re-checks this footer immediately before sending.
-        guard footerActivity == .idle else { return .busy }
-        return .sent
+        SessionSemanticsAdapter.remotePromptResult(
+            status: status,
+            scheduledTurnActive: scheduledTurnActive,
+            hasPendingQuestions: hasPendingQuestions,
+            hasLiveAgent: hasLiveAgent,
+            backgroundOnly: backgroundOnly,
+            footerActivity: footerActivity
+        )
     }
 
     /// Evidence that a session is only busy because scheduled, subagent, or CLI
@@ -1499,15 +1508,12 @@ final class AppModel: ObservableObject {
         now: Date,
         nowMs: Int64
     ) -> Int64? {
-        guard let snapshot,
-              snapshot.isFresh(at: now),
-              snapshot.foregroundTurnActive == false,
-              snapshot.scheduledTurnActive
-                || !snapshot.activeSubagents.isEmpty
-                || backgroundAgentsActive,
-              let snapshotMs = snapshot.foregroundTransitionMilliseconds,
-              snapshotMs <= nowMs else { return nil }
-        return snapshotMs
+        SessionSemanticsAdapter.backgroundOnlyEvidenceMilliseconds(
+            snapshot: snapshot,
+            backgroundAgentsActive: backgroundAgentsActive,
+            now: now,
+            nowMilliseconds: nowMs
+        )
     }
 
     nonisolated static func backgroundOnlyPromptEvidence(
@@ -1518,17 +1524,14 @@ final class AppModel: ObservableObject {
         nowMs: Int64,
         clockMs: Int64?
     ) -> Bool {
-        guard snapshot?.reportsTerminalDisconnect != true else { return false }
-        guard let snapshotMs = backgroundOnlyEvidenceMs(
+        SessionSemanticsAdapter.hasBackgroundOnlyPromptEvidence(
+            status: status,
             snapshot: snapshot,
             backgroundAgentsActive: backgroundAgentsActive,
             now: now,
-            nowMs: nowMs
-        ) else { return false }
-        if let clockMs {
-            return status == .idle ? snapshotMs >= clockMs : snapshotMs > clockMs
-        }
-        return true
+            nowMilliseconds: nowMs,
+            promptClockMilliseconds: clockMs
+        )
     }
 
     /// Accept a remote answer to a structured `ask_user` question and hand it to the
@@ -1539,55 +1542,50 @@ final class AppModel: ObservableObject {
     func answerUserInput(
         sessionId: String,
         answer: RemoteUserInputAnswer,
+        operation: CLIOperationRequest? = nil,
         now: Date = Date()
     ) -> RemoteUserInputResult {
         guard locateIndex(sessionId) != nil else { return .invalid }
-
-        let snapshotURL = agentActivityDirectory
-            .appendingPathComponent("\(sessionId).agent-activity.json")
-        guard let data = try? Data(contentsOf: snapshotURL),
-              let snapshot = try? JSONDecoder().decode(
-                AgentActivitySnapshot.self, from: data
-              ),
-              snapshot.isFresh(at: now),
-              let request = snapshot.trackedUserInputs?
-                .first(where: { $0.requestId == answer.requestId })
-        else { return .invalid }
-        guard !snapshot.reportsTerminalDisconnect else { return .invalid }
-
-        guard answer.answer.utf8.count <= 8_192 else { return .invalid }
-        if answer.wasFreeform {
-            guard request.allowFreeform else { return .invalid }
-        } else {
-            guard request.choices.contains(answer.answer) else { return .invalid }
-        }
-
-        // Bind the answer to the tab's live Copilot session so a response written for
-        // an old (pre-resume) agent session is rejected by the extension.
-        let markerURL = resumeMarkerDirectory
-            .appendingPathComponent("\(sessionId).copilot-session")
-        guard let copilotSessionId = (try? String(contentsOf: markerURL, encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !copilotSessionId.isEmpty else { return .invalid }
-
-        // One outstanding response per tab: refuse while a prior answer is still being
-        // consumed by the extension, which serializes retries.
-        let responseURL = agentActivityDirectory
-            .appendingPathComponent("\(sessionId).user-input-response.json")
-        if FileManager.default.fileExists(atPath: responseURL.path) { return .conflict }
-
-        let payload = UserInputResponseFile(
-            schemaVersion: 1,
-            copilotSessionId: copilotSessionId,
-            requestId: request.requestId,
-            answer: answer.answer,
-            wasFreeform: answer.wasFreeform
-        )
-        guard let encoded = try? JSONEncoder().encode(payload),
-              Self.atomicallyWrite0600(encoded, to: responseURL) else {
+        guard !answer.requestId.isEmpty,
+              answer.requestId.utf8.count <= 200,
+              answer.answer.utf8.count <= 8_192 else {
             return .invalid
         }
-        return .accepted
+        let adapter = CLIOperationAdapter(
+            activityDirectory: agentActivityDirectory,
+            resumeMarkerDirectory: resumeMarkerDirectory
+        )
+        return adapter.submit(
+            sessionId: sessionId,
+            kind: .answerUserInput,
+            operation: operation,
+            fingerprintPayload: answer,
+            handoffSuffix: "user-input-response.json",
+            now: now,
+            validate: { snapshot in
+                guard let request = snapshot.trackedUserInputs?
+                    .first(where: { $0.requestId == answer.requestId }) else {
+                    return false
+                }
+                if answer.wasFreeform {
+                    return request.allowFreeform
+                }
+                return request.choices.contains(answer.answer)
+            },
+            makeHandoff: { metadata in
+                UserInputResponseFile(
+                    schemaVersion: 1,
+                    copilotSessionId: metadata.copilotSessionId,
+                    operationId: metadata.operationId,
+                    conversationEpoch: metadata.conversationEpoch,
+                    kind: metadata.kind,
+                    payloadFingerprint: metadata.payloadFingerprint,
+                    requestId: answer.requestId,
+                    answer: answer.answer,
+                    wasFreeform: answer.wasFreeform
+                )
+            }
+        )
     }
 
     /// Submit a remote answer to a pending elicitation. Mirrors `answerUserInput`:
@@ -1597,42 +1595,69 @@ final class AppModel: ObservableObject {
     func answerElicitation(
         sessionId: String,
         answer: RemoteElicitationAnswer,
+        operation: CLIOperationRequest? = nil,
         now: Date = Date()
     ) -> RemoteUserInputResult {
         guard let location = locateIndex(sessionId) else { return .invalid }
-
-        let snapshotURL = agentActivityDirectory
-            .appendingPathComponent("\(sessionId).agent-activity.json")
-        guard let data = try? Data(contentsOf: snapshotURL),
-              let snapshot = try? JSONDecoder().decode(
-                AgentActivitySnapshot.self, from: data
-              ),
-              snapshot.isFresh(at: now),
-              let request = snapshot.trackedElicitations?
-                .first(where: { $0.requestId == answer.requestId })
-        else { return .invalid }
-        // Accept must carry content; decline/cancel must not.
+        let adapter = CLIOperationAdapter(
+            activityDirectory: agentActivityDirectory,
+            resumeMarkerDirectory: resumeMarkerDirectory
+        )
+        guard !answer.requestId.isEmpty,
+              answer.requestId.utf8.count <= 200 else {
+            return .invalid
+        }
         switch answer.action {
         case .accept:
-            if answer.requestId.hasPrefix("synthetic::durable-ask-user::") {
-                guard Self.durableDefaultBooleanSelection(
-                    request: request,
-                    answer: answer
-                ) != nil else { return .invalid }
-            } else if request.mode == "url" || request.url != nil {
-                guard answer.content == nil else { return .invalid }
-            } else {
-                guard let content = answer.content,
-                      Self.isValidElicitationContent(content),
-                      Self.elicitationContent(content, satisfies: request.schema),
+            if let content = answer.content {
+                guard Self.isValidElicitationContent(content),
                       let encoded = try? JSONEncoder().encode(content),
-                      encoded.count <= 32_768 else { return .invalid }
+                      encoded.count <= 32_768 else {
+                    return .invalid
+                }
             }
         case .decline, .cancel:
             guard answer.content == nil else { return .invalid }
         }
 
+        func validates(_ request: TrackedElicitation) -> Bool {
+            switch answer.action {
+            case .accept:
+                if answer.requestId.hasPrefix("synthetic::durable-ask-user::") {
+                    return Self.durableDefaultBooleanSelection(
+                        request: request,
+                        answer: answer
+                    ) != nil
+                }
+                if request.mode == "url" || request.url != nil {
+                    return answer.content == nil
+                }
+                guard let content = answer.content,
+                      Self.isValidElicitationContent(content),
+                      Self.elicitationContent(content, satisfies: request.schema),
+                      let encoded = try? JSONEncoder().encode(content),
+                      encoded.count <= 32_768 else {
+                    return false
+                }
+                return true
+            case .decline, .cancel:
+                return answer.content == nil
+            }
+        }
+
+        let initialSnapshot = adapter.loadFreshSnapshot(
+            sessionId: sessionId,
+            now: now
+        )
+        let initialRequest = initialSnapshot?.trackedElicitations?
+            .first(where: { $0.requestId == answer.requestId })
         if answer.requestId.hasPrefix("synthetic::durable-ask-user::") {
+            guard operation == nil else { return .conflict }
+            guard let request = initialRequest,
+                  let snapshot = initialSnapshot,
+                  validates(request) else {
+                return .invalid
+            }
             let ledgerId = "\(sessionId):elicitation:\(answer.requestId)"
             if remoteElicitationRequestLedger.contains(ledgerId) {
                 return .conflict
@@ -1679,30 +1704,34 @@ final class AppModel: ObservableObject {
             remoteElicitationRequestLedger.record(ledgerId)
             return .accepted
         }
-        guard !snapshot.reportsTerminalDisconnect else { return .invalid }
-
-        let markerURL = resumeMarkerDirectory
-            .appendingPathComponent("\(sessionId).copilot-session")
-        guard let copilotSessionId = (try? String(contentsOf: markerURL, encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !copilotSessionId.isEmpty else { return .invalid }
-
-        let responseURL = agentActivityDirectory
-            .appendingPathComponent("\(sessionId).elicitation-response.json")
-        if FileManager.default.fileExists(atPath: responseURL.path) { return .conflict }
-
-        let payload = ElicitationResponseFile(
-            schemaVersion: 1,
-            copilotSessionId: copilotSessionId,
-            requestId: answer.requestId,
-            action: answer.action.rawValue,
-            content: answer.action == .accept ? answer.content : nil
+        return adapter.submit(
+            sessionId: sessionId,
+            kind: .answerElicitation,
+            operation: operation,
+            fingerprintPayload: answer,
+            handoffSuffix: "elicitation-response.json",
+            now: now,
+            validate: { freshSnapshot in
+                guard let freshRequest = freshSnapshot.trackedElicitations?
+                    .first(where: { $0.requestId == answer.requestId }) else {
+                    return false
+                }
+                return validates(freshRequest)
+            },
+            makeHandoff: { metadata in
+                ElicitationResponseFile(
+                    schemaVersion: 1,
+                    copilotSessionId: metadata.copilotSessionId,
+                    operationId: metadata.operationId,
+                    conversationEpoch: metadata.conversationEpoch,
+                    kind: metadata.kind,
+                    payloadFingerprint: metadata.payloadFingerprint,
+                    requestId: answer.requestId,
+                    action: answer.action.rawValue,
+                    content: answer.action == .accept ? answer.content : nil
+                )
+            }
         )
-        guard let encoded = try? JSONEncoder().encode(payload),
-              Self.atomicallyWrite0600(encoded, to: responseURL) else {
-            return .invalid
-        }
-        return .accepted
     }
 
     nonisolated static func durableDefaultBooleanSelection(
@@ -1778,62 +1807,64 @@ final class AppModel: ObservableObject {
     func setModel(
         sessionId: String,
         selection: RemoteModelSelection,
+        operation: CLIOperationRequest? = nil,
         now: Date = Date()
     ) -> RemoteUserInputResult {
         guard locateIndex(sessionId) != nil else { return .invalid }
-
-        let snapshotURL = agentActivityDirectory
-            .appendingPathComponent("\(sessionId).agent-activity.json")
-        guard let data = try? Data(contentsOf: snapshotURL),
-              let snapshot = try? JSONDecoder().decode(
-                AgentActivitySnapshot.self, from: data
-              ),
-              snapshot.isFresh(at: now),
-              let target = snapshot.availableModels?
-                .first(where: { $0.id == selection.modelId })
-        else { return .invalid }
-
-        // Never switch to a policy-disabled model, even if a stale client offered it.
-        guard target.disabled != true else { return .invalid }
-
-        if let effort = selection.reasoningEffort {
-            // Only accept a level this model actually advertises.
-            guard let supported = target.supportedReasoningEfforts,
-                  supported.contains(effort) else { return .invalid }
-        }
-        if let tier = selection.contextTier {
-            guard tier == "default" || tier == "long_context" else { return .invalid }
-            if tier == "long_context" {
-                guard target.longContextAvailable != false else { return .invalid }
-            }
-        }
-
-        // Bind the switch to the tab's live Copilot session so a request written for
-        // an old (pre-resume) agent session is rejected by the extension.
-        let markerURL = resumeMarkerDirectory
-            .appendingPathComponent("\(sessionId).copilot-session")
-        guard let copilotSessionId = (try? String(contentsOf: markerURL, encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !copilotSessionId.isEmpty else { return .invalid }
-
-        // One outstanding switch per tab: refuse while a prior request is still being
-        // consumed by the extension, which serializes retries.
-        let requestURL = agentActivityDirectory
-            .appendingPathComponent("\(sessionId).set-model-request.json")
-        if FileManager.default.fileExists(atPath: requestURL.path) { return .conflict }
-
-        let payload = SetModelRequestFile(
-            schemaVersion: 1,
-            copilotSessionId: copilotSessionId,
-            modelId: selection.modelId,
-            reasoningEffort: selection.reasoningEffort,
-            contextTier: selection.contextTier
-        )
-        guard let encoded = try? JSONEncoder().encode(payload),
-              Self.atomicallyWrite0600(encoded, to: requestURL) else {
+        guard !selection.modelId.isEmpty,
+              selection.modelId.utf8.count <= 200,
+              (selection.reasoningEffort?.utf8.count ?? 0) <= 64,
+              (selection.contextTier?.utf8.count ?? 0) <= 64 else {
             return .invalid
         }
-        return .accepted
+        if let tier = selection.contextTier,
+           tier != "default" && tier != "long_context" {
+            return .invalid
+        }
+
+        let adapter = CLIOperationAdapter(
+            activityDirectory: agentActivityDirectory,
+            resumeMarkerDirectory: resumeMarkerDirectory
+        )
+        return adapter.submit(
+            sessionId: sessionId,
+            kind: .setModel,
+            operation: operation,
+            fingerprintPayload: selection,
+            handoffSuffix: "set-model-request.json",
+            now: now,
+            validate: { snapshot in
+                guard let target = snapshot.availableModels?
+                    .first(where: { $0.id == selection.modelId }),
+                      target.disabled != true else {
+                    return false
+                }
+                if let effort = selection.reasoningEffort {
+                    guard let supported = target.supportedReasoningEfforts,
+                          supported.contains(effort) else {
+                        return false
+                    }
+                }
+                if selection.contextTier == "long_context",
+                   target.longContextAvailable == false {
+                    return false
+                }
+                return true
+            },
+            makeHandoff: { metadata in
+                SetModelRequestFile(
+                    schemaVersion: 1,
+                    copilotSessionId: metadata.copilotSessionId,
+                    operationId: metadata.operationId,
+                    conversationEpoch: metadata.conversationEpoch,
+                    kind: metadata.kind,
+                    payloadFingerprint: metadata.payloadFingerprint,
+                    modelId: selection.modelId,
+                    reasoningEffort: selection.reasoningEffort,
+                    contextTier: selection.contextTier
+                )
+            }
+        )
     }
 
     private static func isValidElicitationContent(_ content: [String: RemoteJSONValue]) -> Bool {
@@ -1991,28 +2022,6 @@ final class AppModel: ObservableObject {
             strings.append(string)
         }
         return strings
-    }
-
-    /// temp file and renaming it into place.
-    private static func atomicallyWrite0600(_ data: Data, to url: URL) -> Bool {
-        let directory = url.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        let temporary = directory
-            .appendingPathComponent(".\(UUID().uuidString).user-input.tmp")
-        guard FileManager.default.createFile(
-            atPath: temporary.path,
-            contents: data,
-            attributes: [.posixPermissions: 0o600]
-        ) else { return false }
-        if rename(temporary.path, url.path) != 0 {
-            try? FileManager.default.removeItem(at: temporary)
-            return false
-        }
-        return true
     }
 
     func closeProject(_ pid: String) {
@@ -2217,10 +2226,11 @@ final class AppModel: ObservableObject {
         notification: StatusNotificationKind? = nil
     ) {
         guard let loc = locateIndex(sessionId) else { return }
-        guard statusEventClock.shouldApply(sessionId: sessionId, timestamp: timestamp) else { return }
-        if Self.advancesPromptSafetyClock(source: source) {
-            promptStatusEventClock.seed(sessionId: sessionId, timestamp: timestamp)
-        }
+        guard sessionSemantics.shouldApplyStatusEvent(
+            sessionId: sessionId,
+            timestamp: timestamp,
+            source: source
+        ) else { return }
         // sessionEnd is also emitted during graceful macOS shutdown. Only a live,
         // non-terminating app can treat it as an explicit user exit.
         if source == "session-end", !isTerminating, !isPoweringOff,
@@ -2268,9 +2278,12 @@ final class AppModel: ObservableObject {
             scheduledSnapshotsSuppressed.insert(sessionId)
         }
         let clearsBackgroundAgents = status == .idle && source == "session-idle"
-        let hasCompletionSignal = status == .idle
-            && (source == "agent-stop" || notification == .completed)
-            && !projects[loc.p].sessions[loc.s].scheduledTurnActive
+        let hasCompletionSignal = SessionSemantics.isCompletionSignal(
+            status: status,
+            source: source,
+            notificationIsCompleted: notification == .completed,
+            scheduledTurnActive: projects[loc.p].sessions[loc.s].scheduledTurnActive
+        )
         let clearsFinishedUnseen = (status == .running || status == .waiting)
             && projects[loc.p].sessions[loc.s].finishedUnseen
         let resumesBackgroundTracking = (status == .running || status == .waiting)
@@ -2310,25 +2323,21 @@ final class AppModel: ObservableObject {
         }
         if timestamp == nil {
             let now = SessionArtifacts.currentStatusTimestamp()
-            let effectiveTimestamp = max(now, statusEventClock.timestamp(for: sessionId) ?? now)
-            statusEventClock.seed(sessionId: sessionId, timestamp: effectiveTimestamp)
-            if Self.advancesPromptSafetyClock(source: source) {
-                promptStatusEventClock.seed(
-                    sessionId: sessionId,
-                    timestamp: effectiveTimestamp
-                )
-            }
+            let clocks = sessionSemantics.recordLocalStatusEvent(
+                sessionId: sessionId,
+                nowMilliseconds: now,
+                source: source
+            )
             SessionArtifacts.persistStatus(
                 sessionId: sessionId,
                 status: status,
-                timestamp: effectiveTimestamp,
-                promptStatusTimestamp: promptStatusEventClock.timestamp(for: sessionId)
-                    ?? effectiveTimestamp
+                timestamp: clocks.status,
+                promptStatusTimestamp: clocks.promptSafety
             )
         }
 
         if status == .idle {
-            activityTracker.reset(sessionId: sessionId)
+            sessionSemantics.activityTracker.reset(sessionId: sessionId)
             if source == "session-idle" {
                 setBackgroundAgentsActive(sessionId: sessionId, active: false)
                 backgroundAgentsSuppressed.insert(sessionId)
@@ -2356,9 +2365,11 @@ final class AppModel: ObservableObject {
             if let permissionRestoreState {
                 let now = SessionArtifacts.currentStatusTimestamp()
                 let statusTimestamp = timestamp
-                    ?? statusEventClock.timestamp(for: sessionId)
+                    ?? sessionSemantics.statusClock.timestamp(for: sessionId)
                     ?? now
-                let promptTimestamp = promptStatusEventClock.timestamp(for: sessionId)
+                let promptTimestamp = sessionSemantics.promptSafetyClock.timestamp(
+                    for: sessionId
+                )
                     ?? statusTimestamp
                 schedulePermissionNotification(
                     sessionId: sessionId,
@@ -2394,14 +2405,11 @@ final class AppModel: ObservableObject {
         hasPendingQuestions: Bool,
         pendingPermissionRequestIds: [String]?
     ) -> PermissionNotificationDecision {
-        guard status == .waiting else { return .cancel }
-        if pendingPermissionRequestIds?.isEmpty == false { return .post }
-        guard !hasPendingQuestions else { return .cancel }
-        guard let pendingPermissionRequestIds else {
-            // Older/stale extensions cannot prove that the prompt is gone.
-            return .post
-        }
-        return pendingPermissionRequestIds.isEmpty ? .suppress : .post
+        SessionSemanticsAdapter.permissionDecision(
+            status: status,
+            hasPendingQuestions: hasPendingQuestions,
+            hasPendingPermissionRequests: pendingPermissionRequestIds.map { !$0.isEmpty }
+        )
     }
 
     private func schedulePermissionNotification(
@@ -2502,8 +2510,11 @@ final class AppModel: ObservableObject {
             foregroundIdleGenerationBaselines.removeValue(forKey: sessionId)
         }
 
-        statusEventClock.seed(sessionId: sessionId, timestamp: restore.statusTimestamp)
-        promptStatusEventClock.seed(
+        sessionSemantics.statusClock.seed(
+            sessionId: sessionId,
+            timestamp: restore.statusTimestamp
+        )
+        sessionSemantics.promptSafetyClock.seed(
             sessionId: sessionId,
             timestamp: restore.promptStatusTimestamp
         )
@@ -2523,7 +2534,7 @@ final class AppModel: ObservableObject {
     /// foreground ownership. Keep them out of the prompt-safety clock so they cannot
     /// invalidate an already-settled foreground snapshot.
     nonisolated static func advancesPromptSafetyClock(source: String?) -> Bool {
-        source != "scheduled-active"
+        SessionSemantics.advancesPromptSafetyClock(source: source)
     }
 
     private func shouldClearResumeMarkers(
@@ -2764,15 +2775,14 @@ final class AppModel: ObservableObject {
         nowMs: Int64,
         clockMs: Int64
     ) -> Int64? {
-        guard status == .running,
-              footerActivity == .idle,
-              let snapshot,
-              snapshot.isFresh(at: now),
-              snapshot.reportsTerminalDisconnect,
-              let evidenceMs = snapshot.updatedAtMilliseconds,
-              evidenceMs <= nowMs,
-              evidenceMs >= clockMs else { return nil }
-        return evidenceMs
+        SessionSemanticsAdapter.disconnectDemotionEvidenceMilliseconds(
+            status: status,
+            footerActivity: footerActivity,
+            snapshot: snapshot,
+            now: now,
+            nowMilliseconds: nowMs,
+            statusClockMilliseconds: clockMs
+        )
     }
 
     /// Backstop for cancelled turns. An Esc-cancel fires no stop hook and leaves the
@@ -2815,15 +2825,22 @@ final class AppModel: ObservableObject {
                 // be promoted back to running never fires a spurious completion.
                 if status == .idle {
                     let recoveryNowMs = SessionArtifacts.currentStatusTimestamp()
-                    if let snapshot = projects[pi].sessions[si].agentActivity,
-                       snapshot.isFresh(),
-                       snapshot.foregroundTurnActive == true,
-                       !snapshot.reportsTerminalDisconnect,
-                       let snapshotMs = snapshot.foregroundTransitionMilliseconds,
-                       snapshotMs <= recoveryNowMs,
-                       snapshotMs > (statusEventClock.timestamp(for: sid) ?? Int64.min) {
-                        activityTracker.resetForegroundIdle(sessionId: sid)
-                        activityTracker.resetDisconnectIdle(sessionId: sid)
+                    if let snapshotMs =
+                        SessionSemanticsAdapter.foregroundRecoveryEvidenceMilliseconds(
+                            status: status,
+                            snapshot: projects[pi].sessions[si].agentActivity,
+                            now: Date(),
+                            nowMilliseconds: recoveryNowMs,
+                            statusClockMilliseconds:
+                                sessionSemantics.statusClock.timestamp(for: sid)
+                                ?? Int64.min
+                        ) {
+                        sessionSemantics.activityTracker.resetForegroundIdle(
+                            sessionId: sid
+                        )
+                        sessionSemantics.activityTracker.resetDisconnectIdle(
+                            sessionId: sid
+                        )
                         // Promote IN MEMORY ONLY, using the foreground-transition
                         // timestamp (the root turn_start time — NOT `updatedAt`,
                         // which unrelated republishes rewrite): `setStatus` advances
@@ -2854,17 +2871,17 @@ final class AppModel: ObservableObject {
                     postCompletionIfReady(sessionId: sid)
                 }
                 if status == .idle {
-                    activityTracker.resetDisconnectIdle(sessionId: sid)
+                    sessionSemantics.activityTracker.resetDisconnectIdle(sessionId: sid)
                     guard ActivityTracker.canPromoteIdleFromFooter(
                         backgroundAgentsActive: projects[pi].sessions[si].hasBackgroundWork,
                         hasLiveAgent: liveAgentSessions.contains(sid),
                         supportsSessionIdleHook: supportsSessionIdleHook
                     ) else {
-                        activityTracker.reset(sessionId: sid)
+                        sessionSemantics.activityTracker.reset(sessionId: sid)
                         continue
                     }
                     tracked.insert(sid)
-                    if activityTracker.shouldPromoteFromFooter(
+                    if sessionSemantics.activityTracker.shouldPromoteFromFooter(
                         sessionId: sid,
                         currentStatus: status,
                         activity: activity
@@ -2896,11 +2913,12 @@ final class AppModel: ObservableObject {
                     snapshot: projects[pi].sessions[si].agentActivity,
                     now: Date(),
                     nowMs: SessionArtifacts.currentStatusTimestamp(),
-                    clockMs: statusEventClock.timestamp(for: sid) ?? Int64.min
+                    clockMs: sessionSemantics.statusClock.timestamp(for: sid)
+                        ?? Int64.min
                 ) {
                     tracked.insert(sid)
-                    activityTracker.resetForegroundIdle(sessionId: sid)
-                    if activityTracker.observeDisconnectIdle(
+                    sessionSemantics.activityTracker.resetForegroundIdle(sessionId: sid)
+                    if sessionSemantics.activityTracker.observeDisconnectIdle(
                         sessionId: sid,
                         currentStatus: status
                     ) {
@@ -2908,7 +2926,7 @@ final class AppModel: ObservableObject {
                     }
                     continue
                 } else {
-                    activityTracker.resetDisconnectIdle(sessionId: sid)
+                    sessionSemantics.activityTracker.resetDisconnectIdle(sessionId: sid)
                 }
                 // Stale "working" recovery: the foreground turn has ended, but
                 // scheduled, subagent, or CLI background-agent work keeps
@@ -2933,16 +2951,19 @@ final class AppModel: ObservableObject {
                 // rejected outright so it can't drive a demotion or poison the clock.
                 let backgroundNow = Date()
                 let backgroundNowMs = SessionArtifacts.currentStatusTimestamp()
-                if status == .running,
-                   let snapshotMs = Self.backgroundOnlyEvidenceMs(
-                       snapshot: projects[pi].sessions[si].agentActivity,
-                       backgroundAgentsActive: projects[pi].sessions[si].backgroundAgentsActive,
-                       now: backgroundNow,
-                       nowMs: backgroundNowMs
-                   ),
-                   snapshotMs >= (statusEventClock.timestamp(for: sid) ?? snapshotMs) {
+                if let snapshotMs =
+                    SessionSemanticsAdapter.backgroundDemotionEvidenceMilliseconds(
+                        status: status,
+                        snapshot: projects[pi].sessions[si].agentActivity,
+                        backgroundAgentsActive:
+                            projects[pi].sessions[si].backgroundAgentsActive,
+                        now: backgroundNow,
+                        nowMilliseconds: backgroundNowMs,
+                        statusClockMilliseconds:
+                            sessionSemantics.statusClock.timestamp(for: sid)
+                    ) {
                     tracked.insert(sid)
-                    if activityTracker.observeForegroundIdle(
+                    if sessionSemantics.activityTracker.observeForegroundIdle(
                         sessionId: sid,
                         currentStatus: status,
                         foregroundTurnActive: false
@@ -2958,14 +2979,14 @@ final class AppModel: ObservableObject {
                     }
                     continue
                 } else {
-                    activityTracker.resetForegroundIdle(sessionId: sid)
+                    sessionSemantics.activityTracker.resetForegroundIdle(sessionId: sid)
                 }
                 if supportsSessionIdleHook {
-                    activityTracker.reset(sessionId: sid)
+                    sessionSemantics.activityTracker.reset(sessionId: sid)
                     continue
                 }
                 tracked.insert(sid)
-                if activityTracker.observeFooter(
+                if sessionSemantics.activityTracker.observeFooter(
                     sessionId: sid,
                     currentStatus: status,
                     activity: activity
@@ -2975,14 +2996,14 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        activityTracker.retain(activeSessionIds: tracked)
+        sessionSemantics.activityTracker.retain(activeSessionIds: tracked)
     }
 
     /// Drop a session to idle and (unless it's on screen) flag it finished & unseen,
     /// then persist the corrected status. Shared by the liveness and footer reconcilers.
     private func clearStatusToIdle(pi: Int, si: Int, markFinished: Bool, effectiveTime: Int64? = nil) {
         let sid = projects[pi].sessions[si].id
-        activityTracker.reset(sessionId: sid)
+        sessionSemantics.activityTracker.reset(sessionId: sid)
         projects[pi].sessions[si].status = .idle
         projects[pi].sessions[si].statusText = nil
         if markFinished, !isVisible(projectIndex: pi, sessionIndex: si) {
@@ -2998,9 +3019,15 @@ final class AppModel: ObservableObject {
         // `now`-based behavior.
         let now = SessionArtifacts.currentStatusTimestamp()
         let base = min(effectiveTime ?? now, now)
-        let timestamp = max(base, statusEventClock.timestamp(for: sid) ?? base)
-        statusEventClock.seed(sessionId: sid, timestamp: timestamp)
-        promptStatusEventClock.seed(sessionId: sid, timestamp: timestamp)
+        let timestamp = max(
+            base,
+            sessionSemantics.statusClock.timestamp(for: sid) ?? base
+        )
+        sessionSemantics.statusClock.seed(sessionId: sid, timestamp: timestamp)
+        sessionSemantics.promptSafetyClock.seed(
+            sessionId: sid,
+            timestamp: timestamp
+        )
         SessionArtifacts.persistStatus(
             sessionId: sid,
             status: .idle,
@@ -3162,17 +3189,20 @@ final class AppModel: ObservableObject {
         status: SessionStatus,
         activity: FooterActivity?
     ) -> Bool {
-        // Footer scraping is advisory: only affirmative working evidence blocks an
-        // otherwise-authoritative idle hook. Unknown/unattached footers must not
-        // strand completion forever.
-        status == .idle && activity != .working
+        SessionSemantics.canPostCompletion(
+            status: status,
+            footerActivity: activity
+        )
     }
 
     nonisolated static func shouldClearPendingCompletion(
         status: SessionStatus,
         source: String?
     ) -> Bool {
-        (status == .running || status == .waiting) && source != "footer"
+        SessionSemantics.shouldClearPendingCompletion(
+            status: status,
+            source: source
+        )
     }
 
     func focus(projectId: String?, sessionId: String?) {
@@ -3194,6 +3224,7 @@ final class AppModel: ObservableObject {
         if let sid = currentSelectedSessionId { controller(for: sid) }
         refreshSelectedTranscriptController()
         updateDockBadge()
+        requestMainWindow?()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -3447,11 +3478,11 @@ final class AppModel: ObservableObject {
                 let status = restored.status
                 let statusTimestamp = restored.statusTimestamp
                 projects[pi].sessions[si].status = status
-                statusEventClock.seed(
+                sessionSemantics.statusClock.seed(
                     sessionId: sid,
                     timestamp: statusTimestamp
                 )
-                promptStatusEventClock.seed(
+                sessionSemantics.promptSafetyClock.seed(
                     sessionId: sid,
                     timestamp: restored.promptStatusTimestamp ?? statusTimestamp
                 )

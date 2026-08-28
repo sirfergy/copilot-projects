@@ -20,7 +20,7 @@ public enum CLIMain {
         "ping",
         "screenshot",
         "remote",
-        "doctor",
+        "doctor", "check-assets",
         "resolve-session",
         "version", "--version", "-v",
         "install-cli",
@@ -54,7 +54,8 @@ public enum CLIMain {
 
     public static func run(
         _ args: [String],
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        checkAssets: (() -> Bool)? = nil
     ) -> Int32 {
         guard let raw = args.first else {
             printUsage()
@@ -69,6 +70,21 @@ public enum CLIMain {
             return 0
         case "doctor":
             return doctor()
+        case "check-assets":
+            guard rest.isEmpty else {
+                fail("check-assets takes no arguments")
+                return 1
+            }
+            guard let checkAssets else {
+                fail("asset validation requires the app executable")
+                return 1
+            }
+            guard checkAssets() else {
+                fail("a packaged asset is empty")
+                return 1
+            }
+            print("Packaged assets available")
+            return 0
         case "help":
             printUsage()
             return 0
@@ -469,6 +485,7 @@ public enum CLIMain {
           copilot-projects screenshot [path]       Save a PNG of the app window
           copilot-projects remote [action]         Remote access: enable | disable | status (default)
           copilot-projects doctor                  Diagnose app/session/runtime state
+          copilot-projects check-assets            Load packaged assets without launching the app
           copilot-projects version                 Print the installed version
           copilot-projects install-cli [--dir D]   Symlink this binary onto your PATH
           copilot-projects install-hooks           Install Copilot CLI status hooks (~/.copilot/hooks)
