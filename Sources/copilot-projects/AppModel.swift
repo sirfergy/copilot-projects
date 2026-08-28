@@ -3274,14 +3274,6 @@ final class AppModel: ObservableObject {
         window.makeFirstResponder(view)
     }
 
-    func redrawActiveTerminal() {
-        guard let view = activeController?.terminalView else { return }
-        view.forceRedraw()
-        DispatchQueue.main.async { [weak self] in
-            self?.focusActiveTerminal()
-        }
-    }
-
     private func updateDockBadge() {
         let count = projects.reduce(0) { acc, p in
             acc + p.sessions.filter { $0.hasUnread }.count
