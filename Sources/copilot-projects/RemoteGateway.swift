@@ -903,6 +903,8 @@ private final class RemoteHTTPHandler:
                         contentType: "text/plain", body: "Bad request")
                 return
             }
+            // Form POSTs under no-referrer send Origin: null and fail the origin guard.
+            // Keep referrers within this origin so the browser can complete the handoff.
             respond(
                 context: context,
                 method: head.method,
@@ -910,7 +912,8 @@ private final class RemoteHTTPHandler:
                 contentType: "text/html; charset=utf-8",
                 body: RemoteIOSAuthentication.confirmationPage(
                     for: request
-                )
+                ),
+                referrerPolicy: "same-origin"
             )
         case "/":
             respond(context: context, method: head.method, status: .ok,
@@ -1991,13 +1994,14 @@ private final class RemoteHTTPHandler:
         method: HTTPMethod,
         status: HTTPResponseStatus,
         contentType: String,
-        body: String
+        body: String,
+        referrerPolicy: String = "no-referrer"
     ) {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: contentType)
         headers.add(name: "Content-Length", value: String(body.utf8.count))
         headers.add(name: "Cache-Control", value: "no-store")
-        headers.add(name: "Referrer-Policy", value: "no-referrer")
+        headers.add(name: "Referrer-Policy", value: referrerPolicy)
         headers.add(name: "Content-Security-Policy", value: remoteCSP)
         let response = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
         context.write(wrapOutboundOut(.head(response)), promise: nil)

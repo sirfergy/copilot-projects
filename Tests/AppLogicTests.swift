@@ -6760,6 +6760,7 @@ final class AppLogicTests: XCTestCase {
 
     @MainActor
     func testRemoteGatewayRoutesFailClosed() async throws {
+        _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -6878,14 +6879,28 @@ final class AppLogicTests: XCTestCase {
             let authForm = Data(
                 "state=\(authState)&key=\(authKey)".utf8
             )
-            let missingAuthPostOrigin = try await remoteHTTPStatus(
+            let rejectedOrigins: [String?] = [nil, "null", "https://evil.example.com"]
+            for rejectedOrigin in rejectedOrigins {
+                let rejectedAuthPost = try await remoteHTTPResponse(
+                    port: port,
+                    path: authPath,
+                    method: "POST",
+                    token: token,
+                    origin: rejectedOrigin,
+                    body: authForm,
+                    contentType: "application/x-www-form-urlencoded"
+                )
+                XCTAssertEqual(rejectedAuthPost.statusCode, 403)
+            }
+            let missingAuthPostToken = try await remoteHTTPResponse(
                 port: port,
                 path: authPath,
                 method: "POST",
-                token: token,
-                body: authForm
+                origin: "https://projects.example.com",
+                body: authForm,
+                contentType: "application/x-www-form-urlencoded"
             )
-            XCTAssertEqual(missingAuthPostOrigin, 403)
+            XCTAssertEqual(missingAuthPostToken.statusCode, 403)
             let wrongAuthOrigin = try await remoteHTTPStatus(
                 port: port,
                 path: authPath,
@@ -6900,6 +6915,10 @@ final class AppLogicTests: XCTestCase {
                     token: token
                 )
             XCTAssertEqual(authPageResponse.statusCode, 200)
+            XCTAssertEqual(
+                authPageResponse.value(forHTTPHeaderField: "Referrer-Policy"),
+                "same-origin"
+            )
             let authPageText = try XCTUnwrap(
                 String(data: authPage, encoding: .utf8)
             )
@@ -6946,6 +6965,10 @@ final class AppLogicTests: XCTestCase {
                 token: token
             )
             XCTAssertEqual(allowedAsset.statusCode, 200)
+            XCTAssertEqual(
+                allowedAsset.value(forHTTPHeaderField: "Referrer-Policy"),
+                "no-referrer"
+            )
             XCTAssertEqual(
                 allowedAsset.value(forHTTPHeaderField: "Content-Security-Policy"),
                 "default-src 'self'; connect-src 'self'; style-src 'self'; "
