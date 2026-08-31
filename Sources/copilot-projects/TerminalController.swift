@@ -5,6 +5,7 @@ import CopilotProjectsCore
 /// Owns a single SwiftTerm terminal + its child shell, and republishes the
 /// process-delegate callbacks as plain closures. Deliberately NOT an
 /// ObservableObject: the live NSView is kept out of the SwiftUI observation graph.
+@MainActor
 final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     let sessionId: String
     let terminalView: ProjectsTerminalView
@@ -40,44 +41,36 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     /// this to live `running` agents, so a plain shell is never read.
     @MainActor var agentActivity: FooterActivity {
         guard !exited else { return .idle }
-        guard let terminal = terminalView.terminal else { return .unknown }
-        let rows = terminal.rows, cols = terminal.cols
+        guard let input = terminalView.terminalInputStateSnapshot() else { return .unknown }
+        let snapshot = terminalView.terminalStateSnapshot()
+        let rows = snapshot.dimensions.rows, cols = snapshot.dimensions.cols
         guard rows > 0, cols > 0 else { return .unknown }
-        // Scan only the bottom band from the bottom up and return the lowest row that
-        // reads as a real footer. The footer is the bottom-most chrome; bounding the
-        // scan (rather than walking the whole screen) avoids matching an old idle
-        // footer or the agent's own output higher up — while still tolerating a
-        // resumed session's resized buffer, which can leave the footer a few rows up.
-        for r in stride(from: rows - 1, through: max(0, rows - 8), by: -1) {
-            var line = ""
-            for c in 0 ..< cols {
-                if let ch = terminal.getCharacter(col: c, row: r) { line.append(ch) }
-            }
-            let activity = Self.classifyFooter(line)
+        // Only the bottom band is footer chrome; output above it must not
+        // promote an old idle footer or agent-authored text to activity evidence.
+        for row in snapshot.visibleRows.reversed() where row.row >= max(0, rows - 8) {
+            let activity = Self.classifyFooter(row.text)
             if activity != .unknown {
-                Self.debugLog("activity sid=\(sessionId.prefix(8)) alt=\(terminal.isCurrentBufferAlternate) row=\(r)/\(rows) -> \(activity)  [\(line.trimmingCharacters(in: .whitespaces).suffix(90))]")
+                Self.debugLog("activity sid=\(sessionId.prefix(8)) alt=\(input.isAlternateBuffer) row=\(row.row)/\(rows) -> \(activity)  [\(row.text.trimmingCharacters(in: .whitespaces).suffix(90))]")
                 return activity
             }
         }
-        Self.dumpLayoutOnce(sessionId: sessionId, terminal: terminal)
+        Self.dumpLayoutOnce(sessionId: sessionId, snapshot: snapshot)
         return .unknown
     }
 
     /// One-shot diagnostic dump of the bottom rows when no footer was recognized.
     @MainActor static var dumpedSessions: Set<String> = []
-    @MainActor static func dumpLayoutOnce(sessionId: String, terminal: Terminal) {
+    @MainActor static func dumpLayoutOnce(sessionId: String, snapshot: TerminalViewStateSnapshot) {
         guard FileManager.default.fileExists(atPath: "/tmp/copilot-projects-debug"),
               !dumpedSessions.contains(sessionId) else { return }
         dumpedSessions.insert(sessionId)
-        let rows = terminal.rows, cols = terminal.cols
+        let rows = snapshot.dimensions.rows, cols = snapshot.dimensions.cols
         debugLog("NO FOOTER sid=\(sessionId.prefix(8)) rows=\(rows) cols=\(cols); bottom non-empty rows:")
-        for r in max(0, rows - 40) ..< rows {
-            var line = ""
-            for c in 0 ..< cols { if let ch = terminal.getCharacter(col: c, row: r) { line.append(ch) } }
-            let trimmed = line.replacingOccurrences(of: "\u{0}", with: " ").trimmingCharacters(in: .whitespaces)
+        for row in snapshot.visibleRows where row.row >= max(0, rows - 40) {
+            let trimmed = row.text.replacingOccurrences(of: "\u{0}", with: " ").trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty {
                 let safe = String(trimmed.unicodeScalars.map { $0.value < 32 ? "?" : Character($0) })
-                debugLog("  r\(r)| \(safe.suffix(112))")
+                debugLog("  r\(row.row)| \(safe.suffix(112))")
             }
         }
     }
@@ -146,7 +139,7 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         // Wires durable Kitty-image persistence for this exact session and
         // kicks off its async disk restore *before* `start(...)` below can
         // possibly spawn the shell/dtach process — so no live PTY byte can
-        // ever reach `dataReceived` before restoration begins buffering it
+        // ever reach `consumeProcessOutput` before restoration begins buffering it
         // (see `ProjectsTerminalView.configureImagePersistence`).
         terminalView.configureImagePersistence(sessionId: sessionId, diskStore: kittyImageDiskStore)
         start(cwd: cwd, extraEnvironment: extraEnvironment,
@@ -232,11 +225,9 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     }
 
     func terminate() {
-        MainActor.assumeIsolated {
-            terminalView.kittyImageCapture.disablePersistence()
-            terminalView.cancelImageRestore()
-            terminalView.terminate()
-        }
+        terminalView.kittyImageCapture.disablePersistence()
+        terminalView.cancelImageRestore()
+        terminalView.terminate()
     }
 
     @MainActor
@@ -403,13 +394,11 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     }
 
     func processTerminated(source: TerminalView, exitCode: Int32?) {
-        MainActor.assumeIsolated {
-            if !isDrainingForTermination {
-                terminalView.kittyImageCapture.disablePersistence()
-                terminalView.cancelImageRestore()
-            }
-            exited = true
-            onExit?(exitCode)
+        if !isDrainingForTermination {
+            terminalView.kittyImageCapture.disablePersistence()
+            terminalView.cancelImageRestore()
         }
+        exited = true
+        onExit?(exitCode)
     }
 }

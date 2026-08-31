@@ -65,13 +65,13 @@ final class RemoteModelBridge: @unchecked Sendable {
         guard let model,
               let view = model.controller(for: sessionId)?.terminalView,
               !view.isRestoringImages,
-              let terminal = view.terminal else { return nil }
+              let input = view.terminalInputStateSnapshot() else { return nil }
         return RemoteTerminalRevision(
             contentGeneration: view.remoteContentGeneration,
             imageAvailabilityGeneration: view.kittyImageCapture.imageAvailabilityGeneration,
-            cols: terminal.cols,
-            rows: terminal.rows,
-            terminalScroll: terminal.isCurrentBufferAlternate
+            cols: input.dimensions.cols,
+            rows: input.dimensions.rows,
+            terminalScroll: input.isAlternateBuffer
                 || model.liveAgentSessions.contains(sessionId)
         )
     }
@@ -81,13 +81,16 @@ final class RemoteModelBridge: @unchecked Sendable {
         revision: RemoteTerminalRevision,
         afterLine: Int?
     ) -> RemoteTerminalScreen? {
-        guard let model else { return nil }
+        guard let model, screenRevision(sessionId: sessionId) == revision else { return nil }
         if let cached = cachedScreens[sessionId],
            cached.revision == revision,
            cached.afterLine == afterLine {
             return cached.screen
         }
-        let screen = model.remoteScreen(sessionId: sessionId, afterLine: afterLine)
+        guard let screen = model.remoteScreen(sessionId: sessionId, afterLine: afterLine),
+              screen.cols == revision.cols, screen.rows == revision.rows,
+              (screen.scrollMode == .terminal) == revision.terminalScroll,
+              screenRevision(sessionId: sessionId) == revision else { return nil }
         cachedScreens[sessionId] = CachedScreen(
             revision: revision,
             afterLine: afterLine,
@@ -1985,9 +1988,9 @@ private final class RemoteHTTPHandler:
                                 authorizationExpiresAt: authorizationExpiresAt
                             ) else { return }
                         }
-                        if screenRevision != self.lastScreenRevision {
+                        if let screen, screenRevision != self.lastScreenRevision {
                             self.lastScreenRevision = screenRevision
-                            if let screen, screen != self.lastScreen {
+                            if screen != self.lastScreen {
                                 self.lastScreen = screen
                                 self.lastHistoryEndLine = screen.scrollMode == .history
                                     ? screen.firstLine + screen.lines.count

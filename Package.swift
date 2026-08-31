@@ -18,11 +18,11 @@ let package = Package(
         ),
     ],
     dependencies: [
-        // Based on upstream v1.20.0. The fork retains Copilot Projects' empty-ink
-        // cache, blank-surface recovery, and renderer-recreation fixes.
+        // SwiftTerm 2.0 with copied embedding APIs, caret/glyph correctness
+        // fixes, and bounded Metal recovery; no legacy recovery framework.
         .package(
             url: "https://github.com/sirfergy/SwiftTerm",
-            revision: "cd053dc4709ddea6e5ad80d8d9df20cd81a9da2c"
+            revision: "83f15e7aca5c3cef45ee61158bb83c1fce43b49a"
         ),
         .package(
             url: "https://github.com/apple/swift-nio",

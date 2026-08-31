@@ -166,7 +166,7 @@ final class AppLogicTests: XCTestCase {
         window.contentView = view
         defer { window.contentView = nil }
 
-        view.handleMetalRendererStatus(.fellBackToCoreGraphics)
+        view.metalRendererFallbackHandler?(.deviceUnavailable)
         view.setRendererActive(true)
 
         XCTAssertEqual(view.rendererName, "coregraphics-fallback")
@@ -10222,7 +10222,7 @@ final class AppLogicTests: XCTestCase {
             resumeMarkerDirectory: root
         )
         let controller = try XCTUnwrap(model.controller(for: sessionId))
-        controller.terminalView.dataReceived(slice: Array("terminal output\r\n".utf8)[...])
+        controller.terminalView.consumeProcessOutput(Array("terminal output\r\n".utf8)[...])
         XCTAssertNotNil(model.remoteScreen(sessionId: sessionId, afterLine: nil))
 
         let config = CloudflareAccessConfig(
@@ -13145,7 +13145,7 @@ final class AppLogicTests: XCTestCase {
         let controller = try XCTUnwrap(model.controller(for: sessionId))
 
         let png = remoteKittyTestPNGBytes(width: 2, height: 2)
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=55", base64Payload: png.base64EncodedString()
         )[...])
         // Enter the alternate screen buffer (live/terminal-scroll mode), home
@@ -13159,7 +13159,7 @@ final class AppLogicTests: XCTestCase {
                 + String(repeating: String(placeholder), count: 4)
                 + "\u{1B}[0m"
         ).utf8)
-        controller.terminalView.dataReceived(slice: liveBytes[...])
+        controller.terminalView.consumeProcessOutput(liveBytes[...])
 
         // The production capture assigns a random per-instance epoch (finding
         // #2), so the resulting version is opaque here — read the version the
@@ -13208,7 +13208,7 @@ final class AppLogicTests: XCTestCase {
         let controller = try XCTUnwrap(model.controller(for: sessionId))
 
         let png = remoteKittyTestPNGBytes(width: 2, height: 2)
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=91", base64Payload: png.base64EncodedString()
         )[...])
         let placeholder = Character(UnicodeScalar(0x10EEEE)!)
@@ -13218,7 +13218,7 @@ final class AppLogicTests: XCTestCase {
                 + String(repeating: String(placeholder), count: 4)
                 + "\u{1B}[0m"
         ).utf8)
-        controller.terminalView.dataReceived(slice: liveBytes[...])
+        controller.terminalView.consumeProcessOutput(liveBytes[...])
 
         let firstVersion = try XCTUnwrap(controller.terminalView.kittyImageCapture.currentVersion(for: 91))
         let initialScreen = try XCTUnwrap(model.remoteScreen(sessionId: sessionId, afterLine: nil))
@@ -13232,7 +13232,7 @@ final class AppLogicTests: XCTestCase {
         // The placeholder characters themselves are deliberately left in the
         // grid (never overwritten/erased) to prove the fix, not grid content,
         // is what stops the ghost.
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(control: "a=d,d=i,i=91")[...])
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(control: "a=d,d=i,i=91")[...])
 
         // The exact retained version is still fetchable...
         XCTAssertEqual(
@@ -13250,7 +13250,7 @@ final class AppLogicTests: XCTestCase {
         // Mac SwiftTerm and remote metadata agree again, now that both the
         // placeholder grid cells (never removed) and an active capture
         // placement exist together.
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=91", base64Payload: png.base64EncodedString()
         )[...])
         let secondVersion = try XCTUnwrap(controller.terminalView.kittyImageCapture.currentVersion(for: 91))
@@ -13296,10 +13296,10 @@ final class AppLogicTests: XCTestCase {
         // Transmit the same image id twice, once per explicit placement id —
         // both placements reference whatever bytes/version the id most
         // recently retained.
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=96,p=1", base64Payload: png.base64EncodedString()
         )[...])
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=96,p=2", base64Payload: png.base64EncodedString()
         )[...])
 
@@ -13317,7 +13317,7 @@ final class AppLogicTests: XCTestCase {
                 + String(repeating: String(placeholder), count: 4)
                 + "\u{1B}[0m"
         ).utf8)
-        controller.terminalView.dataReceived(slice: liveBytes[...])
+        controller.terminalView.consumeProcessOutput(liveBytes[...])
 
         let version = try XCTUnwrap(controller.terminalView.kittyImageCapture.currentVersion(for: 96, placementId: 1))
         XCTAssertEqual(controller.terminalView.kittyImageCapture.currentVersion(for: 96, placementId: 2), version)
@@ -13333,7 +13333,7 @@ final class AppLogicTests: XCTestCase {
         ])
 
         // Scoped delete: only placement 1 is targeted.
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(control: "a=d,d=i,i=96,p=1")[...])
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(control: "a=d,d=i,i=96,p=1")[...])
 
         XCTAssertNil(controller.terminalView.kittyImageCapture.currentVersion(for: 96, placementId: 1))
         XCTAssertEqual(controller.terminalView.kittyImageCapture.currentVersion(for: 96, placementId: 2), version)
@@ -13373,7 +13373,7 @@ final class AppLogicTests: XCTestCase {
         let controller = try XCTUnwrap(model.controller(for: sessionId))
 
         let png = remoteKittyTestPNGBytes(width: 2, height: 2)
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=66", base64Payload: png.base64EncodedString()
         )[...])
         let placeholder = Character(UnicodeScalar(0x10EEEE)!)
@@ -13383,7 +13383,7 @@ final class AppLogicTests: XCTestCase {
                 + String(repeating: String(placeholder), count: 3)
                 + "\u{1B}[0m"
         ).utf8)
-        controller.terminalView.dataReceived(slice: liveBytes[...])
+        controller.terminalView.consumeProcessOutput(liveBytes[...])
 
         let liveScreen = try XCTUnwrap(model.remoteScreen(sessionId: sessionId, afterLine: nil))
         XCTAssertEqual(liveScreen.scrollMode, .terminal)
@@ -13397,7 +13397,7 @@ final class AppLogicTests: XCTestCase {
         // A present-but-empty array (never `nil`): this host always scans the
         // full retained history, so an empty result is a definitive "nothing
         // found", not an older host omitting the field.
-        controller.terminalView.dataReceived(slice: Array("\u{1B}[?1049l".utf8)[...])
+        controller.terminalView.consumeProcessOutput(Array("\u{1B}[?1049l".utf8)[...])
         let historyScreen = try XCTUnwrap(model.remoteScreen(sessionId: sessionId, afterLine: nil))
         XCTAssertEqual(historyScreen.scrollMode, .history)
         XCTAssertEqual(historyScreen.images, [])
@@ -13430,13 +13430,13 @@ final class AppLogicTests: XCTestCase {
             kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("kitty-images", isDirectory: true))
         )
         let controller = try XCTUnwrap(model.controller(for: sessionId))
-        let terminal = try XCTUnwrap(controller.terminalView.terminal)
-        let rows = terminal.rows
+        let input = try XCTUnwrap(controller.terminalView.terminalInputStateSnapshot())
+        let rows = input.dimensions.rows
 
         // Register the image's bytes with the capture — independent of what
         // gets written into the terminal's own grid below.
         let png = remoteKittyTestPNGBytes(width: 2, height: 2)
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=80", base64Payload: png.base64EncodedString()
         )[...])
         let version = try XCTUnwrap(controller.terminalView.kittyImageCapture.currentVersion(for: 80))
@@ -13462,7 +13462,7 @@ final class AppLogicTests: XCTestCase {
         for i in 0 ..< (rows + 20) {
             script += "filler-after-\(i)\r\n"
         }
-        controller.terminalView.dataReceived(slice: Array(script.utf8)[...])
+        controller.terminalView.consumeProcessOutput(Array(script.utf8)[...])
 
         let initialScreen = try XCTUnwrap(model.remoteScreen(sessionId: sessionId, afterLine: nil))
         XCTAssertEqual(initialScreen.scrollMode, .history)
@@ -13524,11 +13524,11 @@ final class AppLogicTests: XCTestCase {
             kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("kitty-images", isDirectory: true))
         )
         let controller = try XCTUnwrap(model.controller(for: sessionId))
-        let terminal = try XCTUnwrap(controller.terminalView.terminal)
-        let rows = terminal.rows
+        let input = try XCTUnwrap(controller.terminalView.terminalInputStateSnapshot())
+        let rows = input.dimensions.rows
 
         let png = remoteKittyTestPNGBytes(width: 2, height: 2)
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=81", base64Payload: png.base64EncodedString()
         )[...])
         let version = try XCTUnwrap(controller.terminalView.kittyImageCapture.currentVersion(for: 81))
@@ -13550,7 +13550,7 @@ final class AppLogicTests: XCTestCase {
         for i in 0 ..< (rows + 20) {
             script += "filler-after-\(i)\r\n"
         }
-        controller.terminalView.dataReceived(slice: Array(script.utf8)[...])
+        controller.terminalView.consumeProcessOutput(Array(script.utf8)[...])
 
         let initialScreen = try XCTUnwrap(model.remoteScreen(sessionId: sessionId, afterLine: nil))
         XCTAssertEqual(initialScreen.scrollMode, .history)
@@ -13607,7 +13607,7 @@ final class AppLogicTests: XCTestCase {
         )
         let controller = try XCTUnwrap(model.controller(for: sessionId))
         let png = remoteKittyTestPNGBytes(width: 2, height: 2)
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=99", base64Payload: png.base64EncodedString()
         )[...])
         // The production capture assigns a random per-instance epoch (finding
@@ -13806,7 +13806,7 @@ final class AppLogicTests: XCTestCase {
         )
         let controller = try XCTUnwrap(model.controller(for: sessionId))
         let png = remoteKittyTestPNGBytes(width: 2, height: 2)
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=99", base64Payload: png.base64EncodedString()
         )[...])
         let actualVersion = try XCTUnwrap(controller.terminalView.kittyImageCapture.currentVersion(for: 99))
@@ -14870,7 +14870,7 @@ final class AppLogicTests: XCTestCase {
         // discovered here because restore already installed the current
         // version, never because of any live retransmission.
         let placeholder = Character(UnicodeScalar(0x10EEEE)!)
-        controller.terminalView.dataReceived(slice: Array((
+        controller.terminalView.consumeProcessOutput(Array((
             "\u{1B}[?1049h\u{1B}[H\u{1B}[3;1H"
                 + "\u{1B}[38;2;0;0;77m"
                 + String(repeating: String(placeholder), count: 4)
@@ -14940,9 +14940,9 @@ final class AppLogicTests: XCTestCase {
 
         // Buffered while pending: a delete of the (not-yet-installed)
         // placement, then a fresh live retransmit of the same image id.
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(control: "a=d,d=i,i=55")[...])
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(control: "a=d,d=i,i=55")[...])
         let newPng = remoteKittyTestPNGBytes(width: 5, height: 5)
-        controller.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controller.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=55", base64Payload: newPng.base64EncodedString()
         )[...])
         XCTAssertTrue(controller.terminalView.isRestoringImages, "still pending: nothing has been flushed yet")
@@ -14992,7 +14992,7 @@ final class AppLogicTests: XCTestCase {
         // before the restore `Task` can possibly have run — deterministically
         // overflows and abandons restoration for this session synchronously.
         let livePng = remoteKittyTestPNGBytes(width: 5, height: 5)
-        view.dataReceived(slice: remoteKittyFrameBytes(
+        view.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=66", base64Payload: livePng.base64EncodedString()
         )[...])
         XCTAssertFalse(view.isRestoringImages, "overflow must abandon restoration synchronously")
@@ -15040,7 +15040,7 @@ final class AppLogicTests: XCTestCase {
             diskStore: diskStore,
             restoreBufferBudget: budget
         )
-        view.dataReceived(slice: Array("pending".utf8)[...])
+        view.consumeProcessOutput(Array("pending".utf8)[...])
         XCTAssertEqual(budget.totalBytes, 7)
 
         await view.waitForImageRestoreForTesting()
@@ -15074,11 +15074,11 @@ final class AppLogicTests: XCTestCase {
 
         let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         view.configureImagePersistence(sessionId: sessionId, diskStore: diskStore)
-        view.dataReceived(slice: Array("\u{1B}[?1049h".utf8)[...])
+        view.consumeProcessOutput(Array("\u{1B}[?1049h".utf8)[...])
         await view.waitForImageRestoreForTesting()
         view.replayRestoredPlacementsForTesting()
 
-        XCTAssertEqual(view.terminal?.isCurrentBufferAlternate, true)
+        XCTAssertEqual(view.terminalInputStateSnapshot()?.isAlternateBuffer, true)
         XCTAssertEqual(view.restoredPlacementBufferWasAlternateForTesting, true)
     }
 
@@ -15109,7 +15109,7 @@ final class AppLogicTests: XCTestCase {
 
         let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         view.configureImagePersistence(sessionId: sessionId, diskStore: diskStore)
-        view.dataReceived(slice: remoteKittyFrameBytes(
+        view.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=p,U=1,i=10,p=7,c=4,r=3"
         )[...])
         await view.waitForImageRestoreForTesting()
@@ -15151,7 +15151,7 @@ final class AppLogicTests: XCTestCase {
             diskStore: diskStore,
             restoreBufferBudget: budget
         )
-        view.dataReceived(slice: Array("pending".utf8)[...])
+        view.consumeProcessOutput(Array("pending".utf8)[...])
         XCTAssertEqual(budget.totalBytes, 7)
 
         view.cancelImageRestore()
@@ -15280,11 +15280,11 @@ final class AppLogicTests: XCTestCase {
         // live-placement test's convention.
         let imageIdA: UInt32 = 91
         let png = remoteKittyTestPNGBytes(width: 2, height: 2)
-        controllerA.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+        controllerA.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
             control: "a=T,f=100,t=d,U=1,i=\(imageIdA)", base64Payload: png.base64EncodedString()
         )[...])
         let placeholder = Character(UnicodeScalar(0x10EEEE)!)
-        controllerA.terminalView.dataReceived(slice: Array((
+        controllerA.terminalView.consumeProcessOutput(Array((
             "\u{1B}[?1049h\u{1B}[H\u{1B}[3;1H"
                 + "\u{1B}[38;2;0;0;91m"
                 + String(repeating: String(placeholder), count: 4)
@@ -15310,7 +15310,7 @@ final class AppLogicTests: XCTestCase {
         for floodSessionId in floodSessionIds {
             let floodController = try XCTUnwrap(model.controller(for: floodSessionId))
             let floodPng = remoteKittyTestPNGBytes(width: 2, height: 2)
-            floodController.terminalView.dataReceived(slice: remoteKittyFrameBytes(
+            floodController.terminalView.consumeProcessOutput(remoteKittyFrameBytes(
                 control: "a=T,f=100,t=d,U=1,i=1", base64Payload: floodPng.base64EncodedString()
             )[...])
         }

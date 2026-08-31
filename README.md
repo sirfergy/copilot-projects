@@ -387,9 +387,14 @@ Override it with `COPILOT_PROJECTS_DTACH`.
 ## Renderer
 
 SwiftTerm's Metal renderer is the default. Set `COPILOT_PROJECTS_RENDERER=coregraphics`
-before launching to use the fallback renderer. The dependency is pinned to an exact upstream
-revision containing fixes for stale Metal rows/cursor, window reparenting, hidden-scroller
-layout, and synchronized output.
+before launching to use the fallback renderer. The dependency is pinned to an immutable
+SwiftTerm revision. Three recently selected terminals retain warm Metal surfaces; parking
+other surfaces does not stop their processes, parser, or scrollback. SwiftTerm owns bounded
+renderer recovery and reports final CoreGraphics fallback to the host.
+
+The Mac host reads copied terminal snapshots rather than mutable terminal internals. Raw
+process output passes through an ordered main-actor consumer so Kitty capture, durable-image
+restoration and parser feeds retain their ordering independently of the render thread.
 
 ## How it works
 

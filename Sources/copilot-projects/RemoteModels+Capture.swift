@@ -1,7 +1,44 @@
 import Foundation
 import CopilotProjectsProtocol
+import SwiftTerm
+
+extension TerminalContentRowSnapshot {
+    /// Keep the existing wire's one-Swift-Character-per-cell projection. A v2
+    /// cell can hold more than one Swift Character (for example GB9c clusters);
+    /// its full text remains available separately for cell-aware consumers.
+    var remoteText: String {
+        guard let last = cells.lastIndex(where: { $0.text != "\u{0}" }) else { return "" }
+        let end = last + min(max(0, cells[last].width), cells.count - last)
+        return cells[..<end].map { String($0.text.first ?? " ") }.joined()
+    }
+}
 
 extension RemoteTerminalScreen {
+    static func capture(
+        sessionId: String,
+        snapshot: TerminalContentSnapshot,
+        terminalScroll: Bool,
+        afterLine: Int?
+    ) -> RemoteTerminalScreen {
+        let dimensions = snapshot.inputState.dimensions
+        if terminalScroll {
+            return captureVisible(sessionId: sessionId, cols: dimensions.cols, rows: dimensions.rows) { row in
+                snapshot.rows.indices.contains(row) ? snapshot.rows[row].remoteText : nil
+            }
+        }
+        return captureHistory(
+            sessionId: sessionId, cols: dimensions.cols, rows: dimensions.rows,
+            absoluteStart: snapshot.capturedRange.lowerBound,
+            scanRows: snapshot.capturedRange.count,
+            maximumRows: snapshot.capturedRange.count,
+            afterLine: afterLine,
+            lineExists: snapshot.capturedRange.contains,
+            lineAt: { absoluteRow in
+                guard snapshot.capturedRange.contains(absoluteRow) else { return nil }
+                return snapshot.rows[absoluteRow - snapshot.capturedRange.lowerBound].remoteText
+            })
+    }
+
     static func captureVisible(
         sessionId: String,
         cols: Int,

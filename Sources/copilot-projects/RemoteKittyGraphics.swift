@@ -437,36 +437,31 @@ enum RemoteKittyPlacementScanner {
         }
     }
 
-    /// Adapter over public SwiftTerm grid accessors only (never Kitty-specific
-    /// internal parser state): scans each supplied `(lineID, BufferLine)` for
-    /// standard placeholder graphemes using `terminal.getCharacter(for:)` (which
-    /// resolves the full multi-scalar grapheme SwiftTerm stored for the cell),
-    /// the cell's foreground color (image id), and its underline color
-    /// (placement id, defaulting to `0`).
+    /// Reads only copied cell text and attributes. `relativeTo` converts
+    /// absolute snapshot rows to viewport rows for a live screen.
     static func gridCells(
-        from lines: [(lineId: Int, line: BufferLine)],
-        terminal: Terminal
+        from lines: [TerminalContentRowSnapshot],
+        relativeTo: Int = 0
     ) -> [RemoteKittyGridCell] {
         var cells: [RemoteKittyGridCell] = []
-        for (lineId, line) in lines {
-            for col in 0 ..< line.count {
-                let cellData = line[col]
-                guard case .trueColor(let red, let green, let blue) = cellData.attribute.fg else {
-                    continue
-                }
-                let character = terminal.getCharacter(for: cellData)
-                guard let imageId = RemoteKittyPlaceholderCell.decodeImageId(
-                    character: character,
-                    foreground: (red, green, blue)
-                ) else { continue }
+        for line in lines {
+            for (col, cell) in line.cells.enumerated() {
+                guard case .trueColor(let red, let green, let blue) = cell.attribute.fg,
+                      let character = cell.text.first,
+                      let imageId = RemoteKittyPlaceholderCell.decodeImageId(
+                        character: character,
+                        foreground: (red, green, blue)
+                      ) else { continue }
                 let underline: (red: UInt8, green: UInt8, blue: UInt8)?
-                if case .trueColor(let ur, let ug, let ub) = cellData.attribute.underlineColor {
+                if case .trueColor(let ur, let ug, let ub) = cell.attribute.underlineColor {
                     underline = (ur, ug, ub)
                 } else {
                     underline = nil
                 }
                 let placementId = RemoteKittyPlaceholderCell.decodePlacementId(underline: underline)
-                cells.append(RemoteKittyGridCell(lineId: lineId, col: col, imageId: imageId, placementId: placementId))
+                cells.append(RemoteKittyGridCell(
+                    lineId: line.absoluteRow - relativeTo, col: col,
+                    imageId: imageId, placementId: placementId))
             }
         }
         return cells
@@ -482,8 +477,8 @@ enum RemoteKittyPlacementScanner {
 ///
 /// One instance is owned per terminal session (`ProjectsTerminalView`) — never a
 /// shared/global identity-bearing store — and every mutating access happens on
-/// the main actor, so there is no cross-session identity confusion and no data
-/// race with the terminal's own main-actor-only rendering. Retained bytes are
+/// the main actor, serialized with this host's parser feeds. Rendering consumes
+/// SwiftTerm's own copied state independently. Retained bytes are
 /// additionally accounted against a process-wide `RemoteKittyImageCaptureBudget`
 /// (also main-actor-only), so no fixed number of open terminals can be relied
 /// upon to keep total memory bounded — the shared budget enforces that across
