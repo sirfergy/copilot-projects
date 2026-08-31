@@ -13,12 +13,16 @@ enum RemoteWebAssets {
 
     static let serviceWorker = text("service-worker", "js")
 
-    static func iconPNG(size: Int) -> Data? {
+    static func iconPNG(size: Int, bundle: Bundle? = RunningExecutable.applicationBundle) -> Data? {
         let name: String
         switch size {
         case 192: name = "PWAIcon-192"
         case 512: name = "PWAIcon-512"
         default: return nil
+        }
+        if let bundle {
+            guard let url = bundle.url(forResource: name, withExtension: "png") else { return nil }
+            return try? Data(contentsOf: url)
         }
         if let url = Bundle.main.url(forResource: name, withExtension: "png"),
            let data = try? Data(contentsOf: url) {
@@ -109,10 +113,7 @@ enum RemoteWebAssets {
             }
         }
         return [192, 512].allSatisfy { size in
-            guard let url = anchor.url(
-                forResource: "PWAIcon-\(size)",
-                withExtension: "png"
-            ), let data = try? Data(contentsOf: url) else {
+            guard let data = iconPNG(size: size, bundle: RunningExecutable.applicationBundle ?? anchor) else {
                 return false
             }
             return !data.isEmpty

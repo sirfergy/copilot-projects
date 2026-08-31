@@ -156,6 +156,13 @@ copilot-projects help
 
 Targeting flags (`--project`, `--session`) override the environment defaults.
 
+`copilot-projects install-cli [--dir DIRECTORY]` installs a launcher pointing to the real
+running executable (default: `~/.local/bin`). It is safe to repeat through that launcher;
+existing correct links and the executable itself are left untouched. Other symlinks are
+replaced atomically. Conflicting regular files and directories are refused: move them
+aside yourself or choose a different `--dir`. The app's automatic
+launcher setup and the first step of `install-hooks` use the same behavior.
+
 ### Remote access
 
 Remote access is opt-in. The local gateway listens on `127.0.0.1:49272`; a separately managed

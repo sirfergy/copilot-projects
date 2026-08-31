@@ -587,18 +587,13 @@ final class AppModel: ObservableObject {
     /// Best-effort: symlink the bundled binary onto the user's PATH so terminal
     /// hooks can call `copilot-projects`.
     func installCLISymlinkIfPossible() {
-        guard let exe = Bundle.main.executablePath else { return }
-        let fm = FileManager.default
-        let dir = fm.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin", isDirectory: true)
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-
-        // Keep the copilot-projects CLI symlink pointed at the running bundle.
-        let link = dir.appendingPathComponent("copilot-projects")
-        if (try? fm.destinationOfSymbolicLink(atPath: link.path)) != exe {
-            try? fm.removeItem(at: link)
-            try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: exe)
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin", isDirectory: true)
+        do {
+            try CLILauncher.install(in: dir)
+        } catch {
+            NSLog("copilot-projects: could not install CLI launcher: %@", String(describing: error))
         }
-
     }
 
     // MARK: - derived
