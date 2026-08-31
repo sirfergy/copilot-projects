@@ -14,7 +14,7 @@ cd "$ROOT"
 WEB="Sources/copilot-projects/Resources/web"
 TRACKER="Sources/CopilotProjectsCore/Resources/tracker"
 # The order RemoteWebAssets.javascript concatenates in.
-FRAGMENTS=(markdown draft operations session-creation terminal-image transcript main)
+FRAGMENTS=(markdown draft operations control-delivery session-creation terminal-image transcript main)
 
 if ! command -v node >/dev/null 2>&1; then
   echo "error: node is required to check the web assets" >&2

@@ -6,6 +6,9 @@ const terminalCellProbe = document.querySelector('#terminal-cell-probe');
 const connection = document.querySelector('#connection');
 const lease = document.querySelector('#lease');
 const input = document.querySelector('#input');
+const inputDeliveryNotice = document.querySelector('#input-delivery-notice');
+const inputDeliveryText = document.querySelector('#input-delivery-text');
+const discardPendingInput = document.querySelector('#discard-pending-input');
 const transcript = document.querySelector('#transcript');
 const promptForm = document.querySelector('#prompt-form');
 const prompt = document.querySelector('#prompt');
@@ -52,6 +55,7 @@ function newUUID() {
   ].join('-');
 }
 const clientId = newUUID();
+const controlDeliveries = createControlDeliveryAllocator();
 const sdkOperations = createOperationController({ newOperationId: newUUID });
 const TOOLBAR_KEYS = {
   'esc': 'escape', 'tab': 'tab', 'enter': 'enter',
@@ -61,7 +65,10 @@ let stream = null;
 let selected = null;
 let writable = false;
 let pendingActions = [];
-let flushing = false;
+const uncertainTerminalActions = new Map();
+let inputFlushToken = null;
+let inputRetryTimer = null;
+let inputMessage = null;
 let lastScreen = null;
 let historyStartLine = 0;
 let historyLines = [];
@@ -113,7 +120,6 @@ let pendingScroll = 0;
 let scrollTimer = null;
 let touchY = null;
 let consecutiveStreamErrors = 0;
-let promptSending = false;
 let awaitingPromptStart = false;
 let promptFallbackTimer = null;
 let transcriptRequestId = 0;
@@ -124,7 +130,8 @@ let viewMode = 'conversation';
 // multiple messages while the agent is busy; they flush in order as it frees.
 const QUEUE_CAP = 25;
 const promptQueues = new Map();
-let flushingQueue = false;
+const promptFlushes = new Map();
+const promptRetryTimers = new Map();
 // The host selection supplies the initial default only. The web user's explicit
 // project choice is then preserved while that project remains available.
 let hostSelectedProjectId = null;
@@ -462,6 +469,7 @@ async function acquire(id) {
     syncUserInputCards();
     syncElicitationCards();
     updatePromptState();
+    flushInput();
   }
 }
 // Keep the selected session in the URL so a refresh restores it. The
@@ -493,12 +501,11 @@ function selectSession(id) {
   rememberSelectedSession(id);
   prompt.value = draftForSession(id);
   writable = false;
-  pendingActions.length = 0;
+  selectTerminalInputSession(id);
   pendingScroll = 0;
   lastScreen = null;
   historyStartLine = 0;
   historyLines = [];
-  promptSending = false;
   awaitingPromptStart = false;
   resetTranscriptForSession();
   selectionGeneration += 1;
@@ -522,49 +529,156 @@ function selectSession(id) {
   renderQueue();
   updatePromptState();
 }
-// Buffer keystrokes and send them in order, one request in flight at a time,
-// so rapid typing can't arrive out of order over HTTP/2.
+// Selection drops undispatched typing, never the outcome of an attempted write.
+function selectTerminalInputSession(sessionId) {
+  const uncertain = uncertainTerminalActions.get(sessionId);
+  pendingActions = uncertain ? [uncertain] : [];
+  inputFlushToken = null;
+  clearTimeout(inputRetryTimer);
+  inputRetryTimer = null;
+  inputMessage = null;
+}
+function discardQueuedTerminalInput() {
+  uncertainTerminalActions.delete(selected);
+  selectTerminalInputSession(selected);
+  renderInputDeliveryState();
+  terminal.focus();
+}
+function terminalDeliveryMessage() {
+  return pendingActions[0]?.blockedReason || inputMessage
+    || (pendingActions[0]?.outcomeUnknown ? 'Confirming input delivery...' : '')
+    || (controlDeliverySupport(workspaceProtocolInfo).kind === 'unavailable'
+      ? CONTROL_DELIVERY_UNAVAILABLE : '');
+}
+function canAcceptTerminalInput() {
+  return !!selected && writable && !closingSession && sessionState.has(selected)
+    && !pendingActions[0]?.blockedReason
+    && controlDeliverySupport(workspaceProtocolInfo).kind !== 'unavailable';
+}
+function renderInputDeliveryState() {
+  const message = terminalDeliveryMessage();
+  inputDeliveryNotice.hidden = !message;
+  inputDeliveryText.textContent = message;
+  discardPendingInput.hidden = !pendingActions.length;
+  document.querySelector('#input-form button').disabled = !canAcceptTerminalInput();
+  document.querySelectorAll('#toolbar button').forEach((button) => {
+    button.disabled = !canAcceptTerminalInput();
+  });
+}
+// Keep attempted payloads immutable: appending typing to a retry would reuse
+// its identity for different bytes. Only an unsent tail can be coalesced.
 function sendInput(data) {
-  if (!selected || !writable || !data) return;
-  const last = pendingActions.at(-1);
-  if (last?.type === 'input') last.data += data;
-  else pendingActions.push({type:'input', data});
+  if (!canAcceptTerminalInput() || !data) return false;
+  for (const chunk of controlInputChunks(data)) {
+    const last = pendingActions.at(-1);
+    if (last?.type === 'input' && !last.prepared && last.sessionId === selected
+        && new TextEncoder().encode(last.data + chunk).length <= CONTROL_INPUT_MAX_BYTES) {
+      last.data += chunk;
+    } else {
+      pendingActions.push(controlAction(newUUID(), 'input', selected, chunk));
+    }
+  }
+  inputMessage = null;
   flushInput();
+  return true;
 }
 function sendKey(key) {
-  if (!selected || !writable || !key) return;
-  pendingActions.push({type:'key', data:key});
+  if (!canAcceptTerminalInput() || !key) return false;
+  pendingActions.push(controlAction(newUUID(), 'key', selected, key));
+  inputMessage = null;
   flushInput();
+  return true;
+}
+function sendCommand(value) {
+  if (!canAcceptTerminalInput() || !value) return false;
+  if (new TextEncoder().encode(value).length > CONTROL_INPUT_MAX_BYTES) {
+    inputMessage = 'Command is too large (8 KB maximum).';
+    renderInputDeliveryState();
+    return false;
+  }
+  pendingActions.push(controlAction(newUUID(), 'command', selected, value));
+  inputMessage = null;
+  flushInput();
+  return true;
+}
+function scheduleInputRetry(sessionId, generation) {
+  clearTimeout(inputRetryTimer);
+  const timer = setTimeout(() => {
+    if (inputRetryTimer !== timer) return;
+    inputRetryTimer = null;
+    if (selected === sessionId && selectionGeneration === generation) flushInput();
+  }, 1000);
+  inputRetryTimer = timer;
 }
 async function flushInput() {
-  if (flushing || !pendingActions.length) return;
-  flushing = true;
+  if (inputFlushToken || inputRetryTimer || !pendingActions.length
+      || !canAcceptTerminalInput()) return;
+  const token = {};
+  const generation = selectionGeneration;
+  const sessionId = selected;
+  inputFlushToken = token;
   try {
-    while (writable && pendingActions.length) {
-      const sessionId = selected;
-      const action = pendingActions.shift();
-      const response = await control({
-        type: action.type,
-        sessionId,
-        data: action.data
-      });
-      if (!response) {
-        if (selected === sessionId && writable) {
-          pendingActions.unshift(action);
-          setTimeout(flushInput, 1000);
-        }
+    while (inputFlushToken === token && selected === sessionId
+        && selectionGeneration === generation && writable && !closingSession
+        && pendingActions.length) {
+      const action = pendingActions[0];
+      if (action.sessionId !== sessionId) {
+        action.blockedReason = 'Queued input belongs to another session. Discard it before continuing.';
         return;
       }
-      if (response.status === 403) {
-        writable = false;
-        pendingActions.length = 0;
-        lease.textContent = 'view only';
-        updatePromptState();
-        break;
+      const reason = prepareControlAction(action, workspaceProtocolInfo, null, controlDeliveries);
+      if (reason) { action.blockedReason = reason; return; }
+      action.outcomeUnknown = true;
+      uncertainTerminalActions.set(sessionId, action);
+      const response = await control(controlActionMessage(action));
+      const index = pendingActions.findIndex((item) => item.id === action.id);
+      if (response?.status === 204) {
+        if (uncertainTerminalActions.get(sessionId)?.id === action.id) {
+          uncertainTerminalActions.delete(sessionId);
+        }
+        if (index >= 0) pendingActions.splice(index, 1);
       }
+      // A late error or finally must not tear down a newer tab's input loop.
+      if (inputFlushToken !== token || selected !== sessionId
+          || selectionGeneration !== generation || index < 0) return;
+      if (response?.status === 204) continue;
+      if (response?.status === 400 && action.type === 'command'
+          && action.deliveryMode === 'legacy') {
+        uncertainTerminalActions.delete(sessionId);
+        const replacement = controlInputChunks(action.data)
+          .map((data) => controlAction(newUUID(), 'input', sessionId, data));
+        replacement.push(controlAction(newUUID(), 'key', sessionId, 'enter'));
+        pendingActions.splice(index, 1, ...replacement);
+        continue;
+      }
+      if (response?.status === 409) {
+        uncertainTerminalActions.delete(sessionId);
+        action.outcomeUnknown = false;
+        scheduleInputRetry(sessionId, generation);
+        return;
+      }
+      if (!response || response.status >= 500) {
+        if (canReplayControlAction(action, workspaceProtocolInfo, null)) {
+          scheduleInputRetry(sessionId, generation);
+          return;
+        }
+      }
+      const sameHost = !action.delivery
+        || canReplayControlAction(action, workspaceProtocolInfo, null);
+      if (response?.status === 403 && sameHost) {
+        writable = false;
+        lease.textContent = 'view only';
+      }
+      action.blockedReason = sameHost
+        ? controlDeliveryFailure(response?.status) : CONTROL_DELIVERY_UNKNOWN;
+      return;
     }
   } finally {
-    flushing = false;
+    if (inputFlushToken === token) {
+      inputFlushToken = null;
+      renderInputDeliveryState();
+      flushInput();
+    }
   }
 }
 function sessionQueue(id, create) {
@@ -572,24 +686,32 @@ function sessionQueue(id, create) {
   if (!q && create) { q = []; promptQueues.set(id, q); }
   return q || [];
 }
+function removeQueuedPrompt(sessionId, itemId) {
+  const q = promptQueues.get(sessionId);
+  const index = q?.findIndex((item) => item.id === itemId) ?? -1;
+  if (index < 0) return;
+  q.splice(index, 1);
+  if (!q.length) promptQueues.delete(sessionId);
+}
 function renderQueue() {
-  const q = selected ? sessionQueue(selected) : [];
+  const sessionId = selected;
+  const q = sessionId ? sessionQueue(sessionId) : [];
   promptQueue.replaceChildren();
   promptQueue.hidden = q.length === 0;
-  q.forEach((message, index) => {
+  q.forEach((entry) => {
     const item = document.createElement('div');
     item.className = 'queue-item';
     item.setAttribute('role', 'listitem');
     const text = document.createElement('span');
     text.className = 'queue-text';
-    text.textContent = message;
+    text.textContent = entry.data;
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'queue-remove';
     remove.setAttribute('aria-label', 'Remove queued message');
     remove.textContent = '✕';
     remove.onclick = () => {
-      sessionQueue(selected).splice(index, 1);
+      removeQueuedPrompt(sessionId, entry.id);
       renderQueue();
       updatePromptState();
     };
@@ -598,12 +720,7 @@ function renderQueue() {
   });
 }
 function enqueuePrompt(value) {
-  if (!value.trim() || !selected || !writable) return false;
-  // A session pruned from the workspace snapshot can no longer flush a
-  // queued prompt (flushQueue requires a live sessionState entry), so
-  // reject here instead of silently swallowing the message into a queue
-  // that will never send - the composer keeps the typed text instead.
-  if (!sessionState.has(selected)) return false;
+  if (!value.trim() || !selected || !writable || !sessionState.has(selected)) return false;
   if (new TextEncoder().encode(value).length > 8192) {
     updatePromptState('Message is too large (8 KB maximum)');
     return false;
@@ -613,66 +730,91 @@ function enqueuePrompt(value) {
     updatePromptState(`Queue is full (${QUEUE_CAP} max)`);
     return false;
   }
-  q.push(value);
+  q.push(controlAction(newUUID(), 'prompt', selected, value));
   renderQueue();
   updatePromptState();
   return true;
 }
-// Send the head of the selected session's queue when Copilot is idle, then
-// wait for the turn to land before releasing the next one.
-async function flushQueue() {
-  if (flushingQueue) return;
-  const id = selected;
-  if (!id) return;
-  const q = promptQueues.get(id);
-  if (!q || !q.length) return;
-  const state = sessionState.get(id);
-  if ((state?.pendingUserInputs || []).length > 0) return;
-  if ((state?.pendingElicitations || []).length > 0) return;
-  if (!(writable && state?.promptable === true
-      && !promptSending && !awaitingPromptStart)) return;
-  flushingQueue = true;
-  try {
-    const value = q[0];
-    const submittedGeneration = selectionGeneration;
-    const submittedConversationGeneration = conversationRequestGeneration;
-    promptSending = true;
-    promptStatus.textContent = 'Sending…';
-    const response = await control({ type: 'prompt', sessionId: id, data: value });
-    promptSending = false;
-    if (selected !== id
-        || selectionGeneration !== submittedGeneration
-        || conversationRequestGeneration !== submittedConversationGeneration) return;
-    if (response?.ok) {
-      if (q[0] === value) q.shift();
-      renderQueue();
-      awaitingPromptStart = true;
-      clearTimeout(promptFallbackTimer);
-      promptFallbackTimer = setTimeout(() => {
-        awaitingPromptStart = false;
-        promptFallbackTimer = null;
-        updatePromptState();
-      }, 5000);
+function schedulePromptRetry(sessionId, itemId) {
+  clearTimeout(promptRetryTimers.get(sessionId));
+  const timer = setTimeout(() => {
+    if (promptRetryTimers.get(sessionId) !== timer) return;
+    promptRetryTimers.delete(sessionId);
+    if (selected === sessionId && sessionQueue(sessionId)[0]?.id === itemId) {
       updatePromptState();
+    }
+  }, 1000);
+  promptRetryTimers.set(sessionId, timer);
+}
+// Completion belongs to the original queue item, not the visible tab. UI state
+// remains selection-fenced; a successful old-tab ACK still consumes its item.
+async function flushQueue() {
+  const id = selected;
+  if (!id || promptFlushes.has(id) || promptRetryTimers.has(id)) return;
+  const entry = sessionQueue(id)[0];
+  if (!entry || entry.blockedReason) return;
+  const state = sessionState.get(id);
+  const replaying = entry.outcomeUnknown && canReplayControlAction(
+    entry, workspaceProtocolInfo, nonEmptyOperationToken(state?.conversationEpoch)
+  );
+  if (!(writable && !closingSession && (replaying || (state?.promptable === true
+      && !awaitingPromptStart && !(state.pendingUserInputs || []).length
+      && !(state.pendingElicitations || []).length)))) return;
+  const token = {};
+  const generation = selectionGeneration;
+  const conversationGeneration = conversationRequestGeneration;
+  promptFlushes.set(id, token);
+  promptStatus.textContent = 'Sending…';
+  try {
+    const reason = prepareControlAction(
+      entry, workspaceProtocolInfo, nonEmptyOperationToken(state.conversationEpoch), controlDeliveries
+    );
+    if (reason) { entry.blockedReason = reason; return; }
+    entry.outcomeUnknown = true;
+    const response = await control(controlActionMessage(entry));
+    const isCurrentItem = sessionQueue(id).some((item) => item.id === entry.id);
+    const visible = selected === id && selectionGeneration === generation
+      && conversationRequestGeneration === conversationGeneration
+      && (!entry.delivery || controlActionContextMatches(entry, workspaceProtocolInfo,
+        nonEmptyOperationToken(sessionState.get(id)?.conversationEpoch)));
+    if (response?.status === 204) {
+      removeQueuedPrompt(id, entry.id);
+      if (visible) {
+        awaitingPromptStart = true;
+        clearTimeout(promptFallbackTimer);
+        promptFallbackTimer = setTimeout(() => {
+          if (selected !== id || selectionGeneration !== generation
+              || conversationRequestGeneration !== conversationGeneration) return;
+          awaitingPromptStart = false;
+          promptFallbackTimer = null;
+          updatePromptState();
+        }, 5000);
+      }
+      return;
+    }
+    if (!isCurrentItem) return;
+    if (response?.status === 409) {
+      entry.outcomeUnknown = false;
+      schedulePromptRetry(id, entry.id);
     } else if (response?.status === 403) {
-      writable = false;
-      lease.textContent = 'view only';
-      updatePromptState('Control moved to another device');
-    } else if (response?.status === 409) {
-      // Copilot is still working; keep queued and retry shortly.
-      updatePromptState('Copilot is still working');
-      setTimeout(flushQueue, 3000);
-    } else if (response?.status === 422) {
-      // Not ready in this terminal; keep queued and retry shortly.
-      updatePromptState('Copilot is not ready in this terminal');
-      setTimeout(flushQueue, 3000);
+      entry.outcomeUnknown = false;
+      if (visible) {
+        writable = false;
+        lease.textContent = 'view only';
+      }
+    } else if ((!response || response.status >= 500)
+        && canReplayControlAction(entry, workspaceProtocolInfo,
+          nonEmptyOperationToken(sessionState.get(id)?.conversationEpoch))) {
+      schedulePromptRetry(id, entry.id);
     } else {
-      // Network or unexpected error: keep queued and retry shortly.
-      updatePromptState('Message not sent — will retry');
-      setTimeout(flushQueue, 3000);
+      entry.blockedReason = controlDeliveryFailure(response?.status);
     }
   } finally {
-    flushingQueue = false;
+    if (promptFlushes.get(id) === token) promptFlushes.delete(id);
+    if (selected === id) {
+      renderQueue();
+      updatePromptState();
+    }
   }
 }
 // ---- Model picker -------------------------------------------------------
@@ -1092,6 +1234,7 @@ modelPicker.addEventListener('close', () => {
 
 function updatePromptState(message) {
   updateCloseSessionState();
+  renderInputDeliveryState();
   renderModelLine();
   const state = selected && sessionState.get(selected);
   const pendingInputs = (state && state.pendingUserInputs) || [];
@@ -1101,6 +1244,7 @@ function updatePromptState(message) {
   if (hasQuestions) {
     promptSubmit.disabled = true;
     promptStatus.textContent = message || 'Answer Copilot\u2019s question below';
+    flushQueue();
     return;
   }
   if (awaitingPromptStart && state?.promptable === false) {
@@ -1117,6 +1261,8 @@ function updatePromptState(message) {
     promptStatus.textContent = 'Select a Copilot session';
   } else if (!writable) {
     promptStatus.textContent = 'View only';
+  } else if (q[0]?.blockedReason) {
+    promptStatus.textContent = q[0].blockedReason;
   } else if (q.length) {
     promptStatus.textContent = `${q.length} queued`;
   } else if (awaitingPromptStart) {
@@ -1199,7 +1345,6 @@ function updateSelectedConversationEpoch() {
       && nextEpoch !== selectedConversationEpoch) {
     selectedConversationEpoch = nextEpoch;
     invalidateConversationOperations();
-    promptSending = false;
     awaitingPromptStart = false;
     clearTimeout(promptFallbackTimer);
     promptFallbackTimer = null;
@@ -1248,7 +1393,19 @@ function renderWorkspace(data) {
     invalidateConversationOperations();
     selectedConversationEpoch = null;
   }
-  prunePromptDrafts(new Set(sessionState.keys()));
+  const liveSessionIds = new Set(sessionState.keys());
+  prunePromptDrafts(liveSessionIds);
+  controlDeliveries.prune(liveSessionIds);
+  for (const id of uncertainTerminalActions.keys()) {
+    if (!liveSessionIds.has(id)) uncertainTerminalActions.delete(id);
+  }
+  for (const id of promptQueues.keys()) {
+    if (liveSessionIds.has(id)) continue;
+    promptQueues.delete(id);
+    promptFlushes.delete(id);
+    clearTimeout(promptRetryTimers.get(id));
+    promptRetryTimers.delete(id);
+  }
   updateNewSessionState();
   // Select a just-created session once the host's snapshot includes it, without
   // ever changing the host Mac's own selection.
@@ -3422,13 +3579,14 @@ newSessionProject.onchange = () => {
 updateNewSessionState();
 document.querySelector('#input-form').onsubmit = (event) => {
   event.preventDefault();
-  if (input.value) {
-    sendInput(input.value);
-    sendKey('enter');
-  }
-  input.value = '';
+  if (sendCommand(input.value)) input.value = '';
   terminal.focus();
 };
+input.addEventListener('input', () => {
+  inputMessage = null;
+  renderInputDeliveryState();
+});
+discardPendingInput.onclick = discardQueuedTerminalInput;
 // Enter sends the prompt; Shift+Enter inserts a newline (chat-composer style).
 prompt.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {

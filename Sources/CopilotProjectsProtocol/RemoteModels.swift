@@ -377,6 +377,7 @@ public struct RemoteClientMessage: Codable, Equatable, Sendable {
     public let sessionId: String?
     public let requestId: String?
     public let conversationEpoch: String?
+    public let delivery: RemoteControlDelivery?
     public let data: String?
     public let delta: Int?
 
@@ -387,13 +388,15 @@ public struct RemoteClientMessage: Codable, Equatable, Sendable {
         requestId: String? = nil,
         data: String? = nil,
         delta: Int? = nil,
-        conversationEpoch: String? = nil
+        conversationEpoch: String? = nil,
+        delivery: RemoteControlDelivery? = nil
     ) {
         self.type = type
         self.clientId = clientId
         self.sessionId = sessionId
         self.requestId = requestId
         self.conversationEpoch = conversationEpoch
+        self.delivery = delivery
         self.data = data
         self.delta = delta
     }

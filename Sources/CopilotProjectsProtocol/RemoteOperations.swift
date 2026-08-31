@@ -3,6 +3,7 @@ import Foundation
 public struct RemoteProtocolInfo: Codable, Equatable, Sendable {
     public let revision: Int
     public let capabilities: [String]
+    public let controlDeliveryEpoch: String?
 
     public static let conversationEpochs = "conversation-epochs"
     public static let operationReceipts = "sdk-operation-receipts"
@@ -12,9 +13,14 @@ public struct RemoteProtocolInfo: Codable, Equatable, Sendable {
         capabilities: [conversationEpochs, operationReceipts, transcriptWindow]
     )
 
-    public init(revision: Int, capabilities: [String]) {
+    public init(
+        revision: Int,
+        capabilities: [String],
+        controlDeliveryEpoch: String? = nil
+    ) {
         self.revision = revision
         self.capabilities = capabilities
+        self.controlDeliveryEpoch = controlDeliveryEpoch
     }
 
     public func supports(_ capability: String) -> Bool {
