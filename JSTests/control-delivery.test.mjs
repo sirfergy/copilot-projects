@@ -489,6 +489,32 @@ test('late terminal success cannot remove a replacement after explicit discard a
   assert.equal(c.uncertainTerminalActions.size, 0);
 });
 
+test('competing replay ACKs resume a terminal tail after the original head is settled', async () => {
+  const {context: c, calls} = client();
+  const replies = [];
+  c.control = message => {
+    calls.push(plain(message));
+    return message.type === 'input'
+      ? new Promise(resolve => replies.push(resolve)) : Promise.resolve({status: 204});
+  };
+  c.sendInput('A');
+  switchSession(c, 'B');
+  switchSession(c, 'A');
+  const replay = c.flushInput();
+  c.sendKey('enter');
+  replies[0]({status: 204});
+  await settle();
+  assert.equal(c.pendingActions.length, 1);
+  assert.equal(c.pendingActions[0].type, 'key');
+  replies[1]({status: 204});
+  await replay;
+  await settle();
+  assert.deepEqual(calls.map(message => message.type), ['input', 'input', 'key']);
+  assert.deepEqual(calls[0], calls[1]);
+  assert.equal(c.pendingActions.length, 0);
+  assert.equal(c.uncertainTerminalActions.size, 0);
+});
+
 test('UTF-8 input chunks preserve scalars, data and byte limits', async () => {
   const {context: c, calls} = client();
   const text = 'a'.repeat(8191) + '😀'.repeat(3000) + '\u0003';

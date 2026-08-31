@@ -540,11 +540,7 @@ function selectTerminalInputSession(sessionId) {
 }
 function discardQueuedTerminalInput() {
   uncertainTerminalActions.delete(selected);
-  pendingActions.length = 0;
-  inputFlushToken = null;
-  clearTimeout(inputRetryTimer);
-  inputRetryTimer = null;
-  inputMessage = null;
+  selectTerminalInputSession(selected);
   renderInputDeliveryState();
   terminal.focus();
 }
@@ -681,6 +677,7 @@ async function flushInput() {
     if (inputFlushToken === token) {
       inputFlushToken = null;
       renderInputDeliveryState();
+      flushInput();
     }
   }
 }
