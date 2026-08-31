@@ -42,6 +42,7 @@ export const fragmentOrder = [
   "markdown",
   "draft",
   "operations",
+  "control-delivery",
   "session-creation",
   "terminal-image",
   "transcript",

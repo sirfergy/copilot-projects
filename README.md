@@ -197,6 +197,21 @@ the native CLI input path. The full terminal remains available for permissions a
 interactions, with an on-screen Enter key alongside the other terminal controls. Remote clients do
 not resize the PTY because dtach shares one terminal size with the desktop.
 
+Updated clients negotiate `replay-safe-control` and a host-lifetime delivery epoch.
+Prompt, input, key, and command retries retain their request ID and ordered delivery
+sequence; an acknowledged prompt is removed from its original queue even after a tab
+switch. The host acknowledges an exact replay without injecting it again. This is
+replay-safe host acceptance, not proof that a shell command or Copilot turn finished.
+
+A host restart, expired receipt, or ambiguous reply from an older host pauses delivery
+instead of blindly repeating an action. Inspect the terminal before using **Discard
+queued input** to continue; discarding does not retract input already accepted by the
+host. Tab switches discard undispatched typing but retain an uncertain terminal
+write for its originating session until acknowledged or explicitly discarded. An
+uncertain queued prompt stays visible until removed; automatic replay requires a
+known, unchanged conversation epoch. Older clients remain compatible, but need
+updating (or a web-page reload) to gain replay-safe delivery.
+
 The header's **New Session** controls let the remote user choose any project without changing the
 Mac's selected project or tab. Creation is idempotent: the client generates one request id per
 chosen project, retained across a network/5xx retry and cleared on success or when the host reports

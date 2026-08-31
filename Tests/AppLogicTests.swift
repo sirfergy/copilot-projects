@@ -8212,16 +8212,14 @@ final class AppLogicTests: XCTestCase {
         ))
     }
 
-    func testRemoteWebInputRequeuesAfterNetworkFailure() {
-        XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "pendingActions.unshift(action);"
+    func testRemoteWebInputDeliveryHasVisibleRecovery() {
+        XCTAssertTrue(RemoteWebAssets.html.contains(
+            #"id="input-delivery-notice" role="alert" hidden"#
         ))
-        XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "setTimeout(flushInput, 1000);"
+        XCTAssertTrue(RemoteWebAssets.html.contains(
+            #"id="discard-pending-input" type="button">Discard queued input"#
         ))
-        XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "pendingActions.push({type:'key', data:key});"
-        ))
+        XCTAssertTrue(RemoteWebAssets.css.contains("#input-delivery-notice[hidden]"))
     }
 
     func testRemoteWebCapsTranscriptRenderForLargeSessions() {
@@ -9626,14 +9624,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains("const promptQueues = new Map();"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("function enqueuePrompt(value)"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("async function flushQueue()"))
-        // Only releases the next message when the session is idle/promptable.
-        XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "if (!(writable && state?.promptable === true"
-        ))
-        // Per-session removal from the queue.
-        XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "sessionQueue(selected).splice(index, 1);"
-        ))
+        // Busy-state dispatch and replay eligibility are exercised against the
+        // shipped functions in JSTests/control-delivery.test.mjs.
     }
 
     func testRemoteWebNewSessionButtonCreatesInChosenProject() {
@@ -10287,6 +10279,127 @@ final class AppLogicTests: XCTestCase {
                 defaultStream.delegate.text()
             )
             try await Task.sleep(for: .milliseconds(100))
+        } catch {
+            await gateway.stop()
+            throw error
+        }
+        await gateway.stop()
+    }
+
+    @MainActor
+    func testRemoteGatewayReplaySafePromptAcknowledgmentAndGuards() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = Session(title: "replay-safe prompt", cwd: root.path)
+        defer { SessionArtifacts.removeFiles(sessionId: session.id) }
+        let project = Project(
+            name: "delivery", cwd: root.path, sessions: [session], selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        var injections: [String] = []
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root,
+            remotePromptLiveSessions: { _ in [session.id] },
+            remotePromptTarget: { id in
+                guard id == session.id else { return nil }
+                return RemotePromptTarget(activity: .idle, send: { value in
+                    injections.append(value)
+                    return true
+                })
+            }
+        )
+        let epoch = try XCTUnwrap(model.remoteWorkspaceSnapshot().protocolInfo?.controlDeliveryEpoch)
+        XCTAssertEqual(
+            model.remoteWorkspaceSnapshot().protocolInfo?.controlDeliverySupport,
+            .replaySafe(epoch: epoch)
+        )
+        let config = CloudflareAccessConfig(
+            teamDomain: "team.cloudflareaccess.com", audTag: "audience", allowedEmail: "user@example.com"
+        )
+        let verifier = CloudflareAccessVerifier(config: config, now: { Date() }, fetch: { _ in nil })
+        let (privateKey, publicKey) = try makeRSAKeyPair()
+        verifier.installKey(kid: "delivery-test", key: publicKey)
+        let token = try accessToken(kid: "delivery-test", claims: [
+            "iss": config.issuer, "aud": config.audTag, "email": config.allowedEmail,
+            "exp": Date().timeIntervalSince1970 + 3_600,
+        ], privateKey: privateKey)
+        let gateway = RemoteGateway()
+        let port = try gateway.start(
+            bridge: RemoteModelBridge(model: model), expectedHost: "127.0.0.1",
+            expectedOrigin: "https://projects.example.com", verifier: verifier, port: 0
+        )
+        func assertControl(
+            _ message: RemoteClientMessage,
+            status: Int,
+            origin: String = "https://projects.example.com",
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) async throws {
+            let response = try await remoteHTTPResponse(
+                port: port, path: "/control", method: "POST", token: token, origin: origin,
+                body: JSONEncoder().encode(message)
+            )
+            XCTAssertEqual(response.statusCode, status, file: file, line: line)
+        }
+        let requestId = UUID().uuidString
+        let accepted = RemoteClientMessage(
+            type: "prompt", clientId: "phone", sessionId: session.id,
+            requestId: requestId, data: "one logical prompt",
+            delivery: RemoteControlDelivery(epoch: epoch, sequence: 1)
+        )
+        do {
+            try await assertControl(
+                RemoteClientMessage(type: "acquire", clientId: "phone", sessionId: session.id),
+                status: 204
+            )
+            try await assertControl(accepted, status: 204)
+            try await assertControl(accepted, status: 204)
+            XCTAssertEqual(injections, ["one logical prompt"])
+            try await assertControl(RemoteClientMessage(
+                type: "prompt", clientId: "phone", sessionId: session.id,
+                requestId: requestId, data: "different payload",
+                delivery: RemoteControlDelivery(epoch: epoch, sequence: 1)
+            ), status: 422)
+            try await assertControl(RemoteClientMessage(
+                type: "prompt", clientId: "phone", sessionId: session.id,
+                requestId: UUID().uuidString, data: "old host",
+                delivery: RemoteControlDelivery(epoch: UUID().uuidString, sequence: 2)
+            ), status: 412)
+            try await assertControl(RemoteClientMessage(
+                type: "prompt", clientId: "phone", sessionId: session.id,
+                requestId: UUID().uuidString, data: "invalid sequence",
+                delivery: RemoteControlDelivery(epoch: epoch, sequence: 0)
+            ), status: 422)
+            try await assertControl(
+                RemoteClientMessage(type: "acquire", clientId: "tablet", sessionId: session.id),
+                status: 204
+            )
+            // A receipt acknowledges the earlier injection; it is not another write.
+            try await assertControl(accepted, status: 204)
+            try await assertControl(RemoteClientMessage(
+                type: "prompt", clientId: "phone", sessionId: session.id,
+                requestId: UUID().uuidString, data: "new write after takeover",
+                delivery: RemoteControlDelivery(epoch: epoch, sequence: 2)
+            ), status: 403)
+            try await assertControl(accepted, status: 403, origin: "https://foreign.example.com")
+            let unauthenticated = try await remoteHTTPResponse(
+                port: port, path: "/control", method: "POST", origin: "https://projects.example.com",
+                body: JSONEncoder().encode(accepted)
+            )
+            XCTAssertEqual(unauthenticated.statusCode, 403)
+            try await assertControl(RemoteClientMessage(
+                type: "input", clientId: "phone", sessionId: UUID().uuidString,
+                requestId: UUID().uuidString, data: "missing session",
+                delivery: RemoteControlDelivery(epoch: epoch, sequence: 1)
+            ), status: 404)
+            XCTAssertEqual(injections, ["one logical prompt"])
         } catch {
             await gateway.stop()
             throw error

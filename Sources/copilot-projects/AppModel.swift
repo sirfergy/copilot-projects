@@ -47,6 +47,13 @@ enum RemoteCommandResult: Equatable {
     case sent
     case busy
     case invalid
+    case missing
+}
+
+enum RemoteTerminalInputResult: Equatable {
+    case sent
+    case missing
+    case invalid
 }
 
 struct RemoteCommandRequestLedger {
@@ -395,6 +402,9 @@ final class AppModel: ObservableObject {
         ((String) -> RemoteElicitationTerminalTarget?)?
     private var remoteCommandRequestLedger = RemoteCommandRequestLedger()
     private var remoteElicitationRequestLedger = RemoteCommandRequestLedger()
+    private let remoteControlDeliveryLedger = RemoteControlDeliveryLedger()
+
+    var remoteControlDeliveryEpoch: String { remoteControlDeliveryLedger.epoch }
 
     /// Resolves the absolute Copilot executable for a remotely-created session, and
     /// the absolute `$HOME/Repos` working directory. Injected so tests can drive the
@@ -1082,6 +1092,9 @@ final class AppModel: ObservableObject {
         let closedIndex = projects[pi].sessions.firstIndex { $0.id == sid }
         let wasSelected = projects[pi].selectedSessionId == sid
         projects[pi].sessions.removeAll { $0.id == sid }
+        if locateIndex(sid) == nil {
+            remoteControlDeliveryLedger.removeClosedSession(sid)
+        }
         if wasSelected {
             if projects[pi].sessions.isEmpty {
                 projects[pi].selectedSessionId = nil
@@ -1259,7 +1272,7 @@ final class AppModel: ObservableObject {
                 )
             },
             selectedProjectId: selectedProjectId,
-            protocolInfo: .current
+            protocolInfo: .current.supportingReplaySafeControl(epoch: remoteControlDeliveryEpoch)
         )
     }
 
@@ -1361,21 +1374,56 @@ final class AppModel: ObservableObject {
         return screen.withImages(placements)
     }
 
-    func sendRemoteInput(sessionId: String, value: String) {
-        guard value.utf8.count <= 8_192 else { return }
-        controller(for: sessionId)?.terminalView.sendRemoteInput(value)
+    /// The replay lookup must be outside the lease lock: an exact retry only
+    /// acknowledges accepted work, whereas a new delivery must recheck its lease.
+    func performRemoteControl(
+        _ message: RemoteClientMessage,
+        perform: () -> RemoteControlResult
+    ) -> RemoteControlResult {
+        let location = message.sessionId.flatMap { locateIndex($0) }
+        return remoteControlDeliveryLedger.perform(
+            message,
+            sessionExists: location != nil
+        ) {
+            if message.type == "prompt" {
+                guard let location,
+                      projects[location.p].sessions[location.s].agentActivity?
+                        .remoteOperationProjection().conversationEpoch == message.conversationEpoch else {
+                    return .invalid
+                }
+            }
+            return perform()
+        }
     }
 
     @discardableResult
-    func sendRemoteKey(sessionId: String, key: String) -> Bool {
-        guard let terminalView = controller(for: sessionId)?.terminalView else {
-            return false
-        }
-        return terminalView.sendRemoteKey(
+    func sendRemoteInput(sessionId: String, value: String) -> RemoteTerminalInputResult {
+        guard value.utf8.count <= 8_192 else { return .invalid }
+        guard let view = remoteInputTerminal(sessionId: sessionId) else { return .missing }
+        view.sendRemoteInput(value)
+        return .sent
+    }
+
+    @discardableResult
+    func sendRemoteKey(sessionId: String, key: String) -> RemoteTerminalInputResult {
+        guard ["enter", "escape", "backspace", "tab", "up", "down", "left", "right"]
+            .contains(key) else { return .invalid }
+        guard let view = remoteInputTerminal(sessionId: sessionId) else { return .missing }
+        return view.sendRemoteKey(
             key,
             forceFocusReporting: key == "enter"
                 && remoteSessionHasLiveAgent(sessionId)
-        )
+        ) ? .sent : .invalid
+    }
+
+    private func remoteInputTerminal(sessionId: String) -> ProjectsTerminalView? {
+        guard locateIndex(sessionId) != nil,
+              !isTerminating,
+              let controller = controller(for: sessionId),
+              !controller.exited,
+              controller.shellPID > 0,
+              controller.terminalView.terminal != nil else { return nil }
+        return controller.terminalView
     }
 
     func sendRemoteCommand(
@@ -1387,10 +1435,10 @@ final class AppModel: ObservableObject {
         if remoteCommandRequestLedger.contains(ledgerId) {
             return .sent
         }
-        guard ProjectsTerminalView.remoteCommandTextBytes(value) != nil,
-              let view = controller(for: sessionId)?.terminalView else {
+        guard ProjectsTerminalView.remoteCommandTextBytes(value) != nil else {
             return .invalid
         }
+        guard let view = remoteInputTerminal(sessionId: sessionId) else { return .missing }
         guard view.sendRemoteCommand(
             value,
             forceFocusReporting: remoteSessionHasLiveAgent(sessionId)
@@ -1433,10 +1481,11 @@ final class AppModel: ObservableObject {
         let target: RemotePromptTarget?
         if let remotePromptTarget {
             target = remotePromptTarget(sessionId)
-        } else if let controller = controllers[sessionId] {
+        } else if let controller = controllers[sessionId],
+                  let view = remoteInputTerminal(sessionId: sessionId) {
             target = RemotePromptTarget(
                 activity: controller.agentActivity,
-                send: { controller.terminalView.sendRemotePrompt($0) }
+                send: { view.sendRemotePrompt($0) }
             )
         } else {
             target = nil
@@ -2060,7 +2109,11 @@ final class AppModel: ObservableObject {
             scheduledSnapshotsSuppressed.remove(session.id)
             foregroundIdleGenerationBaselines.removeValue(forKey: session.id)
         }
+        let closedSessionIds = projects[pi].sessions.map(\.id)
         projects.remove(at: pi)
+        for sessionId in closedSessionIds where locateIndex(sessionId) == nil {
+            remoteControlDeliveryLedger.removeClosedSession(sessionId)
+        }
         if selectedProjectId == pid {
             selectedProjectId = projects.first?.id
             if let sid = currentSelectedSessionId { controller(for: sid) }

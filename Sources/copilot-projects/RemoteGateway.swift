@@ -96,12 +96,19 @@ final class RemoteModelBridge: @unchecked Sendable {
         return screen
     }
 
-    func sendInput(sessionId: String, value: String) {
-        model?.sendRemoteInput(sessionId: sessionId, value: value)
+    func performControl(
+        _ message: RemoteClientMessage,
+        perform: () -> RemoteControlResult
+    ) -> RemoteControlResult {
+        model?.performRemoteControl(message, perform: perform) ?? .missing
     }
 
-    func sendKey(sessionId: String, key: String) {
-        model?.sendRemoteKey(sessionId: sessionId, key: key)
+    func sendInput(sessionId: String, value: String) -> RemoteTerminalInputResult {
+        model?.sendRemoteInput(sessionId: sessionId, value: value) ?? .missing
+    }
+
+    func sendKey(sessionId: String, key: String) -> RemoteTerminalInputResult {
+        model?.sendRemoteKey(sessionId: sessionId, key: key) ?? .missing
     }
 
     func sendCommand(
@@ -113,7 +120,7 @@ final class RemoteModelBridge: @unchecked Sendable {
             sessionId: sessionId,
             requestId: requestId,
             value: value
-        ) ?? .invalid
+        ) ?? .missing
     }
 
     func sendScroll(sessionId: String, delta: Int) {
@@ -1351,6 +1358,10 @@ private final class RemoteHTTPHandler:
                     contentType: "text/plain", body: "Bad request")
             return
         }
+        if message.delivery != nil, let kind = RemoteControlKind(rawValue: message.type) {
+            handleReliableControl(context: context, message: message, kind: kind)
+            return
+        }
         switch message.type {
         case "acquire":
             leases.acquire(sessionId: sessionId, clientId: clientId)
@@ -1677,6 +1688,8 @@ private final class RemoteHTTPHandler:
                         response = (.conflict, "Terminal input is busy")
                     case .some(.invalid):
                         response = (.unprocessableEntity, "Command was not accepted")
+                    case .some(.missing):
+                        response = (.notFound, "Session or terminal not found")
                     case .none:
                         response = (.forbidden, "view only")
                     }
@@ -1708,21 +1721,14 @@ private final class RemoteHTTPHandler:
             let channel = context.channel
             let leases = self.leases
             Task { @MainActor in
-                let sent = leases.withHeldLease(
+                let result = leases.withHeldLease(
                     sessionId: sessionId,
                     clientId: clientId
                 ) {
-                    self.bridge.sendInput(sessionId: sessionId, value: value)
-                    return true
-                } ?? false
+                    RemoteControlResult(self.bridge.sendInput(sessionId: sessionId, value: value))
+                } ?? .forbidden
                 channel.eventLoop.execute {
-                    self.respond(
-                        channel: channel,
-                        method: .POST,
-                        status: sent ? .noContent : .forbidden,
-                        contentType: "text/plain",
-                        body: Data()
-                    )
+                    self.respondControl(channel: channel, result: result)
                 }
             }
         case "key":
@@ -1741,21 +1747,14 @@ private final class RemoteHTTPHandler:
             let channel = context.channel
             let leases = self.leases
             Task { @MainActor in
-                let sent = leases.withHeldLease(
+                let result = leases.withHeldLease(
                     sessionId: sessionId,
                     clientId: clientId
                 ) {
-                    self.bridge.sendKey(sessionId: sessionId, key: key)
-                    return true
-                } ?? false
+                    RemoteControlResult(self.bridge.sendKey(sessionId: sessionId, key: key))
+                } ?? .forbidden
                 channel.eventLoop.execute {
-                    self.respond(
-                        channel: channel,
-                        method: .POST,
-                        status: sent ? .noContent : .forbidden,
-                        contentType: "text/plain",
-                        body: Data()
-                    )
+                    self.respondControl(channel: channel, result: result)
                 }
             }
         case "scroll":
@@ -1783,6 +1782,86 @@ private final class RemoteHTTPHandler:
             respond(context: context, method: .POST, status: .badRequest,
                     contentType: "text/plain", body: "Bad request")
         }
+    }
+
+    private func handleReliableControl(
+        context: ChannelHandlerContext,
+        message: RemoteClientMessage,
+        kind: RemoteControlKind
+    ) {
+        guard let sessionId = message.sessionId,
+              let clientId = message.clientId,
+              let requestId = message.requestId,
+              let value = message.data else {
+            respond(context: context, method: .POST, status: .unprocessableEntity,
+                    contentType: "text/plain", body: "Invalid control delivery")
+            return
+        }
+        let channel = context.channel
+        let leases = self.leases
+        Task { @MainActor in
+            let result = self.bridge.performControl(message) {
+                // Exact replays have already returned, so these locks protect
+                // only new injection and never recursively acquire the lease lock.
+                if kind == .prompt {
+                    return RemoteControlResult(leases.submitPrompt(
+                        sessionId: sessionId,
+                        clientId: clientId
+                    ) {
+                        self.bridge.sendPrompt(sessionId: sessionId, value: value)
+                    })
+                }
+                return leases.withHeldLease(sessionId: sessionId, clientId: clientId) {
+                    switch kind {
+                    case .input:
+                        return RemoteControlResult(self.bridge.sendInput(
+                            sessionId: sessionId, value: value
+                        ))
+                    case .key:
+                        return RemoteControlResult(self.bridge.sendKey(
+                            sessionId: sessionId, key: value
+                        ))
+                    case .command:
+                        return RemoteControlResult(self.bridge.sendCommand(
+                            sessionId: sessionId, requestId: requestId, value: value
+                        ))
+                    case .prompt:
+                        return .invalid
+                    }
+                } ?? .forbidden
+            }
+            channel.eventLoop.execute {
+                self.respondControl(channel: channel, result: result)
+            }
+        }
+    }
+
+    private func respondControl(channel: Channel, result: RemoteControlResult) {
+        let response: (HTTPResponseStatus, String)
+        switch result {
+        case .sent:
+            response = (.noContent, "")
+        case .missing:
+            response = (.notFound, "Session or terminal not found")
+        case .invalid:
+            response = (.unprocessableEntity, "Control was not accepted")
+        case .busy:
+            response = (.conflict, "Terminal input is busy")
+        case .forbidden:
+            response = (.forbidden, "view only")
+        case .noLiveCopilot:
+            response = (.unprocessableEntity, "Copilot is not ready")
+        case .epochMismatch:
+            response = (.preconditionFailed, "Host restarted; delivery outcome is unknown")
+        case .superseded:
+            response = (.gone, "Delivery was superseded; outcome is unknown")
+        case .fingerprintConflict:
+            response = (.unprocessableEntity, "Delivery identity was reused for different content")
+        case .capacityExceeded:
+            response = (.tooManyRequests, "Control delivery capacity reached")
+        }
+        respond(channel: channel, method: .POST, status: response.0,
+                contentType: "text/plain", body: Data(response.1.utf8))
     }
 
     // MARK: - Event stream (SSE)

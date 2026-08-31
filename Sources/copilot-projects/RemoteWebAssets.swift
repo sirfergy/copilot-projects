@@ -42,6 +42,8 @@ enum RemoteWebAssets {
 
     static let operationsJavascript = script("operations")
 
+    static let controlDeliveryJavascript = script("control-delivery")
+
     static let sessionCreationJavascript = script("session-creation")
 
     // Terminal image rendering (Kitty inline image placements advertised via
@@ -67,6 +69,7 @@ enum RemoteWebAssets {
         markdownJavascript,
         draftJavascript,
         operationsJavascript,
+        controlDeliveryJavascript,
         sessionCreationJavascript,
         terminalImageJavascript,
         transcriptJavascript,
@@ -88,6 +91,7 @@ enum RemoteWebAssets {
             ("markdown", "js", "web/js"),
             ("draft", "js", "web/js"),
             ("operations", "js", "web/js"),
+            ("control-delivery", "js", "web/js"),
             ("session-creation", "js", "web/js"),
             ("terminal-image", "js", "web/js"),
             ("transcript", "js", "web/js"),
