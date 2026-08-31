@@ -249,7 +249,10 @@ final class RemoteOperationContractTests: XCTestCase {
 
         harness.model.refreshAgentActivitySnapshots(now: now)
         let workspace = harness.model.remoteWorkspaceSnapshot()
-        XCTAssertEqual(workspace.protocolInfo, .current)
+        XCTAssertEqual(
+            workspace.protocolInfo,
+            .current.supportingReplaySafeControl(epoch: harness.model.remoteControlDeliveryEpoch)
+        )
         let session = try XCTUnwrap(workspace.projects.first?.sessions.first)
         XCTAssertEqual(session.conversationEpoch, "epoch-1")
         XCTAssertEqual(session.operationSupport, .receipts)

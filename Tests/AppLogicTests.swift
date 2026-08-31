@@ -7141,7 +7141,7 @@ final class AppLogicTests: XCTestCase {
                 origin: "https://projects.example.com",
                 body: keyBody
             )
-            XCTAssertEqual(keyStatus, 204)
+            XCTAssertEqual(keyStatus, 404)
             let invalidKeyBody = try JSONEncoder().encode(RemoteClientMessage(
                 type: "key",
                 clientId: "phone",
@@ -7941,7 +7941,7 @@ final class AppLogicTests: XCTestCase {
                 ),
             ],
             selectedProjectId: selected.id,
-            protocolInfo: .current
+            protocolInfo: .current.supportingReplaySafeControl(epoch: model.remoteControlDeliveryEpoch)
         ))
     }
 
@@ -8271,7 +8271,7 @@ final class AppLogicTests: XCTestCase {
             "conversationRequestGeneration !== submittedConversationGeneration"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "if ((state?.pendingUserInputs || []).length > 0) return;"
+            "&& !awaitingPromptStart && !(state.pendingUserInputs || []).length"
         ))
     }
 
@@ -8359,12 +8359,12 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "validatedElicitationContent(entry.form, entry.values, entry.touched) === null"
         ))
-        // Composer is suppressed while an elicitation is pending, and the queue pauses.
+        // Composer is suppressed while an elicitation is pending, and new sends pause.
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "const pendingElicits = (state && state.pendingElicitations) || [];"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "if ((state?.pendingElicitations || []).length > 0) return;"
+            "&& !(state.pendingElicitations || []).length"
         ))
         // Retry/removal semantics: 15s fallback, snapshot-driven removal, error codes.
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
@@ -9045,13 +9045,16 @@ final class AppLogicTests: XCTestCase {
             "setPromptDraft(selected, '');"
         ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "prunePromptDrafts(new Set(sessionState.keys()));"
+            "const liveSessionIds = new Set(sessionState.keys());"
+        ))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "prunePromptDrafts(liveSessionIds);"
         ))
         // A prompt must not be accepted into the send queue once its
         // session has been pruned - flushQueue can never send it, so
         // enqueuePrompt must reject up front and leave the typed text alone.
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "if (!sessionState.has(selected)) return false;"
+            "if (!value.trim() || !selected || !writable || !sessionState.has(selected)) return false;"
         ))
         // Both truncation sites (the load-time correction pass and
         // setPromptDraft's write path) must share the same surrogate-safe
@@ -10155,7 +10158,9 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains("capabilities: ['clear-action']"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("rel = 'noopener noreferrer'"))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("push/subscribe"))
-        XCTAssertTrue(RemoteWebAssets.javascript.contains("type: 'prompt'"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "q.push(controlAction(newUUID(), 'prompt', selected, value));"
+        ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "transcript?s=${encodeURIComponent(sessionId)}"
         ))
