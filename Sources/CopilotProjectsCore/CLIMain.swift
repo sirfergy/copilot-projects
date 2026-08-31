@@ -239,15 +239,9 @@ public enum CLIMain {
 
     public static var versionNumber: String {
         let direct = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        let executable = URL(fileURLWithPath: CommandLine.arguments.first ?? "")
-            .resolvingSymlinksInPath()
-        let appURL = executable
-            .deletingLastPathComponent()   // executable -> MacOS
-            .deletingLastPathComponent()   // MacOS -> Contents
-            .deletingLastPathComponent()   // Contents -> app bundle
-        let enclosing = Bundle(url: appURL)?
+        let enclosing = RunningExecutable.applicationBundle?
             .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        return direct ?? enclosing ?? "development"
+        return enclosing ?? direct ?? "development"
     }
 
     public static var versionString: String {
@@ -427,17 +421,8 @@ public enum CLIMain {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let dir = parsed.flags["dir"].map { URL(fileURLWithPath: $0) }
             ?? home.appendingPathComponent(".local/bin", isDirectory: true)
-        guard let exe = currentExecutablePath() else {
-            fail("could not resolve the running executable path")
-            return 1
-        }
-        let fm = FileManager.default
         do {
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            let link = dir.appendingPathComponent("copilot-projects")
-            try? fm.removeItem(at: link)
-            try fm.createSymbolicLink(atPath: link.path, withDestinationPath: exe)
-            print("Linked \(link.path) -> \(exe)")
+            print(try CLILauncher.install(in: dir))
             let pathEnv = ProcessInfo.processInfo.environment["PATH"] ?? ""
             if !pathEnv.split(separator: ":").contains(Substring(dir.path)) {
                 print("note: \(dir.path) is not on your PATH; add it to use `copilot-projects`.")
@@ -447,13 +432,6 @@ public enum CLIMain {
             fail("\(error)")
             return 1
         }
-    }
-
-    private static func currentExecutablePath() -> String? {
-        if let p = Bundle.main.executablePath { return p }
-        let arg0 = CommandLine.arguments.first ?? ""
-        if arg0.hasPrefix("/") { return arg0 }
-        return nil
     }
 
     // MARK: - output

@@ -179,9 +179,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func registerDeepLinkHelper() {
-        let helperURL = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Helpers/Copilot Projects Link.app")
-        guard FileManager.default.fileExists(atPath: helperURL.path) else {
+        guard let helperURL = RunningExecutable.applicationBundle?.bundleURL
+            .appendingPathComponent("Contents/Helpers/Copilot Projects Link.app"),
+              FileManager.default.fileExists(atPath: helperURL.path) else {
             NSLog("copilot-projects: deep-link helper is missing")
             return
         }
@@ -202,9 +202,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let request = ControlRequest(command: "focus")
         if let response = try? ControlClient().send(request), response.ok { return }
 
+        guard let bundleID = (RunningExecutable.applicationBundle ?? .main).bundleIdentifier else { return }
         let currentPID = ProcessInfo.processInfo.processIdentifier
         if let existing = NSRunningApplication
-            .runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .runningApplications(withBundleIdentifier: bundleID)
             .first(where: { $0.processIdentifier != currentPID }) {
             existing.activate(options: [.activateAllWindows])
         }

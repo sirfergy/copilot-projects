@@ -276,8 +276,8 @@ public enum Paths {
            FileManager.default.isExecutableFile(atPath: override) {
             return override
         }
-        let bundled = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Helpers/dtach")
+        guard let bundle = RunningExecutable.applicationBundle else { return nil }
+        let bundled = bundle.bundleURL.appendingPathComponent("Contents/Helpers/dtach")
         if FileManager.default.isExecutableFile(atPath: bundled.path) {
             return bundled.path
         }

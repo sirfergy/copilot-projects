@@ -17,8 +17,9 @@ signal(SIGPIPE, SIG_IGN)
 let cliArgs = Array(CommandLine.arguments.dropFirst())
 if let first = cliArgs.first, CLIMain.isCommand(first) {
     exit(CLIMain.run(cliArgs, checkAssets: {
-        CopilotExtension.packagedAssetAvailable()
-            && RemoteWebAssets.packagedAssetsAvailable()
+        let anchor = RunningExecutable.applicationBundle ?? .main
+        return CopilotExtension.packagedAssetAvailable(anchor: anchor)
+            && RemoteWebAssets.packagedAssetsAvailable(anchor: anchor)
     }))
 }
 if !cliArgs.isEmpty, !CLIMain.isCocoaLaunchArguments(cliArgs) {

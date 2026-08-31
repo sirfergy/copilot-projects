@@ -208,25 +208,18 @@ public enum PackagedResource {
         // <app>/Contents/MacOS/copilot-projects), so the running binary is
         // resolved through symlinks before deciding whether this is an app.
         var isApplicationBundle = false
-        if let executable = Bundle.main.executableURL?.resolvingSymlinksInPath() {
-            let binaryDirectory = executable.deletingLastPathComponent()
-            let contents = binaryDirectory.deletingLastPathComponent()
-            if binaryDirectory.lastPathComponent == "MacOS",
-               contents.lastPathComponent == "Contents",
-               contents.deletingLastPathComponent().pathExtension == "app" {
+        if let executable = RunningExecutable.url {
+            if let appURL = RunningExecutable.applicationBundleURL(for: executable) {
                 isApplicationBundle = true
-                add(contents.appendingPathComponent("Resources", isDirectory: true))
+                add(appURL.appendingPathComponent("Contents/Resources", isDirectory: true))
             } else {
-                add(binaryDirectory)
+                add(executable.deletingLastPathComponent())
             }
         }
 
-        if isApplicationBundle {
-            // Only the app's own sealed resources count; anything found beside
-            // the .app would be a developer artifact that a user never gets.
-            add(Bundle.main.resourceURL)
-            add(anchor.resourceURL)
-        } else {
+        // Through a launcher, Bundle.main and the anchor may describe the
+        // launcher's directory. Never use them as fallbacks for a packaged app.
+        if !isApplicationBundle {
             add(Bundle.main.resourceURL)
             add(Bundle.main.bundleURL)
             add(anchor.resourceURL)
