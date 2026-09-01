@@ -31,11 +31,12 @@ enum NotificationSummary {
               // ISO decoding and Unix-ms conversion can differ below millisecond precision.
               (turn.startedAt.timeIntervalSince1970 * 1_000).rounded() <
                   (context.completedAt.timeIntervalSince1970 * 1_000).rounded(),
-              let endedAt = turn.endedAt,
-              endedAt >= turn.startedAt,
-              (endedAt.timeIntervalSince1970 * 1_000).rounded() >
-                  (context.activeAt.timeIntervalSince1970 * 1_000).rounded(),
               let message = turn.assistantMessages.last,
+              // Durable transcripts can remain open after agentStop. In that case,
+              // require a response newer than the last activity, not an idle marker.
+              (turn.endedAt ?? message.timestamp) >= turn.startedAt,
+              ((turn.endedAt ?? message.timestamp).timeIntervalSince1970 * 1_000).rounded() >
+                  (context.activeAt.timeIntervalSince1970 * 1_000).rounded(),
               message.timestamp >= turn.startedAt,
               (message.timestamp.timeIntervalSince1970 * 1_000).rounded() <=
                   (context.completedAt.timeIntervalSince1970 * 1_000).rounded() else { return nil }
