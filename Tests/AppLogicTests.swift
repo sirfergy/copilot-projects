@@ -2576,6 +2576,42 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), ownerCopilotSession)
     }
 
+    func testCopilotHookCarriesConversationIdentityThroughCompletion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let bin = root.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let hookURL = root.appendingPathComponent("hook.sh")
+        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
+        let capture = root.appendingPathComponent("args.txt")
+        let cli = bin.appendingPathComponent("copilot-projects")
+        try """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> "$CAPTURE_FILE"
+        """.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+        let tabId = UUID().uuidString
+        let conversationId = UUID().uuidString
+        for (action, extra) in [
+            ("running", ""),
+            ("idle", ""),
+            ("notify", ",\"notification_type\":\"session_idle\",\"aborted\":false"),
+        ] {
+            try runHook(
+                hookURL: hookURL,
+                action: action,
+                payload: "{\"sessionId\":\"\(conversationId)\",\"timestamp\":100\(extra)}",
+                tabId: tabId, root: root, bin: bin, capture: capture
+            )
+        }
+        let calls = try cliCallLines(in: capture)
+        XCTAssertEqual(calls.count, 3)
+        XCTAssertFalse(calls[0].contains("--copilot-session"))
+        XCTAssertTrue(calls.dropFirst().allSatisfy { $0.contains("--copilot-session \(conversationId)") })
+        XCTAssertTrue(calls[1].contains("--source agent-stop"))
+        XCTAssertTrue(calls[2].contains("--notification completed"))
+    }
+
     func testCopilotHookRoutesNativeNotificationsForWaitingAndCompletedTurns() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -10017,10 +10053,10 @@ final class AppLogicTests: XCTestCase {
         )
         let sentAt = Date(timeIntervalSince1970: 1_800_000_000)
         await service.send(NotificationEvent(
-            kind: .permission,
-            title: "Copilot needs permission",
+            kind: .completed,
+            title: "Copilot finished a task",
             subtitle: "Project · Session",
-            body: nil,
+            body: "Fixed notification previews.",
             projectId: "project",
             sessionId: "session",
             sentAt: sentAt
@@ -10030,10 +10066,10 @@ final class AppLogicTests: XCTestCase {
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: payload) as? [String: Any]
         )
-        XCTAssertEqual(object["kind"] as? String, "permission")
+        XCTAssertEqual(object["kind"] as? String, "completed")
         XCTAssertEqual(object["sessionId"] as? String, "session")
         XCTAssertEqual(object["sentAt"] as? String, "2027-01-15T08:00:00Z")
-        XCTAssertEqual(object["body"] as? String, "Project · Session")
+        XCTAssertEqual(object["body"] as? String, "Project · Session\nFixed notification previews.")
         XCTAssertTrue(RemoteWebAssets.serviceWorker.contains("Sent at ${sentTime}"))
         XCTAssertEqual(service.status().subscriptions, 1)
         XCTAssertNotNil(service.status().lastSuccessAt)
@@ -10132,7 +10168,7 @@ final class AppLogicTests: XCTestCase {
             kind: .completed,
             title: "Complete",
             subtitle: "Project · Session",
-            body: nil,
+            body: "Fixed notification previews.",
             projectId: "project",
             sessionId: "session"
         ))
@@ -10141,6 +10177,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(device?.environment, .production)
         XCTAssertEqual(device?.token, String(repeating: "ab", count: 32))
         XCTAssertEqual(payloads.first?.action, .show)
+        XCTAssertEqual(payloads.first?.body, "Project · Session\nFixed notification previews.")
         let permissions = try FileManager.default.attributesOfItem(
             atPath: root.appendingPathComponent("devices.json").path
         )[.posixPermissions] as? NSNumber
