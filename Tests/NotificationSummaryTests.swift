@@ -90,6 +90,82 @@ final class NotificationSummaryTests: XCTestCase {
         ))
     }
 
+    func testCompletionRejectsTurnStartingAtCompletionBoundary() throws {
+        XCTAssertNil(NotificationSummary.completion(
+            from: snapshot([
+                turn(id: "older"),
+                turn(startedAt: 4.5, endedAt: 4.5, content: "Next turn's response", messageAt: 4.5),
+            ]),
+            context: try context()
+        ))
+    }
+
+    func testCompletionAllowsResponseAtCompletionBoundaryForEarlierTurn() throws {
+        XCTAssertEqual(NotificationSummary.completion(
+            from: snapshot([turn(startedAt: 4.499, endedAt: 4.5, messageAt: 4.5)]),
+            context: try context()
+        ), "Fixed notification previews. All done.")
+    }
+
+    func testCompletionRejectsDecodedTurnAtMillisecondBoundary() throws {
+        let sessionId = UUID().uuidString
+        Paths.ensureStateDir()
+        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .custom { _, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode("2026-08-31T21:00:00.002Z")
+        }
+        try encoder.encode(snapshot([turn()])).write(to: URL(
+            fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
+        ), options: .atomic)
+        let decoded = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
+        XCTAssertEqual(decoded.turns.count, 1)
+        let context = try XCTUnwrap(CompletionSummaryContext(
+            copilotSessionId: copilotSessionId,
+            activeTimestamp: 1_788_209_999_002,
+            completionTimestamp: 1_788_210_000_002
+        ))
+        XCTAssertNil(NotificationSummary.completion(from: decoded, context: context))
+        let laterCompletion = try XCTUnwrap(CompletionSummaryContext(
+            copilotSessionId: copilotSessionId,
+            activeTimestamp: 1_788_209_999_002,
+            completionTimestamp: 1_788_210_000_003
+        ))
+        XCTAssertEqual(NotificationSummary.completion(from: decoded, context: laterCompletion),
+                       "Fixed notification previews. All done.")
+    }
+
+    func testDecodedCompletionRespectsActiveAndResponseMillisecondBoundaries() throws {
+        let sessionId = UUID().uuidString
+        Paths.ensureStateDir()
+        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(date.timeIntervalSince1970 == 1
+                ? "2026-08-31T21:00:00.000Z"
+                : "2026-08-31T21:00:00.011Z")
+        }
+        try encoder.encode(snapshot([turn()])).write(to: URL(
+            fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
+        ), options: .atomic)
+        let decoded = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
+        let valid = try XCTUnwrap(CompletionSummaryContext(
+            copilotSessionId: copilotSessionId,
+            activeTimestamp: 1_788_210_000_000,
+            completionTimestamp: 1_788_210_000_011
+        ))
+        XCTAssertEqual(NotificationSummary.completion(from: decoded, context: valid),
+                       "Fixed notification previews. All done.")
+        let stale = try XCTUnwrap(CompletionSummaryContext(
+            copilotSessionId: copilotSessionId,
+            activeTimestamp: 1_788_210_000_011,
+            completionTimestamp: 1_788_210_000_012
+        ))
+        XCTAssertNil(NotificationSummary.completion(from: decoded, context: stale))
+    }
+
     func testCompletionRejectsStaleNewScheduledAbortedAndEmptyTurns() throws {
         let context = try context()
         for invalid in [

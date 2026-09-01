@@ -28,13 +28,17 @@ enum NotificationSummary {
               let turn = snapshot.turns.last,
               turn.kind == "foreground" || turn.kind == "automated",
               !turn.isAborted,
-              turn.startedAt <= context.completedAt,
+              // ISO decoding and Unix-ms conversion can differ below millisecond precision.
+              (turn.startedAt.timeIntervalSince1970 * 1_000).rounded() <
+                  (context.completedAt.timeIntervalSince1970 * 1_000).rounded(),
               let endedAt = turn.endedAt,
               endedAt >= turn.startedAt,
-              endedAt > context.activeAt,
+              (endedAt.timeIntervalSince1970 * 1_000).rounded() >
+                  (context.activeAt.timeIntervalSince1970 * 1_000).rounded(),
               let message = turn.assistantMessages.last,
               message.timestamp >= turn.startedAt,
-              message.timestamp <= context.completedAt else { return nil }
+              (message.timestamp.timeIntervalSince1970 * 1_000).rounded() <=
+                  (context.completedAt.timeIntervalSince1970 * 1_000).rounded() else { return nil }
         return preview(message.content)
     }
 
