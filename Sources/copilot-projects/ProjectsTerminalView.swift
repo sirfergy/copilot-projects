@@ -33,7 +33,6 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             : .metal
     }()
     private var rendererShouldBeActive = false
-    private var isObservingMetalRendererStatus = false
     /// True from the moment a remote prompt's paste is written until its submit
     /// Enter fires, so an overlapping remote prompt can't interleave its paste
     /// bytes into a half-submitted one. Main-actor only.
@@ -53,7 +52,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// True from construction until this session's durable image restore
     /// (see `configureImagePersistence`) completes or is abandoned. While
     /// true, incoming PTY bytes are buffered (never fed to
-    /// `kittyImageCapture.ingest`/`super.dataReceived`) so a live retransmit
+    /// `kittyImageCapture.ingest`/`feed`) so a live retransmit
     /// or delete can never interleave with the restore replay — see
     /// `bufferDuringImageRestore`. A session never configured for
     /// persistence (`configureImagePersistence` never called — e.g. any
@@ -73,14 +72,39 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     private var restoredPlacementReplayGeneration = 0
     private var restoredPlacementBufferWasAlternate: Bool?
 
-    override func dataReceived(slice: ArraySlice<UInt8>) {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        configureCallbacks()
+    }
+
+    override init(frame: CGRect, font: NSFont? = nil, options: TerminalOptions) {
+        super.init(frame: frame, font: font, options: options)
+        configureCallbacks()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureCallbacks()
+    }
+
+    private func configureCallbacks() {
+        do {
+            try setProcessOutputConsumer { [weak self] bytes in
+                self?.consumeProcessOutput(bytes[...])
+            }
+        } catch {
+            preconditionFailure("Output consumer must be configured before process startup: \(error)")
+        }
+    }
+
+    func consumeProcessOutput(_ slice: ArraySlice<UInt8>) {
         remoteContentGeneration &+= 1
         guard !isRestoringImages else {
             bufferDuringImageRestore(slice)
             return
         }
         kittyImageCapture.ingest(slice)
-        super.dataReceived(slice: slice)
+        feed(byteArray: slice)
         scheduleRestoredPlacementReplayIfNeeded()
     }
 
@@ -111,7 +135,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         // has nothing at all to restore. Skip the async restore/buffering
         // path entirely rather than unconditionally pay for it (and its
         // inherently non-deterministic `Task` scheduling) only to resolve to
-        // a no-op: `dataReceived` behaves exactly as it did before this
+        // a no-op: `consumeProcessOutput` behaves exactly as it did before this
         // feature existed for every such session.
         guard diskStore.hasPersistedEntriesSynchronously(sessionId: sessionId) else { return }
         isRestoringImages = true
@@ -127,7 +151,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// Buffers PTY bytes that arrive while this session's disk image-restore
     /// is still pending, under the (possibly test-injected)
     /// `RemoteKittyRestoreBufferBudget` hard cap — never feeding them to
-    /// `kittyImageCapture.ingest`/`super.dataReceived` yet, so a live
+    /// `kittyImageCapture.ingest`/`feed` yet, so a live
     /// retransmit or delete can never interleave with (and corrupt) the
     /// eventual restore replay. Reservation failure (this session's share of
     /// the shared cap would overflow) abandons restoration for *this session
@@ -150,10 +174,10 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         restoreBufferBudget.release(buffered.count)
         if !buffered.isEmpty {
             kittyImageCapture.ingest(buffered[...])
-            super.dataReceived(slice: buffered[...])
+            feed(byteArray: buffered[...])
         }
         kittyImageCapture.ingest(slice)
-        super.dataReceived(slice: slice)
+        feed(byteArray: slice)
     }
 
     private func completeImageRestore(_ result: RemoteKittyRestoredSessionImages) {
@@ -164,7 +188,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         restoreBufferBudget.release(buffered.count)
         if !buffered.isEmpty {
             kittyImageCapture.ingest(buffered[...])
-            super.dataReceived(slice: buffered[...])
+            feed(byteArray: buffered[...])
             scheduleRestoredPlacementReplayIfNeeded()
         }
     }
@@ -173,7 +197,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// selection directly into `kittyImageCapture`'s in-memory state (never
     /// through `ingest`, which would mint fresh versions and recursively
     /// re-persist), replays each restored current selection's exact pixels
-    /// and placement directly into SwiftTerm (never through `dataReceived`),
+    /// and placement directly into SwiftTerm (never through `consumeProcessOutput`),
     /// then refreshes this view's own content generation once so any cached
     /// remote screen/revision is invalidated to reflect the newly-restored
     /// availability.
@@ -202,20 +226,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                 placementId: $0.placementId ?? 0
             ) == $0.version
         }
-        var transmitted: Set<RestoredImageKey> = []
-        for selection in currentSelections {
-            let key = RestoredImageKey(imageId: selection.imageId, version: selection.version)
-            guard transmitted.insert(key).inserted,
-                  let data = kittyImageCapture.imageData(
-                      imageId: selection.imageId,
-                      version: selection.version
-                  )
-            else { continue }
-            terminal?.feed(byteArray: RemoteKittyReplayEncoding.transmitOnlyFrames(
-                imageId: selection.imageId,
-                data: data
-            ))
-        }
+        transmitRestoredImages(currentSelections)
         restoredSelectionsAwaitingPlacement = currentSelections
         restoredPlacementBufferWasAlternate = nil
         remoteContentGeneration &+= 1
@@ -227,15 +238,29 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         let version: UInt64
     }
 
-    /// Virtual placement records are buffer-specific in SwiftTerm. Delay their
-    /// replay until the live dtach redraw has gone quiet, so a startup
+    private func transmitRestoredImages(_ selections: [RemoteKittyRestoredSelection]) {
+        var transmitted: Set<RestoredImageKey> = []
+        for selection in selections {
+            let key = RestoredImageKey(imageId: selection.imageId, version: selection.version)
+            guard transmitted.insert(key).inserted,
+                  let data = kittyImageCapture.imageData(
+                      imageId: selection.imageId, version: selection.version)
+            else { continue }
+            feed(byteArray: RemoteKittyReplayEncoding.transmitOnlyFrames(
+                imageId: selection.imageId, data: data)[...])
+        }
+    }
+
+    /// Virtual placements and image pixels are buffer-specific in SwiftTerm.
+    /// Delay their replay until the live dtach redraw has gone quiet, so a startup
     /// `CSI ?1049h` switch lands first and the restored records are attached to
     /// the buffer that actually contains the placeholder cells. Keep the
     /// selections around so a later normal/alternate-buffer switch can replay
     /// them once into that newly-active buffer too.
     private func scheduleRestoredPlacementReplayIfNeeded() {
-        guard !restoredSelectionsAwaitingPlacement.isEmpty, terminal != nil else { return }
-        let isAlternate = terminal?.isCurrentBufferAlternate ?? false
+        guard !restoredSelectionsAwaitingPlacement.isEmpty,
+              let state = terminalInputStateSnapshot() else { return }
+        let isAlternate = state.isAlternateBuffer
         guard restoredPlacementBufferWasAlternate != isAlternate else { return }
         restoredPlacementReplayGeneration += 1
         let generation = restoredPlacementReplayGeneration
@@ -248,8 +273,8 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     }
 
     private func replayRestoredPlacementsNow() {
-        guard let terminal else { return }
-        let activeBufferIsAlternate = terminal.isCurrentBufferAlternate
+        guard let state = terminalInputStateSnapshot() else { return }
+        let activeBufferIsAlternate = state.isAlternateBuffer
         guard restoredPlacementBufferWasAlternate != activeBufferIsAlternate else { return }
 
         var currentSelections: [RemoteKittyRestoredSelection] = []
@@ -272,8 +297,12 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             ))
         }
         restoredSelectionsAwaitingPlacement = currentSelections
+        // A buffer switch can leave the early restore transmission in the
+        // other screen's image store. Replay bytes once per placement pass,
+        // through feed rather than capture, before referencing those image IDs.
+        transmitRestoredImages(currentSelections)
         for selection in currentSelections {
-            terminal.feed(byteArray: RemoteKittyReplayEncoding.placementFrame(
+            feed(byteArray: RemoteKittyReplayEncoding.placementFrame(
                 imageId: selection.imageId,
                 placementId: replayPlacementId(
                     for: selection,
@@ -284,7 +313,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                 x: selection.x,
                 y: selection.y,
                 z: selection.z
-            ))
+            )[...])
         }
         restoredPlacementBufferWasAlternate = activeBufferIsAlternate
         refreshSurface()
@@ -345,7 +374,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         restoreBufferBudget.release(buffered.count)
         guard !buffered.isEmpty else { return }
         kittyImageCapture.ingest(buffered[...])
-        super.dataReceived(slice: buffered[...])
+        feed(byteArray: buffered[...])
     }
 
     /// Awaits this session's disk-restore `Task` directly (not a sleep), so
@@ -364,10 +393,10 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     @discardableResult
     func sendRemoteCommand(_ value: String, forceFocusReporting: Bool) -> Bool {
         guard !isSubmittingRemotePrompt,
-              let terminal,
+              let state = terminalInputStateSnapshot(),
               let bytes = Self.remoteCommandBytes(
                 value,
-                keyboardEnhancementFlags: terminal.keyboardEnhancementFlags,
+                keyboardEnhancementFlags: state.keyboardEnhancementFlags,
                 scopedFocus: forceFocusReporting && !hasActualTerminalFocus
               ) else {
             return false
@@ -379,7 +408,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     @discardableResult
     func sendRemotePrompt(_ value: String) -> Bool {
         guard !isSubmittingRemotePrompt,
-              terminal != nil else {
+              terminalInputStateSnapshot() != nil else {
             return false
         }
         let startedWithScopedFocus = !hasActualTerminalFocus
@@ -408,7 +437,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                 if startedWithScopedFocus,
                    !submitted,
                    !self.hasActualTerminalFocus,
-                   self.terminal != nil {
+                   self.terminalInputStateSnapshot() != nil {
                     self.send(Self.remoteFocusOutBytes)
                 }
             }
@@ -420,7 +449,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                 } catch {
                     return // cancelled: don't submit an unsettled paste
                 }
-                guard self.terminal != nil else { return }
+                guard self.terminalInputStateSnapshot() != nil else { return }
                 let generation = self.remoteContentGeneration
                 if generation != lastGeneration {
                     lastGeneration = generation
@@ -434,9 +463,9 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                     break
                 }
             }
-            guard let terminal = self.terminal else { return }
+            guard let state = self.terminalInputStateSnapshot() else { return }
             self.send(Self.remoteSubmitBytes(
-                keyboardEnhancementFlags: terminal.keyboardEnhancementFlags,
+                keyboardEnhancementFlags: state.keyboardEnhancementFlags,
                 scopedFocus: !self.hasActualTerminalFocus
             ))
             submitted = true
@@ -555,9 +584,9 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     @discardableResult
     func sendRemoteKey(_ key: String, forceFocusReporting: Bool = false) -> Bool {
         if key == "enter", forceFocusReporting {
-            guard let terminal else { return false }
+            guard let state = terminalInputStateSnapshot() else { return false }
             send(Self.remoteSubmitBytes(
-                keyboardEnhancementFlags: terminal.keyboardEnhancementFlags,
+                keyboardEnhancementFlags: state.keyboardEnhancementFlags,
                 scopedFocus: !hasActualTerminalFocus
             ))
             return true
@@ -584,32 +613,25 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// `forwardScroll` convention.
     @discardableResult
     func sendRemoteScroll(delta: Int, agentLive: Bool) -> Bool {
-        guard let terminal, delta != 0 else { return false }
+        guard let state = terminalInputStateSnapshot(), delta != 0 else { return false }
         let up = delta > 0
-        let count = min(abs(delta), 8)
+        let count = Int(min(delta.magnitude, 8))
 
-        if agentLive || (allowMouseReporting && terminal.mouseMode != .off) {
-            let flags = terminal.encodeButton(
-                button: up ? 4 : 5,
-                release: false,
-                shift: false,
-                meta: false,
-                control: false
-            )
-            let col = max(0, terminal.cols / 2)
-            let row = max(0, terminal.rows / 2)
+        if agentLive || (allowMouseReporting && state.mouseMode != .off) {
+            let col = max(0, state.dimensions.cols / 2)
+            let row = max(0, state.dimensions.rows / 2)
             for _ in 0 ..< count {
-                terminal.sendEvent(buttonFlags: flags, x: col, y: row)
+                sendMouseEvent(button: up ? 4 : 5, release: false, col: col, row: row)
             }
             return true
         }
 
-        guard terminal.isCurrentBufferAlternate else { return false }
+        guard state.isAlternateBuffer else { return false }
         let sequence: [UInt8] = up
-            ? (terminal.applicationCursor
+            ? (state.applicationCursor
                 ? [0x1b, 0x4f, 0x41]
                 : [0x1b, 0x5b, 0x41])
-            : (terminal.applicationCursor
+            : (state.applicationCursor
                 ? [0x1b, 0x4f, 0x42]
                 : [0x1b, 0x5b, 0x42])
         for _ in 0 ..< count { send(sequence) }
@@ -618,40 +640,25 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        observeMetalRendererStatusIfNeeded()
         applyRendererState()
-    }
-
-    private func observeMetalRendererStatusIfNeeded() {
-        guard !isObservingMetalRendererStatus else { return }
-        isObservingMetalRendererStatus = true
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(metalRendererStatusDidChange(_:)),
-            name: .terminalViewMetalRendererStatusDidChange,
-            object: self
-        )
-    }
-
-    @objc private func metalRendererStatusDidChange(_ notification: Notification) {
-        handleMetalRendererStatus(metalRendererStatus.state)
-    }
-
-    func handleMetalRendererStatus(_ state: MetalRendererStatus.State) {
-        guard state == .fellBackToCoreGraphics, rendererMode == .metal else { return }
-        NotificationCenter.default.removeObserver(
-            self,
-            name: .terminalViewMetalRendererStatusDidChange,
-            object: self
-        )
-        enterCoreGraphicsFallback()
-        NSLog("copilot-projects: SwiftTerm fell back to CoreGraphics after repeated Metal stalls")
     }
 
     private func enterCoreGraphicsFallback() {
         rendererMode = .coreGraphicsFallback
-        rendererName = "coregraphics-fallback"
-        disableFullRedrawOnAnyChanges = false
+        applyCoreGraphicsRenderer(name: "coregraphics-fallback")
+    }
+
+    private func applyCoreGraphicsRenderer(name: String) {
+        do {
+            if isUsingMetalRenderer {
+                try setUseMetal(false)
+            }
+            rendererName = name
+            disableFullRedrawOnAnyChanges = false
+        } catch {
+            rendererName = "metal-teardown-failed"
+            NSLog("copilot-projects: failed to switch to CoreGraphics: \(error)")
+        }
     }
 
     /// Keeps the terminal model, parser, scrollback, and PTY alive while releasing
@@ -662,7 +669,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             case .metal where active == isUsingMetalRenderer:
                 return
             case .coreGraphicsForced, .coreGraphicsFallback:
-                return
+                if !isUsingMetalRenderer { return }
             default:
                 break
             }
@@ -674,8 +681,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     private func applyRendererState() {
         switch rendererMode {
         case .coreGraphicsForced:
-            rendererName = "coregraphics-forced"
-            disableFullRedrawOnAnyChanges = false
+            applyCoreGraphicsRenderer(name: "coregraphics-forced")
         case .coreGraphicsFallback:
             enterCoreGraphicsFallback()
         case .metal:
@@ -693,10 +699,14 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                 }
                 rendererName = "metal"
             } catch {
-                enterCoreGraphicsFallback()
-                NSLog("copilot-projects: Metal renderer unavailable, using CoreGraphics: \(error)")
+                handleMetalActivationFailure(error)
             }
         }
+    }
+
+    func handleMetalActivationFailure(_ error: Error) {
+        enterCoreGraphicsFallback()
+        NSLog("copilot-projects: Metal initialization failed; renderer=\(rendererName): \(error)")
     }
 
     private func parkMetalRenderer() {
@@ -717,31 +727,20 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         rendererShouldBeActive
     }
 
-    /// Ask the active surface to render its current model after being revealed.
-    /// SwiftTerm's Metal view is intentionally paused and redraws on demand.
+    /// Schedule the current model after reveal. A second request gives the
+    /// newly attached surface one main-loop turn to acquire a drawable.
     func refreshSurface() {
         guard rendererShouldBeActive, window != nil else { return }
         applyRendererState()
-        if isUsingMetalRenderer {
-            invalidateMetalRenderCaches()
-            // A zero-bounds CoreText result is deliberately cached as empty. Give
-            // wake/scale transitions one runloop turn to settle, then clear and
-            // rebuild once more without reaching into SwiftTerm's MTKView tree.
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.isUsingMetalRenderer, self.window != nil else { return }
-                self.invalidateMetalRenderCaches()
-            }
-        } else {
-            terminal?.updateFullScreen()
-            needsDisplay = true
-            display()
+        requestRedraw()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.rendererShouldBeActive, self.window != nil else { return }
+            self.requestRedraw()
         }
     }
 
-    /// Strong manual recovery for a surface that stayed blank after reveal:
-    /// invalidate the full model and draw the paused Metal view immediately.
-    /// SwiftTerm handles missing-drawable backoff; `refreshSurface` retries
-    /// zero-bounds glyph results once on the next runloop turn.
+    /// Preserve the container's synchronous Metal reveal while normal frame
+    /// scheduling refreshes the current model for either backend.
     func forceRedraw() {
         refreshSurface()
         if isUsingMetalRenderer {
@@ -755,11 +754,11 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// TUI even when SwiftTerm's mode looks off after a dtach-resume desync, so the
     /// wheel is forwarded as mouse events regardless.
     func forwardScroll(_ event: NSEvent, agentLive: Bool) -> Bool {
-        guard let terminal = terminal else { return false }
+        guard let state = terminalInputStateSnapshot() else { return false }
 
         // Accumulate fractional/precise deltas so a single trackpad flick (dozens
         // of tiny events) doesn't fire dozens of steps. Positive = up.
-        let cellH = bounds.height > 0 ? bounds.height / CGFloat(max(terminal.rows, 1)) : 18
+        let cellH = bounds.height > 0 ? bounds.height / CGFloat(max(state.dimensions.rows, 1)) : 18
         let lines = event.hasPreciseScrollingDeltas
             ? event.scrollingDeltaY / max(cellH, 1)
             : event.scrollingDeltaY
@@ -774,23 +773,24 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         let up = steps > 0
         let count = min(abs(steps), 8)
 
-        if agentLive || (allowMouseReporting && terminal.mouseMode != .off) {
+        if agentLive || (allowMouseReporting && state.mouseMode != .off) {
             // 1. App reads the mouse (or is a live agent TUI) → send wheel buttons.
             let mods = event.modifierFlags
-            let flags = terminal.encodeButton(
-                button: up ? 4 : 5, release: false,
-                shift: mods.contains(.shift), meta: mods.contains(.option), control: mods.contains(.control))
             let pos = gridPosition(for: event)
-            for _ in 0 ..< count { terminal.sendEvent(buttonFlags: flags, x: pos.col, y: pos.row) }
+            for _ in 0 ..< count {
+                sendMouseEvent(button: up ? 4 : 5, release: false,
+                               shift: mods.contains(.shift), meta: mods.contains(.option),
+                               control: mods.contains(.control), col: pos.col, row: pos.row)
+            }
             return true
         }
 
-        if terminal.isCurrentBufferAlternate {
+        if state.isAlternateBuffer {
             // 2. Alt-screen app without mouse reporting → alternate-scroll: send
             //    cursor up/down keys (application-cursor aware).
             let seq: [UInt8] = up
-                ? (terminal.applicationCursor ? [0x1b, 0x4f, 0x41] : [0x1b, 0x5b, 0x41])   // ESC O A / ESC [ A
-                : (terminal.applicationCursor ? [0x1b, 0x4f, 0x42] : [0x1b, 0x5b, 0x42])   // ESC O B / ESC [ B
+                ? (state.applicationCursor ? [0x1b, 0x4f, 0x41] : [0x1b, 0x5b, 0x41])   // ESC O A / ESC [ A
+                : (state.applicationCursor ? [0x1b, 0x4f, 0x42] : [0x1b, 0x5b, 0x42])   // ESC O B / ESC [ B
             for _ in 0 ..< count { send(seq) }
             return true
         }
@@ -809,30 +809,32 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// OSC 8 — so without this, markdown links are dead. Only plain clicks are
     /// forwarded (drags still select text locally), mirroring Terminal.app.
     func forwardClick(_ event: NSEvent) {
-        guard let terminal = terminal else { return }
+        guard terminalInputStateSnapshot() != nil else { return }
         // A resumed session's terminal reverts to the default x10 mouse protocol (dtach
         // replays nothing; the CLI doesn't re-emit ?1006h on reattach), so a forwarded
         // click would be x10-encoded and the CLI's SGR-based link handler ignores it —
         // markdown links go dead until the CLI restarts. Re-assert SGR so the click
         // encodes the way the CLI expects. Idempotent, and only live-agent clicks reach here.
-        terminal.feed(byteArray: Array("\u{1b}[?1006h".utf8))
+        feed(text: "\u{1b}[?1006h")
         let pos = gridPosition(for: event)
         let mods = event.modifierFlags
         let shift = mods.contains(.shift), meta = mods.contains(.option), ctrl = mods.contains(.control)
-        let press = terminal.encodeButton(button: 0, release: false, shift: shift, meta: meta, control: ctrl)
-        terminal.sendEvent(buttonFlags: press, x: pos.col, y: pos.row)
-        let release = terminal.encodeButton(button: 0, release: true, shift: shift, meta: meta, control: ctrl)
-        terminal.sendEvent(buttonFlags: release, x: pos.col, y: pos.row)
+        sendMouseEvent(button: 0, release: false, shift: shift, meta: meta,
+                       control: ctrl, col: pos.col, row: pos.row)
+        sendMouseEvent(button: 0, release: true, shift: shift, meta: meta,
+                       control: ctrl, col: pos.col, row: pos.row)
     }
 
     /// On-screen cell under the pointer.
     private func gridPosition(for event: NSEvent) -> (col: Int, row: Int) {
-        guard let terminal = terminal, bounds.width > 0, bounds.height > 0 else { return (0, 0) }
+        let dimensions = terminalDimensions
+        guard dimensions.cols > 0, dimensions.rows > 0,
+              bounds.width > 0, bounds.height > 0 else { return (0, 0) }
         let p = convert(event.locationInWindow, from: nil)
-        let cellW = bounds.width / CGFloat(terminal.cols)
-        let cellH = bounds.height / CGFloat(terminal.rows)
-        let col = min(max(0, Int(p.x / max(cellW, 1))), terminal.cols - 1)
-        let row = min(max(0, Int((bounds.height - p.y) / max(cellH, 1))), terminal.rows - 1)
+        let cellW = bounds.width / CGFloat(dimensions.cols)
+        let cellH = bounds.height / CGFloat(dimensions.rows)
+        let col = min(max(0, Int(p.x / max(cellW, 1))), dimensions.cols - 1)
+        let row = min(max(0, Int((bounds.height - p.y) / max(cellH, 1))), dimensions.rows - 1)
         return (col, row)
     }
 
@@ -869,10 +871,10 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// present — ordinary copies pass through unchanged.
     override func copy(_ sender: Any) {
         super.copy(sender)
-        guard let terminal = terminal else { return }
+        guard let snapshot = terminalContentSnapshot(region: .viewport) else { return }
         let pasteboard = NSPasteboard.general
         guard let raw = pasteboard.string(forType: .string), !raw.isEmpty else { return }
-        let bars = Self.scrollbarColumnGlyphs(in: terminal)
+        let bars = Self.scrollbarColumnGlyphs(in: snapshot)
         guard !bars.isEmpty else { return }
         let cleaned = Self.strippingScrollbarGutter(raw, bars: bars)
         if cleaned != raw {
@@ -886,12 +888,12 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// threshold is on the COMBINED occupancy (track + thumb), and every glyph
     /// actually seen in that column is returned, so a thumb drawn with a different
     /// (brighter) glyph than the track is stripped too rather than left behind.
-    private static func scrollbarColumnGlyphs(in terminal: Terminal) -> Set<Character> {
-        let cols = terminal.cols, rows = terminal.rows
+    private static func scrollbarColumnGlyphs(in snapshot: TerminalContentSnapshot) -> Set<Character> {
+        let cols = snapshot.inputState.dimensions.cols, rows = snapshot.inputState.dimensions.rows
         guard cols > 1, rows > 0 else { return [] }
         var counts: [Character: Int] = [:]
-        for r in 0 ..< rows {
-            if let ch = terminal.getCharacter(col: cols - 1, row: r), scrollbarGlyphs.contains(ch) {
+        for row in snapshot.rows where row.cells.indices.contains(cols - 1) {
+            if let ch = row.cells[cols - 1].text.first, scrollbarGlyphs.contains(ch) {
                 counts[ch, default: 0] += 1
             }
         }

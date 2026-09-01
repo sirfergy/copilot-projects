@@ -391,9 +391,34 @@ Override it with `COPILOT_PROJECTS_DTACH`.
 ## Renderer
 
 SwiftTerm's Metal renderer is the default. Set `COPILOT_PROJECTS_RENDERER=coregraphics`
-before launching to use the fallback renderer. The dependency is pinned to an exact upstream
-revision containing fixes for stale Metal rows/cursor, window reparenting, hidden-scroller
-layout, and synchronized output.
+before launching to use the fallback renderer. The dependency is pinned to an immutable
+SwiftTerm revision. Three recently selected terminals retain warm Metal surfaces; parking
+other surfaces does not stop their processes, parser, or scrollback. Metal initialization
+failures use CoreGraphics. A teardown failure is logged without claiming the Metal surface
+was successfully parked.
+
+The Mac host reads copied terminal snapshots rather than mutable terminal internals. Raw
+process output passes through an ordered main-actor consumer so Kitty capture, durable-image
+restoration and parser feeds retain their ordering independently of the render thread.
+
+### Renderer diagnostics
+
+The fork records diagnostic events in unified logging under the static subsystem
+`org.tirania.SwiftTerm`, category `MetalDiagnostics`. The process filter excludes test runs:
+
+```sh
+log show --last 1d --style compact --predicate 'process == "copilot-projects" AND subsystem == "org.tirania.SwiftTerm" AND category == "MetalDiagnostics"'
+```
+
+Events cover transient rasterization failures, actual Metal command errors, delayed completion
+observations after a refused draw, and existing idle-wait timeouts. At most the first five events
+of each kind per process are recorded (20 total); terminal contents, glyph identities, session
+IDs, and paths are not logged.
+
+A slow-completion warning means the completion callback has not been observed for more than
+five seconds, **not** that a GPU hang is proven. Delay checks occur only on a subsequent draw
+refusal or existing idle wait, not while a terminal is fully idle. This logging adds no timers,
+watchdogs, automatic retries, or recovery policy.
 
 ## How it works
 

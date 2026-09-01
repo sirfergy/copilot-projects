@@ -1285,94 +1285,27 @@ final class AppModel: ObservableObject {
         guard locateIndex(sessionId) != nil,
               let view = controller(for: sessionId)?.terminalView,
               !view.isRestoringImages,
-              let terminal = view.terminal else {
-            return nil
-        }
-        let translate: (Int) -> String? = { row in
-            terminal.getScrollInvariantLine(row: row)?.translateToString(
-                trimRight: true,
-                skipNullCellsFollowingWide: false,
-                characterProvider: { terminal.getCharacter(for: $0) }
-            )
-        }
-        let terminalScroll = terminal.isCurrentBufferAlternate
-            || liveAgentSessions.contains(sessionId)
-        let currentVersion = { (imageId: UInt32, placementId: UInt32) in
-            view.kittyImageCapture.currentVersion(for: imageId, placementId: placementId)
-        }
-        if terminalScroll {
-            let screen = RemoteTerminalScreen.captureVisible(
-                sessionId: sessionId,
-                cols: terminal.cols,
-                rows: terminal.rows,
-                lineAt: { row in
-                    terminal.getLine(row: row)?.translateToString(
-                        trimRight: true,
-                        skipNullCellsFollowingWide: false,
-                        characterProvider: { terminal.getCharacter(for: $0) }
-                    )
-                }
-            )
-            // Live/alternate-screen mode: `getLine(row:)` is keyed by viewport
-            // row, matching `firstLine == 0` in the emitted screen.
-            let gridLines = (0 ..< terminal.rows).compactMap { row in
-                terminal.getLine(row: row).map { (lineId: row, line: $0) }
-            }
-            // Live/alternate-screen mode: the entire viewport is "the current
-            // screen window", so every discovered placement is priority.
-            let placements = RemoteKittyPlacementScanner.scan(
-                cells: RemoteKittyPlacementScanner.gridCells(from: gridLines, terminal: terminal),
-                firstLine: 0,
-                priorityLineRange: 0 ..< terminal.rows,
-                currentVersion: currentVersion
-            )
-            // Always attach a present array (even `[]`), never `nil`: this
-            // host scans the *full* retained history on every screen, so an
-            // empty result is a definitive "nothing retained anywhere" —
-            // letting a client distinguish that from an older host that
-            // omits the field entirely (and safely drop any placement it
-            // was previously showing instead of assuming it's still there).
-            return screen.withImages(placements)
-        }
-        let screen = RemoteTerminalScreen.captureHistory(
-            sessionId: sessionId,
-            cols: terminal.cols,
-            rows: terminal.rows,
-            absoluteStart: terminal.buffer.totalLinesTrimmed,
-            scanRows: terminal.options.scrollback + terminal.rows,
-            maximumRows: min(terminal.options.scrollback, 500) + terminal.rows,
-            afterLine: afterLine,
-            lineExists: { terminal.getScrollInvariantLine(row: $0) != nil },
-            lineAt: translate
-        )
-        // History mode: recompute against the screen's own `firstLine` (never a
-        // stale value from a prior live/history capture) using scroll-invariant
-        // absolute row ids, matching how its lines were captured above. The scan
-        // window covers the *entire* retained history range
-        // `[historyStartLine, liveTopLine + rows)` — not just the emitted text
-        // window padded by a fixed number of rows — so any image retained
-        // anywhere in that window (including one taller than the viewport, or
-        // one that straddles an incremental `afterLine`-narrowed window
-        // boundary) is discovered in full: only its *emitted* `line` stays
-        // relative to `screen.firstLine` (so it can go negative for rows above
-        // the emitted window), never the scan itself.
-        let scanLowerBound = screen.historyStartLine
-        let scanUpperBound = screen.liveTopLine + screen.rows
-        let gridLines = (scanLowerBound ..< max(scanLowerBound, scanUpperBound)).compactMap { row in
-            terminal.getScrollInvariantLine(row: row).map { (lineId: row, line: $0) }
-        }
-        // The current/emitted incremental text window (`screen.firstLine ..<
-        // screen.firstLine + screen.lines.count`) is the priority tier: a
-        // placement a client can actually see right now must never be
-        // starved out of the cap by older, merely-still-retained history.
+              let input = view.terminalInputStateSnapshot() else { return nil }
+        let terminalScroll = input.isAlternateBuffer || liveAgentSessions.contains(sessionId)
+        guard let snapshot = view.terminalContentSnapshot(
+            region: terminalScroll ? .viewport : .history(maximumScrollbackRows: 500)),
+              snapshot.inputState.isAlternateBuffer == input.isAlternateBuffer
+        else { return nil }
+        let screen = RemoteTerminalScreen.capture(
+            sessionId: sessionId, snapshot: snapshot,
+            terminalScroll: terminalScroll, afterLine: afterLine)
+        // Scan the entire copied window, not just the afterLine-narrowed text.
+        // Images crossing the incremental boundary retain their full geometry.
         let placements = RemoteKittyPlacementScanner.scan(
-            cells: RemoteKittyPlacementScanner.gridCells(from: gridLines, terminal: terminal),
+            cells: RemoteKittyPlacementScanner.gridCells(
+                from: snapshot.rows,
+                relativeTo: terminalScroll ? snapshot.capturedRange.lowerBound : 0),
             firstLine: screen.firstLine,
             priorityLineRange: screen.firstLine ..< (screen.firstLine + screen.lines.count),
-            currentVersion: currentVersion
-        )
-        // Always attach a present array (even `[]`), never `nil` — see the
-        // matching comment in the live branch above.
+            currentVersion: { imageId, placementId in
+                view.kittyImageCapture.currentVersion(for: imageId, placementId: placementId)
+            })
+        // A present empty array authoritatively clears previous placements.
         return screen.withImages(placements)
     }
 
@@ -1424,7 +1357,7 @@ final class AppModel: ObservableObject {
               let controller = controller(for: sessionId),
               !controller.exited,
               controller.shellPID > 0,
-              controller.terminalView.terminal != nil else { return nil }
+              controller.terminalView.terminalInputStateSnapshot() != nil else { return nil }
         return controller.terminalView
     }
 
