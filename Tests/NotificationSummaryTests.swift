@@ -90,6 +90,63 @@ final class NotificationSummaryTests: XCTestCase {
         ))
     }
 
+    func testCompletionUsesLiveAgentStopBeforeDurableTurnCloses() throws {
+        let sessionId = UUID().uuidString
+        Paths.ensureStateDir()
+        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
+        // The real completion arrived before the durable transcript had an idle boundary.
+        let data = Data("""
+        {
+          "schemaVersion": 3,
+          "updatedAt": "2026-09-01T16:33:42.000Z",
+          "copilotSessionId": "completed-conversation",
+          "turns": [{
+            "id": "live-turn",
+            "startedAt": "2026-09-01T16:31:47.532Z",
+            "endedAt": null,
+            "kind": "foreground",
+            "userContent": "Did it work?",
+            "assistantMessages": [{
+              "id": "final-response",
+              "timestamp": "2026-09-01T16:33:41.991Z",
+              "content": "The **deployed app** is running."
+            }],
+            "tools": [],
+            "isAborted": false
+          }]
+        }
+        """.utf8)
+        try data.write(to: URL(
+            fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
+        ), options: .atomic)
+        let context = try XCTUnwrap(CompletionSummaryContext(
+            copilotSessionId: copilotSessionId,
+            activeTimestamp: 1_788_280_410_300,
+            completionTimestamp: 1_788_280_422_020
+        ))
+        let decoded = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
+        XCTAssertEqual(decoded.turns.count, 1)
+        XCTAssertNil(decoded.turns[0].endedAt)
+        XCTAssertEqual(NotificationSummary.completion(from: decoded, context: context),
+                       "The deployed app is running.")
+    }
+
+    func testOpenTurnRequiresFreshResponseButClosedTurnCanRetainTaskSummary() throws {
+        let context = try context()
+        for timestamp in [1.0, 1.9, 2.0] {
+            XCTAssertNil(NotificationSummary.completion(
+                from: snapshot([turn(endedAt: nil, messageAt: timestamp)]),
+                context: context
+            ))
+        }
+        XCTAssertEqual(NotificationSummary.completion(
+            from: snapshot([turn(endedAt: nil, messageAt: 2.001)]), context: context
+        ), "Fixed notification previews. All done.")
+        XCTAssertEqual(NotificationSummary.completion(
+            from: snapshot([turn(messageAt: 1.9)]), context: context
+        ), "Fixed notification previews. All done.")
+    }
+
     func testCompletionRejectsTurnStartingAtCompletionBoundary() throws {
         XCTAssertNil(NotificationSummary.completion(
             from: snapshot([
@@ -171,7 +228,7 @@ final class NotificationSummaryTests: XCTestCase {
         for invalid in [
             turn(endedAt: 2),
             turn(startedAt: 5, endedAt: 6, messageAt: 5.5),
-            turn(endedAt: nil),
+            turn(endedAt: nil, messageAt: 1.9),
             turn(kind: "scheduled"),
             turn(id: "session-resume-event", startedAt: 4.5, endedAt: 4.5, kind: "automated",
                  content: "Session resumed. Terminal startup details are available in Terminal.",
@@ -197,7 +254,7 @@ final class NotificationSummaryTests: XCTestCase {
     }
 
     func testSnapshotFlushIsRetriedButMissingContentIsBounded() async throws {
-        let pending = snapshot([turn(endedAt: nil)])
+        let pending = snapshot([turn(endedAt: nil, content: "I'll check that.", messageAt: 1.9)])
         let finished = snapshot([turn()])
         let source = SnapshotSource([pending, finished])
         let result = await NotificationSummary.loadCompletion(
@@ -220,7 +277,7 @@ final class NotificationSummaryTests: XCTestCase {
         defer { SessionArtifacts.removeFiles(sessionId: session.id) }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(snapshot([turn()])).write(to: URL(
+        try encoder.encode(snapshot([turn(endedAt: nil)])).write(to: URL(
             fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: session.id)
         ), options: .atomic)
         let model = try model(session: session)
