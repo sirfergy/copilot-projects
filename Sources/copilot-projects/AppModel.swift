@@ -370,6 +370,8 @@ final class AppModel: ObservableObject {
     private var sessionSemantics = SessionSemanticsState()
     private var backgroundAgentsSuppressed: Set<String> = []
     private var completionPending: Set<String> = []
+    private var completionSummaryContexts: [String: CompletionSummaryContext] = [:]
+    private let completionTranscriptLoader: @Sendable (String) -> TranscriptSnapshot
     private var scheduledSnapshotsSuppressed: Set<String> = []
     private var foregroundIdleGenerationBaselines: [String: Int] = [:]
     private let completionNotificationDelayNanoseconds: UInt64
@@ -448,6 +450,9 @@ final class AppModel: ObservableObject {
     init(
         stateRepository: StateRepository = StateRepository(),
         completionNotificationDelayNanoseconds: UInt64 = 1_000_000_000,
+        completionTranscriptLoader: @escaping @Sendable (String) -> TranscriptSnapshot = {
+            TranscriptController.loadRemoteSnapshot(sessionId: $0)
+        },
         permissionNotificationDelayNanoseconds: UInt64 = 1_000_000_000,
         persistPermissionStatus: @escaping (
             _ sessionId: String, _ status: SessionStatus, _ timestamp: Int64,
@@ -491,6 +496,7 @@ final class AppModel: ObservableObject {
     ) {
         self.stateRepository = stateRepository
         self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
+        self.completionTranscriptLoader = completionTranscriptLoader
         self.permissionNotificationDelayNanoseconds = permissionNotificationDelayNanoseconds
         self.persistPermissionStatus = persistPermissionStatus
         self.isAppActive = isAppActive
@@ -1080,6 +1086,7 @@ final class AppModel: ObservableObject {
         sessionSemantics.reset(sessionId: sid)
         backgroundAgentsSuppressed.remove(sid)
         completionPending.remove(sid)
+        completionSummaryContexts[sid] = nil
         permissionNotificationTokens[sid] = nil
         permissionStatusRestores[sid] = nil
         scheduledSnapshotsSuppressed.remove(sid)
@@ -2034,6 +2041,7 @@ final class AppModel: ObservableObject {
             transcriptOpenSessions.remove(session.id)
             backgroundAgentsSuppressed.remove(session.id)
             completionPending.remove(session.id)
+            completionSummaryContexts[session.id] = nil
             scheduledSnapshotsSuppressed.remove(session.id)
             foregroundIdleGenerationBaselines.removeValue(forKey: session.id)
         }
@@ -2218,6 +2226,7 @@ final class AppModel: ObservableObject {
         notification: StatusNotificationKind? = nil
     ) {
         guard let loc = locateIndex(sessionId) else { return }
+        let previousTimestamp = sessionSemantics.statusClock.timestamp(for: sessionId)
         guard sessionSemantics.shouldApplyStatusEvent(
             sessionId: sessionId,
             timestamp: timestamp,
@@ -2308,6 +2317,13 @@ final class AppModel: ObservableObject {
             }
         }
         if hasCompletionSignal {
+            if !completionPending.contains(sessionId) {
+                completionSummaryContexts[sessionId] = CompletionSummaryContext(
+                    copilotSessionId: copilotSessionId,
+                    activeTimestamp: previousTimestamp,
+                    completionTimestamp: timestamp
+                )
+            }
             completionPending.insert(sessionId)
         }
         if status == .idle && source == "session-idle" && notification != .completed {
@@ -3075,7 +3091,8 @@ final class AppModel: ObservableObject {
         sessionId: String,
         kind: StatusNotificationKind? = nil,
         title: String,
-        body: String?
+        body: String?,
+        completionSummaryContext: CompletionSummaryContext? = nil
     ) {
         var subtitle: String?
         var isTargetVisible = false
@@ -3090,7 +3107,7 @@ final class AppModel: ObservableObject {
                 sessionTitle: projects[loc.p].sessions[loc.s].title
             )
         }
-        notifications?.post(NotificationEvent(
+        let event = NotificationEvent(
             kind: kind,
             title: title,
             subtitle: subtitle,
@@ -3098,14 +3115,46 @@ final class AppModel: ObservableObject {
             projectId: projectId,
             sessionId: sessionId,
             isTargetVisible: isTargetVisible
-        ))
+        )
         updateDockBadge()
+        guard let context = completionSummaryContext else {
+            notifications?.post(event)
+            return
+        }
+        let completionClock = sessionSemantics.statusClock.timestamp(for: sessionId)
+        let loadSnapshot = completionTranscriptLoader
+        Task { @MainActor [weak self] in
+            let summary = await Task.detached {
+                await NotificationSummary.loadCompletion(
+                    sessionId: sessionId,
+                    context: context,
+                    loadSnapshot: loadSnapshot
+                )
+            }.value
+            guard let self else { return }
+            // Another hook may start a new turn while the transcript is loading.
+            // Keep the original alert, but never attach that turn's content to it.
+            let stillCurrent = sessionSemantics.statusClock.timestamp(for: sessionId)
+                == completionClock
+            notifications?.post(NotificationEvent(
+                id: event.id,
+                kind: event.kind,
+                title: event.title,
+                subtitle: event.subtitle,
+                body: stillCurrent ? summary : nil,
+                projectId: event.projectId,
+                sessionId: event.sessionId,
+                isTargetVisible: event.isTargetVisible,
+                sentAt: event.sentAt
+            ))
+        }
     }
 
     private func postCompletionIfReady(sessionId: String) {
         guard completionPending.contains(sessionId) else { return }
         guard let loc = locateIndex(sessionId) else {
             completionPending.remove(sessionId)
+            completionSummaryContexts[sessionId] = nil
             return
         }
         let snapshotActivity = projects[loc.p].sessions[loc.s].agentActivity
@@ -3115,6 +3164,7 @@ final class AppModel: ObservableObject {
         if projects[loc.p].sessions[loc.s].scheduledTurnActive || scheduledIdleIsCurrent
         {
             completionPending.remove(sessionId)
+            completionSummaryContexts[sessionId] = nil
             projects[loc.p].sessions[loc.s].turnCompleted = true
             foregroundIdleGenerationBaselines.removeValue(forKey: sessionId)
             return
@@ -3126,6 +3176,7 @@ final class AppModel: ObservableObject {
         ) else { return }
         guard !projects[loc.p].sessions[loc.s].hasBackgroundWork else { return }
         completionPending.remove(sessionId)
+        let summaryContext = completionSummaryContexts.removeValue(forKey: sessionId)
 
         guard !projects[loc.p].sessions[loc.s].turnCompleted else { return }
         projects[loc.p].sessions[loc.s].turnCompleted = true
@@ -3144,7 +3195,8 @@ final class AppModel: ObservableObject {
             sessionId: sessionId,
             kind: .completed,
             title: StatusNotificationKind.completed.title,
-            body: nil
+            body: nil,
+            completionSummaryContext: summaryContext
         )
     }
 

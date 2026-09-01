@@ -36,6 +36,10 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   single remote writer lease.
 - **Notifications:** native macOS banners identify the originating project/session and
   automatically alert when Copilot has a question, needs permission, or finishes a task.
+  Task completions include a short, plain-text preview of the completed turn's response
+  on Mac, native iOS, and web push. Previews are derived locally (no extra model call),
+  omit code blocks, and fall back to the generic alert when the matching transcript
+  is unavailable. Response previews can appear on your devices' lock screens.
   Clicking one focuses that session. Remote web push provides the same timestamped events to
   subscribed browsers and installed iPhone/iPad Home Screen apps. Unread sessions get a bell
   badge + a Dock badge count.

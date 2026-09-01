@@ -129,6 +129,11 @@ final class NotificationManager: NSObject, NotificationPosting, UNUserNotificati
         UNUserNotificationCenter.current().add(request) { error in
             if let error = error {
                 NSLog("copilot-projects: failed to post notification \(error)")
+            } else if event.kind == .completed {
+                NSLog(
+                    "copilot-projects: completion notification accepted session=%@ previewCharacters=%ld",
+                    event.sessionId ?? "-", event.body?.count ?? 0
+                )
             }
         }
     }

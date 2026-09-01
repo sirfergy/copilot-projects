@@ -232,7 +232,7 @@ public enum CopilotHooks {
             source="agent-stop"
           fi
         fi
-        status idle "$(payload_timestamp "$payload")" "$source"
+        status idle "$(payload_timestamp "$payload")" "$source" "" "$(payload_session_id "$payload")"
         ;;
       pre)
         payload="$(cat 2>/dev/null || true)"
@@ -279,7 +279,7 @@ public enum CopilotHooks {
           if [ "$had_active_turn" -eq 1 ] && ! is_aborted "$payload"; then
             notification="completed"
           fi
-          status idle "$timestamp" session-idle "$notification"
+          status idle "$timestamp" session-idle "$notification" "$(payload_session_id "$payload")"
         else
           notification="$(input_notification_kind "$payload")"
           [ -n "$notification" ] || { emit; exit 0; }
