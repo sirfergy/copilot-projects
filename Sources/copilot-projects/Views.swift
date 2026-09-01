@@ -45,7 +45,7 @@ struct RootView: View {
 
     private var tabRow: some View {
         HStack(spacing: 0) {
-            if let project = model.selectedProject, !project.sessions.isEmpty {
+            if let project = model.selectedProject {
                 SessionTabBar(model: model, project: project)
             } else {
                 Spacer(minLength: 0)
