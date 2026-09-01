@@ -18,11 +18,11 @@ let package = Package(
         ),
     ],
     dependencies: [
-        // SwiftTerm 2.0 with copied embedding APIs, caret/glyph correctness
-        // fixes, and bounded Metal recovery; no legacy recovery framework.
+        // SwiftTerm 2.0 with copied embedding APIs, the caret-ordering fix,
+        // and diagnostic-only renderer logging.
         .package(
             url: "https://github.com/sirfergy/SwiftTerm",
-            revision: "83f15e7aca5c3cef45ee61158bb83c1fce43b49a"
+            revision: "3e6a8632bbdeaf4c90921b0847ee240f76aa061f"
         ),
         .package(
             url: "https://github.com/apple/swift-nio",

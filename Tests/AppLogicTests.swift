@@ -3,6 +3,7 @@ import XCTest
 import CopilotProjectsCore
 import CopilotProjectsProtocol
 import AppKit
+import SwiftTerm
 import Combine
 import Security
 import WebPush
@@ -166,8 +167,9 @@ final class AppLogicTests: XCTestCase {
         window.contentView = view
         defer { window.contentView = nil }
 
-        view.metalRendererFallbackHandler?(.deviceUnavailable)
+        view.handleMetalActivationFailure(MetalError.deviceUnavailable)
         view.setRendererActive(true)
+        view.forceRedraw()
 
         XCTAssertEqual(view.rendererName, "coregraphics-fallback")
         XCTAssertFalse(view.isUsingMetalRenderer)

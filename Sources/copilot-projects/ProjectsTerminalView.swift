@@ -95,9 +95,6 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         } catch {
             preconditionFailure("Output consumer must be configured before process startup: \(error)")
         }
-        metalRendererFallbackHandler = { [weak self] error in
-            self?.handleMetalRendererFallback(error)
-        }
     }
 
     func consumeProcessOutput(_ slice: ArraySlice<UInt8>) {
@@ -646,12 +643,6 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         applyRendererState()
     }
 
-    func handleMetalRendererFallback(_ error: MetalError) {
-        guard rendererMode == .metal else { return }
-        enterCoreGraphicsFallback()
-        NSLog("copilot-projects: SwiftTerm fell back to CoreGraphics: \(error)")
-    }
-
     private func enterCoreGraphicsFallback() {
         rendererMode = .coreGraphicsFallback
         applyCoreGraphicsRenderer(name: "coregraphics-fallback")
@@ -714,17 +705,8 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     }
 
     func handleMetalActivationFailure(_ error: Error) {
-        switch error {
-        case MetalError.inFlightLimitReached:
-            // Ordinary capacity pressure is retryable on a later reveal or
-            // LRU reconciliation. Do not latch fallback or start a retry loop.
-            let usingMetal = isUsingMetalRenderer
-            rendererName = usingMetal ? "metal" : "coregraphics-pending-metal"
-            if !usingMetal { disableFullRedrawOnAnyChanges = false }
-        default:
-            enterCoreGraphicsFallback()
-            NSLog("copilot-projects: Metal renderer unavailable, using CoreGraphics: \(error)")
-        }
+        enterCoreGraphicsFallback()
+        NSLog("copilot-projects: Metal initialization failed; renderer=\(rendererName): \(error)")
     }
 
     private func parkMetalRenderer() {
@@ -753,13 +735,12 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         requestRedraw()
         DispatchQueue.main.async { [weak self] in
             guard let self, self.rendererShouldBeActive, self.window != nil else { return }
-            self.applyRendererState()
             self.requestRedraw()
         }
     }
 
-    /// Preserve the container's synchronous Metal reveal while normal redraw
-    /// scheduling owns retries and CoreGraphics snapshot refreshes.
+    /// Preserve the container's synchronous Metal reveal while normal frame
+    /// scheduling refreshes the current model for either backend.
     func forceRedraw() {
         refreshSurface()
         if isUsingMetalRenderer {
