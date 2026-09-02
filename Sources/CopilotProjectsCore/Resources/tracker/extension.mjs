@@ -920,6 +920,25 @@ if (validSessionId && socketPath) {
         return { state: "indeterminate", errorCode: "rpc-indeterminate" };
     }
 
+    function modelSwitchReceiptOutcome(result, requestedModelId) {
+        // switchTo returns model metadata, not the boolean success used by UI
+        // answers. Even status "applied" can describe a deferred queue entry.
+        if (result?.deferred === undefined || result.deferred === false) {
+            switch (result?.status) {
+            case "cancelled":
+            case "confirmation_required":
+                return { state: "rejected", errorCode: "rpc-rejected" };
+            case undefined: // Older runtimes returned only modelId and deferred.
+            case "applied":
+            case "unchanged":
+                if (result?.modelId === requestedModelId) {
+                    return { state: "applied", errorCode: null };
+                }
+            }
+        }
+        return { state: "indeterminate", errorCode: "rpc-indeterminate" };
+    }
+
     function publishRejectedPreflight(context, errorCode, path, encoded) {
         if (!operationAuthorityCurrent(context)) return false;
         if (!operationReceipts.has(context.operationId)) {
@@ -3080,7 +3099,7 @@ if (validSessionId && socketPath) {
                 );
                 refreshModels();
             } else {
-                const outcome = rpcReceiptOutcome(result);
+                const outcome = modelSwitchReceiptOutcome(result, params.modelId);
                 const published = publishTerminalReceipt(
                     operation.context,
                     outcome.state,

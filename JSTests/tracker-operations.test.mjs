@@ -78,7 +78,9 @@ class FakeSession {
     this.modelSwitchCalls = [];
     this.userInputHandler = async () => ({ success: true });
     this.elicitationHandler = async () => ({ success: true });
-    this.modelSwitchHandler = async () => ({ success: true });
+    this.modelSwitchHandler = async (request) => ({
+      status: "applied", modelId: request.modelId, deferred: false,
+    });
     this.modelListHandler = async () => ({
       list: [{
         id: "gpt-5.6-sol",
@@ -406,9 +408,11 @@ test("all SDK controls preserve legacy behavior and publish correlated receipts"
       await entry.prepare(runtime, requestId);
       const fields = operationFields(runtime, entry.name);
       let acceptedAtRPC = null;
-      entry.setHandler(runtime, async () => {
+      entry.setHandler(runtime, async (request) => {
         acceptedAtRPC = receipt(runtime, fields.operationId);
-        return { success: true };
+        return entry.name === "set-model"
+          ? { status: "applied", modelId: request.modelId, deferred: false }
+          : { success: true };
       });
       if (entry.name === "set-model") {
         runtime.session.modelListHandler = () => new Promise(() => {});
@@ -504,6 +508,121 @@ test("accepted publication failure blocks RPC and identical operations deduplica
   );
 });
 
+test("model receipts interpret switchTo metadata without a model event", {
+  concurrency: false,
+}, async (t) => {
+  const target = "gpt-5.6-sol";
+  const applied = { status: "applied", modelId: target, deferred: false };
+  const cases = [
+    ["applied", applied, "applied"],
+    ["unchanged", { ...applied, status: "unchanged" }, "applied"],
+    ["legacy model id", { modelId: target }, "applied"],
+    ["legacy immediate", { modelId: target, deferred: false }, "applied"],
+    ["cancelled", { status: "cancelled", deferred: false }, "rejected"],
+    ["confirmation", {
+      status: "confirmation_required", modelId: "previous", deferred: false,
+      confirmation: { currentTokens: 200, targetLimit: 100 },
+    }, "rejected"],
+    ["deferred", {
+      ...applied, modelId: "previous", deferred: true,
+    }, "indeterminate"],
+    ["deferred same model", { ...applied, deferred: true }, "indeterminate"],
+    ["legacy deferred", { modelId: target, deferred: true }, "indeterminate"],
+    ["contradictory deferred cancellation", {
+      ...applied, status: "cancelled", deferred: true,
+    }, "indeterminate"],
+    ["different model", { ...applied, modelId: "previous" }, "indeterminate"],
+    ["missing model", { status: "applied", deferred: false }, "indeterminate"],
+    ["unknown status", { ...applied, status: "queued" }, "indeterminate"],
+    ["null status", { ...applied, status: null }, "indeterminate"],
+    ["null deferral", { ...applied, deferred: null }, "indeterminate"],
+    ["string deferral", { ...applied, deferred: "false" }, "indeterminate"],
+    ["missing result", undefined, "indeterminate"],
+    ["null result", null, "indeterminate"],
+    ["boolean success", { success: true }, "indeterminate"],
+    ["boolean failure", { success: false }, "indeterminate"],
+    ["RPC exception", new Error("private RPC details"), "indeterminate"],
+  ];
+  for (const [name, result, state] of cases) {
+    await t.test(name, async (t) => {
+      const runtime = await createRuntime(t);
+      const fields = operationFields(runtime, "set-model");
+      let acceptedAtRPC;
+      runtime.session.modelSwitchHandler = async () => {
+        acceptedAtRPC = receipt(runtime, fields.operationId)?.state;
+        if (result instanceof Error) throw result;
+        return result;
+      };
+      const payload = {
+        schemaVersion: 1,
+        copilotSessionId: runtime.copilotSessionId,
+        modelId: target,
+        reasoningEffort: "high",
+        contextTier: "long_context",
+        ...fields,
+      };
+      writeHandoff(runtime, runtime.modelPath, payload);
+      trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
+      await waitFor(
+        () => receipt(runtime, fields.operationId)?.state === state,
+        `${name} did not publish a ${state} receipt`
+      );
+      const outcome = receipt(runtime, fields.operationId);
+      assert.equal(acceptedAtRPC, "accepted");
+      assert.equal(outcome.kind, "set-model");
+      assert.equal(outcome.conversationEpoch, fields.conversationEpoch);
+      assert.equal(outcome.payloadFingerprint, fields.payloadFingerprint);
+      assert.equal(outcome.errorCode, state === "applied" ? undefined
+        : state === "rejected" ? "rpc-rejected" : "rpc-indeterminate");
+      assert.equal(JSON.stringify(outcome).includes("private RPC details"), false);
+      assert.equal(realExistsSync(runtime.modelPath), false);
+      assert.deepEqual(runtime.session.modelSwitchCalls, [{
+        modelId: target, reasoningEffort: "high", contextTier: "long_context",
+      }]);
+
+      writeHandoff(runtime, runtime.modelPath, payload);
+      trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
+      await waitFor(
+        () => !realExistsSync(runtime.modelPath),
+        `${name} did not remove the replayed handoff`
+      );
+      assert.equal(runtime.session.modelSwitchCalls.length, 1);
+      assert.deepEqual(receipt(runtime, fields.operationId), outcome);
+    });
+  }
+});
+
+test("a deferred model event updates the model without guessing its receipt", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  const fields = operationFields(runtime, "set-model");
+  runtime.session.modelSwitchHandler = async () => ({
+    status: "applied", modelId: "previous", deferred: true,
+  });
+  writeHandoff(runtime, runtime.modelPath, {
+    schemaVersion: 1,
+    copilotSessionId: runtime.copilotSessionId,
+    modelId: "gpt-5.6-sol",
+    reasoningEffort: "high",
+    contextTier: "long_context",
+    ...fields,
+  });
+  trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
+  await waitFor(
+    () => receipt(runtime, fields.operationId)?.state === "indeterminate",
+    "deferred model switch was treated as applied"
+  );
+  const outcome = receipt(runtime, fields.operationId);
+  await runtime.session.emit("session.model_change", {
+    newModel: "gpt-5.6-sol", reasoningEffort: "high", contextTier: "long_context",
+  });
+  assert.deepEqual(readSnapshot(runtime).model, {
+    name: "gpt-5.6-sol", reasoningEffort: "high", contextTier: "long_context",
+  });
+  assert.deepEqual(receipt(runtime, fields.operationId), outcome);
+});
+
 test("rotation fences an old model callback from the new conversation handoff", {
   concurrency: false,
 }, async (t) => {
@@ -553,7 +672,7 @@ test("rotation fences an old model callback from the new conversation handoff", 
   };
   writeHandoff(runtime, runtime.modelPath, newPayload);
 
-  resolveOld({ success: true });
+  resolveOld({ status: "applied", modelId: "gpt-5.6-sol", deferred: false });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(realExistsSync(runtime.modelPath), true);
   assert.deepEqual(
@@ -562,7 +681,9 @@ test("rotation fences an old model callback from the new conversation handoff", 
   );
   assert.equal(receipt(runtime, oldFields.operationId), undefined);
 
-  runtime.session.modelSwitchHandler = async () => ({ success: true });
+  runtime.session.modelSwitchHandler = async (request) => ({
+    status: "applied", modelId: request.modelId, deferred: false,
+  });
   trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
   await waitFor(
     () => receipt(runtime, newFields.operationId)?.state === "applied",
