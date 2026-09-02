@@ -22,7 +22,7 @@ let package = Package(
         // and diagnostic-only renderer logging.
         .package(
             url: "https://github.com/sirfergy/SwiftTerm",
-            revision: "2501025ba4206289b3191475d084eded28c55d22"
+            revision: "18de4c63fb5637d1a3d2ada17951f872682b329d"
         ),
         .package(
             url: "https://github.com/apple/swift-nio",
