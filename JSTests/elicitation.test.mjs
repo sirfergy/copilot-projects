@@ -31,13 +31,18 @@ function elicitationHelpers(globals = {}) {
     ...bindings(context, [
       "parseElicitationForm",
       "elicitationAccepts",
+      "seedElicitationDefaults",
       "validatedElicitationContent",
     ]),
   };
 }
 
 test("agent choice fields accept non-empty Other answers while MCP stays closed", () => {
-  const { parseElicitationForm, validatedElicitationContent } =
+  const {
+    parseElicitationForm,
+    seedElicitationDefaults,
+    validatedElicitationContent,
+  } =
     elicitationHelpers();
   const schema = {
     type: "object",
@@ -108,6 +113,38 @@ test("agent choice fields accept non-empty Other answers while MCP stays closed"
     )),
     { answer: "" },
     "the declared empty-string option remains selectable"
+  );
+
+  const customDefaultSchema = {
+    type: "object",
+    required: ["fruit"],
+    properties: {
+      fruit: {
+        type: "string",
+        oneOf: [{ const: "apple", title: "Apple" }],
+        default: "banana",
+      },
+    },
+  };
+  const agentEntry = {
+    form: parseElicitationForm(customDefaultSchema, true),
+    values: {},
+  };
+  seedElicitationDefaults(agentEntry);
+  assert.equal(
+    agentEntry.values.fruit,
+    "banana",
+    "agent choice forms preserve a custom default"
+  );
+  const mcpEntry = {
+    form: parseElicitationForm(customDefaultSchema, false),
+    values: {},
+  };
+  seedElicitationDefaults(mcpEntry);
+  assert.equal(
+    mcpEntry.values.fruit,
+    "apple",
+    "MCP choice forms continue to replace an invalid default"
   );
 });
 

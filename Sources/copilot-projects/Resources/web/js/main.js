@@ -1967,7 +1967,11 @@ function validatedElicitationContent(
 function seedElicitationDefaults(entry) {
   if (!entry.form) return;
   for (const field of entry.form.fields) {
-    if (field.hasDefault && elicitationAccepts(field.kind, field.defaultValue)) {
+    if (field.hasDefault && elicitationAccepts(
+      field.kind,
+      field.defaultValue,
+      entry.form.allowFreeformChoices
+    )) {
       entry.values[field.key] = field.defaultValue;
     } else if (field.required) {
       switch (field.kind.type) {
