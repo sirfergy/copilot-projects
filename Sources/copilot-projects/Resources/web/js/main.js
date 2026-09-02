@@ -1843,7 +1843,7 @@ function elicitationFieldKind(prop) {
     default: return null;
   }
 }
-function parseElicitationForm(schema) {
+function parseElicitationForm(schema, allowFreeformChoices = false) {
   if (!isPlainObject(schema)) return null;
   const supportedRootKeys = new Set([
     '$schema', 'type', 'title', 'description', 'properties', 'required',
@@ -1883,7 +1883,7 @@ function parseElicitationForm(schema) {
       defaultValue: 'default' in prop ? prop.default : undefined
     });
   }
-  return fields.length ? { fields } : null;
+  return fields.length ? { fields, allowFreeformChoices } : null;
 }
 function terminalDefaultBoolean(request) {
   if (request.mode !== 'terminal-default'
@@ -1899,13 +1899,15 @@ function terminalDefaultBoolean(request) {
       || typeof field.default !== 'boolean') return null;
   return { key: keys[0], value: field.default };
 }
-function elicitationAccepts(kind, value) {
+function elicitationAccepts(kind, value, allowFreeformChoices = false) {
   switch (kind.type) {
     case 'stringEnum':
-      return typeof value === 'string' && kind.options.includes(value);
+      return typeof value === 'string'
+        && (kind.options.includes(value) || (allowFreeformChoices && value.length > 0));
     case 'stringOneOf':
       return typeof value === 'string'
-        && kind.choices.some((choice) => choice.value === value);
+        && (kind.choices.some((choice) => choice.value === value)
+          || (allowFreeformChoices && value.length > 0));
     case 'bool':
       return typeof value === 'boolean';
     case 'number':
@@ -1937,7 +1939,12 @@ function elicitationAccepts(kind, value) {
 }
 // Build the accepted-answer payload, or null while any present value is invalid
 // or a required field is missing.
-function validatedElicitationContent(form, values, touched) {
+function validatedElicitationContent(
+  form,
+  values,
+  touched,
+  customChoiceFields = new Set()
+) {
   const payload = {};
   for (const field of form.fields) {
     if (!(field.key in values)) {
@@ -1945,7 +1952,12 @@ function validatedElicitationContent(form, values, touched) {
       continue;
     }
     const value = values[field.key];
-    if (!elicitationAccepts(field.kind, value)) return null;
+    if (customChoiceFields.has(field.key) && value === '') return null;
+    if (!elicitationAccepts(
+      field.kind,
+      value,
+      form.allowFreeformChoices
+    )) return null;
     if (field.required || touched.has(field.key) || field.hasDefault) {
       payload[field.key] = value;
     }
@@ -1955,7 +1967,11 @@ function validatedElicitationContent(form, values, touched) {
 function seedElicitationDefaults(entry) {
   if (!entry.form) return;
   for (const field of entry.form.fields) {
-    if (field.hasDefault && elicitationAccepts(field.kind, field.defaultValue)) {
+    if (field.hasDefault && elicitationAccepts(
+      field.kind,
+      field.defaultValue,
+      entry.form.allowFreeformChoices
+    )) {
       entry.values[field.key] = field.defaultValue;
     } else if (field.required) {
       switch (field.kind.type) {
@@ -2065,7 +2081,12 @@ function refreshElicitationControls(entry) {
       entry.submitButton.disabled = disabled;
     } else if (entry.form) {
       entry.submitButton.disabled = disabled
-        || validatedElicitationContent(entry.form, entry.values, entry.touched) === null;
+        || validatedElicitationContent(
+          entry.form,
+          entry.values,
+          entry.touched,
+          entry.customChoiceFields
+        ) === null;
     }
   }
 }
@@ -2093,7 +2114,15 @@ function toggleElicitationChoice(entry, field, value) {
     .filter((choiceValue) => selected.has(choiceValue));
   entry.touched.add(field.key);
 }
-function buildElicitationChoiceSelect(entry, field, controlId, options) {
+function buildElicitationChoiceSelect(
+  entry,
+  field,
+  controlId,
+  options,
+  allowFreeform = false
+) {
+  const wrap = document.createElement('div');
+  wrap.className = 'elicitation-choice';
   const select = document.createElement('select');
   select.id = controlId;
   select.className = 'elicitation-control';
@@ -2102,21 +2131,78 @@ function buildElicitationChoiceSelect(entry, field, controlId, options) {
     element.textContent = option.title;
     select.append(element);
   });
+  const otherIndex = options.length;
+  let otherInput = null;
+  if (allowFreeform) {
+    const other = document.createElement('option');
+    other.textContent = 'Other';
+    select.append(other);
+
+    const otherLabel = document.createElement('label');
+    otherLabel.className = 'visually-hidden';
+    otherLabel.id = `${controlId}-other-label`;
+    otherLabel.setAttribute('for', `${controlId}-other`);
+    otherLabel.textContent = `${field.title}, other answer`;
+    otherInput = document.createElement('textarea');
+    otherInput.id = `${controlId}-other`;
+    otherInput.className = 'elicitation-control';
+    otherInput.rows = 2;
+    otherInput.hidden = true;
+    otherInput.setAttribute('aria-labelledby', otherLabel.id);
+    otherInput.placeholder = 'Type your answer';
+    otherInput.oninput = () => {
+      entry.values[field.key] = otherInput.value;
+      entry.touched.add(field.key);
+      entry.refresh();
+    };
+    wrap.append(otherLabel);
+  }
   select.onchange = () => {
+    if (allowFreeform && select.selectedIndex === otherIndex) {
+      const current = entry.values[field.key];
+      const matchesChoice = options.some((option) =>
+        option.value !== undefined && elicitationValuesEqual(option.value, current));
+      entry.customChoiceFields.add(field.key);
+      if (matchesChoice || typeof current !== 'string') {
+        entry.values[field.key] = '';
+      }
+      entry.touched.add(field.key);
+      syncChoiceControl();
+      otherInput.focus();
+      entry.refresh();
+      return;
+    }
     const chosen = options[select.selectedIndex];
+    entry.customChoiceFields.delete(field.key);
     if (chosen.value === undefined) delete entry.values[field.key];
     else entry.values[field.key] = chosen.value;
     entry.touched.add(field.key);
+    syncChoiceControl();
     entry.refresh();
   };
-  entry.controlSyncers.push(() => {
+  const syncChoiceControl = () => {
     const current = entry.values[field.key];
     let index = options.findIndex((option) =>
       elicitationValuesEqual(option.value, current));
-    if (index < 0) index = 0;
-    select.selectedIndex = index;
-  });
-  return select;
+    const custom = allowFreeform
+      && (entry.customChoiceFields.has(field.key)
+        || (typeof current === 'string' && current.length > 0 && index < 0));
+    if (custom) {
+      entry.customChoiceFields.add(field.key);
+      select.selectedIndex = otherIndex;
+    } else {
+      if (index < 0) index = 0;
+      select.selectedIndex = index;
+    }
+    if (otherInput) {
+      otherInput.hidden = !custom;
+      otherInput.value = custom && typeof current === 'string' ? current : '';
+    }
+  };
+  entry.controlSyncers.push(syncChoiceControl);
+  wrap.prepend(select);
+  if (otherInput) wrap.append(otherInput);
+  return wrap;
 }
 function buildElicitationControl(entry, field, controlId) {
   const kind = field.kind;
@@ -2125,13 +2211,25 @@ function buildElicitationControl(entry, field, controlId) {
       const options = kind.options.map((option) =>
         ({ value: option, title: option === '' ? 'Empty string' : option }));
       if (!field.required) options.unshift({ value: undefined, title: 'Not set' });
-      return buildElicitationChoiceSelect(entry, field, controlId, options);
+      return buildElicitationChoiceSelect(
+        entry,
+        field,
+        controlId,
+        options,
+        entry.form.allowFreeformChoices
+      );
     }
     case 'stringOneOf': {
       const options = kind.choices.map((choice) =>
         ({ value: choice.value, title: choice.title }));
       if (!field.required) options.unshift({ value: undefined, title: 'Not set' });
-      return buildElicitationChoiceSelect(entry, field, controlId, options);
+      return buildElicitationChoiceSelect(
+        entry,
+        field,
+        controlId,
+        options,
+        entry.form.allowFreeformChoices
+      );
     }
     case 'bool': {
       if (field.required) {
@@ -2359,7 +2457,10 @@ function buildTerminalDefaultControls(entry, card) {
 }
 // Untrusted message/field text is only ever inserted with textContent.
 function buildElicitationCard(request) {
-  const form = parseElicitationForm(request.schema);
+  const form = parseElicitationForm(
+    request.schema,
+    request.elicitationSource == null
+  );
   const entry = {
     request,
     form,
@@ -2369,6 +2470,7 @@ function buildElicitationCard(request) {
       || (typeof request.url === 'string' && request.url.length > 0),
     values: {},
     touched: new Set(),
+    customChoiceFields: new Set(),
     controlSyncers: [],
     card: null,
     submitButton: null,
@@ -2496,7 +2598,12 @@ async function submitElicitation(requestId, action) {
       [entry.terminalDefault.key]: entry.terminalDefault.value
     };
   } else if (action === 'accept' && entry.form) {
-    content = validatedElicitationContent(entry.form, entry.values, entry.touched);
+    content = validatedElicitationContent(
+      entry.form,
+      entry.values,
+      entry.touched,
+      entry.customChoiceFields
+    );
     if (content === null) return;
     let encoded;
     try {
