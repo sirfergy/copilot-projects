@@ -1629,7 +1629,11 @@ final class AppModel: ObservableObject {
                 }
                 guard let content = answer.content,
                       Self.isValidElicitationContent(content),
-                      Self.elicitationContent(content, satisfies: request.schema),
+                      Self.elicitationContent(
+                          content,
+                          satisfies: request.schema,
+                          allowFreeformStringChoices: request.elicitationSource == nil
+                      ),
                       let encoded = try? JSONEncoder().encode(content),
                       encoded.count <= 32_768 else {
                     return false
@@ -1882,7 +1886,8 @@ final class AppModel: ObservableObject {
 
     private static func elicitationContent(
         _ content: [String: RemoteJSONValue],
-        satisfies schema: RemoteJSONValue?
+        satisfies schema: RemoteJSONValue?,
+        allowFreeformStringChoices: Bool
     ) -> Bool {
         guard let schema else { return true }
         guard case .object(let root) = schema else { return false }
@@ -1893,7 +1898,11 @@ final class AppModel: ObservableObject {
         guard required.allSatisfy({ content[$0] != nil }) else { return false }
         for (key, value) in content {
             guard let fieldSchema = properties[key],
-                  elicitationValue(value, satisfies: fieldSchema) else {
+                  elicitationValue(
+                      value,
+                      satisfies: fieldSchema,
+                      allowFreeformStringChoice: allowFreeformStringChoices
+                  ) else {
                 return false
             }
         }
@@ -1902,18 +1911,34 @@ final class AppModel: ObservableObject {
 
     private static func elicitationValue(
         _ value: RemoteJSONValue,
-        satisfies schema: RemoteJSONValue
+        satisfies schema: RemoteJSONValue,
+        allowFreeformStringChoice: Bool = false
     ) -> Bool {
         guard case .object(let schema) = schema else { return true }
-        if let alternatives = jsonArray(schema["oneOf"]) ?? jsonArray(schema["anyOf"]) {
+        let oneOfValues = jsonArray(schema["oneOf"])
+        let enumValues = jsonArray(schema["enum"])
+        let hasFreeformChoiceSet = schema["anyOf"] == nil
+            && ((oneOfValues?.isEmpty == false) != (enumValues?.isEmpty == false))
+        let isNonEmptyFreeformString: Bool
+        if allowFreeformStringChoice,
+           hasFreeformChoiceSet,
+           jsonString(schema["type"]) == "string",
+           case .string(let string) = value {
+            isNonEmptyFreeformString = !string.isEmpty
+        } else {
+            isNonEmptyFreeformString = false
+        }
+        if !isNonEmptyFreeformString,
+           let alternatives = oneOfValues ?? jsonArray(schema["anyOf"]) {
             guard alternatives.contains(where: { alternative in
                 guard case .object(let option) = alternative,
                       let expected = option["const"] else { return false }
                 return expected == value
             }) else { return false }
         }
-        if let enumValues = jsonArray(schema["enum"]),
-           !enumValues.contains(value) {
+        if let enumValues,
+           !enumValues.contains(value),
+           !isNonEmptyFreeformString {
             return false
         }
         guard let type = jsonString(schema["type"]) else { return true }
@@ -1944,7 +1969,13 @@ final class AppModel: ObservableObject {
             if let maximum = jsonNumber(schema["maxItems"]),
                Double(values.count) > maximum { return false }
             if let items = schema["items"] {
-                return values.allSatisfy { elicitationValue($0, satisfies: items) }
+                return values.allSatisfy {
+                    elicitationValue(
+                        $0,
+                        satisfies: items,
+                        allowFreeformStringChoice: false
+                    )
+                }
             }
             return true
         default:

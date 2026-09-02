@@ -3723,6 +3723,73 @@ final class AppLogicTests: XCTestCase {
             .appendingPathComponent("\(session.id).elicitation-response.json")
         let markerURL = directory.appendingPathComponent("\(session.id).copilot-session")
 
+        let formSchema = RemoteJSONValue.object([
+            "type": .string("object"),
+            "required": .array([.string("fruit")]),
+            "properties": .object([
+                "fruit": .object([
+                    "type": .string("string"),
+                    "oneOf": .array([
+                        .object([
+                            "const": .string("apple"),
+                            "title": .string("Apple"),
+                        ]),
+                        .object([
+                            "const": .string("pear"),
+                            "title": .string("Pear"),
+                        ]),
+                    ]),
+                ]),
+                "drink": .object([
+                    "type": .string("string"),
+                    "enum": .array([.string("water"), .string("coffee")]),
+                ]),
+                "ripe": .object(["type": .string("boolean")]),
+                "count": .object([
+                    "type": .string("number"),
+                    "minimum": .number(1),
+                    "maximum": .number(3),
+                ]),
+                "colors": .object([
+                    "type": .string("array"),
+                    "items": .object([
+                        "anyOf": .array([
+                            .object(["const": .string("red")]),
+                            .object(["const": .string("green")]),
+                        ]),
+                    ]),
+                ]),
+                "nickname": .object([
+                    "type": .string("string"),
+                    "minLength": .number(1e300),
+                ]),
+                "emojiCodepoints": .object([
+                    "type": .string("string"),
+                    "minLength": .number(2),
+                ]),
+                "email": .object([
+                    "type": .string("string"),
+                    "format": .string("email"),
+                ]),
+                "uri": .object([
+                    "type": .string("string"),
+                    "format": .string("uri"),
+                ]),
+                "date": .object([
+                    "type": .string("string"),
+                    "format": .string("date"),
+                ]),
+                "dateTime": .object([
+                    "type": .string("string"),
+                    "format": .string("date-time"),
+                ]),
+                "tokens": .object([
+                    "type": .string("array"),
+                    "minItems": .number(1e300),
+                ]),
+            ]),
+        ])
+
         func writeSnapshot(updatedAt: Date, error: String? = nil) throws {
             let snapshot = AgentActivitySnapshot(
                 schemaVersion: 1,
@@ -3742,69 +3809,18 @@ final class AppLogicTests: XCTestCase {
                         message: "Pick a fruit",
                         mode: "form",
                         url: nil,
-                        schema: .object([
-                            "type": .string("object"),
-                            "required": .array([.string("fruit")]),
-                            "properties": .object([
-                                "fruit": .object([
-                                    "type": .string("string"),
-                                    "oneOf": .array([
-                                        .object([
-                                            "const": .string("apple"),
-                                            "title": .string("Apple"),
-                                        ]),
-                                        .object([
-                                            "const": .string("pear"),
-                                            "title": .string("Pear"),
-                                        ]),
-                                    ]),
-                                ]),
-                                "ripe": .object(["type": .string("boolean")]),
-                                "count": .object([
-                                    "type": .string("number"),
-                                    "minimum": .number(1),
-                                    "maximum": .number(3),
-                                ]),
-                                "colors": .object([
-                                    "type": .string("array"),
-                                    "items": .object([
-                                        "anyOf": .array([
-                                            .object(["const": .string("red")]),
-                                            .object(["const": .string("green")]),
-                                        ]),
-                                    ]),
-                                ]),
-                                "nickname": .object([
-                                    "type": .string("string"),
-                                    "minLength": .number(1e300),
-                                ]),
-                                "emojiCodepoints": .object([
-                                    "type": .string("string"),
-                                    "minLength": .number(2),
-                                ]),
-                                "email": .object([
-                                    "type": .string("string"),
-                                    "format": .string("email"),
-                                ]),
-                                "uri": .object([
-                                    "type": .string("string"),
-                                    "format": .string("uri"),
-                                ]),
-                                "date": .object([
-                                    "type": .string("string"),
-                                    "format": .string("date"),
-                                ]),
-                                "dateTime": .object([
-                                    "type": .string("string"),
-                                    "format": .string("date-time"),
-                                ]),
-                                "tokens": .object([
-                                    "type": .string("array"),
-                                    "minItems": .number(1e300),
-                                ]),
-                            ]),
-                        ]),
+                        schema: formSchema,
                         elicitationSource: nil,
+                        requestedAt: ISO8601DateFormatter().string(from: updatedAt),
+                        agentId: nil
+                    ),
+                    TrackedElicitation(
+                        requestId: "req-mcp-form",
+                        message: "Pick a fruit",
+                        mode: "form",
+                        url: nil,
+                        schema: formSchema,
+                        elicitationSource: "example-mcp",
                         requestedAt: ISO8601DateFormatter().string(from: updatedAt),
                         agentId: nil
                     ),
@@ -3912,7 +3928,7 @@ final class AppLogicTests: XCTestCase {
         let unsupportedContents: [[String: RemoteJSONValue]] = [
             ["fruit": .null],
             ["fruit": .number(2)],
-            ["fruit": .string("banana")],
+            ["fruit": .string("")],
             ["fruit": .object(["name": .string("apple")])],
             ["fruit": .array([.number(1)])],
             ["fruit": .array([.array([.string("apple")])])],
@@ -3940,6 +3956,48 @@ final class AppLogicTests: XCTestCase {
             )
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
+
+        let customChoiceContent: [String: RemoteJSONValue] = [
+            "fruit": .string("banana"),
+            "drink": .string("tea"),
+        ]
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(
+                    requestId: "req-mcp-form",
+                    action: .accept,
+                    content: customChoiceContent
+                )
+            ),
+            .invalid,
+            "MCP elicitations must stay bound to their declared choices"
+        )
+        XCTAssertEqual(
+            model.answerElicitation(
+                sessionId: session.id,
+                answer: RemoteElicitationAnswer(
+                    requestId: "req-form",
+                    action: .accept,
+                    content: customChoiceContent
+                )
+            ),
+            .accepted,
+            "Agent ask_user choices are suggestions and accept non-empty Other answers"
+        )
+        let writtenCustomChoice = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: responseURL))
+                as? [String: Any]
+        )
+        XCTAssertEqual(
+            (writtenCustomChoice["content"] as? [String: Any])?["fruit"] as? String,
+            "banana"
+        )
+        XCTAssertEqual(
+            (writtenCustomChoice["content"] as? [String: Any])?["drink"] as? String,
+            "tea"
+        )
+        try FileManager.default.removeItem(at: responseURL)
 
         // Valid accept with content is written 0600 with the expected payload.
         XCTAssertEqual(
@@ -8357,7 +8415,9 @@ final class AppLogicTests: XCTestCase {
     func testRemoteWebSurfacesElicitationCardsSafely() {
         // Schema-form / url elicitations render into the same question surface as
         // ask_user, mirroring the native iOS ElicitationForm/ElicitationCard.
-        XCTAssertTrue(RemoteWebAssets.javascript.contains("function parseElicitationForm(schema) {"))
+        XCTAssertTrue(RemoteWebAssets.javascript.contains(
+            "function parseElicitationForm(schema, allowFreeformChoices = false) {"
+        ))
         XCTAssertTrue(RemoteWebAssets.javascript.contains("function syncElicitationCards() {"))
         // Untrusted message/field text is only ever set via textContent.
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
@@ -8393,9 +8453,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
             "submitElicitation(entry.request.requestId, 'decline')"
         ))
-        // Send stays disabled until the submitted content re-validates.
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
-            "validatedElicitationContent(entry.form, entry.values, entry.touched) === null"
+            "request.elicitationSource == null"
         ))
         // Composer is suppressed while an elicitation is pending, and new sends pause.
         XCTAssertTrue(RemoteWebAssets.javascript.contains(
