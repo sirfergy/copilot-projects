@@ -1917,8 +1917,29 @@ final class AppModel: ObservableObject {
         guard case .object(let schema) = schema else { return true }
         let oneOfValues = jsonArray(schema["oneOf"])
         let enumValues = jsonArray(schema["enum"])
-        let hasFreeformChoiceSet = schema["anyOf"] == nil
-            && ((oneOfValues?.isEmpty == false) != (enumValues?.isEmpty == false))
+        let hasOneOfChoices = oneOfValues?.isEmpty == false
+        let hasEnumChoices = enumValues?.isEmpty == false
+        let hasFreeformChoiceSet: Bool
+        if schema["anyOf"] == nil, hasOneOfChoices != hasEnumChoices {
+            if let oneOfValues, hasOneOfChoices {
+                hasFreeformChoiceSet = oneOfValues.allSatisfy { alternative in
+                    guard case .object(let option) = alternative,
+                          case .string = option["const"] else {
+                        return false
+                    }
+                    return true
+                }
+            } else if let enumValues, hasEnumChoices {
+                hasFreeformChoiceSet = enumValues.allSatisfy {
+                    if case .string = $0 { return true }
+                    return false
+                }
+            } else {
+                hasFreeformChoiceSet = false
+            }
+        } else {
+            hasFreeformChoiceSet = false
+        }
         let isNonEmptyFreeformString: Bool
         if allowFreeformStringChoice,
            hasFreeformChoiceSet,

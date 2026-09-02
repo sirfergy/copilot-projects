@@ -3825,6 +3825,46 @@ final class AppLogicTests: XCTestCase {
                         agentId: nil
                     ),
                     TrackedElicitation(
+                        requestId: "req-non-choice-one-of",
+                        message: "Enter a long answer",
+                        mode: "form",
+                        url: nil,
+                        schema: .object([
+                            "type": .string("object"),
+                            "required": .array([.string("answer")]),
+                            "properties": .object([
+                                "answer": .object([
+                                    "type": .string("string"),
+                                    "oneOf": .array([
+                                        .object(["minLength": .number(5)]),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                        elicitationSource: nil,
+                        requestedAt: ISO8601DateFormatter().string(from: updatedAt),
+                        agentId: nil
+                    ),
+                    TrackedElicitation(
+                        requestId: "req-mixed-enum",
+                        message: "Pick an answer",
+                        mode: "form",
+                        url: nil,
+                        schema: .object([
+                            "type": .string("object"),
+                            "required": .array([.string("answer")]),
+                            "properties": .object([
+                                "answer": .object([
+                                    "type": .string("string"),
+                                    "enum": .array([.string("yes"), .number(1)]),
+                                ]),
+                            ]),
+                        ]),
+                        elicitationSource: nil,
+                        requestedAt: ISO8601DateFormatter().string(from: updatedAt),
+                        agentId: nil
+                    ),
+                    TrackedElicitation(
                         requestId: "req-url",
                         message: "Open this URL?",
                         mode: nil,
@@ -3953,6 +3993,22 @@ final class AppLogicTests: XCTestCase {
                     )
                 ),
                 .invalid
+            )
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
+
+        for requestId in ["req-non-choice-one-of", "req-mixed-enum"] {
+            XCTAssertEqual(
+                model.answerElicitation(
+                    sessionId: session.id,
+                    answer: RemoteElicitationAnswer(
+                        requestId: requestId,
+                        action: .accept,
+                        content: ["answer": .string("other")]
+                    )
+                ),
+                .invalid,
+                "Only string const/enum choice sets may accept freeform answers"
             )
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
