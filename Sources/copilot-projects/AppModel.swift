@@ -1209,7 +1209,9 @@ final class AppModel: ObservableObject {
         for session in sessions {
             pendingSessionDestroys[session.id] = PendingSessionDestroy(
                 task: cleanup,
-                controller: session.controller
+                controller: Paths.dtachExecutable == nil
+                    ? session.controller
+                    : nil
             )
         }
         Task { @MainActor [weak self] in
