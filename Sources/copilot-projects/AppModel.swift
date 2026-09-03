@@ -241,9 +241,10 @@ enum PermissionNotificationDecision: Equatable {
 /// Single source of truth. Holds value-type projects/sessions (observed) and live
 /// terminal controllers (NOT observed, kept out of the SwiftUI graph).
 typealias GracefulSessionDestroyer = (
-    _ sessionId: String,
+    _ sessionIds: [String],
     _ kittyImageDiskStore: RemoteKittyImageDiskStore
 ) -> Task<Void, Never>
+typealias ForcedSessionDestroyer = (_ sessionIds: [String]) -> Void
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -415,6 +416,7 @@ final class AppModel: ObservableObject {
     private var remoteElicitationRequestLedger = RemoteCommandRequestLedger()
     private let remoteControlDeliveryLedger = RemoteControlDeliveryLedger()
     private let gracefulSessionDestroyer: GracefulSessionDestroyer
+    private let forcedSessionDestroyer: ForcedSessionDestroyer
     private var pendingSessionDestroys: [String: PendingSessionDestroy] = [:]
 
     var remoteControlDeliveryEpoch: String { remoteControlDeliveryLedger.epoch }
@@ -505,11 +507,14 @@ final class AppModel: ObservableObject {
         notificationSync: NotificationSyncService? = nil,
         kittyImageDiskStore: RemoteKittyImageDiskStore = .shared,
         gracefulSessionDestroyer: @escaping GracefulSessionDestroyer = {
-            sessionId, store in
+            sessionIds, store in
             SessionArtifacts.destroyGracefully(
-                sessionId: sessionId,
+                sessionIds: sessionIds,
                 kittyImageDiskStore: store
             )
+        },
+        forcedSessionDestroyer: @escaping ForcedSessionDestroyer = {
+            SessionArtifacts.forceDestroy(sessionIds: $0)
         }
     ) {
         self.stateRepository = stateRepository
@@ -533,6 +538,7 @@ final class AppModel: ObservableObject {
         self.agentActivityScanObserver = agentActivityScanObserver
         self.kittyImageDiskStore = kittyImageDiskStore
         self.gracefulSessionDestroyer = gracefulSessionDestroyer
+        self.forcedSessionDestroyer = forcedSessionDestroyer
         remoteAccess = RemoteAccessController(
             webPushService: webPushService,
             apnsService: apnsService,
@@ -1186,17 +1192,31 @@ final class AppModel: ObservableObject {
         sessionId: String,
         controller: TerminalController?
     ) {
+        scheduleSessionDestroy(
+            sessions: [(id: sessionId, controller: controller)]
+        )
+    }
+
+    private func scheduleSessionDestroy(
+        sessions: [(id: String, controller: TerminalController?)]
+    ) {
+        guard !sessions.isEmpty else { return }
+        let sessionIds = sessions.map(\.id)
         let cleanup = gracefulSessionDestroyer(
-            sessionId,
+            sessionIds,
             kittyImageDiskStore
         )
-        pendingSessionDestroys[sessionId] = PendingSessionDestroy(
-            task: cleanup,
-            controller: controller
-        )
+        for session in sessions {
+            pendingSessionDestroys[session.id] = PendingSessionDestroy(
+                task: cleanup,
+                controller: session.controller
+            )
+        }
         Task { @MainActor [weak self] in
             await cleanup.value
-            self?.completeSessionDestroy(sessionId)
+            for sessionId in sessionIds {
+                self?.completeSessionDestroy(sessionId)
+            }
         }
     }
 
@@ -1230,14 +1250,19 @@ final class AppModel: ObservableObject {
         }
         controllers.removeAll()
         let pendingDestroys = pendingSessionDestroys
-        for (sessionId, destroy) in pendingDestroys {
-            if isPoweringOff {
+        if isPoweringOff {
+            for destroy in pendingDestroys.values {
                 destroy.task.cancel()
-                SessionArtifacts.forceDestroy(sessionId: sessionId)
-            } else {
-                await destroy.task.value
             }
-            completeSessionDestroy(sessionId)
+            forcedSessionDestroyer(Array(pendingDestroys.keys))
+            for sessionId in pendingDestroys.keys {
+                completeSessionDestroy(sessionId)
+            }
+        } else {
+            for (sessionId, destroy) in pendingDestroys {
+                await destroy.task.value
+                completeSessionDestroy(sessionId)
+            }
         }
     }
 
@@ -1261,10 +1286,12 @@ final class AppModel: ObservableObject {
     func forcePendingSessionDestroys() {
         let pending = pendingSessionDestroys
         pendingSessionDestroys.removeAll()
-        for (sessionId, destroy) in pending {
+        for destroy in pending.values {
             destroy.task.cancel()
-            SessionArtifacts.forceDestroy(sessionId: sessionId)
-            if Paths.dtachExecutable == nil {
+        }
+        forcedSessionDestroyer(Array(pending.keys))
+        if Paths.dtachExecutable == nil {
+            for destroy in pending.values {
                 destroy.controller?.terminate()
             }
         }
@@ -2171,15 +2198,16 @@ final class AppModel: ObservableObject {
     func closeProject(_ pid: String) {
         guard let pi = projectIndex(pid) else { return }
         let usesDtach = Paths.dtachExecutable != nil
-        for session in projects[pi].sessions {
-            let controller = controllers[session.id]
-            controller?.terminalView.kittyImageCapture.disablePersistence()
-            scheduleSessionDestroy(
-                sessionId: session.id,
-                controller: controller
-            )
+        let sessions = projects[pi].sessions.map { session in
+            (id: session.id, controller: controllers[session.id])
+        }
+        for session in sessions {
+            session.controller?.terminalView.kittyImageCapture.disablePersistence()
+        }
+        scheduleSessionDestroy(sessions: sessions)
+        for session in sessions {
             if usesDtach {
-                controller?.terminate()
+                session.controller?.terminate()
             }
             controllers[session.id] = nil
             if selectedTranscriptController?.sessionId == session.id {

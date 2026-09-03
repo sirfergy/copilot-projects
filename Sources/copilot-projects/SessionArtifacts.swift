@@ -116,18 +116,27 @@ enum SessionArtifacts {
     }
 
     static func forceDestroy(sessionId: String) {
-        let socket = Paths.dtachSocketPath(sessionId: sessionId)
+        forceDestroy(sessionIds: [sessionId])
+    }
+
+    static func forceDestroy(sessionIds: [String]) {
+        guard !sessionIds.isEmpty else { return }
         if Paths.dtachExecutable != nil {
             let processes = ProcessTree.snapshot()
+            let sockets = Set(sessionIds.map {
+                Paths.dtachSocketPath(sessionId: $0)
+            })
             // Kill both the attached client and master. This also closes the tiny
             // creation race where only the client is visible before it forks the
             // master; killing just a selected master could miss that case.
             for process in ProcessTree.dtachProcesses(in: processes)
-                where process.socketPath == socket {
+                where process.socketPath.map(sockets.contains) == true {
                 kill(process.pid, SIGTERM)
             }
         }
-        removeFiles(sessionId: sessionId)
+        for sessionId in sessionIds {
+            removeFiles(sessionId: sessionId)
+        }
     }
 
     /// Ask the live tracker extension to route this close through the CLI's
@@ -137,17 +146,40 @@ enum SessionArtifacts {
         sessionId: String,
         kittyImageDiskStore: RemoteKittyImageDiskStore = .shared
     ) -> Task<Void, Never> {
+        destroyGracefully(
+            sessionIds: [sessionId],
+            kittyImageDiskStore: kittyImageDiskStore
+        )
+    }
+
+    /// Batch variant used when one user action closes multiple sessions. The
+    /// requests are recorded synchronously, their grace waits run concurrently,
+    /// and one fresh process snapshot covers the fallback after they finish.
+    static func destroyGracefully(
+        sessionIds: [String],
+        kittyImageDiskStore: RemoteKittyImageDiskStore = .shared
+    ) -> Task<Void, Never> {
         // Synchronously tombstone this session's durable Kitty images before
         // requesting exit, so late persistence can never resurrect closed data.
-        _ = kittyImageDiskStore.tombstone(sessionId: sessionId)
-        let cliPID = TranscriptController.liveCLIProcessPID(sessionId: sessionId)
-        let requested = writeCloseSessionRequest(sessionId: sessionId)
+        let requests = sessionIds.map { sessionId in
+            _ = kittyImageDiskStore.tombstone(sessionId: sessionId)
+            return (
+                pid: TranscriptController.liveCLIProcessPID(sessionId: sessionId),
+                requested: writeCloseSessionRequest(sessionId: sessionId)
+            )
+        }
 
         return Task.detached(priority: .utility) {
-            if requested, let cliPID {
-                _ = await Self.waitForProcessExit(cliPID)
+            await withTaskGroup(of: Void.self) { group in
+                for request in requests {
+                    guard request.requested, let pid = request.pid else { continue }
+                    group.addTask {
+                        _ = await Self.waitForProcessExit(pid)
+                    }
+                }
             }
-            Self.forceDestroy(sessionId: sessionId)
+            if Task.isCancelled { return }
+            Self.forceDestroy(sessionIds: sessionIds)
         }
     }
 
@@ -197,7 +229,7 @@ enum SessionArtifacts {
     static func forceDestroyStaleCloseSessionRequests(
         sessionsDirectory: URL = Paths.sessionsDir,
         preserving sessionIds: Set<String> = [],
-        destroy: (String) -> Void = { SessionArtifacts.forceDestroy(sessionId: $0) }
+        destroy: ([String]) -> Void = { SessionArtifacts.forceDestroy(sessionIds: $0) }
     ) {
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: sessionsDirectory,
@@ -205,6 +237,7 @@ enum SessionArtifacts {
         ) else {
             return
         }
+        var staleSessionIds: [String] = []
         for url in entries where url.lastPathComponent.hasSuffix(closeRequestSuffix) {
             let name = url.lastPathComponent
             let sessionId = String(name.dropLast(closeRequestSuffix.count))
@@ -213,7 +246,10 @@ enum SessionArtifacts {
                 try? FileManager.default.removeItem(at: url)
                 continue
             }
-            destroy(sessionId)
+            staleSessionIds.append(sessionId)
+        }
+        if !staleSessionIds.isEmpty {
+            destroy(staleSessionIds)
         }
     }
 
