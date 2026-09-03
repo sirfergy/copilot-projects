@@ -53,6 +53,54 @@ private final class GracefulClosePollCounter: @unchecked Sendable {
     }
 }
 
+private final class GracefulCloseOwnerResolver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pids: [pid_t?]
+    private var calls = 0
+
+    init(pids: [pid_t?]) {
+        self.pids = pids
+    }
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
+    }
+
+    func resolve() -> pid_t? {
+        lock.lock()
+        defer { lock.unlock() }
+        calls += 1
+        return pids.isEmpty ? nil : pids.removeFirst()
+    }
+}
+
+private final class GracefulCloseProcessProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var aliveChecks: Int
+    private var observedPIDs: [pid_t] = []
+
+    init(aliveChecks: Int) {
+        self.aliveChecks = aliveChecks
+    }
+
+    var pids: [pid_t] {
+        lock.lock()
+        defer { lock.unlock() }
+        return observedPIDs
+    }
+
+    func isAlive(_ pid: pid_t) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        observedPIDs.append(pid)
+        guard aliveChecks > 0 else { return false }
+        aliveChecks -= 1
+        return true
+    }
+}
+
 private final class AgentActivityCooldownHarness {
     private(set) var delays: [TimeInterval] = []
     private var actions: [@MainActor () -> Void] = []
@@ -885,6 +933,42 @@ final class AppLogicTests: XCTestCase {
             sleep: {}
         )
         XCTAssertTrue(exited)
+
+        let ownerResolver = GracefulCloseOwnerResolver(pids: [nil, 456])
+        let ownerProcess = GracefulCloseProcessProbe(aliveChecks: 1)
+        let startedThenExited = await SessionArtifacts.waitForLiveCLIExit(
+            sessionId: sessionId,
+            initialPID: nil,
+            maximumPolls: 4,
+            liveCLIProcessPID: { _ in ownerResolver.resolve() },
+            processIsAlive: { ownerProcess.isAlive($0) },
+            sleep: {}
+        )
+        XCTAssertTrue(startedThenExited)
+        XCTAssertEqual(ownerResolver.callCount, 2)
+        XCTAssertEqual(ownerProcess.pids, [456, 456])
+
+        let missingOwner = await SessionArtifacts.waitForLiveCLIExit(
+            sessionId: sessionId,
+            initialPID: nil,
+            maximumPolls: 2,
+            liveCLIProcessPID: { _ in nil },
+            processIsAlive: { _ in true },
+            sleep: {}
+        )
+        XCTAssertFalse(missingOwner)
+
+        let unusedResolver = GracefulCloseOwnerResolver(pids: [999])
+        let liveOwnerTimedOut = await SessionArtifacts.waitForLiveCLIExit(
+            sessionId: sessionId,
+            initialPID: 123,
+            maximumPolls: 2,
+            liveCLIProcessPID: { _ in unusedResolver.resolve() },
+            processIsAlive: { _ in true },
+            sleep: {}
+        )
+        XCTAssertFalse(liveOwnerTimedOut)
+        XCTAssertEqual(unusedResolver.callCount, 0)
 
         var forceDestroyBatches: [[String]] = []
         SessionArtifacts.forceDestroyStaleCloseSessionRequests(
@@ -14808,7 +14892,8 @@ final class AppLogicTests: XCTestCase {
     func testSessionArtifactsDestroyTombstonesSynchronouslyAndPreventsResurrection() async throws {
         let (store, root) = makeIsolatedKittyImageDiskStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let sessionId = "victim"
+        let sessionId = UUID().uuidString
+        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
         let png = remoteKittyTestPNGBytes(width: 2, height: 2)
         store.persistRetain(sessionId: sessionId, imageId: 1, version: 1, data: png)
         store.replaceCurrentSelections(
@@ -14828,6 +14913,7 @@ final class AppLogicTests: XCTestCase {
         // The marker is written *synchronously* — asserted here with no
         // `await` at all, immediately after `destroyGracefully` returns.
         XCTAssertTrue(store.isTombstonedForTesting(sessionId: sessionId))
+        cleanup.cancel()
         await cleanup.value
 
         await store.barrierForTesting()

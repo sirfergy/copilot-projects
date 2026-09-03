@@ -164,6 +164,7 @@ enum SessionArtifacts {
         let requests = sessionIds.map { sessionId in
             _ = kittyImageDiskStore.tombstone(sessionId: sessionId)
             return (
+                sessionId: sessionId,
                 pid: TranscriptController.liveCLIProcessPID(sessionId: sessionId),
                 requested: writeCloseSessionRequest(sessionId: sessionId)
             )
@@ -172,9 +173,12 @@ enum SessionArtifacts {
         return Task.detached(priority: .utility) {
             await withTaskGroup(of: Void.self) { group in
                 for request in requests {
-                    guard request.requested, let pid = request.pid else { continue }
+                    guard request.requested else { continue }
                     group.addTask {
-                        _ = await Self.waitForProcessExit(pid)
+                        _ = await Self.waitForLiveCLIExit(
+                            sessionId: request.sessionId,
+                            initialPID: request.pid
+                        )
                     }
                 }
             }
@@ -198,6 +202,35 @@ enum SessionArtifacts {
             guard processIsAlive(pid) else { return true }
             await sleep()
         }
+        return !processIsAlive(pid)
+    }
+
+    static func waitForLiveCLIExit(
+        sessionId: String,
+        initialPID: pid_t?,
+        maximumPolls: Int = gracefulClosePolls,
+        liveCLIProcessPID: @escaping @Sendable (String) -> pid_t? = {
+            TranscriptController.liveCLIProcessPID(sessionId: $0)
+        },
+        processIsAlive: @escaping @Sendable (pid_t) -> Bool = {
+            TranscriptController.processIsAlive($0)
+        },
+        sleep: @escaping @Sendable () async -> Void = {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    ) async -> Bool {
+        var pid = initialPID
+        for _ in 0 ..< maximumPolls {
+            if Task.isCancelled { return false }
+            if pid == nil {
+                pid = liveCLIProcessPID(sessionId)
+            }
+            if let pid, !processIsAlive(pid) {
+                return true
+            }
+            await sleep()
+        }
+        guard let pid else { return false }
         return !processIsAlive(pid)
     }
 
