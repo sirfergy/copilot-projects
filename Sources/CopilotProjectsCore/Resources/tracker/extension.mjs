@@ -166,6 +166,10 @@ if (validSessionId && socketPath) {
     let scheduledTurnActive = false;
     let currentTurnKind = null;
     let idleGeneration = 0;
+    let closeActivityIdleBaseline = idleGeneration;
+    let closeActivityState = "pending";
+    let closeActivityPendingSince = Date.now();
+    let closeActivityRetryTimer = null;
     let lastIdleAborted = false;
     let lastIdleTurnKind = null;
     let currentModel = null;
@@ -252,6 +256,7 @@ if (validSessionId && socketPath) {
     const CLOSE_ABORT_TIMEOUT_MS = 3_000;
     const CLOSE_IDLE_TIMEOUT_MS = 5_000;
     const CLOSE_ENQUEUE_TIMEOUT_MS = 3_000;
+    const CLOSE_ACTIVITY_PENDING_TIMEOUT_MS = 1_000;
 
     const MAX_USER_INPUT_QUESTION_BYTES = 16_384;
     const MAX_USER_INPUT_CHOICE_BYTES = 8_192;
@@ -336,6 +341,43 @@ if (validSessionId && socketPath) {
         return idleGeneration > afterGeneration;
     }
 
+    function latestRootTurnKind(events) {
+        let turnKind = null;
+        for (const event of events) {
+            if (!event || typeof event !== "object" || event.agentId) continue;
+            if (event.type === "user.message") {
+                turnKind = classifyUserMessage(event) ?? turnKind;
+            } else if (event.type === "assistant.turn_start") {
+                turnKind ??= "foreground";
+            } else if (event.type === "session.idle"
+                    || event.type === "session.start"
+                    || event.type === "session.resume"
+                    || event.type === "session.shutdown") {
+                turnKind = null;
+            }
+        }
+        return turnKind;
+    }
+
+    function clearCloseActivityRetry() {
+        if (closeActivityRetryTimer === null) return;
+        clearTimeout(closeActivityRetryTimer);
+        closeActivityRetryTimer = null;
+    }
+
+    function retryCloseAfterActivityTimeout() {
+        if (closeActivityRetryTimer !== null) return;
+        const generation = conversationGeneration;
+        const elapsed = Date.now() - closeActivityPendingSince;
+        closeActivityRetryTimer = setTimeout(() => {
+            closeActivityRetryTimer = null;
+            if (generation === conversationGeneration) {
+                processCloseSessionRequest();
+            }
+        }, Math.max(0, CLOSE_ACTIVITY_PENDING_TIMEOUT_MS - elapsed));
+        closeActivityRetryTimer.unref?.();
+    }
+
     async function processCloseSessionRequest() {
         if (closeSessionRequestInFlight
                 || closeSessionExitQueued
@@ -343,18 +385,35 @@ if (validSessionId && socketPath) {
                 || !fileExistsSync(closeSessionRequestPath)) {
             return;
         }
+        const activityActive = currentTurnKind !== null
+            || foregroundTurnActive
+            || scheduledTurnActive;
+        let activityState = closeActivityState;
+        if (!activityActive && activityState === "pending") {
+            if (Date.now() - closeActivityPendingSince
+                    < CLOSE_ACTIVITY_PENDING_TIMEOUT_MS) {
+                retryCloseAfterActivityTimeout();
+                return;
+            }
+            closeActivityState = "unknown";
+            activityState = "unknown";
+        }
+        clearCloseActivityRetry();
         closeSessionRequestInFlight = true;
         try {
             const idleGenerationBeforeAbort = idleGeneration;
-            if (currentTurnKind !== null
-                    || foregroundTurnActive
-                    || scheduledTurnActive) {
-                await promiseWithTimeout(
-                    session.abort(),
-                    CLOSE_ABORT_TIMEOUT_MS,
-                    "session abort timed out"
-                );
-                if (!await waitForSessionIdle(idleGenerationBeforeAbort)) {
+            if (activityActive || activityState === "unknown") {
+                try {
+                    await promiseWithTimeout(
+                        session.abort(),
+                        CLOSE_ABORT_TIMEOUT_MS,
+                        "session abort timed out"
+                    );
+                } catch (error) {
+                    if (activityState !== "unknown") throw error;
+                }
+                const becameIdle = await waitForSessionIdle(idleGenerationBeforeAbort);
+                if (!becameIdle && activityState !== "unknown") {
                     throw new Error("session did not become idle after abort");
                 }
             }
@@ -2676,6 +2735,7 @@ if (validSessionId && socketPath) {
         // empty and would otherwise blank the model line the rotation event
         // just taught us.
         const preservedModel = currentModel;
+        let history = [];
 
         durableTranscriptAuthoritative = durableHistoryAvailable();
         // Startup only: publish a deliberate empty snapshot so a snapshot
@@ -2692,7 +2752,7 @@ if (validSessionId && socketPath) {
             : null;
         let historyLoaded = false;
         try {
-            const history = await sdkHistoryWithTimeout();
+            history = await sdkHistoryWithTimeout();
             if (stale()) return;
             if (durableTranscriptAuthoritative) {
                 for (const event of history) {
@@ -2715,6 +2775,25 @@ if (validSessionId && socketPath) {
         } catch {
             if (stale()) return;
         }
+        if (historyLoaded) {
+            const restoredTurnKind = latestRootTurnKind(history);
+            if (restoredTurnKind !== null
+                    && idleGeneration === closeActivityIdleBaseline
+                    && currentTurnKind === null
+                    && !foregroundTurnActive
+                    && !scheduledTurnActive) {
+                currentTurnKind = restoredTurnKind;
+                // History has no durable session.idle event, so it can prove
+                // that a turn started but not that the turn is still live.
+                closeActivityState = "unknown";
+            } else {
+                closeActivityState = "ready";
+            }
+        } else if (closeActivityState === "pending") {
+            closeActivityState = "unknown";
+        }
+        clearCloseActivityRetry();
+        processCloseSessionRequest();
         if (!durableTranscriptAuthoritative && !historyLoaded) {
             resetTranscriptReplayState(preservedTurns, preservedModel);
         }
@@ -2773,6 +2852,10 @@ if (validSessionId && socketPath) {
         foregroundTurnActive = false;
         scheduledTurnActive = false;
         currentTurnKind = null;
+        closeActivityIdleBaseline = idleGeneration;
+        closeActivityState = "pending";
+        closeActivityPendingSince = Date.now();
+        clearCloseActivityRetry();
         lastIdleAborted = false;
         lastIdleTurnKind = null;
         foregroundTransitionAt = transitionAt;
@@ -3219,21 +3302,27 @@ if (validSessionId && socketPath) {
 
     session.on("user.message", (event) => {
         if (event.agentId) return;
+        closeActivityState = "ready";
+        clearCloseActivityRetry();
         lastIdleTurnKind = null;
         currentTurnKind = event.data.source?.startsWith("schedule-")
             ? "scheduled"
             : "foreground";
         setScheduledTurnMarker(currentTurnKind === "scheduled");
+        processCloseSessionRequest();
     });
 
     session.on("assistant.turn_start", (event) => {
         if (event.agentId) return;
+        closeActivityState = "ready";
+        clearCloseActivityRetry();
         lastIdleTurnKind = null;
         scheduledTurnActive = currentTurnKind === "scheduled";
         foregroundTurnActive = !scheduledTurnActive;
         foregroundTransitionAt = normalizedTimestamp(event.timestamp);
         if (scheduledTurnActive) setScheduledTurnMarker(true);
         publish();
+        processCloseSessionRequest();
     });
 
     session.on("assistant.turn_end", (event) => {
@@ -3245,6 +3334,8 @@ if (validSessionId && socketPath) {
 
     session.on("session.idle", (event) => {
         if (event.agentId) return;
+        closeActivityState = "ready";
+        clearCloseActivityRetry();
         idleGeneration += 1;
         lastIdleAborted = event.data.aborted === true;
         lastIdleTurnKind = currentTurnKind;
@@ -3255,6 +3346,7 @@ if (validSessionId && socketPath) {
         activeSubagents.clear();
         publish();
         setTimeout(() => setScheduledTurnMarker(false), 5_000);
+        processCloseSessionRequest();
     });
 
     // Track the effective model so remote clients can show it. Seeded from

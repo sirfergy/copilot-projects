@@ -340,6 +340,127 @@ final class CoreLogicTests: XCTestCase {
     }
 
     func testCopilotExtensionQueuesGracefulCloseAfterAbortBecomesIdle() throws {
+        let summary = try runCopilotExtensionCloseHarness(
+            historyEvents: "[]",
+            liveEvents: #"""
+            namedListeners.get("user.message")?.({
+              id:"user",type:"user.message",timestamp:new Date().toISOString(),
+              data:{content:"work",source:null}
+            });
+            namedListeners.get("assistant.turn_start")?.({
+              id:"turn",type:"assistant.turn_start",timestamp:new Date().toISOString(),
+              data:{}
+            });
+            // turn_end clears foregroundTurnActive before session.idle clears the
+            // runtime's working record. Close must still abort/wait in this gap.
+            namedListeners.get("assistant.turn_end")?.({
+              id:"turn-end",type:"assistant.turn_end",timestamp:new Date().toISOString(),
+              data:{}
+            });
+            """#,
+            requestDuringHistory: false,
+            historyDelayMilliseconds: 0,
+            abortEmitsIdle: true
+        )
+
+        XCTAssertEqual(
+            summary?["calls"] as? [String],
+            ["abort", "enqueue:/exit print"]
+        )
+        XCTAssertEqual(summary?["requestExists"] as? Bool, true)
+    }
+
+    func testCopilotExtensionRestoresActiveTurnBeforeGracefulClose() throws {
+        let summary = try runCopilotExtensionCloseHarness(
+            historyEvents: #"""
+            [
+              {
+                id:"history-user",type:"user.message",
+                timestamp:"2026-09-02T18:00:00.000Z",
+                data:{content:"work",source:null}
+              },
+              {
+                id:"history-start",type:"assistant.turn_start",
+                timestamp:"2026-09-02T18:00:01.000Z",data:{}
+              },
+              {
+                id:"history-end",type:"assistant.turn_end",
+                timestamp:"2026-09-02T18:00:02.000Z",data:{}
+              }
+            ]
+            """#,
+            liveEvents: "",
+            requestDuringHistory: true,
+            historyDelayMilliseconds: 100,
+            abortEmitsIdle: false
+        )
+
+        XCTAssertEqual(
+            summary?["calls"] as? [String],
+            ["history:start", "history:end", "abort", "enqueue:/exit print"]
+        )
+        XCTAssertEqual(summary?["requestExists"] as? Bool, true)
+    }
+
+    func testCopilotExtensionBoundsCloseWaitForActivityHistory() throws {
+        let summary = try runCopilotExtensionCloseHarness(
+            historyEvents: "[]",
+            liveEvents: "",
+            requestDuringHistory: true,
+            historyDelayMilliseconds: 1_500,
+            abortEmitsIdle: true
+        )
+
+        XCTAssertEqual(
+            summary?["calls"] as? [String],
+            ["history:start", "abort", "enqueue:/exit print", "history:end"]
+        )
+        XCTAssertEqual(summary?["requestExists"] as? Bool, true)
+    }
+
+    func testCopilotExtensionTreatsResumeAsIdleHistoryBoundary() throws {
+        let summary = try runCopilotExtensionCloseHarness(
+            historyEvents: #"""
+            [
+              {
+                id:"history-user",type:"user.message",
+                timestamp:"2026-09-02T18:00:00.000Z",
+                data:{content:"work",source:null}
+              },
+              {
+                id:"history-start",type:"assistant.turn_start",
+                timestamp:"2026-09-02T18:00:01.000Z",data:{}
+              },
+              {
+                id:"history-shutdown",type:"session.shutdown",
+                timestamp:"2026-09-02T18:00:02.000Z",data:{}
+              },
+              {
+                id:"history-resume",type:"session.resume",
+                timestamp:"2026-09-02T18:00:03.000Z",data:{}
+              }
+            ]
+            """#,
+            liveEvents: "",
+            requestDuringHistory: false,
+            historyDelayMilliseconds: 0,
+            abortEmitsIdle: true
+        )
+
+        XCTAssertEqual(
+            summary?["calls"] as? [String],
+            ["enqueue:/exit print"]
+        )
+        XCTAssertEqual(summary?["requestExists"] as? Bool, true)
+    }
+
+    private func runCopilotExtensionCloseHarness(
+        historyEvents: String,
+        liveEvents: String,
+        requestDuringHistory: Bool,
+        historyDelayMilliseconds: Int,
+        abortEmitsIdle: Bool
+    ) throws -> [String: Any]? {
         try requireNodeForJavaScriptTests()
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build/copilot-extension-close-\(UUID().uuidString)")
@@ -349,17 +470,35 @@ final class CoreLogicTests: XCTestCase {
 
         let appSessionId = "22222222-2222-4222-8222-222222222222"
         let copilotSessionId = "11111111-1111-4111-8111-111111111111"
+        let historySetup = requestDuringHistory ? #"""
+            calls.push("history:start");
+            const duringHistoryRequestPath = join(
+              process.env.COPILOT_PROJECTS_ROOT, "sessions",
+              `${process.env.COPILOT_PROJECTS_SESSION}.close-session-request`
+            );
+            writeFileSync(duringHistoryRequestPath, "");
+            await new Promise((resolve) => setTimeout(
+              resolve, __HISTORY_DELAY_MILLISECONDS__
+            ));
+            calls.push("history:end");
+        """#.replacingOccurrences(
+            of: "__HISTORY_DELAY_MILLISECONDS__",
+            with: String(historyDelayMilliseconds)
+        ) : ""
         let prelude = #"""
         const calls = [];
         const namedListeners = new Map();
+        const historyEvents = __HISTORY_EVENTS__;
         const fakeSession = {
           sessionId: "__COPILOT_SESSION_ID__",
           abort: async () => {
             calls.push("abort");
-            queueMicrotask(() => namedListeners.get("session.idle")?.({
-              id:"idle",type:"session.idle",timestamp:new Date().toISOString(),
-              data:{aborted:true}
-            }));
+            if (__ABORT_EMITS_IDLE__) {
+              queueMicrotask(() => namedListeners.get("session.idle")?.({
+                id:"idle",type:"session.idle",timestamp:new Date().toISOString(),
+                data:{aborted:true}
+              }));
+            }
           },
           rpc: {
             schedule: { list: async () => ({entries:[]}) },
@@ -382,34 +521,35 @@ final class CoreLogicTests: XCTestCase {
           on(name, handler) {
             if (typeof name === "string") namedListeners.set(name, handler);
           },
-          async getEvents() { return []; }
+          async getEvents() {
+            __HISTORY_SETUP__
+            return historyEvents;
+          }
         };
-        """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
+        """#
+            .replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
+            .replacingOccurrences(of: "__HISTORY_EVENTS__", with: historyEvents)
+            .replacingOccurrences(of: "__HISTORY_SETUP__", with: historySetup)
+            .replacingOccurrences(
+                of: "__ABORT_EMITS_IDLE__",
+                with: abortEmitsIdle ? "true" : "false"
+            )
         let extensionScript = CopilotExtension.script.replacingOccurrences(
             of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
             with: "const joinSession = async () => fakeSession;"
+        ).replacingOccurrences(
+            of: "const CLOSE_IDLE_TIMEOUT_MS = 5_000;",
+            with: "const CLOSE_IDLE_TIMEOUT_MS = 100;"
         )
+        let writeRequest = requestDuringHistory ? "" : #"writeFileSync(requestPath, "");"#
         let epilogue = #"""
 
-        namedListeners.get("user.message")?.({
-          id:"user",type:"user.message",timestamp:new Date().toISOString(),
-          data:{content:"work",source:null}
-        });
-        namedListeners.get("assistant.turn_start")?.({
-          id:"turn",type:"assistant.turn_start",timestamp:new Date().toISOString(),
-          data:{}
-        });
-        // turn_end clears foregroundTurnActive before session.idle clears the
-        // runtime's working record. Close must still abort/wait in this gap.
-        namedListeners.get("assistant.turn_end")?.({
-          id:"turn-end",type:"assistant.turn_end",timestamp:new Date().toISOString(),
-          data:{}
-        });
+        __LIVE_EVENTS__
         const requestPath = join(
           process.env.COPILOT_PROJECTS_ROOT, "sessions",
           `${process.env.COPILOT_PROJECTS_SESSION}.close-session-request`
         );
-        writeFileSync(requestPath, "");
+        __WRITE_REQUEST__
         for (let attempt = 0; attempt < 200; attempt += 1) {
           if (calls.some((call) => call.startsWith("enqueue:"))) break;
           await new Promise((resolve) => setTimeout(resolve, 5));
@@ -420,6 +560,8 @@ final class CoreLogicTests: XCTestCase {
         }));
         process.exit(0);
         """#
+            .replacingOccurrences(of: "__LIVE_EVENTS__", with: liveEvents)
+            .replacingOccurrences(of: "__WRITE_REQUEST__", with: writeRequest)
         let scriptURL = root.appendingPathComponent("close.mjs")
         try (prelude + extensionScript + epilogue).write(
             to: scriptURL,
@@ -451,12 +593,7 @@ final class CoreLogicTests: XCTestCase {
             String(data: errors, encoding: .utf8) ?? "node harness failed"
         )
         let output = stdout.fileHandleForReading.readDataToEndOfFile()
-        let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
-        XCTAssertEqual(
-            summary?["calls"] as? [String],
-            ["abort", "enqueue:/exit print"]
-        )
-        XCTAssertEqual(summary?["requestExists"] as? Bool, true)
+        return try JSONSerialization.jsonObject(with: output) as? [String: Any]
     }
 
     func testCopilotExtensionUsesNativeSessionResolver() throws {
