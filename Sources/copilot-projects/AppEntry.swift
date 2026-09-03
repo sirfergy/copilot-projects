@@ -104,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
+        model.finishInterruptedSessionDestroys()
         model.activateKittyImagePersistence()
 
         nativeNotifications.onActivate = { [weak self] projectId, sessionId in
@@ -355,6 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         guard isPrimaryInstance else { return }
         model.beginTermination()
+        model.forcePendingSessionDestroys()
         webPushService?.shutdown()
         model.detachAllClients()   // keep dtach masters alive for resume
         model.stopServer()

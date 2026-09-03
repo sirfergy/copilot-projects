@@ -12,6 +12,8 @@ final class TranscriptController: ObservableObject {
         let appSessionId: String?
         let copilotSessionId: String?
         let pid: pid_t
+        let parentPid: pid_t?
+        let bootTime: String?
     }
 
     private struct TranscriptQuarantine: Codable {
@@ -393,10 +395,55 @@ final class TranscriptController: ObservableObject {
     /// Best-effort liveness for a pid (no identity guarantee). Mirrors the
     /// extension hook's `process.kill(pid, 0)` probe: alive if the signal is
     /// deliverable, or if it exists but is owned by another user (EPERM).
-    nonisolated private static func processIsAlive(_ pid: pid_t) -> Bool {
+    nonisolated static func processIsAlive(_ pid: pid_t) -> Bool {
         guard pid > 0 else { return false }
         if kill(pid, 0) == 0 { return true }
         return errno == EPERM
+    }
+
+    nonisolated static func currentBootTimeSeconds() -> Int? {
+        var bootTime = timeval()
+        var size = MemoryLayout<timeval>.size
+        guard sysctlbyname("kern.boottime", &bootTime, &size, nil, 0) == 0 else {
+            return nil
+        }
+        return Int(bootTime.tv_sec)
+    }
+
+    nonisolated private static func bootTimeSeconds(_ value: String?) -> Int? {
+        guard let value,
+              let secondsStart = value.range(of: "sec = ")?.upperBound else {
+            return nil
+        }
+        let suffix = value[secondsStart...]
+        let digits = suffix.prefix { $0.isNumber }
+        return Int(digits)
+    }
+
+    /// The live CLI process whose tracker currently owns this app session's
+    /// shared files. New tracker versions record the CLI parent directly; older
+    /// markers fall back to the extension pid. Boot-time metadata is
+    /// defense-in-depth: missing/unreadable values fail open, while a confirmed
+    /// reboot mismatch rejects a reused pid.
+    nonisolated static func liveCLIProcessPID(
+        sessionId: String,
+        directory: URL = Paths.sessionsDir
+    ) -> pid_t? {
+        guard let owner = readOwnerMarker(sessionId: sessionId, directory: directory),
+              ownerCorroboration(
+                  owner: owner,
+                  sessionId: sessionId
+              ) == .confirmedThisTab,
+              processIsAlive(owner.pid) else {
+            return nil
+        }
+        if let recordedBootTime = bootTimeSeconds(owner.bootTime),
+           let currentBootTime = currentBootTimeSeconds(),
+           abs(recordedBootTime - currentBootTime) > 5 {
+            return nil
+        }
+        let pid = owner.parentPid.flatMap { $0 > 0 ? $0 : nil } ?? owner.pid
+        return processIsAlive(pid) ? pid : nil
     }
 
     nonisolated static func transcriptOwnerMatchesSession(

@@ -127,6 +127,10 @@ if (validSessionId && socketPath) {
         sessionsDir, `${appSessionId}.set-model-request.json`
     );
     const setModelRequestName = `${appSessionId}.set-model-request.json`;
+    const closeSessionRequestPath = join(
+        sessionsDir, `${appSessionId}.close-session-request`
+    );
+    const closeSessionRequestName = `${appSessionId}.close-session-request`;
     const activeSubagents = new Map();
     // All outstanding structured questions (root and subagent), keyed by
     // requestId. Starts empty every launch: stale question state is never
@@ -180,6 +184,8 @@ if (validSessionId && socketPath) {
     let schedulesRefreshGeneration = null;
     let modelsRefreshGeneration = null;
     let setModelRequestGeneration = null;
+    let closeSessionRequestInFlight = false;
+    let closeSessionExitQueued = false;
     let schedules = [];
     const transcriptTurns = [];
     const transcriptEventIds = new Set();
@@ -243,6 +249,9 @@ if (validSessionId && socketPath) {
     const DURABLE_RECONCILE_DEBOUNCE_MS = 200;
     const DURABLE_RECONCILE_POLL_MS = 5_000;
     const TRANSCRIPT_PUBLISH_THROTTLE_MS = 400;
+    const CLOSE_ABORT_TIMEOUT_MS = 3_000;
+    const CLOSE_IDLE_TIMEOUT_MS = 5_000;
+    const CLOSE_ENQUEUE_TIMEOUT_MS = 3_000;
 
     const MAX_USER_INPUT_QUESTION_BYTES = 16_384;
     const MAX_USER_INPUT_CHOICE_BYTES = 8_192;
@@ -304,6 +313,70 @@ if (validSessionId && socketPath) {
             return true;
         } catch {
             return false;
+        }
+    }
+
+    function promiseWithTimeout(promise, timeoutMs, message) {
+        let timeout = null;
+        const timeoutPromise = new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+            timeout.unref?.();
+        });
+        return Promise.race([promise, timeoutPromise])
+            .finally(() => {
+                if (timeout) clearTimeout(timeout);
+            });
+    }
+
+    async function waitForSessionIdle(afterGeneration) {
+        const deadline = Date.now() + CLOSE_IDLE_TIMEOUT_MS;
+        while (idleGeneration <= afterGeneration && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        return idleGeneration > afterGeneration;
+    }
+
+    async function processCloseSessionRequest() {
+        if (closeSessionRequestInFlight
+                || closeSessionExitQueued
+                || !ownsSharedFiles()
+                || !fileExistsSync(closeSessionRequestPath)) {
+            return;
+        }
+        closeSessionRequestInFlight = true;
+        try {
+            const idleGenerationBeforeAbort = idleGeneration;
+            if (currentTurnKind !== null
+                    || foregroundTurnActive
+                    || scheduledTurnActive) {
+                await promiseWithTimeout(
+                    session.abort(),
+                    CLOSE_ABORT_TIMEOUT_MS,
+                    "session abort timed out"
+                );
+                if (!await waitForSessionIdle(idleGenerationBeforeAbort)) {
+                    throw new Error("session did not become idle after abort");
+                }
+            }
+            const result = await promiseWithTimeout(
+                session.rpc.commands.enqueue({command: "/exit print"}),
+                CLOSE_ENQUEUE_TIMEOUT_MS,
+                "exit command enqueue timed out"
+            );
+            if (result?.queued !== true) {
+                throw new Error("exit command was not queued");
+            }
+            // The app removes the request only after this tracker process exits
+            // (or after its bounded force-cleanup fallback). Keeping it here lets
+            // a failed attempt retry from the periodic poll.
+            closeSessionExitQueued = true;
+        } catch (error) {
+            console.error(
+                "[copilot-projects] failed to request graceful CLI exit:",
+                error
+            );
+        } finally {
+            closeSessionRequestInFlight = false;
         }
     }
 
@@ -3285,6 +3358,9 @@ if (validSessionId && socketPath) {
             if (!filename || filename === setModelRequestName) {
                 processSetModelRequest();
             }
+            if (!filename || filename === closeSessionRequestName) {
+                processCloseSessionRequest();
+            }
         });
     } catch {}
 
@@ -3464,6 +3540,7 @@ if (validSessionId && socketPath) {
     processUserInputResponse();
     processElicitationResponse();
     processSetModelRequest();
+    processCloseSessionRequest();
 
     timer = setInterval(() => {
         refreshForegroundAuthoritySoon();
@@ -3485,6 +3562,7 @@ if (validSessionId && socketPath) {
         processUserInputResponse();
         processElicitationResponse();
         processSetModelRequest();
+        processCloseSessionRequest();
         scheduleDurableReconcile(0);
     }, DURABLE_RECONCILE_POLL_MS);
     foregroundHandlingReady = true;

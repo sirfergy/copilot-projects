@@ -25,6 +25,9 @@ enum SessionStatusRecordLoad: Equatable {
 }
 
 enum SessionArtifacts {
+    private static let closeRequestSuffix = ".close-session-request"
+    private static let gracefulClosePolls = 200
+
     static func currentStatusTimestamp() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
@@ -112,24 +115,10 @@ enum SessionArtifacts {
         }
     }
 
-    @discardableResult
-    static func destroy(
-        sessionId: String,
-        snapshot: ProcessTree.Snapshot? = nil,
-        kittyImageDiskStore: RemoteKittyImageDiskStore = .shared,
-        alreadyTombstoned: Bool = false
-    ) -> Bool {
-        // Synchronously tombstone this session's durable Kitty images
-        // *before* any teardown below — the marker itself must survive even
-        // an immediate app exit, so a late restore/persist callback racing
-        // this destroy can never resurrect data this call already committed
-        // to discard. The (potentially larger) actual cleanup is enqueued
-        // asynchronously by `tombstone(sessionId:)` itself.
-        let imageCleanupScheduled = alreadyTombstoned
-            || kittyImageDiskStore.tombstone(sessionId: sessionId)
+    static func forceDestroy(sessionId: String) {
         let socket = Paths.dtachSocketPath(sessionId: sessionId)
         if Paths.dtachExecutable != nil {
-            let processes = snapshot ?? ProcessTree.snapshot()
+            let processes = ProcessTree.snapshot()
             // Kill both the attached client and master. This also closes the tiny
             // creation race where only the client is visible before it forks the
             // master; killing just a selected master could miss that case.
@@ -139,7 +128,93 @@ enum SessionArtifacts {
             }
         }
         removeFiles(sessionId: sessionId)
-        return imageCleanupScheduled
+    }
+
+    /// Ask the live tracker extension to route this close through the CLI's
+    /// in-app exit path, then force the existing dtach teardown after the tracker
+    /// exits or a bounded grace period. The image tombstone remains synchronous.
+    static func destroyGracefully(
+        sessionId: String,
+        kittyImageDiskStore: RemoteKittyImageDiskStore = .shared
+    ) -> Task<Void, Never> {
+        // Synchronously tombstone this session's durable Kitty images before
+        // requesting exit, so late persistence can never resurrect closed data.
+        _ = kittyImageDiskStore.tombstone(sessionId: sessionId)
+        let cliPID = TranscriptController.liveCLIProcessPID(sessionId: sessionId)
+        let requested = writeCloseSessionRequest(sessionId: sessionId)
+
+        return Task.detached(priority: .utility) {
+            if requested, let cliPID {
+                _ = await Self.waitForProcessExit(cliPID)
+            }
+            Self.forceDestroy(sessionId: sessionId)
+        }
+    }
+
+    static func waitForProcessExit(
+        _ pid: pid_t,
+        maximumPolls: Int = gracefulClosePolls,
+        processIsAlive: @escaping @Sendable (pid_t) -> Bool = {
+            TranscriptController.processIsAlive($0)
+        },
+        sleep: @escaping @Sendable () async -> Void = {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    ) async -> Bool {
+        for _ in 0 ..< maximumPolls {
+            if Task.isCancelled { return false }
+            guard processIsAlive(pid) else { return true }
+            await sleep()
+        }
+        return !processIsAlive(pid)
+    }
+
+    @discardableResult
+    static func writeCloseSessionRequest(
+        sessionId: String,
+        sessionsDirectory: URL = Paths.sessionsDir
+    ) -> Bool {
+        do {
+            try FileManager.default.createDirectory(
+                at: sessionsDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            let url = sessionsDirectory
+                .appendingPathComponent("\(sessionId)\(closeRequestSuffix)")
+            if FileManager.default.fileExists(atPath: url.path) { return true }
+            return FileManager.default.createFile(
+                atPath: url.path,
+                contents: Data(),
+                attributes: [.posixPermissions: 0o600]
+            )
+        } catch {
+            NSLog("copilot-projects: could not request graceful close for \(sessionId): \(error)")
+            return false
+        }
+    }
+
+    static func forceDestroyStaleCloseSessionRequests(
+        sessionsDirectory: URL = Paths.sessionsDir,
+        preserving sessionIds: Set<String> = [],
+        destroy: (String) -> Void = { SessionArtifacts.forceDestroy(sessionId: $0) }
+    ) {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: sessionsDirectory,
+            includingPropertiesForKeys: nil
+        ) else {
+            return
+        }
+        for url in entries where url.lastPathComponent.hasSuffix(closeRequestSuffix) {
+            let name = url.lastPathComponent
+            let sessionId = String(name.dropLast(closeRequestSuffix.count))
+            guard UUID(uuidString: sessionId) != nil else { continue }
+            if sessionIds.contains(sessionId) {
+                try? FileManager.default.removeItem(at: url)
+                continue
+            }
+            destroy(sessionId)
+        }
     }
 
     static func removeFiles(sessionId: String) {
@@ -158,6 +233,7 @@ enum SessionArtifacts {
             Paths.agentActivitySnapshotPath(sessionId: sessionId),
             Paths.userInputResponsePath(sessionId: sessionId),
             Paths.elicitationResponsePath(sessionId: sessionId),
+            Paths.closeSessionRequestPath(sessionId: sessionId),
             Paths.transcriptSnapshotPath(sessionId: sessionId),
             Paths.transcriptOwnerPath(sessionId: sessionId),
             Paths.transcriptOwnerLockPath(sessionId: sessionId),

@@ -339,6 +339,126 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertFalse(CopilotExtension.script.contains("rmSync(eventsPath"))
     }
 
+    func testCopilotExtensionQueuesGracefulCloseAfterAbortBecomesIdle() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-close-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let appSessionId = "22222222-2222-4222-8222-222222222222"
+        let copilotSessionId = "11111111-1111-4111-8111-111111111111"
+        let prelude = #"""
+        const calls = [];
+        const namedListeners = new Map();
+        const fakeSession = {
+          sessionId: "__COPILOT_SESSION_ID__",
+          abort: async () => {
+            calls.push("abort");
+            queueMicrotask(() => namedListeners.get("session.idle")?.({
+              id:"idle",type:"session.idle",timestamp:new Date().toISOString(),
+              data:{aborted:true}
+            }));
+          },
+          rpc: {
+            schedule: { list: async () => ({entries:[]}) },
+            permissions: { getAllowAll: async () => ({enabled:false}) },
+            model: { list: async () => [] },
+            commands: {
+              enqueue: async ({command}) => {
+                calls.push(`enqueue:${command}`);
+                return {queued:true};
+              }
+            },
+            eventLog: {
+              registerInterest: async ({eventType}) => ({handle:eventType}),
+              releaseInterest: async () => ({success:true})
+            }
+          },
+          connection: {
+            sendRequest: async () => ({sessionId:"__COPILOT_SESSION_ID__"})
+          },
+          on(name, handler) {
+            if (typeof name === "string") namedListeners.set(name, handler);
+          },
+          async getEvents() { return []; }
+        };
+        """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: "const joinSession = async () => fakeSession;"
+        )
+        let epilogue = #"""
+
+        namedListeners.get("user.message")?.({
+          id:"user",type:"user.message",timestamp:new Date().toISOString(),
+          data:{content:"work",source:null}
+        });
+        namedListeners.get("assistant.turn_start")?.({
+          id:"turn",type:"assistant.turn_start",timestamp:new Date().toISOString(),
+          data:{}
+        });
+        // turn_end clears foregroundTurnActive before session.idle clears the
+        // runtime's working record. Close must still abort/wait in this gap.
+        namedListeners.get("assistant.turn_end")?.({
+          id:"turn-end",type:"assistant.turn_end",timestamp:new Date().toISOString(),
+          data:{}
+        });
+        const requestPath = join(
+          process.env.COPILOT_PROJECTS_ROOT, "sessions",
+          `${process.env.COPILOT_PROJECTS_SESSION}.close-session-request`
+        );
+        writeFileSync(requestPath, "");
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          if (calls.some((call) => call.startsWith("enqueue:"))) break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        console.log(JSON.stringify({
+          calls,
+          requestExists: fileExistsSync(requestPath)
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("close.mjs")
+        try (prelude + extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "HOME": root.path,
+            "COPILOT_HOME": root.appendingPathComponent("copilot-home").path,
+            "COPILOT_PROJECTS_SESSION": appSessionId,
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errors = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errors, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
+        XCTAssertEqual(
+            summary?["calls"] as? [String],
+            ["abort", "enqueue:/exit print"]
+        )
+        XCTAssertEqual(summary?["requestExists"] as? Bool, true)
+    }
+
     func testCopilotExtensionUsesNativeSessionResolver() throws {
         try requireNodeForJavaScriptTests()
         let root = FileManager.default.temporaryDirectory
