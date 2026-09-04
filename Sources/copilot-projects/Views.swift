@@ -553,8 +553,8 @@ struct SessionTab: View {
     let onClose: () -> Void
 
     var showsUnreadIndicator: Bool {
-        // Mirror SessionTabIndicator's idle blue dot without hiding alerts beside busy/waiting status.
-        session.hasUnread && (session.status != .idle || !session.finishedUnseen)
+        // Avoid duplicating the idle completion dot unless the tab-number hint hides it.
+        session.hasUnread && (showNumber || session.status != .idle || !session.finishedUnseen)
     }
 
     var body: some View {

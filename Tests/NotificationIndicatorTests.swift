@@ -6,31 +6,33 @@ import AppKit
 final class NotificationIndicatorTests: XCTestCase {
     @MainActor
     func testUnreadIndicatorDoesNotDuplicateFinishedDot() {
-        let cases: [(status: SessionStatus, finished: Bool, unread: Bool, expected: Bool)] = [
-            (.idle, false, false, false),
-            (.idle, false, true, true), // A custom alert has no leading finished dot.
-            (.idle, true, false, false),
-            (.idle, true, true, false), // Completion already has a leading blue dot.
-            (.running, false, false, false),
-            (.running, false, true, true),
-            (.running, true, false, false),
-            (.running, true, true, true),
-            (.waiting, false, false, false),
-            (.waiting, false, true, true),
-            (.waiting, true, false, false),
-            (.waiting, true, true, true),
+        let cases: [(status: SessionStatus, finished: Bool, unread: Bool, showNumber: Bool, expected: Bool)] = [
+            (.idle, false, false, false, false),
+            (.idle, false, true, false, true), // A custom alert has no leading finished dot.
+            (.idle, true, false, false, false),
+            (.idle, true, true, false, false), // Completion already has a leading blue dot.
+            (.idle, true, true, true, true), // Number hint hides the leading completion dot.
+            (.running, false, false, false, false),
+            (.running, false, true, false, true),
+            (.running, true, false, false, false),
+            (.running, true, true, false, true),
+            (.waiting, false, false, false, false),
+            (.waiting, false, true, false, true),
+            (.waiting, true, false, false, false),
+            (.waiting, true, true, false, true),
         ]
-        for (status, finished, unread, expected) in cases {
+        for (status, finished, unread, showNumber, expected) in cases {
             var session = Session(title: "target", cwd: "/tmp")
             session.status = status
             session.finishedUnseen = finished
             session.hasUnread = unread
             let tab = SessionTab(
-                session: session, isActive: false, onSelect: {}, onClose: {}
+                session: session, isActive: false, showNumber: showNumber,
+                onSelect: {}, onClose: {}
             )
             XCTAssertEqual(
                 tab.showsUnreadIndicator, expected,
-                "status=\(status), finished=\(finished), unread=\(unread)"
+                "status=\(status), finished=\(finished), unread=\(unread), showNumber=\(showNumber)"
             )
         }
     }
