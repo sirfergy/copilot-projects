@@ -261,6 +261,7 @@ struct ProjectRow: View {
 /// (running); orange means it's waiting on your input; blue means it has finished
 /// and you haven't viewed it yet ("ready for interaction"); idle shows nothing.
 /// The 9pt frame keeps the slot a constant size whether or not a dot is shown.
+/// SessionTab suppresses its separate unread dot while this indicator is blue.
 struct SessionTabIndicator: View {
     let session: Session
 
@@ -551,6 +552,11 @@ struct SessionTab: View {
     let onSelect: () -> Void
     let onClose: () -> Void
 
+    var showsUnreadIndicator: Bool {
+        // Mirror SessionTabIndicator's idle blue dot without hiding alerts beside busy/waiting status.
+        session.hasUnread && (session.status != .idle || !session.finishedUnseen)
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             ZStack {
@@ -570,7 +576,7 @@ struct SessionTab: View {
             } else if !session.schedules.isEmpty {
                 ScheduleBadge(schedules: session.schedules)
             }
-            if session.hasUnread {
+            if showsUnreadIndicator {
                 Circle().fill(Color.blue).frame(width: 6, height: 6)
             }
             Button(action: onClose) {
