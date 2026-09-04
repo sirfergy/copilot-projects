@@ -42,7 +42,9 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   is unavailable. Response previews can appear on your devices' lock screens.
   Clicking one focuses that session. Remote web push provides the same timestamped events to
   subscribed browsers and installed iPhone/iPad Home Screen apps. Unread sessions get a bell
-  badge + a Dock badge count.
+  badge + a Dock badge count. Completed tabs show one blue attention dot, not two.
+  Returning to the Mac app marks the selected session read across devices without
+  needing to switch tabs.
 - **Control socket + CLI:** the same `copilot-projects` binary is also a CLI that talks to the
   running app over a Unix socket — ideal for agent hooks.
 - **Resumable sessions:** each terminal runs under a bundled [dtach](https://github.com/crigler/dtach),
