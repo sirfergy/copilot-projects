@@ -239,10 +239,17 @@ Persistence failures return 503 and the client retains the same request id; whil
 session remains live, its next retry repairs the missing state without launching Copilot again.
 Launch intentionally precedes persistence so a saved session cannot miss its one-shot initial
 prompt. Consequently, the prompt may already have acted before a 503, and a host crash combined
-with the failed workspace write leaves recovery dependent on the surviving dtach state. Other
-answers are 409 collision, 410 already-closed, 422 unknown project or missing Repos, and 503 Copilot
-or persistence unavailable. Hosts without this endpoint return 404, which the client surfaces as
-unsupported.
+with the failed workspace write leaves recovery dependent on the surviving dtach state. An
+unacknowledged creation can also be saved by a later unrelated workspace change without gaining
+a ledger record; closing it before a successful creation retry can allow a subsequent retry to
+create it again. Other answers are 409 collision, 410 already-closed, 422 unknown project or missing
+Repos, and 503 Copilot or persistence unavailable. Hosts without this endpoint return 404, which
+the client surfaces as unsupported.
+
+A malformed or unreadable `session-creation-ledger.json` in the state directory keeps remote
+creation unavailable, rather than silently discarding its records. Repair its permissions or
+restore a valid backup, keeping the original for recovery. Discarding the ledger also discards
+its replay protection; a 503 caused by corrupt data will not resolve just by retrying.
 
 When Copilot asks a structured `ask_user` question, the extension heartbeat surfaces it (with its
 verbatim choices) as a native question card in the remote client, temporarily replacing the

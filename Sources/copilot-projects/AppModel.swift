@@ -165,15 +165,8 @@ enum RemoteSessionCreationOutcome: Equatable {
     case persistenceUnavailable
 }
 
-private enum WorkspacePersistenceError: LocalizedError {
-    case unavailable(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .unavailable(let message):
-            return message
-        }
-    }
+private struct WorkspacePersistenceError: LocalizedError {
+    let errorDescription: String?
 }
 
 private enum WindowScreenshot {
@@ -1114,6 +1107,8 @@ final class AppModel: ObservableObject {
         now: Date
     ) -> Bool {
         do {
+            // Older builds could write the ledger after a failed workspace save.
+            // An existing record alone therefore cannot prove this session is saved.
             try persistWorkspace()
         } catch {
             NSLog(
@@ -3874,7 +3869,7 @@ final class AppModel: ObservableObject {
 
     private func persistWorkspace() throws {
         if let stateLoadFailure {
-            throw WorkspacePersistenceError.unavailable(stateLoadFailure)
+            throw WorkspacePersistenceError(errorDescription: stateLoadFailure)
         }
         let state = PersistedState(projects: projects, selectedProjectId: selectedProjectId)
         try stateRepository.save(state)
