@@ -3465,15 +3465,11 @@ final class AppModel: ObservableObject {
         updateDockBadge()
     }
 
-    /// Clear the on-screen session's "finished" flag when the app is brought forward
-    /// (you're now looking at it). Other tabs keep their flag until you switch to them.
+    /// Clear the visible session's attention flags when the app is brought forward.
+    /// Other tabs stay unread until you view them.
     func markActiveSessionSeen() {
-        guard let pid = selectedProjectId, let pi = projectIndex(pid),
-              let sid = projects[pi].selectedSessionId,
-              let si = projects[pi].sessions.firstIndex(where: { $0.id == sid }) else { return }
-        if projects[pi].sessions[si].finishedUnseen {
-            projects[pi].sessions[si].finishedUnseen = false
-        }
+        guard let sid = currentSelectedSessionId else { return }
+        markSessionRead(sessionId: sid)
     }
 
     /// Make the visible session's terminal the first responder. Used when the app
