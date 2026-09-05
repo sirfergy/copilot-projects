@@ -134,8 +134,8 @@ final class RemoteModelBridge: @unchecked Sendable {
         model?.markSessionRead(sessionId: sessionId)
     }
 
-    func closeSession(sessionId: String) -> Bool {
-        model?.closeRemoteSession(sessionId: sessionId) ?? false
+    func closeSession(sessionId: String) -> RemoteSessionCloseResult {
+        model?.closeRemoteSession(sessionId: sessionId) ?? .failed
     }
 
     func moveSession(
@@ -1394,10 +1394,12 @@ private final class RemoteHTTPHandler:
                 channel.eventLoop.execute {
                     let response: (HTTPResponseStatus, String)
                     switch closed {
-                    case .some(true):
+                    case .some(.closed):
                         response = (.noContent, "")
-                    case .some(false):
+                    case .some(.missing):
                         response = (.notFound, "Session not found")
+                    case .some(.failed):
+                        response = (.serviceUnavailable, "Could not save session close")
                     case .none:
                         response = (.forbidden, "view only")
                     }

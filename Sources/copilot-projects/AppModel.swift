@@ -240,6 +240,16 @@ enum PermissionNotificationDecision: Equatable {
 
 /// Single source of truth. Holds value-type projects/sessions (observed) and live
 /// terminal controllers (NOT observed, kept out of the SwiftUI graph).
+typealias GracefulSessionDestroyer = (
+    _ sessionIds: [String],
+    _ kittyImageDiskStore: RemoteKittyImageDiskStore
+) -> Task<Void, Never>
+typealias ForcedSessionDestroyer = (_ sessionIds: [String]) -> Void
+
+enum RemoteSessionCloseResult: Equatable {
+    case closed, missing, failed
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     private var projectStorage: [Project] = []
@@ -391,6 +401,10 @@ final class AppModel: ObservableObject {
         let statusTimestamp: Int64
         let promptStatusTimestamp: Int64
     }
+    private struct PendingSessionDestroy {
+        let task: Task<Void, Never>
+        let controller: TerminalController?
+    }
     private var permissionNotificationTokens: [String: UUID] = [:]
     private var permissionStatusRestores: [String: PermissionStatusRestore] = [:]
     private let isAppActive: @MainActor () -> Bool
@@ -405,6 +419,9 @@ final class AppModel: ObservableObject {
     private var remoteCommandRequestLedger = RemoteCommandRequestLedger()
     private var remoteElicitationRequestLedger = RemoteCommandRequestLedger()
     private let remoteControlDeliveryLedger = RemoteControlDeliveryLedger()
+    private let gracefulSessionDestroyer: GracefulSessionDestroyer
+    private let forcedSessionDestroyer: ForcedSessionDestroyer
+    private var pendingSessionDestroys: [String: PendingSessionDestroy] = [:]
 
     var remoteControlDeliveryEpoch: String { remoteControlDeliveryLedger.epoch }
 
@@ -431,15 +448,7 @@ final class AppModel: ObservableObject {
     /// Override with COPILOT_PROJECTS_AGENT_PROCESSES (comma-separated); disable the
     /// whole check with COPILOT_PROJECTS_LIVENESS=0.
     private var agentProcessNames: Set<String> {
-        let env = ProcessInfo.processInfo.environment
-        if let raw = env["COPILOT_PROJECTS_AGENT_PROCESSES"],
-           !raw.isEmpty {
-            let names = raw.split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-            if !names.isEmpty { return Set(names) }
-        }
-        return ["copilot"]
+        Env.agentProcessNames()
     }
 
     private var livenessEnabled: Bool {
@@ -492,7 +501,17 @@ final class AppModel: ObservableObject {
         webPushService: WebPushService? = nil,
         apnsService: APNsService? = nil,
         notificationSync: NotificationSyncService? = nil,
-        kittyImageDiskStore: RemoteKittyImageDiskStore = .shared
+        kittyImageDiskStore: RemoteKittyImageDiskStore = .shared,
+        gracefulSessionDestroyer: @escaping GracefulSessionDestroyer = {
+            sessionIds, store in
+            SessionArtifacts.destroyGracefully(
+                sessionIds: sessionIds,
+                kittyImageDiskStore: store
+            )
+        },
+        forcedSessionDestroyer: @escaping ForcedSessionDestroyer = {
+            SessionArtifacts.forceDestroy(sessionIds: $0)
+        }
     ) {
         self.stateRepository = stateRepository
         self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
@@ -514,6 +533,8 @@ final class AppModel: ObservableObject {
         self.agentActivityCooldownScheduler = agentActivityCooldownScheduler
         self.agentActivityScanObserver = agentActivityScanObserver
         self.kittyImageDiskStore = kittyImageDiskStore
+        self.gracefulSessionDestroyer = gracefulSessionDestroyer
+        self.forcedSessionDestroyer = forcedSessionDestroyer
         remoteAccess = RemoteAccessController(
             webPushService: webPushService,
             apnsService: apnsService,
@@ -1076,8 +1097,18 @@ final class AppModel: ObservableObject {
     }
 
     func closeSession(projectId pid: String, sessionId sid: String) {
+        closeSession(projectId: pid, sessionId: sid, terminateController: true)
+    }
+
+    private func closeSession(
+        projectId pid: String,
+        sessionId sid: String,
+        terminateController: Bool
+    ) {
         guard let pi = projectIndex(pid) else { return }
-        controllers[sid]?.terminate()
+        if terminateController {
+            controllers[sid]?.terminate()
+        }
         controllers[sid] = nil
         if selectedTranscriptController?.sessionId == sid {
             selectedTranscriptController = nil
@@ -1119,31 +1150,103 @@ final class AppModel: ObservableObject {
         requestCloseSession(projectId: pid, sessionId: sid)
     }
 
-    func closeRemoteSession(sessionId: String) -> Bool {
-        guard let location = locateIndex(sessionId) else { return false }
-        requestCloseSession(
+    func closeRemoteSession(sessionId: String) -> RemoteSessionCloseResult {
+        guard let location = locateIndex(sessionId) else { return .missing }
+        return destroySession(
             projectId: projects[location.p].id,
             sessionId: sessionId
-        )
-        return true
+        ) ? .closed : .failed
     }
 
     /// User-initiated close (⌘W / tab ✕). Ends the session immediately with no
     /// confirmation — an explicit close is intentional, and app restarts resume
     /// sessions, so there's nothing to protect against here.
     func requestCloseSession(projectId pid: String, sessionId sid: String) {
-        destroySession(projectId: pid, sessionId: sid)
+        if !destroySession(projectId: pid, sessionId: sid) {
+            presentAlert(
+                title: "Could Not Close Session",
+                message: "The close could not be saved. The session has been left open."
+            )
+        }
     }
 
-    /// Permanently end a session: kill its dtach master (so it does not resume),
-    /// remove its socket, and drop it from the model.
-    private func destroySession(projectId pid: String, sessionId sid: String) {
-        controllers[sid]?.terminalView.kittyImageCapture.disablePersistence()
-        _ = SessionArtifacts.destroy(
-            sessionId: sid,
-            kittyImageDiskStore: kittyImageDiskStore
+    /// Permanently end a session: ask Copilot to exit through its own TUI, retain
+    /// the existing forced dtach teardown as a bounded fallback, and remove the
+    /// tab from the model immediately.
+    private func destroySession(projectId pid: String, sessionId sid: String) -> Bool {
+        guard let pi = projectIndex(pid),
+              projects[pi].sessions.contains(where: { $0.id == sid }),
+              acceptSessionCloses(sessionIds: [sid]) else { return false }
+        let controller = controllers[sid]
+        controller?.terminalView.kittyImageCapture.disablePersistence()
+        scheduleSessionDestroy(
+            sessions: [(id: sid, controller: controller)]
         )
-        closeSession(projectId: pid, sessionId: sid)
+        closeSession(
+            projectId: pid,
+            sessionId: sid,
+            terminateController: Paths.dtachExecutable != nil
+        )
+        return true
+    }
+
+    private func acceptSessionCloses(sessionIds: [String], projectIds: [String] = []) -> Bool {
+        guard stateLoadFailure == nil else { return false }
+        do {
+            try stateRepository.acceptCloses(sessionIds: sessionIds, projectIds: projectIds)
+            return true
+        } catch {
+            NSLog("copilot-projects: could not accept session close: \(error)")
+            return false
+        }
+    }
+
+    private func finishPersistedSessionCloses() {
+        guard pendingSessionDestroys.isEmpty, stateLoadFailure == nil else { return }
+        do {
+            try stateRepository.finishCloses(
+                PersistedState(projects: projects, selectedProjectId: selectedProjectId)
+            )
+        } catch {
+            NSLog("copilot-projects: retaining interrupted session closes: \(error)")
+        }
+    }
+
+    private func scheduleSessionDestroy(
+        sessions: [(id: String, controller: TerminalController?)]
+    ) {
+        guard !sessions.isEmpty else { return }
+        let sessionIds = sessions.map(\.id)
+        let cleanup = gracefulSessionDestroyer(
+            sessionIds,
+            kittyImageDiskStore
+        )
+        for session in sessions {
+            pendingSessionDestroys[session.id] = PendingSessionDestroy(
+                task: cleanup,
+                controller: Paths.dtachExecutable == nil
+                    ? session.controller
+                    : nil
+            )
+        }
+        Task { @MainActor [weak self] in
+            await cleanup.value
+            for sessionId in sessionIds {
+                self?.completeSessionDestroy(sessionId)
+            }
+        }
+    }
+
+    private func completeSessionDestroy(_ sessionId: String) {
+        guard let pending = pendingSessionDestroys.removeValue(
+            forKey: sessionId
+        ) else {
+            return
+        }
+        if Paths.dtachExecutable == nil {
+            pending.controller?.terminate()
+        }
+        finishPersistedSessionCloses()
     }
 
     /// Detach (don't destroy) every live terminal — used on app quit so dtach
@@ -1155,7 +1258,11 @@ final class AppModel: ObservableObject {
         controllers.removeAll()
     }
 
-    func detachAllClientsAndDrain() async {
+    func detachAllClientsAndDrain(closeTimeout: Duration = .seconds(2)) async {
+        // Independent of the destroy tasks: cancellation does not guarantee an
+        // awaited task/continuation will finish. Poll the main-actor ledger, not
+        // the tasks themselves, so quit can enforce its own deadline.
+        let closeDeadline = ContinuousClock.now.advanced(by: closeTimeout)
         let activeControllers = Array(controllers.values)
         for controller in activeControllers {
             controller.beginTerminationDrain()
@@ -1164,6 +1271,14 @@ final class AppModel: ObservableObject {
             await controller.finishTerminationDrain()
         }
         controllers.removeAll()
+        if isPoweringOff {
+            forcePendingSessionDestroys()
+        } else {
+            while !pendingSessionDestroys.isEmpty, ContinuousClock.now < closeDeadline {
+                try? await Task.sleep(for: min(.milliseconds(25), ContinuousClock.now.duration(to: closeDeadline)))
+            }
+            forcePendingSessionDestroys()
+        }
     }
 
     func flushKittyImagePersistence() async {
@@ -1181,6 +1296,46 @@ final class AppModel: ObservableObject {
         agentActivitySource = nil
         agentActivityRefreshGeneration += 1
         remoteAccess.stopGateway()
+    }
+
+    func forcePendingSessionDestroys() {
+        let pending = pendingSessionDestroys
+        pendingSessionDestroys.removeAll()
+        for destroy in pending.values {
+            destroy.task.cancel()
+        }
+        forcedSessionDestroyer(Array(pending.keys))
+        if Paths.dtachExecutable == nil {
+            for destroy in pending.values {
+                destroy.controller?.terminate()
+            }
+        }
+        finishPersistedSessionCloses()
+    }
+
+    func finishInterruptedSessionDestroys(sessionsDirectory: URL = Paths.sessionsDir) {
+        guard stateLoadFailure == nil else { return }
+        do {
+            let legacyRequests = try SessionArtifacts.closeSessionRequests(sessionsDirectory: sessionsDirectory)
+            if !legacyRequests.isEmpty {
+                try stateRepository.acceptCloses(sessionIds: legacyRequests)
+            }
+            let intent = try stateRepository.pendingCloses()
+            let state = try stateRepository.normalized(intent.applying(
+                to: PersistedState(projects: projects, selectedProjectId: selectedProjectId)
+            ))
+            projects = state.projects
+            selectedProjectId = state.selectedProjectId
+            for sessionId in intent.sessionIds {
+                _ = kittyImageDiskStore.tombstone(sessionId: sessionId)
+            }
+            forcedSessionDestroyer(Array(intent.sessionIds))
+            finishPersistedSessionCloses()
+        } catch {
+            let message = "Could not recover session closes (intent: \(stateRepository.closeIntentPath.path), requests: \(sessionsDirectory.path)): \(error)"
+            stateLoadFailure = message
+            NSLog("copilot-projects: \(message)")
+        }
     }
 
     func prepareForSystemPowerOff(protectionInterval: TimeInterval = 300) {
@@ -2073,19 +2228,28 @@ final class AppModel: ObservableObject {
 
     func closeProject(_ pid: String) {
         guard let pi = projectIndex(pid) else { return }
-        for session in projects[pi].sessions {
-            _ = kittyImageDiskStore.tombstone(sessionId: session.id)
-        }
-        let snapshot = Paths.dtachExecutable != nil ? ProcessTree.snapshot() : nil
-        for session in projects[pi].sessions {
-            controllers[session.id]?.terminalView.kittyImageCapture.disablePersistence()
-            SessionArtifacts.destroy(
-                sessionId: session.id,
-                snapshot: snapshot,
-                kittyImageDiskStore: kittyImageDiskStore,
-                alreadyTombstoned: true
+        guard acceptSessionCloses(
+            sessionIds: projects[pi].sessions.map(\.id),
+            projectIds: [pid]
+        ) else {
+            presentAlert(
+                title: "Could Not Close Project",
+                message: "The close could not be saved. The project has been left open."
             )
-            controllers[session.id]?.terminate()
+            return
+        }
+        let usesDtach = Paths.dtachExecutable != nil
+        let sessions = projects[pi].sessions.map { session in
+            (id: session.id, controller: controllers[session.id])
+        }
+        for session in sessions {
+            session.controller?.terminalView.kittyImageCapture.disablePersistence()
+        }
+        scheduleSessionDestroy(sessions: sessions)
+        for session in sessions {
+            if usesDtach {
+                session.controller?.terminate()
+            }
             controllers[session.id] = nil
             if selectedTranscriptController?.sessionId == session.id {
                 selectedTranscriptController = nil
@@ -2109,6 +2273,7 @@ final class AppModel: ObservableObject {
         refreshSelectedTranscriptController()
         updateDockBadge()
         save()
+        finishPersistedSessionCloses()
     }
 
     func renameProject(_ pid: String, name: String) {
@@ -3409,13 +3574,15 @@ final class AppModel: ObservableObject {
             return
         }
 
-        guard let loc = locateIndex(sessionId) else { return }
+        guard let loc = locateIndex(sessionId),
+              acceptSessionCloses(sessionIds: [sessionId]) else { return }
         projects[loc.p].sessions[loc.s].backgroundAgentsActive = false
         backgroundAgentsSuppressed.remove(sessionId)
         let projectId = projects[loc.p].id
         _ = kittyImageDiskStore.tombstone(sessionId: sessionId)
         SessionArtifacts.removeFiles(sessionId: sessionId)
         closeSession(projectId: projectId, sessionId: sessionId)
+        finishPersistedSessionCloses()
     }
 
     nonisolated static func shouldPreserveSessionAfterTerminalExit(

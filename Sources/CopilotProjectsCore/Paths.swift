@@ -154,6 +154,12 @@ public enum Paths {
         sessionsDir.appendingPathComponent("\(sessionId).elicitation-response.json").path
     }
 
+    /// Host-written request asking the owning tracker extension to terminate the
+    /// Copilot CLI through its in-app `/exit` path before dtach is destroyed.
+    public static func closeSessionRequestPath(sessionId: String) -> String {
+        sessionsDir.appendingPathComponent("\(sessionId).close-session-request").path
+    }
+
     public static func transcriptSnapshotPath(sessionId: String) -> String {
         sessionsDir.appendingPathComponent("\(sessionId).transcript.json").path
     }

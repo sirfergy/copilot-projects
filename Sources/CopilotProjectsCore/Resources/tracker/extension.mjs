@@ -127,6 +127,10 @@ if (validSessionId && socketPath) {
         sessionsDir, `${appSessionId}.set-model-request.json`
     );
     const setModelRequestName = `${appSessionId}.set-model-request.json`;
+    const closeSessionRequestPath = join(
+        sessionsDir, `${appSessionId}.close-session-request`
+    );
+    const closeSessionRequestName = `${appSessionId}.close-session-request`;
     const activeSubagents = new Map();
     // All outstanding structured questions (root and subagent), keyed by
     // requestId. Starts empty every launch: stale question state is never
@@ -162,6 +166,10 @@ if (validSessionId && socketPath) {
     let scheduledTurnActive = false;
     let currentTurnKind = null;
     let idleGeneration = 0;
+    let closeActivityIdleBaseline = idleGeneration;
+    let closeActivityState = "pending";
+    let closeActivityPendingSince = Date.now();
+    let closeActivityRetryTimer = null;
     let lastIdleAborted = false;
     let lastIdleTurnKind = null;
     let currentModel = null;
@@ -180,6 +188,8 @@ if (validSessionId && socketPath) {
     let schedulesRefreshGeneration = null;
     let modelsRefreshGeneration = null;
     let setModelRequestGeneration = null;
+    let closeSessionRequestInFlight = false;
+    let closeSessionExitQueued = false;
     let schedules = [];
     const transcriptTurns = [];
     const transcriptEventIds = new Set();
@@ -243,6 +253,10 @@ if (validSessionId && socketPath) {
     const DURABLE_RECONCILE_DEBOUNCE_MS = 200;
     const DURABLE_RECONCILE_POLL_MS = 5_000;
     const TRANSCRIPT_PUBLISH_THROTTLE_MS = 400;
+    const CLOSE_ABORT_TIMEOUT_MS = 3_000;
+    const CLOSE_IDLE_TIMEOUT_MS = 5_000;
+    const CLOSE_ENQUEUE_TIMEOUT_MS = 3_000;
+    const CLOSE_ACTIVITY_PENDING_TIMEOUT_MS = 1_000;
 
     const MAX_USER_INPUT_QUESTION_BYTES = 16_384;
     const MAX_USER_INPUT_CHOICE_BYTES = 8_192;
@@ -304,6 +318,129 @@ if (validSessionId && socketPath) {
             return true;
         } catch {
             return false;
+        }
+    }
+
+    function promiseWithTimeout(promise, timeoutMs, message) {
+        let timeout = null;
+        const timeoutPromise = new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+            timeout.unref?.();
+        });
+        return Promise.race([promise, timeoutPromise])
+            .finally(() => {
+                if (timeout) clearTimeout(timeout);
+            });
+    }
+
+    async function waitForSessionIdle(afterGeneration) {
+        const deadline = Date.now() + CLOSE_IDLE_TIMEOUT_MS;
+        while (idleGeneration <= afterGeneration && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        return idleGeneration > afterGeneration;
+    }
+
+    function latestRootTurnKind(events) {
+        let turnKind = null;
+        for (const event of events) {
+            if (!event || typeof event !== "object" || event.agentId) continue;
+            if (event.type === "user.message") {
+                turnKind = classifyUserMessage(event) ?? turnKind;
+            } else if (event.type === "assistant.turn_start") {
+                turnKind ??= "foreground";
+            } else if (event.type === "session.idle"
+                    || event.type === "session.start"
+                    || event.type === "session.resume"
+                    || event.type === "session.shutdown") {
+                turnKind = null;
+            }
+        }
+        return turnKind;
+    }
+
+    function clearCloseActivityRetry() {
+        if (closeActivityRetryTimer === null) return;
+        clearTimeout(closeActivityRetryTimer);
+        closeActivityRetryTimer = null;
+    }
+
+    function retryCloseAfterActivityTimeout() {
+        if (closeActivityRetryTimer !== null) return;
+        const generation = conversationGeneration;
+        const elapsed = Date.now() - closeActivityPendingSince;
+        closeActivityRetryTimer = setTimeout(() => {
+            closeActivityRetryTimer = null;
+            if (generation === conversationGeneration) {
+                processCloseSessionRequest();
+            }
+        }, Math.max(0, CLOSE_ACTIVITY_PENDING_TIMEOUT_MS - elapsed));
+        closeActivityRetryTimer.unref?.();
+    }
+
+    async function processCloseSessionRequest() {
+        if (closeSessionRequestInFlight
+                || closeSessionExitQueued
+                || !ownsSharedFiles()
+                || !fileExistsSync(closeSessionRequestPath)) {
+            return;
+        }
+        const activityActive = currentTurnKind !== null
+            || foregroundTurnActive
+            || scheduledTurnActive;
+        let activityState = closeActivityState;
+        if (!activityActive && activityState === "pending") {
+            if (Date.now() - closeActivityPendingSince
+                    < CLOSE_ACTIVITY_PENDING_TIMEOUT_MS) {
+                retryCloseAfterActivityTimeout();
+                return;
+            }
+            closeActivityState = "unknown";
+            activityState = "unknown";
+        }
+        clearCloseActivityRetry();
+        const generation = conversationGeneration;
+        closeSessionRequestInFlight = true;
+        try {
+            const idleGenerationBeforeAbort = idleGeneration;
+            if (activityActive || activityState === "unknown") {
+                try {
+                    await promiseWithTimeout(
+                        session.abort(),
+                        CLOSE_ABORT_TIMEOUT_MS,
+                        "session abort timed out"
+                    );
+                } catch (error) {
+                    if (activityState !== "unknown") throw error;
+                }
+                const becameIdle = await waitForSessionIdle(idleGenerationBeforeAbort);
+                if (generation !== conversationGeneration || !ownsSharedFiles()) return;
+                if (!becameIdle && activityState !== "unknown") {
+                    throw new Error("session did not become idle after abort");
+                }
+            }
+            const result = await promiseWithTimeout(
+                session.rpc.commands.enqueue({command: "/exit print"}),
+                CLOSE_ENQUEUE_TIMEOUT_MS,
+                "exit command enqueue timed out"
+            );
+            if (generation !== conversationGeneration || !ownsSharedFiles()) return;
+            if (result?.queued !== true) {
+                throw new Error("exit command was not queued");
+            }
+            // The app removes the request only after this tracker process exits
+            // (or after its bounded force-cleanup fallback). Keeping it here lets
+            // a failed attempt retry from the periodic poll.
+            closeSessionExitQueued = true;
+        } catch (error) {
+            console.error(
+                "[copilot-projects] failed to request graceful CLI exit:",
+                error
+            );
+        } finally {
+            if (generation === conversationGeneration) {
+                closeSessionRequestInFlight = false;
+            }
         }
     }
 
@@ -2603,6 +2740,7 @@ if (validSessionId && socketPath) {
         // empty and would otherwise blank the model line the rotation event
         // just taught us.
         const preservedModel = currentModel;
+        let history = [];
 
         durableTranscriptAuthoritative = durableHistoryAvailable();
         // Startup only: publish a deliberate empty snapshot so a snapshot
@@ -2619,7 +2757,7 @@ if (validSessionId && socketPath) {
             : null;
         let historyLoaded = false;
         try {
-            const history = await sdkHistoryWithTimeout();
+            history = await sdkHistoryWithTimeout();
             if (stale()) return;
             if (durableTranscriptAuthoritative) {
                 for (const event of history) {
@@ -2642,6 +2780,25 @@ if (validSessionId && socketPath) {
         } catch {
             if (stale()) return;
         }
+        if (historyLoaded) {
+            const restoredTurnKind = latestRootTurnKind(history);
+            if (restoredTurnKind !== null
+                    && idleGeneration === closeActivityIdleBaseline
+                    && currentTurnKind === null
+                    && !foregroundTurnActive
+                    && !scheduledTurnActive) {
+                // History has no durable session.idle event, so it can prove
+                // that a turn started but not that it is still live. Keep this
+                // uncertainty local to close; don't relabel live activity.
+                closeActivityState = "unknown";
+            } else {
+                closeActivityState = "ready";
+            }
+        } else if (closeActivityState === "pending") {
+            closeActivityState = "unknown";
+        }
+        clearCloseActivityRetry();
+        processCloseSessionRequest();
         if (!durableTranscriptAuthoritative && !historyLoaded) {
             resetTranscriptReplayState(preservedTurns, preservedModel);
         }
@@ -2700,6 +2857,10 @@ if (validSessionId && socketPath) {
         foregroundTurnActive = false;
         scheduledTurnActive = false;
         currentTurnKind = null;
+        closeActivityIdleBaseline = idleGeneration;
+        closeActivityState = "pending";
+        closeActivityPendingSince = Date.now();
+        clearCloseActivityRetry();
         lastIdleAborted = false;
         lastIdleTurnKind = null;
         foregroundTransitionAt = transitionAt;
@@ -2768,6 +2929,10 @@ if (validSessionId && socketPath) {
         ownedCopilotSessionIds.add(nextCopilotSessionId);
         conversationGeneration += 1;
         const generation = conversationGeneration;
+        // Slash-command stop/clear discards the old conversation's queued
+        // commands. Permanent tab close intent survives that queue/owner.
+        closeSessionRequestInFlight = false;
+        closeSessionExitQueued = false;
         rotationConsumedEventId = typeof event?.id === "string"
             ? event.id
             : null;
@@ -3146,21 +3311,27 @@ if (validSessionId && socketPath) {
 
     session.on("user.message", (event) => {
         if (event.agentId) return;
+        closeActivityState = "ready";
+        clearCloseActivityRetry();
         lastIdleTurnKind = null;
         currentTurnKind = event.data.source?.startsWith("schedule-")
             ? "scheduled"
             : "foreground";
         setScheduledTurnMarker(currentTurnKind === "scheduled");
+        processCloseSessionRequest();
     });
 
     session.on("assistant.turn_start", (event) => {
         if (event.agentId) return;
+        closeActivityState = "ready";
+        clearCloseActivityRetry();
         lastIdleTurnKind = null;
         scheduledTurnActive = currentTurnKind === "scheduled";
         foregroundTurnActive = !scheduledTurnActive;
         foregroundTransitionAt = normalizedTimestamp(event.timestamp);
         if (scheduledTurnActive) setScheduledTurnMarker(true);
         publish();
+        processCloseSessionRequest();
     });
 
     session.on("assistant.turn_end", (event) => {
@@ -3172,6 +3343,8 @@ if (validSessionId && socketPath) {
 
     session.on("session.idle", (event) => {
         if (event.agentId) return;
+        closeActivityState = "ready";
+        clearCloseActivityRetry();
         idleGeneration += 1;
         lastIdleAborted = event.data.aborted === true;
         lastIdleTurnKind = currentTurnKind;
@@ -3182,6 +3355,7 @@ if (validSessionId && socketPath) {
         activeSubagents.clear();
         publish();
         setTimeout(() => setScheduledTurnMarker(false), 5_000);
+        processCloseSessionRequest();
     });
 
     // Track the effective model so remote clients can show it. Seeded from
@@ -3284,6 +3458,9 @@ if (validSessionId && socketPath) {
             }
             if (!filename || filename === setModelRequestName) {
                 processSetModelRequest();
+            }
+            if (!filename || filename === closeSessionRequestName) {
+                processCloseSessionRequest();
             }
         });
     } catch {}
@@ -3464,6 +3641,7 @@ if (validSessionId && socketPath) {
     processUserInputResponse();
     processElicitationResponse();
     processSetModelRequest();
+    processCloseSessionRequest();
 
     timer = setInterval(() => {
         refreshForegroundAuthoritySoon();
@@ -3485,6 +3663,7 @@ if (validSessionId && socketPath) {
         processUserInputResponse();
         processElicitationResponse();
         processSetModelRequest();
+        processCloseSessionRequest();
         scheduleDurableReconcile(0);
     }, DURABLE_RECONCILE_POLL_MS);
     foregroundHandlingReady = true;
