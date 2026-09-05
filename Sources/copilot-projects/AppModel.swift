@@ -1052,11 +1052,8 @@ final class AppModel: ObservableObject {
                 guard owningProjectId == request.projectId else { return .conflict }
             }
             guard persistRemoteCreation(
-                requestId: request.requestId,
-                projectId: request.projectId,
-                sessionId: sessionId,
-                createdAt: creationRecord?.createdAt ?? now,
-                rememberCreation: creationRecord == nil,
+                request: request,
+                existingRecord: creationRecord,
                 now: now
             ) else {
                 return .persistenceUnavailable
@@ -1098,11 +1095,7 @@ final class AppModel: ObservableObject {
         // retryable; the live deterministic session is retained so the retry can
         // repair state without relaunching it.
         guard persistRemoteCreation(
-            requestId: request.requestId,
-            projectId: request.projectId,
-            sessionId: sessionId,
-            createdAt: now,
-            rememberCreation: true,
+            request: request,
             now: now
         ) else {
             return .persistenceUnavailable
@@ -1116,11 +1109,8 @@ final class AppModel: ObservableObject {
     }
 
     private func persistRemoteCreation(
-        requestId: UUID,
-        projectId: String,
-        sessionId: String,
-        createdAt: Date,
-        rememberCreation: Bool,
+        request: RemoteCreateSessionRequest,
+        existingRecord: SessionCreationRecord? = nil,
         now: Date
     ) -> Bool {
         do {
@@ -1128,19 +1118,19 @@ final class AppModel: ObservableObject {
         } catch {
             NSLog(
                 "copilot-projects: could not persist workspace for remote session "
-                    + "request \(requestId.uuidString); retry with the same request id: "
+                    + "request \(request.requestId.uuidString); retry with the same request id: "
                     + error.localizedDescription
             )
             return false
         }
-        guard rememberCreation else { return true }
+        guard existingRecord == nil else { return true }
         do {
             try sessionCreationLedger.remember(
                 SessionCreationRecord(
-                    requestId: requestId.uuidString,
-                    projectId: projectId,
-                    sessionId: sessionId,
-                    createdAt: createdAt
+                    requestId: request.requestId.uuidString,
+                    projectId: request.projectId,
+                    sessionId: request.requestId.uuidString,
+                    createdAt: now
                 ),
                 now: now
             )
@@ -1148,7 +1138,7 @@ final class AppModel: ObservableObject {
         } catch {
             NSLog(
                 "copilot-projects: could not persist remote session creation ledger "
-                    + "for request \(requestId.uuidString); retry with the same request id: "
+                    + "for request \(request.requestId.uuidString); retry with the same request id: "
                     + error.localizedDescription
             )
             return false

@@ -131,16 +131,14 @@ final class SessionCreationLedger: @unchecked Sendable {
             throw PersistenceError.couldNotCreateTemporaryFile(temporaryURL.path)
         }
         do {
+            let handle = try FileHandle(forWritingTo: temporaryURL)
             do {
-                let handle = try FileHandle(forWritingTo: temporaryURL)
-                do {
-                    try handle.write(contentsOf: data)
-                    try handle.synchronize()
-                    try handle.close()
-                } catch {
-                    try? handle.close()
-                    throw error
-                }
+                try handle.write(contentsOf: data)
+                try handle.synchronize()
+                try handle.close()
+            } catch {
+                try? handle.close()
+                throw error
             }
             if rename(temporaryURL.path, url.path) != 0 {
                 let code = errno
