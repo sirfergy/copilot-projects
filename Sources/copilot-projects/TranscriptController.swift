@@ -43,9 +43,11 @@ final class TranscriptController: ObservableObject {
     private var signature: LoadSignature?
     private var reloadGeneration = 0
     private var started = false
+    private let snapshotLoadObserver: (() -> Void)?
 
-    init(sessionId: String) {
+    init(sessionId: String, snapshotLoadObserver: (() -> Void)? = nil) {
         self.sessionId = sessionId
+        self.snapshotLoadObserver = snapshotLoadObserver
     }
 
     deinit {
@@ -82,18 +84,24 @@ final class TranscriptController: ObservableObject {
         fallbackTimer = timer
     }
 
-    private func reload(after delay: TimeInterval = 0) {
+    func reload(after delay: TimeInterval = 0) {
         reloadGeneration += 1
         let generation = reloadGeneration
         let previousSignature = signature
         let currentSessionId = sessionId
         let path = Paths.transcriptSnapshotPath(sessionId: currentSessionId)
-        Task.detached {
+        Task.detached { [weak self] in
             if delay > 0 {
                 try? await Task.sleep(
                     nanoseconds: UInt64(delay * 1_000_000_000)
                 )
             }
+            let isCurrent = await MainActor.run { [weak self] in
+                guard let self, generation == reloadGeneration else { return false }
+                snapshotLoadObserver?()
+                return true
+            }
+            guard isCurrent else { return }
             guard let result = Self.load(
                 sessionId: currentSessionId,
                 path: path,
