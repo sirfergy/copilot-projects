@@ -97,6 +97,16 @@ final class RemoteControlHostTests: XCTestCase {
     }
 
     @MainActor
+    func testOutOfRangeScrollReturnsWithoutChangingTheSession() throws {
+        let harness = try makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        for delta in [Int.min, Int.max, -21, 21] {
+            harness.model.sendRemoteScroll(sessionId: harness.session.id, delta: delta)
+        }
+        XCTAssertEqual(harness.model.projects[0].sessions.map(\.id), [harness.session.id])
+    }
+
+    @MainActor
     func testModelAdvertisesItsOwnStableHostLifetimeEpoch() throws {
         let first = try makeHarness()
         defer { try? FileManager.default.removeItem(at: first.root) }
