@@ -191,6 +191,21 @@ public enum CopilotHooks {
       esac
     }
 
+    tool_hook_has_other_owner() {
+      local owner caller uuid
+      uuid='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+      owner="$(cat "$state_dir/sessions/$session_id.copilot-session" 2>/dev/null \
+        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      [[ "$owner" =~ $uuid ]] || return 1
+      # Tool arguments can contain other sessionIds; only the top-level identity
+      # describes the hook sender. Unknown identities retain legacy behavior.
+      caller="$(printf '%s' "$1" \
+        | /usr/bin/plutil -extract sessionId raw -o - - 2>/dev/null)" || return 1
+      [[ "$caller" =~ $uuid ]] || return 1
+      [ "$(printf '%s' "$caller" | tr '[:upper:]' '[:lower:]')" \
+        != "$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')" ]
+    }
+
     case "${1:-}" in
       start)
         payload="$(cat 2>/dev/null || true)"
@@ -234,18 +249,10 @@ public enum CopilotHooks {
         fi
         status idle "$(payload_timestamp "$payload")" "$source" "" "$(payload_session_id "$payload")"
         ;;
-      pre)
+      pre|post)
         payload="$(cat 2>/dev/null || true)"
-        if [ -f "$scheduled_turn" ]; then
-          : > "$scheduled_turn"
-          status idle "$(payload_timestamp "$payload")" scheduled-active
-        else
-          mark_turn_active
-          status running "$(payload_timestamp "$payload")"
-        fi
-        ;;
-      post)
-        payload="$(cat 2>/dev/null || true)"
+        # A child shares the terminal, not its foreground prompt or status clock.
+        if tool_hook_has_other_owner "$payload"; then emit; exit 0; fi
         if [ -f "$scheduled_turn" ]; then
           : > "$scheduled_turn"
           status idle "$(payload_timestamp "$payload")" scheduled-active
