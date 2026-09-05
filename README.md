@@ -304,7 +304,7 @@ agent lifecycle to status:
 | --- | --- |
 | `sessionStart` | `idle` |
 | `userPromptSubmitted` | `running` |
-| `preToolUse` / `postToolUse` | `running` |
+| `preToolUse` / `postToolUse` | Known non-owner: ignored. Owner or unknown identity: `running` (scheduled activity: `idle`). |
 | `notification` (`elicitation_dialog` / `permission_prompt`) | `waiting` |
 | `agentStop` | `idle` |
 | `sessionEnd` | `idle` |
