@@ -7515,6 +7515,26 @@ final class AppLogicTests: XCTestCase {
                 origin: "https://evil.example.com"
             )
             XCTAssertEqual(wrongGetOrigin, 403)
+            for (delta, expectedStatus) in [
+                (Int.min, 400), (Int.max, 400), (-21, 400), (21, 400), (0, 400),
+                (-20, 403), (-1, 403), (1, 403), (20, 403),
+            ] {
+                let body = try JSONEncoder().encode(RemoteClientMessage(
+                    type: "scroll",
+                    clientId: "phone",
+                    sessionId: "session",
+                    delta: delta
+                ))
+                let status = try await remoteHTTPStatus(
+                    port: port,
+                    path: "/control",
+                    method: "POST",
+                    token: token,
+                    origin: "https://projects.example.com",
+                    body: body
+                )
+                XCTAssertEqual(status, expectedStatus, "Unleased scroll delta \(delta)")
+            }
             let controlBody = try JSONEncoder().encode(RemoteClientMessage(
                 type: "acquire",
                 clientId: "phone",
@@ -7674,21 +7694,23 @@ final class AppLogicTests: XCTestCase {
                 body: invalidKeyBody
             )
             XCTAssertEqual(invalidKeyStatus, 400)
-            let scrollBody = try JSONEncoder().encode(RemoteClientMessage(
-                type: "scroll",
-                clientId: "phone",
-                sessionId: "session",
-                delta: 2
-            ))
-            let scrollStatus = try await remoteHTTPStatus(
-                port: port,
-                path: "/control",
-                method: "POST",
-                token: token,
-                origin: "https://projects.example.com",
-                body: scrollBody
-            )
-            XCTAssertEqual(scrollStatus, 204)
+            for delta in [-20, -1, 1, 2, 20] {
+                let scrollBody = try JSONEncoder().encode(RemoteClientMessage(
+                    type: "scroll",
+                    clientId: "phone",
+                    sessionId: "session",
+                    delta: delta
+                ))
+                let scrollStatus = try await remoteHTTPStatus(
+                    port: port,
+                    path: "/control",
+                    method: "POST",
+                    token: token,
+                    origin: "https://projects.example.com",
+                    body: scrollBody
+                )
+                XCTAssertEqual(scrollStatus, 204, "Leased scroll delta \(delta)")
+            }
             let subscriptionBody = try webPushRegistrationData(
                 endpoint: "https://wns2-by3p.notify.windows.com/sub/route"
             )

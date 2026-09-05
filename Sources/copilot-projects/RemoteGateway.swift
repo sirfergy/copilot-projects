@@ -1767,7 +1767,7 @@ private final class RemoteHTTPHandler:
         case "scroll":
             guard let delta = message.delta,
                   delta != 0,
-                  abs(delta) <= 20 else {
+                  (-20...20).contains(delta) else {
                 respond(context: context, method: .POST, status: .badRequest,
                         contentType: "text/plain", body: "Bad request")
                 return

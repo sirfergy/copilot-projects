@@ -1615,7 +1615,7 @@ final class AppModel: ObservableObject {
     }
 
     func sendRemoteScroll(sessionId: String, delta: Int) {
-        guard abs(delta) <= 20 else { return }
+        guard (-20...20).contains(delta) else { return }
         controller(for: sessionId)?.terminalView.sendRemoteScroll(
             delta: delta,
             agentLive: liveAgentSessions.contains(sessionId)
