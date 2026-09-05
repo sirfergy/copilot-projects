@@ -14,6 +14,18 @@ public enum Env {
         nonEmpty(env["COPILOT_PROJECTS_SOCKET"])
     }
 
+    public static func agentProcessNames(
+        _ env: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Set<String> {
+        if let raw = env["COPILOT_PROJECTS_AGENT_PROCESSES"], !raw.isEmpty {
+            let names = raw.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            if !names.isEmpty { return Set(names) }
+        }
+        return ["copilot"]
+    }
+
     /// True when this process should install/refresh the global Copilot CLI
     /// integration (hooks + tracker extension) in `~/.copilot`.
     ///

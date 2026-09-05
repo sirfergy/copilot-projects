@@ -11,6 +11,21 @@ struct StateRepository {
 
     let path: URL
     let backupPath: URL
+    var closeIntentPath: URL { path.appendingPathExtension("closing") }
+
+    struct CloseIntent: Codable {
+        var sessionIds: Set<String> = []
+        var projectIds: Set<String> = []
+
+        func applying(to state: PersistedState) -> PersistedState {
+            var state = state
+            state.projects.removeAll { projectIds.contains($0.id) }
+            for index in state.projects.indices {
+                state.projects[index].sessions.removeAll { sessionIds.contains($0.id) }
+            }
+            return state
+        }
+    }
 
     init(path: URL = Paths.statePath) {
         self.path = path
@@ -18,6 +33,24 @@ struct StateRepository {
     }
 
     func load() -> LoadResult {
+        do {
+            let intent = try pendingCloses()
+            switch loadWorkspace() {
+            case .loaded(let state):
+                return .loaded(try normalized(intent.applying(to: state)))
+            case .recovered(let state, let message):
+                return .recovered(try normalized(intent.applying(to: state)), message)
+            case .missing:
+                return .missing
+            case .failed(let message):
+                return .failed(message)
+            }
+        } catch {
+            return .failed("Could not recover accepted session closes at \(closeIntentPath.path): \(error)")
+        }
+    }
+
+    private func loadWorkspace() -> LoadResult {
         guard FileManager.default.fileExists(atPath: path.path) else {
             guard FileManager.default.fileExists(atPath: backupPath.path) else { return .missing }
             do {
@@ -52,6 +85,38 @@ struct StateRepository {
                 )
             }
         }
+    }
+
+    func pendingCloses() throws -> CloseIntent {
+        guard FileManager.default.fileExists(atPath: closeIntentPath.path) else {
+            return CloseIntent()
+        }
+        return try JSONDecoder().decode(CloseIntent.self, from: Data(contentsOf: closeIntentPath))
+    }
+
+    /// One atomic acceptance point for an entire close action, before images,
+    /// tracker commands or workspace rows change. The command markers are not
+    /// the journal: a tracker can consume them while a project batch is written.
+    func acceptCloses(sessionIds: [String], projectIds: [String] = []) throws {
+        var intent = try pendingCloses()
+        intent.sessionIds.formUnion(sessionIds)
+        intent.projectIds.formUnion(projectIds)
+        try FileManager.default.createDirectory(
+            at: path.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try JSONEncoder().encode(intent).write(to: closeIntentPath, options: .atomic)
+    }
+
+    /// Called only after all accepted teardown tasks finish. Both recovery
+    /// copies must exclude the closed rows before the intent can be forgotten.
+    func finishCloses(_ state: PersistedState) throws {
+        guard FileManager.default.fileExists(atPath: closeIntentPath.path) else { return }
+        let closedState = try normalized(pendingCloses().applying(to: state))
+        try save(closedState)
+        try JSONEncoder().encode(closedState).write(to: backupPath, options: .atomic)
+        try FileManager.default.removeItem(at: closeIntentPath)
     }
 
     func save(_ state: PersistedState) throws {

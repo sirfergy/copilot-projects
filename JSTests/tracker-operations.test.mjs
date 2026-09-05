@@ -76,6 +76,10 @@ class FakeSession {
     this.userInputCalls = [];
     this.elicitationCalls = [];
     this.modelSwitchCalls = [];
+    this.closeCalls = [];
+    this.history = [];
+    this.abortHandler = async () => this.emit("session.idle", { aborted: true });
+    this.enqueueHandler = async () => ({ queued: true });
     this.userInputHandler = async () => ({ success: true });
     this.elicitationHandler = async () => ({ success: true });
     this.modelSwitchHandler = async (request) => ({
@@ -120,6 +124,12 @@ class FakeSession {
         }),
         releaseInterest: async () => ({ success: true }),
       },
+      commands: {
+        enqueue: async (request) => {
+          this.closeCalls.push({ ...request, sessionId: this.sessionId });
+          return this.enqueueHandler(request);
+        },
+      },
     };
     this.connection = {
       sendRequest: async () => ({ sessionId: this.sessionId }),
@@ -155,7 +165,11 @@ class FakeSession {
   }
 
   async getEvents() {
-    return [];
+    return this.history;
+  }
+
+  async abort() {
+    return this.abortHandler();
   }
 }
 
@@ -193,7 +207,7 @@ async function waitFor(predicate, message, timeoutMs = 2_000) {
   assert.fail(message);
 }
 
-async function createRuntime(t) {
+async function createRuntime(t, configure = () => {}) {
   const root = join(runtimeParent, uuid());
   const sessions = join(root, "sessions");
   realMkdirSync(sessions, { recursive: true });
@@ -207,6 +221,7 @@ async function createRuntime(t) {
     failWrite: null,
   };
   runtime.session = new FakeSession(runtime.copilotSessionId);
+  configure(runtime.session);
   runtimes.add(runtime);
 
   const environmentKeys = [
@@ -311,6 +326,94 @@ function operationFields(runtime, kind, operationId = `operation-${uuid()}`, fil
     payloadFingerprint: fill.repeat(64),
   };
 }
+
+function requestClose(runtime) {
+  const name = `${runtime.appSessionId}.close-session-request`;
+  realWriteFileSync(join(runtime.sessions, name), "");
+  trigger(runtime, name);
+}
+
+test("historical scheduled turns do not contaminate live idle classification on close", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, (session) => {
+    session.history = [{
+      id: uuid(), type: "user.message", timestamp: new Date().toISOString(),
+      data: { content: "old scheduled work", source: "schedule-fixture" },
+    }, {
+      id: uuid(), type: "assistant.turn_end", timestamp: new Date().toISOString(), data: {},
+    }];
+  });
+  // Close still probes abort because history is uncertain, but the resulting
+  // idle must not be attributed to a historic scheduled turn.
+  requestClose(runtime);
+  await waitFor(() => runtime.session.closeCalls.length === 1, "close was not queued");
+  assert.equal(readSnapshot(runtime).lastIdleAborted, true);
+  assert.equal(readSnapshot(runtime).lastIdleTurnKind, null);
+  assert.equal(readSnapshot(runtime).scheduledTurnActive, false);
+  assert.equal(runtime.session.closeCalls[0].command, "/exit print");
+});
+
+test("permanent close requeues after rotation discards the old session queue", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  requestClose(runtime);
+  await waitFor(() => runtime.session.closeCalls.length === 1, "first close was not queued");
+  const next = uuid();
+  runtime.session.sessionId = next;
+  await runtime.session.emit("session.start", { sessionId: next });
+  await waitFor(() => runtime.session.closeCalls.length === 2, "rotated close was not queued");
+  requestClose(runtime);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(runtime.session.closeCalls.map((call) => call.sessionId),
+    [runtime.copilotSessionId, next]);
+});
+
+test("late enqueue completion cannot suppress a rotated close or reset its in-flight guard", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  let finishOld;
+  let finishNew;
+  runtime.session.enqueueHandler = () => new Promise((resolve) => {
+    if (!finishOld) finishOld = resolve;
+    else finishNew = resolve;
+  });
+  requestClose(runtime);
+  await waitFor(() => finishOld, "old enqueue did not start");
+  const next = uuid();
+  runtime.session.sessionId = next;
+  await runtime.session.emit("session.start", { sessionId: next });
+  await waitFor(() => finishNew, "new enqueue did not start");
+  finishOld({ queued: true });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  requestClose(runtime);
+  assert.equal(runtime.session.closeCalls.length, 2);
+  finishNew({ queued: true });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  requestClose(runtime);
+  assert.equal(runtime.session.closeCalls.length, 2);
+});
+
+test("late abort completion cannot enqueue another exit into the new conversation", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  let finishAbort;
+  runtime.session.abortHandler = () => new Promise((resolve) => { finishAbort = resolve; });
+  await runtime.session.emit("user.message", { content: "work", source: null });
+  requestClose(runtime);
+  await waitFor(() => finishAbort, "abort did not start");
+  const next = uuid();
+  runtime.session.sessionId = next;
+  await runtime.session.emit("session.start", { sessionId: next });
+  await waitFor(() => runtime.session.closeCalls.length === 1, "new close did not enqueue");
+  await runtime.session.emit("session.idle", { aborted: true });
+  finishAbort();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(runtime.session.closeCalls.map((call) => call.sessionId), [next]);
+});
 
 async function emitUserInput(runtime, requestId, choices = ["Go", "Wait"]) {
   await runtime.session.emit("user_input.requested", {

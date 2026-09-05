@@ -811,17 +811,303 @@ final class AppLogicTests: XCTestCase {
             projects: [project],
             selectedProjectId: project.id
         ))
+        var destroyedSessionIds: [String] = []
         let model = AppModel(
             stateRepository: repository,
             isAppActive: { false },
             agentActivityDirectory: root,
-            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("kitty-images", isDirectory: true))
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("kitty-images", isDirectory: true)),
+            gracefulSessionDestroyer: { sessionIds, _ in
+                destroyedSessionIds.append(contentsOf: sessionIds)
+                return Task {}
+            }
         )
 
-        XCTAssertTrue(model.closeRemoteSession(sessionId: session.id))
-        XCTAssertFalse(model.closeRemoteSession(sessionId: session.id))
+        XCTAssertEqual(model.closeRemoteSession(sessionId: session.id), .closed)
+        XCTAssertEqual(model.closeRemoteSession(sessionId: session.id), .missing)
         XCTAssertTrue(model.projects[0].sessions.isEmpty)
         XCTAssertNil(model.projects[0].selectedSessionId)
+        XCTAssertEqual(destroyedSessionIds, [session.id])
+    }
+
+    func testGracefulCloseRequestLifecycle() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionId = UUID().uuidString
+        let request = root.appendingPathComponent("\(sessionId).close-session-request")
+        let secondSessionId = UUID().uuidString
+        let secondRequest = root.appendingPathComponent(
+            "\(secondSessionId).close-session-request"
+        )
+        let preservedSessionId = UUID().uuidString
+        let preservedRequest = root.appendingPathComponent(
+            "\(preservedSessionId).close-session-request"
+        )
+
+        XCTAssertTrue(SessionArtifacts.writeCloseSessionRequest(
+            sessionId: sessionId,
+            sessionsDirectory: root
+        ))
+        XCTAssertTrue(SessionArtifacts.writeCloseSessionRequest(
+            sessionId: secondSessionId,
+            sessionsDirectory: root
+        ))
+        XCTAssertTrue(SessionArtifacts.writeCloseSessionRequest(
+            sessionId: preservedSessionId,
+            sessionsDirectory: root
+        ))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: request.path))
+
+        XCTAssertEqual(
+            Set(try SessionArtifacts.closeSessionRequests(sessionsDirectory: root)),
+            Set([sessionId, secondSessionId, preservedSessionId])
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: request.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: secondRequest.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: preservedRequest.path))
+    }
+
+    func testLiveCLIProcessesIncludesTrackerAndMatchingParent() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionId = UUID().uuidString
+        let bootTime = try XCTUnwrap(TranscriptController.currentBootTimeSeconds())
+        let ownerURL = root.appendingPathComponent("\(sessionId).transcript-owner.json")
+        func writeOwner(bootTime: String?, parentPID: pid_t? = getppid()) throws {
+            var owner: [String: Any] = [
+                "appSessionId": sessionId,
+                "copilotSessionId": UUID().uuidString,
+                "pid": ProcessInfo.processInfo.processIdentifier,
+            ]
+            owner["parentPid"] = parentPID
+            owner["bootTime"] = bootTime
+            try JSONSerialization.data(withJSONObject: owner).write(to: ownerURL)
+        }
+
+        try writeOwner(bootTime: nil)
+        XCTAssertEqual(
+            Set(TranscriptController.liveCLIProcesses(
+                sessionId: sessionId,
+                directory: root
+            ).map(\.pid)),
+            Set([getpid(), getppid()])
+        )
+        try writeOwner(bootTime: "{ sec = \(bootTime - 3_600), usec = 0 }")
+        XCTAssertTrue(TranscriptController.liveCLIProcesses(
+            sessionId: sessionId,
+            directory: root
+        ).isEmpty)
+        try writeOwner(bootTime: "{ sec = \(bootTime), usec = 0 }")
+        XCTAssertEqual(
+            Set(TranscriptController.liveCLIProcesses(
+                sessionId: sessionId,
+                directory: root
+            ).map(\.pid)),
+            Set([getpid(), getppid()])
+        )
+        try writeOwner(bootTime: nil, parentPID: nil)
+        XCTAssertEqual(
+            Set(TranscriptController.liveCLIProcesses(sessionId: sessionId, directory: root).map(\.pid)),
+            Set([getpid(), getppid()])
+        )
+        try writeOwner(bootTime: nil, parentPID: 1)
+        XCTAssertEqual(
+            Set(TranscriptController.liveCLIProcesses(sessionId: sessionId, directory: root).map(\.pid)),
+            [getpid()]
+        )
+        XCTAssertTrue(TranscriptController.liveCLIProcesses(
+            sessionId: UUID().uuidString,
+            directory: root
+        ).isEmpty)
+    }
+
+    @MainActor
+    func testCloseProjectSchedulesEverySessionForGracefulDestruction() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = [
+            Session(title: "one", cwd: root.path),
+            Session(title: "two", cwd: root.path),
+        ]
+        let project = Project(
+            name: "project",
+            cwd: root.path,
+            sessions: sessions,
+            selectedSessionId: sessions[0].id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+        var destroyedSessionBatches: [[String]] = []
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(
+                root: root.appendingPathComponent("kitty-images", isDirectory: true)
+            ),
+            gracefulSessionDestroyer: { sessionIds, _ in
+                destroyedSessionBatches.append(sessionIds)
+                return Task {}
+            }
+        )
+
+        model.closeProject(project.id)
+
+        XCTAssertTrue(model.projects.isEmpty)
+        XCTAssertEqual(destroyedSessionBatches.count, 1)
+        XCTAssertEqual(
+            Set(destroyedSessionBatches[0]),
+            Set(sessions.map(\.id))
+        )
+    }
+
+    @MainActor
+    func testForcePendingSessionDestroysUsesOneFallbackBatch() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = [
+            Session(title: "one", cwd: root.path),
+            Session(title: "two", cwd: root.path),
+        ]
+        let project = Project(
+            name: "project",
+            cwd: root.path,
+            sessions: sessions,
+            selectedSessionId: sessions[0].id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+        var gracefulBatches: [[String]] = []
+        var forcedBatches: [[String]] = []
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(
+                root: root.appendingPathComponent("kitty-images", isDirectory: true)
+            ),
+            gracefulSessionDestroyer: { sessionIds, _ in
+                gracefulBatches.append(sessionIds)
+                return Task {
+                    try? await Task.sleep(for: .seconds(60))
+                }
+            },
+            forcedSessionDestroyer: { forcedBatches.append($0) }
+        )
+
+        model.closeProject(project.id)
+        model.forcePendingSessionDestroys()
+
+        XCTAssertEqual(gracefulBatches.count, 1)
+        XCTAssertEqual(forcedBatches.count, 1)
+        XCTAssertEqual(Set(forcedBatches[0]), Set(sessions.map(\.id)))
+    }
+
+    @MainActor
+    func testPowerOffDrainUsesOneFallbackBatch() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = [
+            Session(title: "one", cwd: root.path),
+            Session(title: "two", cwd: root.path),
+        ]
+        let project = Project(
+            name: "project",
+            cwd: root.path,
+            sessions: sessions,
+            selectedSessionId: sessions[0].id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+        var forcedBatches: [[String]] = []
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(
+                root: root.appendingPathComponent("kitty-images", isDirectory: true)
+            ),
+            gracefulSessionDestroyer: { _, _ in
+                Task {
+                    try? await Task.sleep(for: .seconds(60))
+                }
+            },
+            forcedSessionDestroyer: { forcedBatches.append($0) }
+        )
+
+        model.closeProject(project.id)
+        model.prepareForSystemPowerOff()
+        await model.detachAllClientsAndDrain()
+
+        XCTAssertEqual(forcedBatches.count, 1)
+        XCTAssertEqual(Set(forcedBatches[0]), Set(sessions.map(\.id)))
+    }
+
+    @MainActor
+    func testBeginTerminationAllowsPendingSessionDestroyToFinish() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = Session(title: "close", cwd: root.path)
+        let project = Project(
+            name: "project",
+            cwd: root.path,
+            sessions: [session],
+            selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [project],
+            selectedProjectId: project.id
+        ))
+        let started = expectation(description: "destroy started")
+        let finished = expectation(description: "destroy finished")
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(
+                root: root.appendingPathComponent("kitty-images", isDirectory: true)
+            ),
+            gracefulSessionDestroyer: { _, _ in
+                Task {
+                    started.fulfill()
+                    try? await Task.sleep(for: .milliseconds(25))
+                    XCTAssertFalse(Task.isCancelled)
+                    finished.fulfill()
+                }
+            }
+        )
+        XCTAssertEqual(model.closeRemoteSession(sessionId: session.id), .closed)
+        await fulfillment(of: [started], timeout: 1)
+
+        model.beginTermination()
+
+        await fulfillment(of: [finished], timeout: 1)
     }
 
     @MainActor
@@ -7217,6 +7503,20 @@ final class AppLogicTests: XCTestCase {
                 body: closeAcquireBody
             )
             XCTAssertEqual(closeAcquireStatus, 204)
+            try FileManager.default.createDirectory(
+                at: repository.closeIntentPath, withIntermediateDirectories: true
+            )
+            let rejectedClose = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: closeBody
+            )
+            XCTAssertEqual(rejectedClose, 503)
+            XCTAssertTrue(model.projects.contains { $0.sessions.contains { $0.id == session.id } })
+            try FileManager.default.removeItem(at: repository.closeIntentPath)
             let closeStatus = try await remoteHTTPStatus(
                 port: port,
                 path: "/control",
@@ -14489,7 +14789,8 @@ final class AppLogicTests: XCTestCase {
     func testSessionArtifactsDestroyTombstonesSynchronouslyAndPreventsResurrection() async throws {
         let (store, root) = makeIsolatedKittyImageDiskStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let sessionId = "victim"
+        let sessionId = UUID().uuidString
+        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
         let png = remoteKittyTestPNGBytes(width: 2, height: 2)
         store.persistRetain(sessionId: sessionId, imageId: 1, version: 1, data: png)
         store.replaceCurrentSelections(
@@ -14502,10 +14803,15 @@ final class AppLogicTests: XCTestCase {
         let existsBeforeDestroy = await store.entryExistsForTesting(sessionId: sessionId, imageId: 1, version: 1)
         XCTAssertTrue(existsBeforeDestroy)
 
-        SessionArtifacts.destroy(sessionId: sessionId, kittyImageDiskStore: store)
+        let cleanup = SessionArtifacts.destroyGracefully(
+            sessionId: sessionId,
+            kittyImageDiskStore: store
+        )
         // The marker is written *synchronously* — asserted here with no
-        // `await` at all, immediately after `destroy` returns.
+        // `await` at all, immediately after `destroyGracefully` returns.
         XCTAssertTrue(store.isTombstonedForTesting(sessionId: sessionId))
+        cleanup.cancel()
+        await cleanup.value
 
         await store.barrierForTesting()
         let restored = await store.restore(sessionId: sessionId)
