@@ -171,3 +171,32 @@ test("the project signature ignores fields the picker does not render", () => {
     createProjectSignature([{ id: "project", name: "Renamed" }])
   );
 });
+
+test("session creation distinguishes persistence failures from Copilot unavailability", () => {
+  const { createSessionFailureMessage } = bindings(loadFragments(["session-creation"]), [
+    "createSessionFailureMessage",
+  ]);
+  let requestedHeader = null;
+
+  assert.equal(
+    createSessionFailureMessage({
+      status: 503,
+      headers: {
+        get(name) {
+          requestedHeader = name;
+          return "persistence-unavailable";
+        },
+      },
+    }),
+    "Session creation could not be saved — tap to retry"
+  );
+  assert.equal(requestedHeader, "X-Copilot-Projects-Error");
+  assert.equal(
+    createSessionFailureMessage({ status: 503, headers: { get: () => null } }),
+    "Copilot is unavailable — tap to retry"
+  );
+  assert.equal(
+    createSessionFailureMessage({ status: 500, headers: { get: () => null } }),
+    "Host error — tap New Session to retry"
+  );
+});
