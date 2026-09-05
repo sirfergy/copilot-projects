@@ -408,12 +408,8 @@ async function createSession() {
   creating = false;
   syncCreateProjectOptions(availableCreateProjects, hostSelectedProjectId);
   if (response.status >= 500) {
-    // 5xx (incl. 503 Copilot unavailable): retain the id for an idempotent retry.
-    setCreateStatus(
-      response.status === 503
-        ? 'Copilot is unavailable — tap to retry'
-        : 'Host error — tap New Session to retry'
-    );
+    // Retain the id for an idempotent retry, including persistence failures.
+    setCreateStatus(createSessionFailureMessage(response));
     return;
   }
   if (response.status === 410) {

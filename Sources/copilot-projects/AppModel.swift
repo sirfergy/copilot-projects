@@ -346,6 +346,7 @@ final class AppModel: ObservableObject {
         }
     ))
     private var stateLoadFailure: String?
+    private var didFailToLoadWorkspaceState = false
     private var stateRecoveryMessage: String?
     private var didPresentStateMessage = false
     private var server: ControlServer?
@@ -1009,6 +1010,11 @@ final class AppModel: ObservableObject {
         initialPrompt: String?,
         now: Date
     ) -> RemoteSessionCreationOutcome {
+        // A failed startup load leaves the in-memory workspace empty, so neither
+        // missing projects nor absent sessions are authoritative.
+        if didFailToLoadWorkspaceState {
+            return .persistenceUnavailable
+        }
         let sessionId = request.requestId.uuidString
         let creationRecord: SessionCreationRecord?
         do {
@@ -3776,6 +3782,7 @@ final class AppModel: ObservableObject {
             stateRecoveryMessage = message
             NSLog("copilot-projects: \(message)")
         case .failed(let message):
+            didFailToLoadWorkspaceState = true
             stateLoadFailure = message
             NSLog("copilot-projects: \(message)")
             return

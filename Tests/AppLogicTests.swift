@@ -7951,6 +7951,58 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testCreateRemoteSessionFailsClosedWhenWorkspaceCouldNotLoad() throws {
+        let scratchDirectory = ProcessInfo.processInfo.environment["COPILOT_PROJECTS_STATE_DIR"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+                .appendingPathComponent(".build/test-state", isDirectory: true)
+        let root = scratchDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        let stateURL = root.appendingPathComponent("state.json")
+        let ledgerURL = root.appendingPathComponent("ledger.json")
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        try Data("{".utf8).write(to: stateURL)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recordedId = UUID()
+        let ledger = SessionCreationLedger(url: ledgerURL)
+        try ledger.remember(SessionCreationRecord(
+            requestId: recordedId.uuidString,
+            projectId: "p1",
+            sessionId: recordedId.uuidString,
+            createdAt: Date()
+        ))
+        var launches = 0
+        let model = AppModel(
+            stateRepository: StateRepository(path: stateURL),
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root,
+            remoteCopilotExecutable: { "/opt/copilot/bin/copilot" },
+            remoteReposDirectory: { repos.path },
+            remoteSessionBackendAvailable: { true },
+            remoteSessionLauncher: { _, _, _, _ in launches += 1 },
+            sessionCreationLedger: ledger
+        )
+
+        XCTAssertTrue(model.projects.isEmpty)
+        XCTAssertEqual(
+            model.createRemoteSession(
+                RemoteCreateSessionRequest(requestId: recordedId, projectId: "p1")
+            ),
+            .persistenceUnavailable
+        )
+        XCTAssertEqual(
+            model.createRemoteSession(
+                RemoteCreateSessionRequest(requestId: UUID(), projectId: "p1")
+            ),
+            .persistenceUnavailable
+        )
+        XCTAssertEqual(launches, 0)
+    }
+
+    @MainActor
     func testCreateRemoteSessionRepairsLedgerFailureAcrossRestartThenStaysGoneAfterClose() throws {
         _ = NSApplication.shared
         try XCTSkipIf(getuid() == 0, "root bypasses filesystem permissions")
@@ -8650,6 +8702,12 @@ final class AppLogicTests: XCTestCase {
                 token: token, origin: origin, body: try createBody(repairId, "p1")
             )
             XCTAssertEqual(failedPersistence.0.statusCode, 503)
+            XCTAssertEqual(
+                failedPersistence.0.value(
+                    forHTTPHeaderField: RemoteSessionContract.errorCodeHeader
+                ),
+                RemoteSessionContract.persistenceUnavailableErrorCode
+            )
             XCTAssertEqual(
                 String(decoding: failedPersistence.1, as: UTF8.self),
                 "Session creation could not be saved; retry with the same request id"

@@ -1320,9 +1320,21 @@ private final class RemoteHTTPHandler:
             respond(channel: channel, method: .POST, status: status,
                     contentType: "application/json", body: data)
         }
-        func send(_ status: HTTPResponseStatus, text: String) {
+        func send(
+            _ status: HTTPResponseStatus,
+            text: String,
+            errorCode: String? = nil
+        ) {
+            var additionalHeaders = HTTPHeaders()
+            if let errorCode {
+                additionalHeaders.add(
+                    name: RemoteSessionContract.errorCodeHeader,
+                    value: errorCode
+                )
+            }
             respond(channel: channel, method: .POST, status: status,
-                    contentType: "text/plain", body: Data(text.utf8))
+                    contentType: "text/plain", body: Data(text.utf8),
+                    additionalHeaders: additionalHeaders)
         }
         switch outcome {
         case .created(let response):
@@ -1342,7 +1354,11 @@ private final class RemoteHTTPHandler:
         case .unavailable:
             send(.serviceUnavailable, text: "Copilot is unavailable")
         case .persistenceUnavailable:
-            send(.serviceUnavailable, text: "Session creation could not be saved; retry with the same request id")
+            send(
+                .serviceUnavailable,
+                text: "Session creation could not be saved; retry with the same request id",
+                errorCode: RemoteSessionContract.persistenceUnavailableErrorCode
+            )
         }
     }
 
@@ -2140,9 +2156,10 @@ private final class RemoteHTTPHandler:
         status: HTTPResponseStatus,
         contentType: String,
         body: Data,
+        additionalHeaders: HTTPHeaders = HTTPHeaders(),
         onBodyWriteComplete: (@Sendable (Result<Void, Error>) -> Void)? = nil
     ) {
-        var headers = HTTPHeaders()
+        var headers = additionalHeaders
         headers.add(name: "Content-Type", value: contentType)
         headers.add(name: "Content-Length", value: String(body.count))
         headers.add(name: "Cache-Control", value: "no-store")

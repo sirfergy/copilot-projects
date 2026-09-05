@@ -12,3 +12,13 @@ function chooseCreateProjectId(projects, currentProjectId, hostSelectedProjectId
 function createProjectSignature(projects) {
   return JSON.stringify(projects.map((project) => [project.id, project.name]));
 }
+
+function createSessionFailureMessage(response) {
+  const errorCode = response.headers?.get('X-Copilot-Projects-Error');
+  if (response.status === 503) {
+    return errorCode === 'persistence-unavailable'
+      ? 'Session creation could not be saved — tap to retry'
+      : 'Copilot is unavailable — tap to retry';
+  }
+  return 'Host error — tap New Session to retry';
+}
