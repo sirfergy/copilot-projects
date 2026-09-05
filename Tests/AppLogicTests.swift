@@ -5381,10 +5381,10 @@ final class AppLogicTests: XCTestCase {
 
         let ledger = SessionCreationLedger(url: url)
         let requestId = UUID()
-        XCTAssertNil(ledger.record(for: requestId))
+        XCTAssertNil(try ledger.record(for: requestId))
 
         let created = Date(timeIntervalSince1970: 1_900_000_000)
-        ledger.remember(SessionCreationRecord(
+        try ledger.remember(SessionCreationRecord(
             requestId: requestId.uuidString,
             projectId: "project-1",
             sessionId: requestId.uuidString,
@@ -5393,7 +5393,7 @@ final class AppLogicTests: XCTestCase {
 
         // Tombstone survives a fresh ledger instance (persisted to disk).
         let reopened = SessionCreationLedger(url: url)
-        let record = try XCTUnwrap(reopened.record(for: requestId))
+        let record = try XCTUnwrap(try reopened.record(for: requestId))
         XCTAssertEqual(record.projectId, "project-1")
         XCTAssertEqual(record.sessionId, requestId.uuidString)
 
@@ -5426,6 +5426,71 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(bounded.count, SessionCreationLedger.maxRecords)
         XCTAssertFalse(bounded.contains { $0.requestId == "r0" })
         XCTAssertTrue(bounded.contains { $0.requestId == "r\(overflow - 1)" })
+    }
+
+    func testSessionCreationLedgerRejectsMalformedAndNonFileState() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let requestId = UUID()
+
+        let malformedURL = root.appendingPathComponent("malformed.json")
+        try Data("{".utf8).write(to: malformedURL)
+        XCTAssertThrowsError(
+            try SessionCreationLedger(url: malformedURL).record(for: requestId)
+        )
+
+        let directoryURL = root.appendingPathComponent("ledger-as-directory")
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: false)
+        let directoryLedger = SessionCreationLedger(url: directoryURL)
+        XCTAssertThrowsError(try directoryLedger.record(for: requestId))
+        XCTAssertThrowsError(try directoryLedger.remember(SessionCreationRecord(
+            requestId: requestId.uuidString,
+            projectId: "project-1",
+            sessionId: requestId.uuidString,
+            createdAt: Date()
+        )))
+    }
+
+    func testSessionCreationLedgerPropagatesReadAndWritePermissionFailures() throws {
+        try XCTSkipIf(getuid() == 0, "root bypasses filesystem permissions")
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let readRoot = root.appendingPathComponent("read", isDirectory: true)
+        let writeRoot = root.appendingPathComponent("write", isDirectory: true)
+        try FileManager.default.createDirectory(at: readRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: writeRoot, withIntermediateDirectories: true)
+        defer {
+            chmod(readRoot.path, 0o700)
+            chmod(writeRoot.path, 0o700)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let unreadableURL = readRoot.appendingPathComponent("ledger.json")
+        try Data(#"{"records":[]}"#.utf8).write(to: unreadableURL)
+        XCTAssertEqual(chmod(unreadableURL.path, 0o000), 0)
+        defer { chmod(unreadableURL.path, 0o600) }
+        XCTAssertThrowsError(
+            try SessionCreationLedger(url: unreadableURL).record(for: UUID())
+        )
+
+        let unwritableURL = writeRoot.appendingPathComponent("ledger.json")
+        let ledger = SessionCreationLedger(url: unwritableURL)
+        let seedId = UUID()
+        try ledger.remember(SessionCreationRecord(
+            requestId: seedId.uuidString,
+            projectId: "project-1",
+            sessionId: seedId.uuidString,
+            createdAt: Date()
+        ))
+        XCTAssertEqual(chmod(writeRoot.path, 0o500), 0)
+        XCTAssertThrowsError(try ledger.remember(SessionCreationRecord(
+            requestId: UUID().uuidString,
+            projectId: "project-1",
+            sessionId: UUID().uuidString,
+            createdAt: Date()
+        )))
     }
 
     func testSessionStatusMarkersPersistAsAtomicRecord() throws {
@@ -7762,13 +7827,218 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(launches.first?.executable, "/opt/copilot/bin/copilot")
         XCTAssertEqual(launches.first?.allowAll, true)
         XCTAssertNil(launches.first?.prompt)
-        XCTAssertNotNil(ledger.record(for: requestId))
+        XCTAssertNotNil(try ledger.record(for: requestId))
 
         // Idempotent replay: existing, no new session, no relaunch.
         XCTAssertEqual(model.createRemoteSession(request), .existing(expected))
         XCTAssertEqual(
             model.project("p1")?.sessions.filter { $0.id == requestId.uuidString }.count, 1)
         XCTAssertEqual(launches.count, 1)
+    }
+
+    @MainActor
+    func testCreateRemoteSessionRepairsWorkspaceSaveFailureWithoutRelaunching() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let stateURL = root.appendingPathComponent("state.json")
+        let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        var launches = 0
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [Project(id: "p1", name: "First", cwd: "/tmp", sessions: [])],
+            selectedProjectId: "p1",
+            reposDirectory: { repos.path },
+            ledger: ledger,
+            onLaunch: { _, _, _, _ in launches += 1 }
+        )
+        try FileManager.default.removeItem(at: stateURL)
+        try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: false)
+
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let request = RemoteCreateSessionRequest(requestId: UUID(), projectId: "p1")
+        XCTAssertEqual(model.createRemoteSession(request, now: now), .persistenceUnavailable)
+        XCTAssertEqual(launches, 1)
+        XCTAssertNotNil(
+            model.project("p1")?.sessions.first { $0.id == request.requestId.uuidString }
+        )
+        XCTAssertNil(try ledger.record(for: request.requestId, now: now))
+
+        try FileManager.default.removeItem(at: stateURL)
+        let expected = RemoteCreateSessionResponse(
+            requestId: request.requestId,
+            projectId: "p1",
+            sessionId: request.requestId.uuidString
+        )
+        XCTAssertEqual(
+            model.createRemoteSession(request, now: now.addingTimeInterval(1)),
+            .existing(expected)
+        )
+        XCTAssertEqual(launches, 1)
+        XCTAssertNotNil(
+            try ledger.record(for: request.requestId, now: now.addingTimeInterval(1))
+        )
+        guard case .loaded(let persisted) = StateRepository(path: stateURL).load() else {
+            return XCTFail("repaired workspace state was not persisted")
+        }
+        XCTAssertEqual(
+            persisted.projects.first?.sessions.map(\.id),
+            [request.requestId.uuidString]
+        )
+    }
+
+    @MainActor
+    func testCreateRemoteSessionFailsClosedOnMalformedLedgerBeforeLaunch() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let ledgerURL = root.appendingPathComponent("ledger.json")
+        try Data("{".utf8).write(to: ledgerURL)
+        let ledger = SessionCreationLedger(url: ledgerURL)
+        var launches = 0
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [Project(id: "p1", name: "First", cwd: "/tmp", sessions: [])],
+            selectedProjectId: "p1",
+            reposDirectory: { repos.path },
+            ledger: ledger,
+            onLaunch: { _, _, _, _ in launches += 1 }
+        )
+
+        let request = RemoteCreateSessionRequest(requestId: UUID(), projectId: "p1")
+        XCTAssertEqual(model.createRemoteSession(request), .persistenceUnavailable)
+        XCTAssertTrue(model.project("p1")?.sessions.isEmpty == true)
+        XCTAssertEqual(launches, 0)
+
+        try FileManager.default.removeItem(at: ledgerURL)
+        XCTAssertEqual(
+            model.createRemoteSession(request),
+            .created(RemoteCreateSessionResponse(
+                requestId: request.requestId,
+                projectId: "p1",
+                sessionId: request.requestId.uuidString
+            ))
+        )
+        XCTAssertEqual(launches, 1)
+    }
+
+    @MainActor
+    func testCreateRemoteSessionRepairsLedgerFailureAcrossRestartThenStaysGoneAfterClose() throws {
+        _ = NSApplication.shared
+        try XCTSkipIf(getuid() == 0, "root bypasses filesystem permissions")
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        let ledgerRoot = root.appendingPathComponent("ledger", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: ledgerRoot, withIntermediateDirectories: true)
+        defer {
+            chmod(ledgerRoot.path, 0o700)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let stateURL = root.appendingPathComponent("state.json")
+        let ledgerURL = ledgerRoot.appendingPathComponent("ledger.json")
+        let ledger = SessionCreationLedger(url: ledgerURL)
+        let seedId = UUID()
+        try ledger.remember(SessionCreationRecord(
+            requestId: seedId.uuidString,
+            projectId: "p1",
+            sessionId: seedId.uuidString,
+            createdAt: Date(timeIntervalSince1970: 2_000_000_000)
+        ))
+        var launches = 0
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [Project(id: "p1", name: "First", cwd: "/tmp", sessions: [])],
+            selectedProjectId: "p1",
+            reposDirectory: { repos.path },
+            ledger: ledger,
+            onLaunch: { _, _, _, _ in launches += 1 }
+        )
+        XCTAssertEqual(chmod(ledgerRoot.path, 0o500), 0)
+
+        let now = Date(timeIntervalSince1970: 2_000_000_100)
+        let request = RemoteCreateSessionRequest(requestId: UUID(), projectId: "p1")
+        XCTAssertEqual(model.createRemoteSession(request, now: now), .persistenceUnavailable)
+        XCTAssertEqual(launches, 1)
+        guard case .loaded(let persistedAfterFailure) =
+            StateRepository(path: stateURL).load() else {
+            return XCTFail("workspace was not durable before the ledger failure")
+        }
+        XCTAssertEqual(
+            persistedAfterFailure.projects.first?.sessions.map(\.id),
+            [request.requestId.uuidString]
+        )
+
+        XCTAssertEqual(chmod(ledgerRoot.path, 0o700), 0)
+        let expected = RemoteCreateSessionResponse(
+            requestId: request.requestId,
+            projectId: "p1",
+            sessionId: request.requestId.uuidString
+        )
+        XCTAssertEqual(
+            model.createRemoteSession(request, now: now.addingTimeInterval(1)),
+            .existing(expected)
+        )
+        XCTAssertEqual(launches, 1)
+        XCTAssertNotNil(
+            try ledger.record(for: request.requestId, now: now.addingTimeInterval(1))
+        )
+
+        var restartLaunches = 0
+        let restarted = AppModel(
+            stateRepository: StateRepository(path: stateURL),
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root,
+            remoteCopilotExecutable: { "/opt/copilot/bin/copilot" },
+            remoteReposDirectory: { repos.path },
+            remoteSessionBackendAvailable: { true },
+            remoteSessionLauncher: { _, _, _, _ in restartLaunches += 1 },
+            sessionCreationLedger: SessionCreationLedger(url: ledgerURL),
+            kittyImageDiskStore: RemoteKittyImageDiskStore(
+                root: root.appendingPathComponent("kitty-images", isDirectory: true)
+            ),
+            gracefulSessionDestroyer: { _, _ in Task {} },
+            forcedSessionDestroyer: { _ in }
+        )
+        XCTAssertEqual(
+            restarted.createRemoteSession(request, now: now.addingTimeInterval(2)),
+            .existing(expected)
+        )
+        XCTAssertEqual(restartLaunches, 0)
+
+        XCTAssertEqual(
+            restarted.closeRemoteSession(sessionId: request.requestId.uuidString),
+            .closed
+        )
+        restarted.forcePendingSessionDestroys()
+        let afterClose = AppModel(
+            stateRepository: StateRepository(path: stateURL),
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root,
+            remoteCopilotExecutable: { "/opt/copilot/bin/copilot" },
+            remoteReposDirectory: { repos.path },
+            remoteSessionBackendAvailable: { true },
+            remoteSessionLauncher: { _, _, _, _ in restartLaunches += 1 },
+            sessionCreationLedger: SessionCreationLedger(url: ledgerURL),
+            kittyImageDiskStore: RemoteKittyImageDiskStore(
+                root: root.appendingPathComponent("kitty-images-after-close", isDirectory: true)
+            )
+        )
+        XCTAssertEqual(
+            afterClose.createRemoteSession(request, now: now.addingTimeInterval(3)),
+            .gone
+        )
+        XCTAssertEqual(restartLaunches, 0)
     }
 
     @MainActor
@@ -8020,7 +8290,7 @@ final class AppLogicTests: XCTestCase {
         let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
         let requestId = UUID()
         // A tombstone exists but the session is gone from the workspace.
-        ledger.remember(SessionCreationRecord(
+        try ledger.remember(SessionCreationRecord(
             requestId: requestId.uuidString, projectId: "p1",
             sessionId: requestId.uuidString, createdAt: Date()))
 
@@ -8040,6 +8310,54 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertTrue(model.project("p1")?.sessions.isEmpty == true)
         XCTAssertEqual(launches, 0)
+    }
+
+    @MainActor
+    func testCreateRemoteSessionExpiredTombstoneCanCreateAgain() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        let requestId = UUID()
+        let createdAt = Date(timeIntervalSince1970: 2_000_000_000)
+        try ledger.remember(
+            SessionCreationRecord(
+                requestId: requestId.uuidString,
+                projectId: "p1",
+                sessionId: requestId.uuidString,
+                createdAt: createdAt
+            ),
+            now: createdAt
+        )
+        var launches = 0
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [Project(id: "p1", name: "First", cwd: "/tmp", sessions: [])],
+            selectedProjectId: "p1",
+            reposDirectory: { repos.path },
+            ledger: ledger,
+            onLaunch: { _, _, _, _ in launches += 1 }
+        )
+        let retryAt = createdAt.addingTimeInterval(SessionCreationLedger.ttl + 1)
+        XCTAssertEqual(
+            model.createRemoteSession(
+                RemoteCreateSessionRequest(requestId: requestId, projectId: "p1"),
+                now: retryAt
+            ),
+            .created(RemoteCreateSessionResponse(
+                requestId: requestId,
+                projectId: "p1",
+                sessionId: requestId.uuidString
+            ))
+        )
+        XCTAssertEqual(launches, 1)
+        XCTAssertEqual(
+            try ledger.record(for: requestId, now: retryAt)?.createdAt,
+            retryAt
+        )
     }
 
     @MainActor
@@ -8076,7 +8394,7 @@ final class AppLogicTests: XCTestCase {
             model.createRemoteSession(
                 RemoteCreateSessionRequest(requestId: unavailableId, projectId: "p1")),
             .unavailable)
-        XCTAssertNil(ledger.record(for: unavailableId))
+        XCTAssertNil(try ledger.record(for: unavailableId))
 
         // Missing dtach backend also fails closed instead of returning a shell-only
         // session that violated the automatic-Copilot contract.
@@ -8097,7 +8415,7 @@ final class AppLogicTests: XCTestCase {
                 RemoteCreateSessionRequest(requestId: noBackendId, projectId: "p1")),
             .unavailable
         )
-        XCTAssertNil(ledger.record(for: noBackendId))
+        XCTAssertNil(try ledger.record(for: noBackendId))
 
         // Repos missing → unprocessable, nothing created.
         reposPath = nil
@@ -8106,7 +8424,7 @@ final class AppLogicTests: XCTestCase {
             model.createRemoteSession(
                 RemoteCreateSessionRequest(requestId: invalidId, projectId: "p1")),
             .invalid)
-        XCTAssertNil(ledger.record(for: invalidId))
+        XCTAssertNil(try ledger.record(for: invalidId))
 
         XCTAssertTrue(model.project("p1")?.sessions.isEmpty == true)
         XCTAssertEqual(launches, 0)
@@ -8223,6 +8541,16 @@ final class AppLogicTests: XCTestCase {
             XCTAssertEqual(response.requestId, requestId)
             XCTAssertEqual(response.projectId, "p1")
             XCTAssertEqual(response.sessionId, requestId.uuidString)
+            guard case .loaded(let persistedCreatedState) =
+                StateRepository(path: root.appendingPathComponent("state.json")).load() else {
+                return XCTFail("201 response was sent before workspace state was durable")
+            }
+            XCTAssertNotNil(
+                persistedCreatedState.projects[0].sessions.first {
+                    $0.id == requestId.uuidString
+                }
+            )
+            XCTAssertNotNil(try ledger.record(for: requestId))
             XCTAssertEqual(launched.map(\.sessionId), [requestId.uuidString])
             XCTAssertNil(launched.first?.prompt)
             // Idempotent replay → 200, never relaunched.
@@ -8284,9 +8612,46 @@ final class AppLogicTests: XCTestCase {
                 token: token, origin: origin, body: try createBody(UUID(), "p1"))
             XCTAssertEqual(invalid, 422)
             reposPath = repos.path
+            // A launched session is not reported as successful until both
+            // workspace state and its ledger record are durable. The same request
+            // repairs the failed save without launching twice.
+            let stateURL = root.appendingPathComponent("state.json")
+            try FileManager.default.removeItem(at: stateURL)
+            try FileManager.default.createDirectory(
+                at: stateURL,
+                withIntermediateDirectories: false
+            )
+            let repairId = UUID()
+            let launchCountBeforeRepair = launched.count
+            let failedPersistence = try await remoteHTTPResponseWithBody(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, origin: origin, body: try createBody(repairId, "p1")
+            )
+            XCTAssertEqual(failedPersistence.0.statusCode, 503)
+            XCTAssertEqual(
+                String(decoding: failedPersistence.1, as: UTF8.self),
+                "Session creation could not be saved; retry with the same request id"
+            )
+            XCTAssertEqual(launched.count, launchCountBeforeRepair + 1)
+            XCTAssertNil(try ledger.record(for: repairId))
+
+            try FileManager.default.removeItem(at: stateURL)
+            let repairedPersistence = try await remoteHTTPResponseWithBody(
+                port: port, path: "/sessions/create", method: "POST",
+                token: token, origin: origin, body: try createBody(repairId, "p1")
+            )
+            XCTAssertEqual(repairedPersistence.0.statusCode, 200)
+            let repairedResponse = try JSONDecoder().decode(
+                RemoteCreateSessionResponse.self,
+                from: repairedPersistence.1
+            )
+            XCTAssertEqual(repairedResponse.requestId, repairId)
+            XCTAssertEqual(repairedResponse.sessionId, repairId.uuidString)
+            XCTAssertEqual(launched.count, launchCountBeforeRepair + 1)
+            XCTAssertNotNil(try ledger.record(for: repairId))
             // Processed-but-closed tombstone → 410, never recreated.
             let goneId = UUID()
-            ledger.remember(SessionCreationRecord(
+            try ledger.remember(SessionCreationRecord(
                 requestId: goneId.uuidString, projectId: "p1",
                 sessionId: goneId.uuidString, createdAt: Date()))
             let gone = try await remoteHTTPStatus(

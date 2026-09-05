@@ -160,6 +160,20 @@ enum RemoteSessionCreationOutcome: Equatable {
     case gone
     /// The Copilot executable could not be resolved, so no session was created. (503)
     case unavailable
+    /// The workspace or creation ledger could not be read or durably written.
+    /// The client must retry with the same request id. (503)
+    case persistenceUnavailable
+}
+
+private enum WorkspacePersistenceError: LocalizedError {
+    case unavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable(let message):
+            return message
+        }
+    }
 }
 
 private enum WindowScreenshot {
@@ -1003,9 +1017,25 @@ final class AppModel: ObservableObject {
         now: Date
     ) -> RemoteSessionCreationOutcome {
         let sessionId = request.requestId.uuidString
+        let creationRecord: SessionCreationRecord?
+        do {
+            creationRecord = try sessionCreationLedger.record(
+                for: request.requestId,
+                now: now
+            )
+        } catch {
+            NSLog(
+                "copilot-projects: could not read remote session creation ledger "
+                    + "for request \(sessionId); retry with the same request id: "
+                    + error.localizedDescription
+            )
+            return .persistenceUnavailable
+        }
 
         // A live deterministic session answers replays directly and covers the
-        // crash window where the session was saved but the ledger wasn't yet written.
+        // failure window where the session launched but workspace or ledger
+        // persistence did not finish. Repair both durable records before reporting
+        // success, without launching the already-live session again.
         if let loc = locateIndex(sessionId) {
             let owningProjectId = projects[loc.p].id
             let response = RemoteCreateSessionResponse(
@@ -1013,23 +1043,29 @@ final class AppModel: ObservableObject {
                 projectId: owningProjectId,
                 sessionId: sessionId
             )
-            if let record = sessionCreationLedger.record(
-                for: request.requestId,
-                now: now
-            ) {
+            if let record = creationRecord {
                 guard record.projectId == request.projectId,
                       record.sessionId == sessionId else {
                     return .conflict
                 }
-                return .existing(response)
+            } else {
+                guard owningProjectId == request.projectId else { return .conflict }
             }
-            return owningProjectId == request.projectId
-                ? .existing(response)
-                : .conflict
+            guard persistRemoteCreation(
+                requestId: request.requestId,
+                projectId: request.projectId,
+                sessionId: sessionId,
+                createdAt: creationRecord?.createdAt ?? now,
+                rememberCreation: creationRecord == nil,
+                now: now
+            ) else {
+                return .persistenceUnavailable
+            }
+            return .existing(response)
         }
 
         // Processed before, but the session is gone: it is a tombstone, never resurrect it.
-        if sessionCreationLedger.record(for: request.requestId, now: now) != nil {
+        if creationRecord != nil {
             return .gone
         }
 
@@ -1056,25 +1092,67 @@ final class AppModel: ObservableObject {
             allowAll: true
         )
         refreshSelectedTranscriptController()
-        save()
 
-        // Record the tombstone only AFTER the session is appended and persisted, so a
-        // crash can never leave a ledger entry for a session that was never created.
-        sessionCreationLedger.remember(
-            SessionCreationRecord(
-                requestId: sessionId,
-                projectId: request.projectId,
-                sessionId: sessionId,
-                createdAt: now
-            ),
+        // Launch remains before persistence so a saved session cannot be stranded
+        // without its one-shot initial prompt. A persistence failure is surfaced as
+        // retryable; the live deterministic session is retained so the retry can
+        // repair state without relaunching it.
+        guard persistRemoteCreation(
+            requestId: request.requestId,
+            projectId: request.projectId,
+            sessionId: sessionId,
+            createdAt: now,
+            rememberCreation: true,
             now: now
-        )
+        ) else {
+            return .persistenceUnavailable
+        }
 
         return .created(RemoteCreateSessionResponse(
             requestId: request.requestId,
             projectId: request.projectId,
             sessionId: sessionId
         ))
+    }
+
+    private func persistRemoteCreation(
+        requestId: UUID,
+        projectId: String,
+        sessionId: String,
+        createdAt: Date,
+        rememberCreation: Bool,
+        now: Date
+    ) -> Bool {
+        do {
+            try persistWorkspace()
+        } catch {
+            NSLog(
+                "copilot-projects: could not persist workspace for remote session "
+                    + "request \(requestId.uuidString); retry with the same request id: "
+                    + error.localizedDescription
+            )
+            return false
+        }
+        guard rememberCreation else { return true }
+        do {
+            try sessionCreationLedger.remember(
+                SessionCreationRecord(
+                    requestId: requestId.uuidString,
+                    projectId: projectId,
+                    sessionId: sessionId,
+                    createdAt: createdAt
+                ),
+                now: now
+            )
+            return true
+        } catch {
+            NSLog(
+                "copilot-projects: could not persist remote session creation ledger "
+                    + "for request \(requestId.uuidString); retry with the same request id: "
+                    + error.localizedDescription
+            )
+            return false
+        }
     }
 
     /// Where a new session should start: inherit the active pane's directory
@@ -3804,11 +3882,17 @@ final class AppModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
     }
 
-    func save() {
-        guard stateLoadFailure == nil else { return }
+    private func persistWorkspace() throws {
+        if let stateLoadFailure {
+            throw WorkspacePersistenceError.unavailable(stateLoadFailure)
+        }
         let state = PersistedState(projects: projects, selectedProjectId: selectedProjectId)
+        try stateRepository.save(state)
+    }
+
+    func save() {
         do {
-            try stateRepository.save(state)
+            try persistWorkspace()
         } catch {
             NSLog("copilot-projects: failed to save workspace state: \(error)")
         }

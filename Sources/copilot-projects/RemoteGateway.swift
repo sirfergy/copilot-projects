@@ -1341,6 +1341,8 @@ private final class RemoteHTTPHandler:
             send(.badRequest, text: "Invalid session creation request")
         case .unavailable:
             send(.serviceUnavailable, text: "Copilot is unavailable")
+        case .persistenceUnavailable:
+            send(.serviceUnavailable, text: "Session creation could not be saved; retry with the same request id")
         }
     }
 
