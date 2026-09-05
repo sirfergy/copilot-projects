@@ -435,6 +435,10 @@ watchdogs, automatic retries, or recovery policy.
   dir); each connection is one JSON request → one JSON response.
 - State is persisted to `~/.local/state/copilot-projects/state.json`. Writes are atomic, preserve
   a known-good backup, and never overwrite unreadable state with an empty workspace.
+- Permanent closes are accepted in `state.json.closing` before images, tracker commands, or tabs
+  change. Startup replays interrupted closes even when recovering a backup; the intent is removed
+  only after teardown and both state copies exclude the closed sessions. An unreadable intent
+  stops workspace recovery rather than resurrecting sessions. Do not delete it to bypass an error.
 
 Override locations with `COPILOT_PROJECTS_SOCKET` and `COPILOT_PROJECTS_STATE_DIR` to run an isolated
 instance. An app launched with either override does not replace the global CLI symlink or Copilot

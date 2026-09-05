@@ -26,7 +26,7 @@ enum SessionStatusRecordLoad: Equatable {
 
 enum SessionArtifacts {
     private static let closeRequestSuffix = ".close-session-request"
-    private static let gracefulClosePolls = 200
+    private static let gracefulCloseTimeout: Duration = .seconds(20)
 
     static func currentStatusTimestamp() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
@@ -159,25 +159,40 @@ enum SessionArtifacts {
         sessionIds: [String],
         kittyImageDiskStore: RemoteKittyImageDiskStore = .shared
     ) -> Task<Void, Never> {
-        // Synchronously tombstone this session's durable Kitty images before
-        // requesting exit, so late persistence can never resurrect closed data.
+        let deadline = ContinuousClock.now.advanced(by: gracefulCloseTimeout)
+        let discoveryDeadline = ContinuousClock.now.advanced(by: .seconds(2))
         let requests = sessionIds.map { sessionId in
             _ = kittyImageDiskStore.tombstone(sessionId: sessionId)
             return (
                 sessionId: sessionId,
-                pid: TranscriptController.liveCLIProcessPID(sessionId: sessionId),
+                processes: TranscriptController.liveCLIProcesses(sessionId: sessionId),
                 requested: writeCloseSessionRequest(sessionId: sessionId)
             )
         }
 
         return Task.detached(priority: .utility) {
+            // One background snapshot for the batch distinguishes a CLI still
+            // starting its tracker from a shell. Include this work in the grace
+            // deadline without blocking the main actor's tab removal.
+            let processes = ProcessTree.snapshot()
+            let dtach = ProcessTree.dtachProcesses(in: processes)
+            let agentNames = Env.agentProcessNames()
             await withTaskGroup(of: Void.self) { group in
                 for request in requests {
                     guard request.requested else { continue }
+                    let master = ProcessTree.dtachMaster(
+                        forSocket: Paths.dtachSocketPath(sessionId: request.sessionId),
+                        among: dtach
+                    )
+                    let cliStarting = master.map {
+                        ProcessTree.hasDescendant(under: $0, named: agentNames, in: processes)
+                    } ?? false
                     group.addTask {
                         _ = await Self.waitForLiveCLIExit(
                             sessionId: request.sessionId,
-                            initialPID: request.pid
+                            initialProcesses: request.processes,
+                            deadline: deadline,
+                            discoveryDeadline: cliStarting ? deadline : discoveryDeadline
                         )
                     }
                 }
@@ -187,51 +202,33 @@ enum SessionArtifacts {
         }
     }
 
-    static func waitForProcessExit(
-        _ pid: pid_t,
-        maximumPolls: Int = gracefulClosePolls,
-        processIsAlive: @escaping @Sendable (pid_t) -> Bool = {
-            TranscriptController.processIsAlive($0)
-        },
-        sleep: @escaping @Sendable () async -> Void = {
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-    ) async -> Bool {
-        for _ in 0 ..< maximumPolls {
-            if Task.isCancelled { return false }
-            guard processIsAlive(pid) else { return true }
-            await sleep()
-        }
-        return !processIsAlive(pid)
-    }
-
     static func waitForLiveCLIExit(
         sessionId: String,
-        initialPID: pid_t?,
-        maximumPolls: Int = gracefulClosePolls,
-        liveCLIProcessPID: @escaping @Sendable (String) -> pid_t? = {
-            TranscriptController.liveCLIProcessPID(sessionId: $0)
+        initialProcesses: Set<TranscriptController.CloseProcessIdentity>,
+        deadline: ContinuousClock.Instant,
+        discoveryDeadline: ContinuousClock.Instant,
+        liveCLIProcesses: @escaping @Sendable (String) -> Set<TranscriptController.CloseProcessIdentity> = {
+            TranscriptController.liveCLIProcesses(sessionId: $0)
         },
-        processIsAlive: @escaping @Sendable (pid_t) -> Bool = {
-            TranscriptController.processIsAlive($0)
+        processIsAlive: @escaping @Sendable (TranscriptController.CloseProcessIdentity) -> Bool = {
+            TranscriptController.closeProcessIsAlive($0)
         },
-        sleep: @escaping @Sendable () async -> Void = {
-            try? await Task.sleep(for: .milliseconds(100))
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
+        sleep: @escaping @Sendable (Duration) async -> Void = {
+            try? await Task.sleep(for: $0)
         }
     ) async -> Bool {
-        var pid = initialPID
-        for _ in 0 ..< maximumPolls {
+        var observed = initialProcesses
+        while now() < deadline {
             if Task.isCancelled { return false }
-            if pid == nil {
-                pid = liveCLIProcessPID(sessionId)
-            }
-            if let pid, !processIsAlive(pid) {
-                return true
-            }
-            await sleep()
+            observed.formUnion(liveCLIProcesses(sessionId))
+            guard now() < deadline else { return false }
+            if !observed.isEmpty, !observed.contains(where: processIsAlive) { return true }
+            if observed.isEmpty, now() >= discoveryDeadline { return false }
+            let nextDeadline = observed.isEmpty ? min(deadline, discoveryDeadline) : deadline
+            await sleep(max(.zero, min(.milliseconds(100), now().duration(to: nextDeadline))))
         }
-        guard let pid else { return false }
-        return !processIsAlive(pid)
+        return false
     }
 
     @discardableResult
@@ -248,41 +245,32 @@ enum SessionArtifacts {
             let url = sessionsDirectory
                 .appendingPathComponent("\(sessionId)\(closeRequestSuffix)")
             if FileManager.default.fileExists(atPath: url.path) { return true }
-            return FileManager.default.createFile(
-                atPath: url.path,
-                contents: Data(),
-                attributes: [.posixPermissions: 0o600]
-            )
+            guard FileManager.default.createFile(
+                atPath: url.path, contents: Data(), attributes: [.posixPermissions: 0o600]
+            ) else {
+                NSLog("copilot-projects: could not create close request at \(url.path)")
+                return false
+            }
+            return true
         } catch {
             NSLog("copilot-projects: could not request graceful close for \(sessionId): \(error)")
             return false
         }
     }
 
-    static func forceDestroyStaleCloseSessionRequests(
-        sessionsDirectory: URL = Paths.sessionsDir,
-        preserving sessionIds: Set<String> = [],
-        destroy: ([String]) -> Void = { SessionArtifacts.forceDestroy(sessionIds: $0) }
-    ) {
-        guard let entries = try? FileManager.default.contentsOfDirectory(
+    static func closeSessionRequests(
+        sessionsDirectory: URL = Paths.sessionsDir
+    ) throws -> [String] {
+        guard FileManager.default.fileExists(atPath: sessionsDirectory.path) else { return [] }
+        let entries = try FileManager.default.contentsOfDirectory(
             at: sessionsDirectory,
             includingPropertiesForKeys: nil
-        ) else {
-            return
-        }
-        var staleSessionIds: [String] = []
-        for url in entries where url.lastPathComponent.hasSuffix(closeRequestSuffix) {
+        )
+        return entries.compactMap { url in
             let name = url.lastPathComponent
+            guard name.hasSuffix(closeRequestSuffix) else { return nil }
             let sessionId = String(name.dropLast(closeRequestSuffix.count))
-            guard UUID(uuidString: sessionId) != nil else { continue }
-            if sessionIds.contains(sessionId) {
-                try? FileManager.default.removeItem(at: url)
-                continue
-            }
-            staleSessionIds.append(sessionId)
-        }
-        if !staleSessionIds.isEmpty {
-            destroy(staleSessionIds)
+            return UUID(uuidString: sessionId) != nil ? sessionId : nil
         }
     }
 

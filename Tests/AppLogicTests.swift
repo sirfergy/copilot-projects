@@ -36,71 +36,6 @@ private final class SSECaptureDelegate: NSObject, URLSessionDataDelegate, @unche
     }
 }
 
-private final class GracefulClosePollCounter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var aliveChecks: Int
-
-    init(aliveChecks: Int) {
-        self.aliveChecks = aliveChecks
-    }
-
-    func isAlive() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard aliveChecks > 0 else { return false }
-        aliveChecks -= 1
-        return true
-    }
-}
-
-private final class GracefulCloseOwnerResolver: @unchecked Sendable {
-    private let lock = NSLock()
-    private var pids: [pid_t?]
-    private var calls = 0
-
-    init(pids: [pid_t?]) {
-        self.pids = pids
-    }
-
-    var callCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return calls
-    }
-
-    func resolve() -> pid_t? {
-        lock.lock()
-        defer { lock.unlock() }
-        calls += 1
-        return pids.isEmpty ? nil : pids.removeFirst()
-    }
-}
-
-private final class GracefulCloseProcessProbe: @unchecked Sendable {
-    private let lock = NSLock()
-    private var aliveChecks: Int
-    private var observedPIDs: [pid_t] = []
-
-    init(aliveChecks: Int) {
-        self.aliveChecks = aliveChecks
-    }
-
-    var pids: [pid_t] {
-        lock.lock()
-        defer { lock.unlock() }
-        return observedPIDs
-    }
-
-    func isAlive(_ pid: pid_t) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        observedPIDs.append(pid)
-        guard aliveChecks > 0 else { return false }
-        aliveChecks -= 1
-        return true
-    }
-}
-
 private final class AgentActivityCooldownHarness {
     private(set) var delays: [TimeInterval] = []
     private var actions: [@MainActor () -> Void] = []
@@ -888,8 +823,8 @@ final class AppLogicTests: XCTestCase {
             }
         )
 
-        XCTAssertTrue(model.closeRemoteSession(sessionId: session.id))
-        XCTAssertFalse(model.closeRemoteSession(sessionId: session.id))
+        XCTAssertEqual(model.closeRemoteSession(sessionId: session.id), .closed)
+        XCTAssertEqual(model.closeRemoteSession(sessionId: session.id), .missing)
         XCTAssertTrue(model.projects[0].sessions.isEmpty)
         XCTAssertNil(model.projects[0].selectedSessionId)
         XCTAssertEqual(destroyedSessionIds, [session.id])
@@ -925,78 +860,16 @@ final class AppLogicTests: XCTestCase {
         ))
         XCTAssertTrue(FileManager.default.fileExists(atPath: request.path))
 
-        let counter = GracefulClosePollCounter(aliveChecks: 2)
-        let exited = await SessionArtifacts.waitForProcessExit(
-            123,
-            maximumPolls: 3,
-            processIsAlive: { _ in counter.isAlive() },
-            sleep: {}
-        )
-        XCTAssertTrue(exited)
-
-        let ownerResolver = GracefulCloseOwnerResolver(pids: [nil, 456])
-        let ownerProcess = GracefulCloseProcessProbe(aliveChecks: 1)
-        let startedThenExited = await SessionArtifacts.waitForLiveCLIExit(
-            sessionId: sessionId,
-            initialPID: nil,
-            maximumPolls: 4,
-            liveCLIProcessPID: { _ in ownerResolver.resolve() },
-            processIsAlive: { ownerProcess.isAlive($0) },
-            sleep: {}
-        )
-        XCTAssertTrue(startedThenExited)
-        XCTAssertEqual(ownerResolver.callCount, 2)
-        XCTAssertEqual(ownerProcess.pids, [456, 456])
-
-        let missingOwner = await SessionArtifacts.waitForLiveCLIExit(
-            sessionId: sessionId,
-            initialPID: nil,
-            maximumPolls: 2,
-            liveCLIProcessPID: { _ in nil },
-            processIsAlive: { _ in true },
-            sleep: {}
-        )
-        XCTAssertFalse(missingOwner)
-
-        let unusedResolver = GracefulCloseOwnerResolver(pids: [999])
-        let liveOwnerTimedOut = await SessionArtifacts.waitForLiveCLIExit(
-            sessionId: sessionId,
-            initialPID: 123,
-            maximumPolls: 2,
-            liveCLIProcessPID: { _ in unusedResolver.resolve() },
-            processIsAlive: { _ in true },
-            sleep: {}
-        )
-        XCTAssertFalse(liveOwnerTimedOut)
-        XCTAssertEqual(unusedResolver.callCount, 0)
-
-        var forceDestroyBatches: [[String]] = []
-        SessionArtifacts.forceDestroyStaleCloseSessionRequests(
-            sessionsDirectory: root,
-            preserving: [preservedSessionId],
-            destroy: { forceDestroyBatches.append($0) }
-        )
-        XCTAssertEqual(forceDestroyBatches.count, 1)
         XCTAssertEqual(
-            Set(forceDestroyBatches[0]),
-            Set([sessionId, secondSessionId])
+            Set(try SessionArtifacts.closeSessionRequests(sessionsDirectory: root)),
+            Set([sessionId, secondSessionId, preservedSessionId])
         )
-        try? FileManager.default.removeItem(at: request)
-        try? FileManager.default.removeItem(at: secondRequest)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: request.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: secondRequest.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: preservedRequest.path))
-
-        let timedOut = await SessionArtifacts.waitForProcessExit(
-            123,
-            maximumPolls: 2,
-            processIsAlive: { _ in true },
-            sleep: {}
-        )
-        XCTAssertFalse(timedOut)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: request.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: secondRequest.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: preservedRequest.path))
     }
 
-    func testLiveCLIProcessPIDPrefersMatchingParentProcess() throws {
+    func testLiveCLIProcessesIncludesTrackerAndMatchingParent() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1004,42 +877,52 @@ final class AppLogicTests: XCTestCase {
         let sessionId = UUID().uuidString
         let bootTime = try XCTUnwrap(TranscriptController.currentBootTimeSeconds())
         let ownerURL = root.appendingPathComponent("\(sessionId).transcript-owner.json")
-        func writeOwner(bootTime: String?) throws {
+        func writeOwner(bootTime: String?, parentPID: pid_t? = getppid()) throws {
             var owner: [String: Any] = [
                 "appSessionId": sessionId,
                 "copilotSessionId": UUID().uuidString,
                 "pid": ProcessInfo.processInfo.processIdentifier,
-                "parentPid": getppid(),
             ]
+            owner["parentPid"] = parentPID
             owner["bootTime"] = bootTime
             try JSONSerialization.data(withJSONObject: owner).write(to: ownerURL)
         }
 
         try writeOwner(bootTime: nil)
         XCTAssertEqual(
-            TranscriptController.liveCLIProcessPID(
+            Set(TranscriptController.liveCLIProcesses(
                 sessionId: sessionId,
                 directory: root
-            ),
-            getppid()
+            ).map(\.pid)),
+            Set([getpid(), getppid()])
         )
         try writeOwner(bootTime: "{ sec = \(bootTime - 3_600), usec = 0 }")
-        XCTAssertNil(TranscriptController.liveCLIProcessPID(
+        XCTAssertTrue(TranscriptController.liveCLIProcesses(
             sessionId: sessionId,
             directory: root
-        ))
+        ).isEmpty)
         try writeOwner(bootTime: "{ sec = \(bootTime), usec = 0 }")
         XCTAssertEqual(
-            TranscriptController.liveCLIProcessPID(
+            Set(TranscriptController.liveCLIProcesses(
                 sessionId: sessionId,
                 directory: root
-            ),
-            getppid()
+            ).map(\.pid)),
+            Set([getpid(), getppid()])
         )
-        XCTAssertNil(TranscriptController.liveCLIProcessPID(
+        try writeOwner(bootTime: nil, parentPID: nil)
+        XCTAssertEqual(
+            Set(TranscriptController.liveCLIProcesses(sessionId: sessionId, directory: root).map(\.pid)),
+            Set([getpid(), getppid()])
+        )
+        try writeOwner(bootTime: nil, parentPID: 1)
+        XCTAssertEqual(
+            Set(TranscriptController.liveCLIProcesses(sessionId: sessionId, directory: root).map(\.pid)),
+            [getpid()]
+        )
+        XCTAssertTrue(TranscriptController.liveCLIProcesses(
             sessionId: UUID().uuidString,
             directory: root
-        ))
+        ).isEmpty)
     }
 
     @MainActor
@@ -1219,7 +1102,7 @@ final class AppLogicTests: XCTestCase {
                 }
             }
         )
-        XCTAssertTrue(model.closeRemoteSession(sessionId: session.id))
+        XCTAssertEqual(model.closeRemoteSession(sessionId: session.id), .closed)
         await fulfillment(of: [started], timeout: 1)
 
         model.beginTermination()
@@ -7620,6 +7503,20 @@ final class AppLogicTests: XCTestCase {
                 body: closeAcquireBody
             )
             XCTAssertEqual(closeAcquireStatus, 204)
+            try FileManager.default.createDirectory(
+                at: repository.closeIntentPath, withIntermediateDirectories: true
+            )
+            let rejectedClose = try await remoteHTTPStatus(
+                port: port,
+                path: "/control",
+                method: "POST",
+                token: token,
+                origin: "https://projects.example.com",
+                body: closeBody
+            )
+            XCTAssertEqual(rejectedClose, 503)
+            XCTAssertTrue(model.projects.contains { $0.sessions.contains { $0.id == session.id } })
+            try FileManager.default.removeItem(at: repository.closeIntentPath)
             let closeStatus = try await remoteHTTPStatus(
                 port: port,
                 path: "/control",

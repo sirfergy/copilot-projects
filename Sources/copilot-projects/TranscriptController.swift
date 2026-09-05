@@ -420,30 +420,61 @@ final class TranscriptController: ObservableObject {
         return Int(digits)
     }
 
-    /// The live CLI process whose tracker currently owns this app session's
-    /// shared files. New tracker versions record the CLI parent directly; older
-    /// markers fall back to the extension pid. Boot-time metadata is
-    /// defense-in-depth: missing/unreadable values fail open, while a confirmed
-    /// reboot mismatch rejects a reused pid.
-    nonisolated static func liveCLIProcessPID(
+    struct CloseProcessIdentity: Hashable, Sendable {
+        let pid: pid_t
+        let startSeconds: UInt64
+        let startMicroseconds: UInt64
+    }
+
+    nonisolated private static func closeProcessInfo(
+        _ pid: pid_t
+    ) -> (identity: CloseProcessIdentity, parentPID: pid_t)? {
+        guard pid > 1 else { return nil }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return (
+            CloseProcessIdentity(
+                pid: pid,
+                startSeconds: info.pbi_start_tvsec,
+                startMicroseconds: info.pbi_start_tvusec
+            ),
+            pid_t(bitPattern: info.pbi_ppid)
+        )
+    }
+
+    nonisolated static func closeProcessIsAlive(_ identity: CloseProcessIdentity) -> Bool {
+        closeProcessInfo(identity.pid)?.identity == identity
+    }
+
+    /// Observe both the extension and its actual CLI parent. Keep their process
+    /// birth identities across owner replacement: tracker restart is not CLI
+    /// exit, and CLI exit is not evidence that child cleanup has finished.
+    nonisolated static func liveCLIProcesses(
         sessionId: String,
         directory: URL = Paths.sessionsDir
-    ) -> pid_t? {
+    ) -> Set<CloseProcessIdentity> {
         guard let owner = readOwnerMarker(sessionId: sessionId, directory: directory),
               ownerCorroboration(
                   owner: owner,
                   sessionId: sessionId
               ) == .confirmedThisTab,
-              processIsAlive(owner.pid) else {
-            return nil
+              let tracker = closeProcessInfo(owner.pid) else {
+            return []
         }
         if let recordedBootTime = bootTimeSeconds(owner.bootTime),
            let currentBootTime = currentBootTimeSeconds(),
            abs(recordedBootTime - currentBootTime) > 5 {
-            return nil
+            return []
         }
-        let pid = owner.parentPid.flatMap { $0 > 0 ? $0 : nil } ?? owner.pid
-        return processIsAlive(pid) ? pid : nil
+        var processes: Set<CloseProcessIdentity> = [tracker.identity]
+        // Legacy owners omit parentPid; kernel parentage still identifies the
+        // CLI. A conflicting marker is never a reason to trust an arbitrary PID.
+        if owner.parentPid == nil || owner.parentPid == tracker.parentPID,
+           let parent = closeProcessInfo(tracker.parentPID) {
+            processes.insert(parent.identity)
+        }
+        return processes
     }
 
     nonisolated static func transcriptOwnerMatchesSession(

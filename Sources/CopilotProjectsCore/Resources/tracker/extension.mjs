@@ -399,6 +399,7 @@ if (validSessionId && socketPath) {
             activityState = "unknown";
         }
         clearCloseActivityRetry();
+        const generation = conversationGeneration;
         closeSessionRequestInFlight = true;
         try {
             const idleGenerationBeforeAbort = idleGeneration;
@@ -413,6 +414,7 @@ if (validSessionId && socketPath) {
                     if (activityState !== "unknown") throw error;
                 }
                 const becameIdle = await waitForSessionIdle(idleGenerationBeforeAbort);
+                if (generation !== conversationGeneration || !ownsSharedFiles()) return;
                 if (!becameIdle && activityState !== "unknown") {
                     throw new Error("session did not become idle after abort");
                 }
@@ -422,6 +424,7 @@ if (validSessionId && socketPath) {
                 CLOSE_ENQUEUE_TIMEOUT_MS,
                 "exit command enqueue timed out"
             );
+            if (generation !== conversationGeneration || !ownsSharedFiles()) return;
             if (result?.queued !== true) {
                 throw new Error("exit command was not queued");
             }
@@ -435,7 +438,9 @@ if (validSessionId && socketPath) {
                 error
             );
         } finally {
-            closeSessionRequestInFlight = false;
+            if (generation === conversationGeneration) {
+                closeSessionRequestInFlight = false;
+            }
         }
     }
 
@@ -2782,9 +2787,9 @@ if (validSessionId && socketPath) {
                     && currentTurnKind === null
                     && !foregroundTurnActive
                     && !scheduledTurnActive) {
-                currentTurnKind = restoredTurnKind;
                 // History has no durable session.idle event, so it can prove
-                // that a turn started but not that the turn is still live.
+                // that a turn started but not that it is still live. Keep this
+                // uncertainty local to close; don't relabel live activity.
                 closeActivityState = "unknown";
             } else {
                 closeActivityState = "ready";
@@ -2924,6 +2929,10 @@ if (validSessionId && socketPath) {
         ownedCopilotSessionIds.add(nextCopilotSessionId);
         conversationGeneration += 1;
         const generation = conversationGeneration;
+        // Slash-command stop/clear discards the old conversation's queued
+        // commands. Permanent tab close intent survives that queue/owner.
+        closeSessionRequestInFlight = false;
+        closeSessionExitQueued = false;
         rotationConsumedEventId = typeof event?.id === "string"
             ? event.id
             : null;
