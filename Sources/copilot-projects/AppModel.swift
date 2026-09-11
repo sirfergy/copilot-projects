@@ -3901,6 +3901,8 @@ final class AppModel: ObservableObject {
         updateDockBadge()
         requestMainWindow?()
         NSApp.activate(ignoringOtherApps: true)
+        // An already-visible session may not trigger activation or reveal callbacks.
+        focusActiveTerminal()
     }
 
     /// Mark a session read on behalf of a remote client that is now viewing it (iOS
@@ -3926,11 +3928,11 @@ final class AppModel: ObservableObject {
         markSessionRead(sessionId: sid)
     }
 
-    /// Make the visible session's terminal the first responder. Used when the app
-    /// is activated (clicked / ⌘-Tab'd back) so focus lands on the terminal rather
-    /// than the sidebar project list.
+    /// Make the visible session's terminal the first responder on activation or
+    /// an explicit focus request. Hidden/unattached targets are focused on reveal.
     func focusActiveTerminal() {
-        guard let view = activeController?.terminalView, let window = view.window else { return }
+        guard let view = activeController?.terminalView, !view.isHidden,
+              let window = view.window, window.firstResponder !== view else { return }
         window.makeFirstResponder(view)
     }
 
