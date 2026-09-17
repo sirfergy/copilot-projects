@@ -445,7 +445,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             var quietTicks = 0
             for tick in 0 ..< maxTicks {
                 do {
-                    try await Task.sleep(for: Self.promptSubmitPollInterval)
+                    try await ContinuousClock().sleep(until: .now.advanced(by: Self.promptSubmitPollInterval))
                 } catch {
                     return // cancelled: don't submit an unsettled paste
                 }
