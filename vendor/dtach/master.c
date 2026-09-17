@@ -36,6 +36,8 @@ struct pty
 };
 
 /* A connected client */
+/* Copilot Projects, 2026-09-17: keep attachment control responsive while
+** output is backpressured, retaining the pending chunk across wakeups. */
 struct client
 {
 	/* The next client in the linked list. */
@@ -46,6 +48,8 @@ struct client
 	int fd;
 	/* Whether or not the client is attached. */
 	int attached;
+	/* Bytes of the current pty chunk already delivered to this client. */
+	size_t written;
 };
 
 /* The list of connected clients. */
@@ -245,6 +249,9 @@ update_socket_modes(int exec)
 		chmod(sockname, newmode);
 }
 
+static void control_activity(int s);
+static void client_activity(struct client *p);
+
 /* Process activity on the pty - Input and terminal changes are sent out to
 ** the attached clients. If the pty goes away, we die. */
 static void
@@ -252,8 +259,8 @@ pty_activity(int s)
 {
 	unsigned char buf[BUFSIZE];
 	ssize_t len;
-	struct client *p;
-	fd_set readfds, writefds;
+	struct client *p, *next;
+	fd_set readfds, writefds, deferred;
 	int highest_fd, nclients;
 
 	/* Read the pty activity */
@@ -282,10 +289,14 @@ pty_activity(int s)
 		exit(1);
 #endif
 
+	FD_ZERO(&deferred);
+	for (p = clients; p; p = p->next)
+		p->written = 0;
+
 top:
 	/*
 	** Wait until at least one client is writable. Also wait on the control
-	** socket in case a new client tries to connect.
+	** socket and attachment messages, even when all old clients are blocked.
 	*/
 	FD_ZERO(&readfds);
 	FD_ZERO(&writefds);
@@ -293,34 +304,59 @@ top:
 	highest_fd = s;
 	for (p = clients, nclients = 0; p; p = p->next)
 	{
+		if (!FD_ISSET(p->fd, &deferred))
+			FD_SET(p->fd, &readfds);
+		if (p->fd > highest_fd)
+			highest_fd = p->fd;
 		if (!p->attached)
 			continue;
 		FD_SET(p->fd, &writefds);
-		if (p->fd > highest_fd)
-			highest_fd = p->fd;
 		nclients++;
 	}
 	if (nclients == 0)
 		return;
 	if (select(highest_fd + 1, &readfds, &writefds, NULL, NULL) < 0)
+	{
+		if (errno == EINTR || errno == EAGAIN)
+			goto top;
 		return;
+	}
+
+	if (FD_ISSET(s, &readfds))
+		control_activity(s);
+	for (p = clients; p; p = next)
+	{
+		struct packet pkt;
+		ssize_t available;
+
+		next = p->next;
+		if (!FD_ISSET(p->fd, &readfds))
+			continue;
+		available = recv(p->fd, &pkt, sizeof(pkt), MSG_PEEK);
+		if (available == (ssize_t)sizeof(pkt) && pkt.type != MSG_ATTACH &&
+		    pkt.type != MSG_DETACH && pkt.type != MSG_WINCH)
+		{
+			/* Input and ctrl-L redraw can block writing to the slave.
+			** Leave them queued until this output chunk is delivered. */
+			FD_SET(p->fd, &deferred);
+			continue;
+		}
+		client_activity(p);
+	}
 
 	/* Send the data out to the clients. */
 	for (p = clients, nclients = 0; p; p = p->next)
 	{
-		ssize_t written;
-
-		if (!FD_ISSET(p->fd, &writefds))
+		if (!p->attached || !FD_ISSET(p->fd, &writefds))
 			continue;
 
-		written = 0;
-		while (written < len)
+		while (p->written < (size_t)len)
 		{
-			ssize_t n = write(p->fd, buf + written, len - written);
+			ssize_t n = write(p->fd, buf + p->written, len - p->written);
 
 			if (n > 0)
 			{
-				written += n;
+				p->written += n;
 				continue;
 			}
 			else if (n < 0 && errno == EINTR)
@@ -329,12 +365,12 @@ top:
 				nclients = -1;
 			break;
 		}
-		if (nclients != -1 && written == len)
+		if (nclients != -1 && p->written == (size_t)len)
 			nclients++;
 	}
 
 	/* Try again if nothing happened. */
-	if (!FD_ISSET(s, &readfds) && nclients == 0)
+	if (nclients == 0)
 		goto top;
 }
 
@@ -359,6 +395,7 @@ control_activity(int s)
 	p = malloc(sizeof(struct client));
 	p->fd = fd;
 	p->attached = 0;
+	p->written = 0;
 	p->pprev = &clients;
 	p->next = *(p->pprev);
 	if (p->next)

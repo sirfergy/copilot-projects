@@ -37,6 +37,15 @@ and /dev/pts.
 
 2. QUICK START
 
+Copilot Projects local modification (2026-09-17): master.c continues servicing
+attachment control while old clients are blocked, without discarding or
+duplicating the pending output chunk. Input that could block on the program's
+pty remains queued until output delivery can proceed.
+
+Run `python3 scripts/test-dtach.py` from the repository root to build this
+vendored source in a temporary directory and exercise reattachment, byte
+preservation, and ordinary terminal control without using application sessions.
+
 Compiling dtach should be simple, as it uses autoconf:
 
 	$ ./configure
