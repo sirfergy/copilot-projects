@@ -23,11 +23,11 @@ let package = Package(
         ),
     ],
     dependencies: [
-        // SwiftTerm 2.0 with copied embedding APIs, the caret-ordering fix,
-        // and diagnostic-only renderer logging.
+        // SwiftTerm 2.0 with embedding APIs, caret ordering, renderer diagnostics,
+        // and close-on-exec protection for the private PTY write descriptor.
         .package(
             url: "https://github.com/sirfergy/SwiftTerm",
-            revision: "18de4c63fb5637d1a3d2ada17951f872682b329d"
+            revision: "cc0f5a65b40874ede770ba9e44ae61ce48a7de96"
         ),
     ],
     targets: [

@@ -506,6 +506,11 @@ prints the active path and distinguishes the normal master/client process pair f
 orphaned masters. If the bundled dtach is missing, sessions fall back to plain shells.
 Override it with `COPILOT_PROJECTS_DTACH`.
 
+An app update does not replace already-running dtach masters. Backend fixes apply
+to newly created sessions; old sessions keep their original helper and inherited
+terminal handles until they end. Let active work finish before closing and
+recreating an affected session.
+
 ## Renderer
 
 SwiftTerm's Metal renderer is the default. Set `COPILOT_PROJECTS_RENDERER=coregraphics`

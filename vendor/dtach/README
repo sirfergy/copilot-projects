@@ -37,6 +37,25 @@ and /dev/pts.
 
 2. QUICK START
 
+Copilot Projects local modification (2026-09-17): master.c continues servicing
+attachment control while old clients are blocked. Partial-write offsets survive
+retries of the current output chunk; the existing best-effort fanout policy is
+unchanged, so a lagging client can still miss bytes when another client finishes
+the chunk. Only the nested output wait defers input that could block on the
+program's pty; the outer input path is unchanged.
+
+The output wait checks actual child termination without reaping its status.
+After the child exits, a bounded no-progress wait returns control to the normal
+EOF/reaping path. Resize traffic alone does not extend that wait; new attachments
+and readers making progress get a chance to drain output. Stop/continue
+notifications do not count as termination. If the no-progress deadline expires,
+the held chunk is discarded so EOF handling can continue. The master still waits
+for PTY EOF if another process retains the slave.
+
+Run `python3 scripts/test-dtach.py` from the repository root to build this
+vendored source in a temporary directory and exercise reattachment, byte
+preservation, and ordinary terminal control without using application sessions.
+
 Compiling dtach should be simple, as it uses autoconf:
 
 	$ ./configure
