@@ -139,7 +139,13 @@ swift test --package-path Packages/SessionDomain
 ./scripts/check-tracker.sh
 python3 scripts/test-release.py
 swift test
+swift test -c release --filter SessionCloseIntegrationTests
 ```
+
+The session-close integration covers the Command-W action with real terminal
+processes and asynchronous cleanup. The remote companion also runs it with its
+production dependencies linked, since the sleep-specialization crash depends on
+the optimized binary's linked modules.
 
 See the [usage and development guide](docs/usage.md) for hook behavior, tracker
 upgrades, troubleshooting, rendering, and release instructions.

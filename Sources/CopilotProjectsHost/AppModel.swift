@@ -1569,7 +1569,8 @@ final class AppModel: ObservableObject {
             forcePendingSessionDestroys()
         } else {
             while !pendingSessionDestroys.isEmpty, ContinuousClock.now < closeDeadline {
-                try? await Task.sleep(for: min(.milliseconds(25), ContinuousClock.now.duration(to: closeDeadline)))
+                try? await ContinuousClock().sleep(
+                    until: min(.now.advanced(by: .milliseconds(25)), closeDeadline))
             }
             forcePendingSessionDestroys()
         }
@@ -2587,7 +2588,7 @@ final class AppModel: ObservableObject {
             return RemoteWorkflowActionResult(state: .rejected, message: "The session action was not accepted.")
         }
         for _ in 0..<40 {
-            do { try await Task.sleep(for: .milliseconds(500)) }
+            do { try await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(500))) }
             catch { break }
             guard let fresh = adapter.loadFreshSnapshot(sessionId: sessionId, now: Date()),
                   fresh.conversationEpoch == epoch else { break }

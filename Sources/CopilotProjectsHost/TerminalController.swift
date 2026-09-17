@@ -289,7 +289,7 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         var lastGeneration = terminalView.remoteContentGeneration
         var quietTicks = 0
         for _ in 0 ..< maxTicks {
-            try? await Task.sleep(for: .milliseconds(20))
+            try? await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(20)))
             let generation = terminalView.remoteContentGeneration
             if generation == lastGeneration {
                 quietTicks += 1

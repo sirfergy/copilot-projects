@@ -229,7 +229,9 @@ enum SessionArtifacts {
         },
         now: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
         sleep: @escaping @Sendable (Duration) async -> Void = {
-            try? await Task.sleep(for: $0)
+            // Avoid the release-only cross-module duration-sleep specialization
+            // crash (swiftlang/swift#86204) when the remote integration is linked.
+            try? await ContinuousClock().sleep(until: .now.advanced(by: $0))
         }
     ) async -> Bool {
         var observed = initialProcesses

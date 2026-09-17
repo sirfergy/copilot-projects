@@ -22,5 +22,7 @@ jobs:
         run: PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" ./scripts/check-tracker.sh
       - name: Test
         run: swift test
+      - name: Release session-close integration
+        run: swift test -c release --filter SessionCloseIntegrationTests
       - name: Release build
         run: swift build -c release
