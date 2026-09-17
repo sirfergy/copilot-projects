@@ -63,7 +63,7 @@ This component preview uses illustrative sample data.
 Hold `⌘` or `⌃` to reveal numbered navigation hints. Use the session-details
 button to open the completed-turn drawer.
 
-The **+ Copilot** button starts an interactive Copilot CLI session immediately,
+The **+** side of the split button starts an interactive Copilot CLI session immediately,
 inheriting the current session's working directory. Its dropdown offers
 **Start with Prompt…** (a multiline composer) and **New Terminal** (just a shell).
 The Session menu and project context menus offer the same choices. New projects

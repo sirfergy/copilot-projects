@@ -470,13 +470,11 @@ struct SessionTabBar: View {
 
             HStack(spacing: 0) {
                 Button { model.addCopilotSessionInteractive(toProjectId: project.id) } label: {
-                    Label("Copilot", systemImage: "plus")
-                        .font(.callout)
-                        .padding(.horizontal, 6)
-                        .frame(height: 22)
+                    Image(systemName: "plus")
+                        .font(.caption)
+                        .frame(width: 24, height: 22)
                 }
                 .buttonStyle(.borderless)
-                .hoverHighlight()
                 .help("New Copilot Session (⌘T)")
                 .accessibilityLabel("New Copilot Session")
 
@@ -498,6 +496,7 @@ struct SessionTabBar: View {
                 .help("More Session Options")
                 .accessibilityLabel("More Session Options")
             }
+            .hoverHighlight()
             .padding(.trailing, 8)
         }
     }
