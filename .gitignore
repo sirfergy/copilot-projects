@@ -7,6 +7,7 @@ AuthKey_*.p8
 *.p8
 dist/
 .DS_Store
+__pycache__/
 
 # vendored dtach build artifacts (source is kept, binaries are rebuilt)
 vendor/dtach/dtach

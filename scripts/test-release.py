@@ -2,6 +2,9 @@
 """Exercise the release entrypoint without building, signing, or network access."""
 
 import json
+import importlib.util
+import fcntl
+import multiprocessing
 import os
 from pathlib import Path
 import shutil
@@ -9,10 +12,14 @@ import shlex
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 RELEASE = Path(__file__).with_name("release.sh")
 REAL_GIT = shutil.which("git")
+KEYCHAIN_SPEC = importlib.util.spec_from_file_location("keychain_search", RELEASE.with_name("keychain-search.py"))
+keychain_search = importlib.util.module_from_spec(KEYCHAIN_SPEC)
+KEYCHAIN_SPEC.loader.exec_module(keychain_search)
 MOCK = r"""#!/usr/bin/env python3
 import json
 import os
@@ -449,6 +456,217 @@ class ReleaseTests(unittest.TestCase):
         result = self.run_release()
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("tag v1.2.3 already exists", result.stdout)
+
+
+class KeychainSearchTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="keychain-search-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.existing = self.root / "existing public.keychain-db"
+        self.job = self.root / "job signing.keychain-db"
+        self.existing.touch()
+        self.job.touch()
+        self.state = [str(self.existing)]
+        self.writes = []
+        self.deletes = []
+        self.lock_file = self.root / "search.lock"
+        self.account_lock_path = keychain_search.lock_path
+        patcher = mock.patch.object(keychain_search, "lock_path", return_value=self.lock_file)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def execute(self, *args):
+        if args[:2] == ("security", "delete-keychain"):
+            self.deletes.append(args[2])
+            self.state.remove(args[2])
+            Path(args[2]).unlink()
+            return ""
+        if "-s" in args:
+            self.writes.append(list(args))
+            self.state = list(args[args.index("-s") + 1:])
+            return ""
+        self.assertEqual(args, ("security", "list-keychains", "-d", "user"))
+        return "".join("    " + json.dumps(path) + "\n" for path in self.state)
+
+    def test_register_preserves_quoted_paths_and_is_idempotent(self):
+        keychain_search.register_keychain(str(self.job), self.execute)
+        self.assertEqual(self.writes, [[
+            "security", "list-keychains", "-d", "user", "-s", str(self.existing), str(self.job),
+        ]])
+        keychain_search.register_keychain(str(self.job), self.execute)
+        self.assertEqual(len(self.writes), 1)
+
+    def test_empty_malformed_or_relative_lists_never_reach_the_setter(self):
+        for raw in (
+            "", '    "/broken\n', '"relative.keychain-db"\n', '"/tmp/a" "/tmp/b"\n',
+            '    "/Users/sean/Library/Keychains/    "/Users/sean/Library/Keychains/login.keychain-db"\n',
+        ):
+            with self.subTest(raw=raw):
+                def execute(*args):
+                    self.assertNotIn("-s", args)
+                    return raw
+                with self.assertRaises(ValueError):
+                    keychain_search.register_keychain(str(self.job), execute)
+
+    def test_missing_job_keychain_never_changes_the_search_list(self):
+        self.job.unlink()
+        with self.assertRaisesRegex(ValueError, "already exist"):
+            keychain_search.register_keychain(str(self.job), self.execute)
+        self.assertEqual(self.writes, [])
+
+    def test_concurrent_removal_is_bounded_and_fails_visibly(self):
+        def execute(*args):
+            if "-s" in args:
+                self.writes.append(args)
+            return "    " + json.dumps(str(self.existing)) + "\n"
+        with self.assertRaisesRegex(RuntimeError, "Concurrent"):
+            keychain_search.register_keychain(str(self.job), execute)
+        self.assertEqual(len(self.writes), 3)
+
+    def test_lock_identity_uses_account_home_not_job_environment(self):
+        with mock.patch.object(keychain_search.pwd, "getpwuid") as account, mock.patch.dict(
+            os.environ, {"HOME": str(self.root / "other-home"), "TMPDIR": str(self.root / "job-temp")}
+        ):
+            account.return_value.pw_dir = str(self.root)
+            expected = self.root / ".copilot-projects-keychain-search.lock"
+            self.assertEqual(self.account_lock_path(), expected)
+            self.assertEqual(self.account_lock_path(), expected)
+            account.assert_called_with(os.geteuid())
+            for home in ("", str(self.root / "missing-home")):
+                account.return_value.pw_dir = home
+                with self.assertRaises(ValueError):
+                    self.account_lock_path()
+
+    def assert_serialized_mutations(self, delete=False):
+        context = multiprocessing.get_context("fork")
+        first_read = context.Event()
+        release_first = context.Event()
+        first_finished = context.Event()
+        progress = context.Queue()
+        other = self.root / "other signing.keychain-db"
+        other.touch()
+        state = self.root / "search.json"
+        state.write_text(json.dumps(self.state + ([str(other)] if delete else [])))
+        real_flock = fcntl.flock
+
+        def first():
+            initial = True
+
+            def execute(*args):
+                nonlocal initial
+                if "-s" in args:
+                    state.write_text(json.dumps(list(args[args.index("-s") + 1:])))
+                    return ""
+                paths = json.loads(state.read_text())
+                if initial:
+                    initial = False
+                    first_read.set()
+                    if not release_first.wait(10):
+                        raise RuntimeError("First registration was not released")
+                return "".join(json.dumps(path) + "\n" for path in paths)
+
+            try:
+                keychain_search.register_keychain(str(self.job), execute)
+            finally:
+                first_finished.set()
+
+        def second():
+            initial = True
+
+            def flock(fd, operation):
+                try:
+                    real_flock(fd, operation | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    progress.put("blocked")
+                    return real_flock(fd, operation)
+                progress.put("uncontended")
+
+            def execute(*args):
+                nonlocal initial
+                paths = json.loads(state.read_text())
+                if args[:2] == ("security", "delete-keychain"):
+                    paths.remove(str(other))
+                    state.write_text(json.dumps(paths))
+                    other.unlink()
+                    progress.put("deleted")
+                    return ""
+                if "-s" in args:
+                    state.write_text(json.dumps(list(args[args.index("-s") + 1:])))
+                    return ""
+                if initial:
+                    initial = False
+                    progress.put("read")
+                    if not first_finished.wait(10):
+                        raise RuntimeError("First registration did not finish")
+                return "".join(json.dumps(path) + "\n" for path in paths)
+
+            with mock.patch.object(fcntl, "flock", side_effect=flock):
+                operation = keychain_search.delete_keychain if delete else keychain_search.register_keychain
+                operation(str(other), execute)
+
+        processes = []
+        try:
+            first_process = context.Process(target=first)
+            first_process.start()
+            processes.append(first_process)
+            self.assertTrue(first_read.wait(10), "First process never read the search list")
+            second_process = context.Process(target=second)
+            second_process.start()
+            processes.append(second_process)
+            observed = progress.get(timeout=10)
+            release_first.set()
+            for process in processes:
+                process.join(10)
+                self.assertFalse(process.is_alive(), "Keychain mutation did not finish")
+                self.assertEqual(process.exitcode, 0)
+            expected = [str(self.existing), str(self.job)] + ([] if delete else [str(other)])
+            self.assertEqual(json.loads(state.read_text()), expected)
+            self.assertEqual(observed, "blocked", "The second mutation did not share the first lock")
+        finally:
+            release_first.set()
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                process.join(10)
+            progress.close()
+            progress.join_thread()
+
+    def test_two_process_registrations_preserve_both_entries(self):
+        self.assert_serialized_mutations()
+
+    def test_cleanup_cannot_be_restored_by_inflight_registration(self):
+        self.assert_serialized_mutations(delete=True)
+
+    def test_delete_is_native_idempotent_and_preserves_the_lock_inode(self):
+        keychain_search.register_keychain(str(self.job), self.execute)
+        inode = self.lock_file.stat().st_ino
+        self.writes.clear()
+        keychain_search.delete_keychain(str(self.job), self.execute)
+        keychain_search.delete_keychain(str(self.job), self.execute)
+        self.assertEqual(self.deletes, [str(self.job)])
+        self.assertEqual(self.state, [str(self.existing)])
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.lock_file.stat().st_ino, inode)
+
+    def test_delete_failure_is_visible_and_releases_the_lock(self):
+        def execute(*args):
+            raise subprocess.CalledProcessError(1, args)
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            keychain_search.delete_keychain(str(self.job), execute)
+        self.assertTrue(self.job.is_file())
+        with self.lock_file.open("r+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_delete_rejects_malformed_or_nonfile_paths(self):
+        broken = self.root / "broken.keychain-db"
+        broken.symlink_to(self.root / "missing.keychain-db")
+        for path in ("relative.keychain-db", str(self.root), str(broken), str(self.job) + "\x01"):
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError):
+                    keychain_search.delete_keychain(path, self.execute)
+        self.assertEqual(self.deletes, [])
 
 
 if __name__ == "__main__":

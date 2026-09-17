@@ -201,6 +201,7 @@ jobs:
             -s \
             -k "$keychain_password" \
             "$keychain_path"
+          python3 scripts/keychain-search.py "$keychain_path"
           xcrun notarytool store-credentials copilot-projects-release \
             --key "$notary_key_path" \
             --key-id "$NOTARY_KEY_ID" \
@@ -219,6 +220,16 @@ jobs:
             echo "Expected exactly one Developer ID Application identity, found $identity_count." >&2
             exit 1
           fi
+          probe="$RUNNER_TEMP/copilot-projects-signing-probe"
+          python3 - "$probe" <<'PY'
+          import os, shutil, sys
+          shutil.copyfile("/usr/bin/true", sys.argv[1])
+          os.chmod(sys.argv[1], 0o755)
+          PY
+          codesign --force --options runtime --timestamp \
+            --sign "$identities" --keychain "$keychain_path" "$probe"
+          codesign --verify --strict "$probe"
+          rm -f "$probe"
 
           {
             echo "codesign_identity=$identities"
@@ -242,8 +253,9 @@ jobs:
         run: |
           rm -f \
             "$RUNNER_TEMP/developer-id.p12" \
-            "$RUNNER_TEMP/AuthKey.p8"
+            "$RUNNER_TEMP/AuthKey.p8" \
+            "$RUNNER_TEMP/copilot-projects-signing-probe"
           keychain_path="$RUNNER_TEMP/copilot-projects-signing.keychain-db"
           if [ -f "$keychain_path" ]; then
-            security delete-keychain "$keychain_path"
+            python3 scripts/keychain-search.py --delete "$keychain_path"
           fi
