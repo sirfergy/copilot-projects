@@ -90,16 +90,8 @@ The web queue removes the confirmed message when its receipt arrives, without
 another click or tab switch; messages still awaiting confirmation stay visible.
 Stop has its own handoff lane, so an unresolved send cannot block cancellation.
 
-The session drawer and native/web conversation views include a **Latest task
-result** with the final response, branch, available diff, execution-derived check
-exit statuses, and PR links reported by tools. Diffs are cumulative session
-captures or explicitly labeled working-tree fallbacks, never per-turn attribution.
-Simple check commands need structured shell-exit metadata; a successful tool call,
-an asynchronous shell, or an assistant's assertion does not prove tests passed.
-The latest result is kept in one bounded private sidecar, not copied into every
-historical turn. Streaming text replaces its matching final message.
-In the desktop drawer, the result stays immediately after the turn that produced it,
-before newer prompts, rather than remaining at the bottom of the conversation.
+The session drawer and native/web conversation views render live response updates
+within their conversation turns. Final messages replace their matching streamed text.
 
 **Usage and background work** shows accumulated session AI credits, the latest
 context observation, active agents, and schedules. Session totals and the current

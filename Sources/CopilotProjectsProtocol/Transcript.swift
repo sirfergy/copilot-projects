@@ -17,22 +17,19 @@ public struct TranscriptSnapshot: Codable, Equatable, Sendable {
     /// default so every existing constructor and decoder keeps working, and so
     /// encoding omits the key entirely rather than emitting `null`.
     public let totalTurns: Int?
-    public let latestResult: RemoteTaskResult?
 
     public init(
         schemaVersion: Int,
         updatedAt: Date,
         copilotSessionId: String,
         turns: [TranscriptTurn],
-        totalTurns: Int? = nil,
-        latestResult: RemoteTaskResult? = nil
+        totalTurns: Int? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.updatedAt = updatedAt
         self.copilotSessionId = copilotSessionId
         self.turns = turns
         self.totalTurns = totalTurns
-        self.latestResult = latestResult
     }
 
     /// The most recent `limit` turns, tagged with the full turn count so a
@@ -48,8 +45,7 @@ public struct TranscriptSnapshot: Codable, Equatable, Sendable {
             updatedAt: updatedAt,
             copilotSessionId: copilotSessionId,
             turns: dropped > 0 ? Array(turns.suffix(bounded)) : turns,
-            totalTurns: turns.count,
-            latestResult: latestResult
+            totalTurns: turns.count
         )
     }
 }

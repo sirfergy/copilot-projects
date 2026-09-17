@@ -5,43 +5,6 @@ import CopilotProjectsProtocol
 @testable import CopilotProjectsHost
 
 final class SessionWorkflowTests: XCTestCase {
-    private func resultTurn(_ id: String, kind: String = "foreground", pending: Bool = false) -> TranscriptTurn {
-        TranscriptTurn(
-            id: id, startedAt: Date(timeIntervalSince1970: pending ? 200 : 100),
-            endedAt: pending ? nil : Date(timeIntervalSince1970: 150), kind: kind,
-            userContent: id, assistantMessages: [], tools: [], isAborted: false
-        )
-    }
-
-    func testDrawerResultStaysBeforeNewPromptEvenWhenCapturedLate() {
-        for kind in ["foreground", "scheduled", "automated"] {
-            let rows = TranscriptDrawerRow.make(
-                turns: [resultTurn("old", kind: kind), resultTurn("pending", pending: true)],
-                latestResult: RemoteTaskResult(
-                    turnId: "old", capturedAt: Date(timeIntervalSince1970: 300), status: "finished"
-                )
-            )
-            XCTAssertEqual(rows.map(\.id), ["turn-old", "result-old", "turn-pending"], kind)
-        }
-    }
-
-    func testDrawerKeepsOnlyTheLatestResultAtItsMatchingTurn() {
-        let turns = [resultTurn("old"), resultTurn("new")]
-        XCTAssertEqual(
-            TranscriptDrawerRow.make(turns: turns, latestResult: nil).map(\.id),
-            ["turn-old", "turn-new"]
-        )
-        for status in ["finished", "stopped", "blocked"] {
-            let result = RemoteTaskResult(turnId: "new", capturedAt: Date(), status: status)
-            let rows = TranscriptDrawerRow.make(turns: turns, latestResult: result)
-            XCTAssertEqual(rows.map(\.id), ["turn-old", "turn-new", "result-new"])
-            guard case .result(let rendered) = rows.last else {
-                return XCTFail("Expected the matching result after the last turn")
-            }
-            XCTAssertEqual(rendered, result)
-        }
-    }
-
     func testActionValidationIsClosedAndBudgetLimitsAreExplicit() throws {
         XCTAssertTrue(RemoteSessionAction(kind: .send, prompt: "hello", mode: .enqueue).isValid)
         XCTAssertFalse(RemoteSessionAction(kind: .send, prompt: "hello").isValid)
@@ -134,30 +97,66 @@ final class SessionWorkflowTests: XCTestCase {
         ), .invalid)
     }
 
-    func testResultSidecarRequiresExactConversationAndRetainedTurn() throws {
+    func testLegacyTaskResultIsIgnoredWithoutChangingConversationHistory() throws {
+        let payload = Data(#"""
+        {
+          "schemaVersion": 3, "updatedAt": "2026-09-16T12:00:00Z", "copilotSessionId": "sdk",
+          "turns": [{
+            "id": "turn", "startedAt": "2026-09-16T11:00:00Z",
+            "kind": "foreground", "userContent": "Keep this conversation",
+            "assistantMessages": [], "tools": [], "isAborted": false
+          }],
+          "latestResult": {"turnId": "turn", "summary": "Ignore this legacy result"}
+        }
+        """#.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let snapshot = try decoder.decode(TranscriptSnapshot.self, from: payload)
+        XCTAssertEqual(snapshot.turns.map(\.userContent), ["Keep this conversation"])
+        let enriched = TranscriptImageAssociation.attach(
+            images: [], to: snapshot.limitedToMostRecentTurns(1)
+        )
+        XCTAssertEqual(enriched.turns, snapshot.turns)
+        XCTAssertEqual(enriched.totalTurns, 1)
+        let encoded = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(enriched)) as? [String: Any]
+        )
+        XCTAssertNil(encoded["latestResult"])
+    }
+
+    func testLegacyTaskResultSidecarDoesNotChangeTranscriptOrRevision() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        let previous = ProcessInfo.processInfo.environment["COPILOT_PROJECTS_STATE_DIR"]
+        setenv("COPILOT_PROJECTS_STATE_DIR", root.path, 1)
+        defer {
+            if let previous { setenv("COPILOT_PROJECTS_STATE_DIR", previous, 1) }
+            else { unsetenv("COPILOT_PROJECTS_STATE_DIR") }
+        }
+        Paths.ensureStateDir()
+        let sessionID = UUID().uuidString
+        let copilotID = UUID().uuidString
         let turn = TranscriptTurn(
             id: "turn", startedAt: Date(), endedAt: Date(), kind: "foreground",
             userContent: "work", assistantMessages: [], tools: [], isAborted: false
         )
-        let snapshot = TranscriptSnapshot(schemaVersion: 3, updatedAt: Date(), copilotSessionId: "sdk", turns: [turn])
-        struct Envelope: Encodable {
-            let schemaVersion = 1
-            let copilotSessionId: String
-            let result: RemoteTaskResult
-        }
+        let snapshot = TranscriptSnapshot(schemaVersion: 3, updatedAt: Date(), copilotSessionId: copilotID, turns: [turn])
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        let result = RemoteTaskResult(turnId: "turn", capturedAt: Date(), status: "finished")
-        let url = root.appendingPathComponent("tab.task-result.json")
-        try encoder.encode(Envelope(copilotSessionId: "other", result: result)).write(to: url)
-        XCTAssertNil(TranscriptController.attachingTaskResult(snapshot, sessionId: "tab", directory: root).latestResult)
-        try encoder.encode(Envelope(copilotSessionId: "sdk", result: result)).write(to: url)
-        let attached = TranscriptController.attachingTaskResult(snapshot, sessionId: "tab", directory: root)
-        XCTAssertEqual(attached.latestResult?.turnId, "turn")
-        XCTAssertEqual(attached.limitedToMostRecentTurns(1).latestResult, attached.latestResult)
-        XCTAssertEqual(TranscriptImageAssociation.attach(images: [], to: attached).latestResult, attached.latestResult)
+        try encoder.encode(snapshot).write(to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionID)))
+        let before = TranscriptController.loadRemoteSnapshot(sessionId: sessionID)
+        XCTAssertEqual(before.turns.map(\.userContent), ["work"])
+        let revision = TranscriptController.remoteRevision(sessionId: sessionID)
+        let sidecar = Paths.sessionsDir.appendingPathComponent("\(sessionID).task-result.json")
+        for legacyContents in [
+            #"{"schemaVersion":1,"copilotSessionId":"\#(copilotID)","result":{"turnId":"turn","capturedAt":"2026-09-16T12:00:00Z","status":"finished","summary":"Old result","checks":[],"pullRequests":[]}}"#,
+            "invalid legacy JSON",
+        ] {
+            try Data(legacyContents.utf8).write(to: sidecar)
+            XCTAssertEqual(TranscriptController.loadRemoteSnapshot(sessionId: sessionID), before)
+            XCTAssertEqual(TranscriptController.remoteRevision(sessionId: sessionID), revision)
+            XCTAssertEqual(try String(contentsOf: sidecar, encoding: .utf8), legacyContents)
+        }
     }
 }

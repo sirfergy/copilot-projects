@@ -20,7 +20,6 @@ const originalClearInterval = globalThis.clearInterval;
 const originalWatch = fs.watch;
 const originalWriteFileSync = fs.writeFileSync;
 const originalCreateReadStream = fs.createReadStream;
-const originalRenameSync = fs.renameSync;
 const realMkdirSync = fs.mkdirSync.bind(fs);
 const realReadFileSync = fs.readFileSync.bind(fs);
 const realWriteFileSync = fs.writeFileSync.bind(fs);
@@ -58,13 +57,6 @@ fs.createReadStream = (path, ...args) => {
   }
   return stream;
 };
-fs.renameSync = (from, to) => {
-  const runtime = [...runtimes].find((entry) => String(from).startsWith(entry.root));
-  if (runtime?.failRename?.(String(to))) {
-    throw new Error("injected tracker rename failure");
-  }
-  return originalRenameSync(from, to);
-};
 syncBuiltinESMExports();
 
 const fakeSDKURL = `data:text/javascript,${encodeURIComponent(`
@@ -88,7 +80,6 @@ test.after(() => {
   fs.watch = originalWatch;
   fs.writeFileSync = originalWriteFileSync;
   fs.createReadStream = originalCreateReadStream;
-  fs.renameSync = originalRenameSync;
   syncBuiltinESMExports();
   realRmSync(runtimeParent, { recursive: true, force: true });
 });
@@ -318,7 +309,6 @@ async function createRuntime(t, configure = () => {}) {
     watchCallback: null,
     intervalCallback: null,
     failWrite: null,
-    failRename: null,
     activityWrites: [],
     durableReadsFinished: 0,
   };
@@ -589,325 +579,45 @@ test("usage uses accumulated runtime totals without summing child or ephemeral u
   await waitFor(() => readSnapshot(runtime).workflow.totalAiCredits === null, "usage failure fabricated a total");
 });
 
-function taskResultPath(runtime) {
-  return join(runtime.sessions, `${runtime.appSessionId}.task-result.json`);
-}
-
-async function waitForTaskResult(runtime, turnId) {
-  return waitFor(() => {
-    const path = taskResultPath(runtime);
-    if (!realExistsSync(path)) return false;
-    const envelope = JSON.parse(realReadFileSync(path, "utf8"));
-    return envelope.result.turnId === turnId && envelope;
-  }, `task result for ${turnId} was not saved`);
-}
-
-async function finishResultTask(runtime, {
-  status = "finished", summary = "Current task result", checkId = uuid(),
-} = {}) {
-  const turnId = uuid();
-  await runtime.session.emit("user.message", { content: summary }, { id: turnId });
-  await runtime.session.emit("assistant.turn_start");
-  await runtime.session.emit("tool.execution_start", {
-    toolCallId: checkId, toolName: "bash", arguments: { command: "npm test" },
-  });
-  await runtime.session.emit("tool.execution_complete", {
-    toolCallId: checkId, success: true,
-    result: { contents: [
-      { type: "shell_exit", exitCode: 0, cwd: "/fixture" },
-      { type: "resource_link", uri: "https://github.com/example/project/pull/1" },
-    ] },
-  });
-  await runtime.session.emit("session.task_complete", { summary, success: status !== "blocked" });
-  await runtime.session.emit("session.idle", { aborted: status === "stopped" });
-  return turnId;
-}
-
-test("latest task result preserves diff provenance and only structured check exits", {
+test("completed tasks preserve transcripts without diff capture or result sidecars", {
   concurrency: false,
 }, async (t) => {
-  const runtime = await createRuntime(t);
-  await workflowReady(runtime);
-  await runtime.session.emit("user.message", { content: "run checks" });
-  await runtime.session.emit("assistant.turn_start");
-  await runtime.session.emit("tool.execution_start", { toolCallId: "test", toolName: "bash", arguments: { command: "npm test" } });
-  await runtime.session.emit("tool.execution_complete", {
-    toolCallId: "test", success: true,
-    result: { content: "ignored prose", contents: [{ type: "shell_exit", exitCode: 1, shellId: "test", cwd: "/fixture" }] },
+  let diffCalls = 0;
+  const runtime = await createRuntime(t, (session) => {
+    session.diffHandler = async () => { diffCalls += 1; return null; };
   });
-  await runtime.session.emit("tool.execution_start", { toolCallId: "async", toolName: "bash", arguments: { command: "swift test" } });
-  await runtime.session.emit("tool.execution_complete", { toolCallId: "async", success: true, result: { content: "still running" } });
-  await runtime.session.emit("tool.execution_start", { toolCallId: "masked", toolName: "bash", arguments: { command: "npm test || true" } });
-  await runtime.session.emit("session.task_complete", { summary: "A check failed", success: false });
+  await workflowReady(runtime);
+  const sidecar = join(runtime.sessions, `${runtime.appSessionId}.task-result.json`);
+  const transcript = join(runtime.sessions, `${runtime.appSessionId}.transcript.json`);
+  for (const status of ["finished", "blocked", "stopped"]) {
+    const turnId = uuid();
+    await runtime.session.emit("user.message", { content: status }, { id: turnId });
+    await runtime.session.emit("assistant.turn_start");
+    await runtime.session.emit("tool.execution_start", {
+      toolCallId: turnId, toolName: "bash", arguments: { command: "npm test" },
+    });
+    await runtime.session.emit("tool.execution_complete", {
+      toolCallId: turnId, success: true, result: { contents: [{ type: "shell_exit", exitCode: 0 }] },
+    });
+    await runtime.session.emit("assistant.message", { messageId: turnId, content: `Response: ${status}` });
+    await runtime.session.emit("session.task_complete", { summary: status, success: status !== "blocked" });
+    await runtime.session.emit("session.idle", { aborted: status === "stopped" });
+    await waitFor(() => JSON.parse(realReadFileSync(transcript, "utf8")).turns
+      .find((turn) => turn.id === turnId)?.endedAt, "completed turn missing");
+    const saved = JSON.parse(realReadFileSync(transcript, "utf8"));
+    assert.ok(saved.turns.find((turn) => turn.id === turnId).assistantMessages
+      .some((message) => message.content === `Response: ${status}`));
+    assert.equal(realExistsSync(sidecar), false);
+    assert.equal(diffCalls, 0);
+  }
+  realWriteFileSync(sidecar, "retained legacy artifact");
   await runtime.session.emit("session.idle");
-  const path = join(runtime.sessions, `${runtime.appSessionId}.task-result.json`);
-  await waitFor(() => realExistsSync(path), "task result not saved");
-  const result = JSON.parse(realReadFileSync(path, "utf8")).result;
-  assert.equal(result.status, "blocked");
-  assert.equal(result.diff.mode, "unstaged");
-  assert.equal(result.diff.isFallback, true);
-  assert.equal(result.diff.unavailableReason, "file-change-tracking-disabled");
-  assert.deepEqual(result.checks.map((check) => check.exitCode), [1, null]);
-});
-
-test("failed captures supersede prior successful evidence with the current turn's minimal error", {
-  concurrency: false,
-}, async (t) => {
-  for (const failure of [
-    "metadata-timeout", "metadata-identity", "metadata-remote", "metadata-missing",
-    "oversize", "primary-write", "primary-rename",
-  ]) {
-    await t.test(failure, { concurrency: false }, async (t) => {
-      const runtime = await createRuntime(t);
-      await workflowReady(runtime);
-      const oldTurn = await finishResultTask(runtime, { summary: "Old successful evidence" });
-      const old = await waitForTaskResult(runtime, oldTurn);
-      assert.equal(old.result.checks[0].exitCode, 0);
-      assert.ok(old.result.diff && old.result.branch && old.result.pullRequests.length);
-      const errors = [];
-      t.mock.method(console, "error", (...args) => errors.push(args.map(String).join(" ")));
-      let writeAttempts = 0;
-      let renameAttempts = 0;
-      if (failure === "metadata-timeout") {
-        const schedule = globalThis.setTimeout;
-        t.mock.method(globalThis, "setTimeout", (callback, delay, ...args) =>
-          schedule(callback, delay === 3000 ? 10 : delay, ...args));
-        runtime.session.metadataHandler = () => new Promise(() => {});
-      } else if (failure === "metadata-identity") {
-        runtime.session.metadataHandler = async () => ({
-          sessionId: uuid(), isRemote: false, workspace: { branch: "wrong-owner", repository: "wrong/repo" },
-        });
-      } else if (failure === "metadata-remote") {
-        runtime.session.metadataHandler = async ({ sessionId }) => ({ sessionId, isRemote: true });
-      } else if (failure === "metadata-missing") {
-        runtime.session.metadataHandler = async () => null;
-      } else if (failure === "primary-write") {
-        runtime.failWrite = path => path === `${taskResultPath(runtime)}.${process.pid}.tmp`
-          && ++writeAttempts === 1;
-      } else if (failure === "primary-rename") {
-        runtime.failRename = path => path === taskResultPath(runtime) && ++renameAttempts === 1;
-      }
-      const status = failure === "metadata-identity" ? "stopped" : failure === "oversize" ? "blocked" : "finished";
-      const turnId = await finishResultTask(runtime, {
-        status, summary: "New task evidence",
-        checkId: failure === "oversize" ? "x".repeat(300 * 1024) : uuid(),
-      });
-      const captured = await waitForTaskResult(runtime, turnId);
-      assert.equal(captured.schemaVersion, 1);
-      assert.equal(captured.copilotSessionId, runtime.copilotSessionId);
-      assert.equal(captured.conversationEpoch, readSnapshot(runtime).conversationEpoch);
-      assert.equal(captured.result.status, status);
-      assert.ok(Number.isFinite(Date.parse(captured.result.capturedAt)));
-      assert.equal(captured.result.summary, null);
-      assert.equal(captured.result.branch, null);
-      assert.equal(captured.result.repository, null);
-      assert.equal(captured.result.diff, null);
-      assert.deepEqual(captured.result.checks, []);
-      assert.deepEqual(captured.result.pullRequests, []);
-      assert.match(captured.result.error, /capture failed.*terminal/);
-      assert.equal(fs.statSync(taskResultPath(runtime)).mode & 0o777, 0o600);
-      assert.ok(errors.some(message => message.includes("could not capture task result")));
-      if (failure === "primary-write") assert.equal(writeAttempts, 2);
-      if (failure === "primary-rename") assert.equal(renameAttempts, 2);
-    });
-  }
-});
-
-test("a failure without a previous sidecar still publishes a decodable current-turn error", {
-  concurrency: false,
-}, async (t) => {
-  const runtime = await createRuntime(t);
-  await workflowReady(runtime);
-  runtime.session.metadataHandler = async () => null;
-  const turnId = await finishResultTask(runtime);
-  const envelope = await waitForTaskResult(runtime, turnId);
-  assert.equal(envelope.result.turnId, turnId);
-  assert.match(envelope.result.error, /capture failed/);
-  assert.deepEqual(envelope.result.checks, []);
-  assert.deepEqual(envelope.result.pullRequests, []);
-});
-
-test("unwritable primary and minimal error results stop after two attempts and report durable failure", {
-  concurrency: false,
-}, async (t) => {
-  const runtime = await createRuntime(t);
-  await workflowReady(runtime);
-  const originalTurn = await finishResultTask(runtime, { summary: "Previously captured" });
-  await waitForTaskResult(runtime, originalTurn);
-  const before = realReadFileSync(taskResultPath(runtime), "utf8");
-  const errors = [];
-  t.mock.method(console, "error", (...args) => errors.push(args.map(String).join(" ")));
-  let attempts = 0;
-  runtime.failWrite = path => {
-    if (path !== `${taskResultPath(runtime)}.${process.pid}.tmp`) return false;
-    attempts += 1;
-    return true;
-  };
-  await finishResultTask(runtime);
-  await waitFor(() => errors.some(message => message.includes("previous result may remain")),
-    "final durable result failure was not surfaced");
-  assert.equal(attempts, 2);
-  assert.equal(realReadFileSync(taskResultPath(runtime), "utf8"), before);
-  runtime.failWrite = null;
-  const recoveredTurn = await finishResultTask(runtime, { summary: "Recovered valid capture" });
-  const recovered = await waitForTaskResult(runtime, recoveredTurn);
-  assert.equal(recovered.result.error, null);
-  assert.equal(recovered.result.summary, "Recovered valid capture");
-});
-
-test("diff-only failure keeps actual current-turn evidence without borrowing an older diff", {
-  concurrency: false,
-}, async (t) => {
-  const runtime = await createRuntime(t);
-  await workflowReady(runtime);
-  await waitForTaskResult(runtime, await finishResultTask(runtime, { summary: "Old result" }));
-  runtime.session.diffHandler = async () => { throw new Error("diff unavailable"); };
-  const turnId = await finishResultTask(runtime, { summary: "Actual new result" });
-  const envelope = await waitForTaskResult(runtime, turnId);
-  assert.equal(envelope.result.summary, "Actual new result");
-  assert.equal(envelope.result.branch, "fixture");
-  assert.equal(envelope.result.diff, null);
-  assert.equal(envelope.result.checks[0].exitCode, 0);
-  assert.match(envelope.result.error, /Diff unavailable/);
-});
-
-test("late success or failure from capture A leaves capture B's successful bytes unchanged", {
-  concurrency: false,
-}, async (t) => {
-  for (const invalidMetadata of [false, true]) {
-    await t.test(invalidMetadata ? "late failure" : "late success", { concurrency: false }, async (t) => {
-      const runtime = await createRuntime(t);
-      await workflowReady(runtime);
-      await waitForTaskResult(runtime, await finishResultTask(runtime, { summary: "Previous result" }));
-      const previous = realReadFileSync(taskResultPath(runtime), "utf8");
-      const metadata = runtime.session.metadataHandler;
-      const diff = runtime.session.diffHandler;
-      let finishA;
-      runtime.session.diffHandler = () => new Promise(resolve => { finishA = resolve; });
-      if (invalidMetadata) runtime.session.metadataHandler = async () => null;
-      await finishResultTask(runtime, { summary: "Capture A" });
-      await waitFor(() => finishA, "capture A did not start");
-      assert.equal(realReadFileSync(taskResultPath(runtime), "utf8"), previous,
-        "capture start must not delete or publish a pending result");
-      runtime.session.metadataHandler = metadata;
-      runtime.session.diffHandler = diff;
-      const turnB = await finishResultTask(runtime, { summary: "Capture B" });
-      await waitForTaskResult(runtime, turnB);
-      const winner = realReadFileSync(taskResultPath(runtime), "utf8");
-      finishA(await diff());
-      await new Promise(resolve => setTimeout(resolve, 30));
-      assert.equal(realReadFileSync(taskResultPath(runtime), "utf8"), winner);
-    });
-  }
-});
-
-test("an old capture failure after conversation rotation cannot replace the new conversation result", {
-  concurrency: false,
-}, async (t) => {
-  const runtime = await createRuntime(t);
-  await workflowReady(runtime);
-  const metadata = runtime.session.metadataHandler;
-  const diff = runtime.session.diffHandler;
-  let finishOld;
-  runtime.session.metadataHandler = async () => null;
-  runtime.session.diffHandler = () => new Promise(resolve => { finishOld = resolve; });
-  await finishResultTask(runtime, { summary: "Old conversation" });
-  await waitFor(() => finishOld, "old capture did not start");
-  runtime.session.metadataHandler = metadata;
-  runtime.session.diffHandler = diff;
   const next = uuid();
   runtime.session.foregroundSessionId = next;
   await runtime.session.emit("session.start", { sessionId: next });
   await workflowReady(runtime);
-  const currentTurn = await finishResultTask(runtime, { summary: "New conversation" });
-  const current = await waitForTaskResult(runtime, currentTurn);
-  assert.equal(current.copilotSessionId, next);
-  const winner = realReadFileSync(taskResultPath(runtime), "utf8");
-  finishOld(await diff());
-  await new Promise(resolve => setTimeout(resolve, 30));
-  assert.equal(realReadFileSync(taskResultPath(runtime), "utf8"), winner);
-});
-
-test("loss of the file owner while awaiting capture prevents any failure-result publication", {
-  concurrency: false,
-}, async (t) => {
-  const runtime = await createRuntime(t);
-  await workflowReady(runtime);
-  await waitForTaskResult(runtime, await finishResultTask(runtime));
-  const winner = realReadFileSync(taskResultPath(runtime), "utf8");
-  let finish;
-  runtime.session.metadataHandler = async () => null;
-  runtime.session.diffHandler = () => new Promise(resolve => { finish = resolve; });
-  await finishResultTask(runtime);
-  await waitFor(() => finish, "capture did not start");
-  realWriteFileSync(runtime.ownerPath, JSON.stringify({
-    copilotSessionId: runtime.copilotSessionId, pid: 1,
-  }));
-  finish({ mode: "session", isFallback: false, changes: [] });
-  await new Promise(resolve => setTimeout(resolve, 30));
-  assert.equal(realReadFileSync(taskResultPath(runtime), "utf8"), winner);
-});
-
-test("primary write failure rechecks owner and revision before attempting a minimal error write", {
-  concurrency: false,
-}, async (t) => {
-  for (const loss of ["owner", "revision"]) {
-    await t.test(loss, { concurrency: false }, async (t) => {
-      const runtime = await createRuntime(t);
-      await workflowReady(runtime);
-      await waitForTaskResult(runtime, await finishResultTask(runtime));
-      const winner = realReadFileSync(taskResultPath(runtime), "utf8");
-      let attempts = 0;
-      runtime.failWrite = path => {
-        if (path !== `${taskResultPath(runtime)}.${process.pid}.tmp`) return false;
-        attempts += 1;
-        if (loss === "owner") {
-          realWriteFileSync(runtime.ownerPath, JSON.stringify({
-            copilotSessionId: runtime.copilotSessionId, pid: 1,
-          }));
-        } else {
-          void runtime.session.emit("user.message", { content: "New revision" });
-        }
-        return true;
-      };
-      await finishResultTask(runtime);
-      await waitFor(() => attempts > 0, "primary write was not attempted");
-      await new Promise(resolve => setTimeout(resolve, 30));
-      assert.equal(attempts, 1, "obsolete failure must not attempt the minimal write");
-      assert.equal(realReadFileSync(taskResultPath(runtime), "utf8"), winner);
-    });
-  }
-});
-
-test("minimal error publication rechecks owner and revision before its atomic rename", {
-  concurrency: false,
-}, async (t) => {
-  for (const loss of ["owner", "revision"]) {
-    await t.test(loss, { concurrency: false }, async (t) => {
-      const runtime = await createRuntime(t);
-      await workflowReady(runtime);
-      await waitForTaskResult(runtime, await finishResultTask(runtime));
-      const winner = realReadFileSync(taskResultPath(runtime), "utf8");
-      let attempts = 0;
-      runtime.failWrite = path => {
-        if (path !== `${taskResultPath(runtime)}.${process.pid}.tmp`) return false;
-        attempts += 1;
-        if (attempts === 1) return true;
-        if (loss === "owner") {
-          realWriteFileSync(runtime.ownerPath, JSON.stringify({
-            copilotSessionId: runtime.copilotSessionId, pid: 1,
-          }));
-        } else {
-          void runtime.session.emit("user.message", { content: "New revision before rename" });
-        }
-        return false;
-      };
-      await finishResultTask(runtime);
-      await waitFor(() => attempts === 2, "minimal write was not attempted");
-      await new Promise(resolve => setTimeout(resolve, 30));
-      assert.equal(realReadFileSync(taskResultPath(runtime), "utf8"), winner);
-    });
-  }
+  assert.equal(realReadFileSync(sidecar, "utf8"), "retained legacy artifact");
+  assert.equal(diffCalls, 0);
 });
 
 test("live deltas are replaced by final messages without duplicate transcript text", {
@@ -923,23 +633,6 @@ test("live deltas are replaced by final messages without duplicate transcript te
   await waitFor(() => JSON.parse(realReadFileSync(path, "utf8")).turns.length, "transcript missing");
   const messages = JSON.parse(realReadFileSync(path, "utf8")).turns.at(-1).assistantMessages;
   assert.deepEqual(messages.map((message) => message.content), ["complete"]);
-});
-
-test("a late diff cannot become the result of a newer task", {
-  concurrency: false,
-}, async (t) => {
-  let finishDiff;
-  const runtime = await createRuntime(t, (session) => {
-    session.diffHandler = () => new Promise((resolve) => { finishDiff = resolve; });
-  });
-  await workflowReady(runtime);
-  await runtime.session.emit("user.message", { content: "first task" });
-  await runtime.session.emit("session.idle");
-  await waitFor(() => finishDiff, "result capture did not start");
-  await runtime.session.emit("user.message", { content: "second task" });
-  finishDiff({ requestedMode: "session", mode: "session", isFallback: false, changes: [] });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(realExistsSync(join(runtime.sessions, `${runtime.appSessionId}.task-result.json`)), false);
 });
 
 test("an unknown native send outcome upgrades when its exact late SDK reply arrives", {
@@ -961,7 +654,7 @@ test("an unknown native send outcome upgrades when its exact late SDK reply arri
   assert.equal(runtime.session.workflowCalls.filter((call) => call.method === "session.send").length, 1);
 });
 
-test("durable history streams the pending turn but result identity follows newer live input", {
+test("durable history streams the pending turn and live text follows newer input", {
   concurrency: false,
 }, async (t) => {
   const event = (id, type, data) => ({ id, type, timestamp: new Date().toISOString(), data });
@@ -991,26 +684,19 @@ test("durable history streams the pending turn but result identity follows newer
   "durable-authoritative transcript did not expose live text", 4_000);
   const liveID = uuid();
   await runtime.session.emit("user.message", { content: "new input before journal catches up" }, { id: liveID });
-  await runtime.session.emit("session.task_complete", { summary: "current result", success: true });
-  await runtime.session.emit("session.idle");
-  const resultPath = join(runtime.sessions, `${runtime.appSessionId}.task-result.json`);
-  await waitFor(() => realExistsSync(resultPath), "current result not captured");
-  assert.equal(JSON.parse(realReadFileSync(resultPath, "utf8")).result.turnId, liveID);
-});
-
-test("duplicate idle never recaptures a completed task with a new diff or timestamp", {
-  concurrency: false,
-}, async (t) => {
-  const runtime = await createRuntime(t);
-  await workflowReady(runtime);
-  await runtime.session.emit("user.message", { content: "one task" });
-  await runtime.session.emit("session.idle");
-  const path = join(runtime.sessions, `${runtime.appSessionId}.task-result.json`);
-  await waitFor(() => realExistsSync(path), "initial task result missing");
-  const captured = realReadFileSync(path, "utf8");
-  await runtime.session.emit("session.idle");
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(realReadFileSync(path, "utf8"), captured);
+  await runtime.session.emit("assistant.message_delta", { messageId: "new-live", deltaContent: "new live text" });
+  const journal = join(runtime.root, "copilot-home", "session-state", runtime.copilotSessionId, "events.jsonl");
+  fs.appendFileSync(journal, [
+    event("previous-idle", "session.idle", {}),
+    event(liveID, "user.message", { content: "new input before journal catches up" }),
+    event("new-start", "assistant.turn_start", {}),
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  await runtime.session.emit("assistant.message", { messageId: "new-live", content: "new final text" });
+  await waitFor(() => JSON.parse(realReadFileSync(transcript, "utf8")).turns
+    .find((turn) => turn.id === liveID)?.assistantMessages.some((message) => message.content === "new final text"),
+  "live text did not follow the new turn after the journal caught up", 4_000);
+  const previousTurn = JSON.parse(realReadFileSync(transcript, "utf8")).turns.find((turn) => turn.id === pendingID);
+  assert.equal(previousTurn.assistantMessages.some((message) => message.content.startsWith("new ")), false);
 });
 
 function requestClose(runtime) {
