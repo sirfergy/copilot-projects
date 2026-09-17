@@ -9,9 +9,13 @@ public struct RemoteProtocolInfo: Codable, Equatable, Sendable {
     public static let operationReceipts = "sdk-operation-receipts"
     public static let transcriptWindow = "transcript-window"
     public static let nativeWorkflows = "native-session-workflows"
+    public static let configuredSessionCreation = "configured-session-creation"
     public static let current = RemoteProtocolInfo(
         revision: 1,
-        capabilities: [conversationEpochs, operationReceipts, transcriptWindow, nativeWorkflows]
+        capabilities: [
+            conversationEpochs, operationReceipts, transcriptWindow,
+            nativeWorkflows, configuredSessionCreation,
+        ]
     )
 
     public init(

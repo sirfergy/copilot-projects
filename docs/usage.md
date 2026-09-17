@@ -21,10 +21,17 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 - **Projects (vertical sidebar):** a project is just a named group of sessions. Create one
   with `⌘N` (name it; no folder required). Jump to one with **`⌘1`–`⌘9`**.
 - **Sessions (browser-style tabs):** each project shows a horizontal tab strip; one terminal
-  is visible at a time. Add a tab with `⌘T`, switch with a click / **`⌃Tab`** (next) / `⌃⇧Tab`
+  is visible at a time. Start Copilot with `⌘T` or a plain shell with `⌥⌘T`, switch with a click / **`⌃Tab`** (next) / `⌃⇧Tab`
   (prev) / **`⌃1`–`⌃9`** / `⌘⇧[` / `⌘⇧]`, close with `⌘W` or the tab's ✕. Background tabs keep
   running. Hold **⌘** (projects) or **⌃** (tabs) to see the number on each.
-- **Local PR reviews:** the shield button beside **New Session** accepts a GitHub pull request
+- **Prompt-first sessions:** the **+ Copilot** dropdown, Session menu, and project context
+  menu offer **Start with Prompt…**. Compose multiple lines, then use `⌘Return` to launch
+  an interactive session (not a one-shot/headless command). Cancel creates no tab.
+  Startup checks retain the draft on failure; after a tab opens, **Copy Starting Prompt**
+  in its context menu recovers the prompt until that tab closes or the app quits.
+  Prompts are never retried automatically. All new desktop Copilot sessions use
+  `--allow-all`, with or without a starting prompt.
+- **Local PR reviews:** the shield button beside **+ Copilot** accepts a GitHub pull request
   URL and opens a new Copilot CLI tab with a local adversarial-review prompt.
 - **Status:** each session reports `idle` / `running` / `waiting`. Running and waiting
   counts appear in the sidebar; a blue dot on the session tab marks work that finished
@@ -320,6 +327,58 @@ public and usable by existing clients. They do not require a private dependency.
 An integrating app can reuse `scripts/build-app.sh` with `--binary`, `--resources`,
 and `--output`; its executable must include its additional assets in `check-assets`.
 The normal build and release do not resolve or bundle optional integrations.
+
+#### Configured remote session creation
+
+An integrating gateway can expose `RemoteSessionContract.configuredCreatePath`
+(`sessions/create-configured`) and pass its decoded `RemoteCreateSessionRequest`
+to `SessionHost.createConfiguredSession`. In addition to `requestId` and
+`projectId`, the request accepts optional `kind` (`copilot` or `terminal`) and `initialPrompt`.
+Omitted kind means Copilot; omitted prompt means an unprompted session. Copilot
+uses `--allow-all`; a terminal opens a plain shell without requiring Copilot.
+Both retain the remote `~/Repos` working-directory and desktop-selection policy.
+
+A supplied prompt must be nonempty after whitespace trimming, at most 8,192
+UTF-8 bytes after CRLF/CR normalization to LF, and free of terminal control
+characters other than line breaks and tabs. Terminal requests cannot carry a
+prompt. Configured creation rejects `pullRequestURL`; the separate review route
+accepts its canonical PR URL and rejects `kind` and `initialPrompt`.
+
+Gateways and `SessionHost.createSession` reject launch options on the legacy
+`sessions/create` route. Gateways must
+expose the configured route only when the host advertises the
+`configured-session-creation` protocol capability. Clients must not
+fall back to the legacy endpoint when configured creation is unsupported: older
+hosts ignore unknown JSON fields and could otherwise silently drop the prompt
+or launch Copilot instead of a terminal. Allow enough JSON body space for an
+escaped maximum-size prompt.
+Custom `SessionHost` implementations that do not honor these options must
+publish protocol metadata without `configured-session-creation`.
+The public `RemoteProtocolInfo` initializer accepts a filtered
+`RemoteProtocolInfo.current.capabilities` array; other capabilities need not be
+copied into a hard-coded list.
+The default `createConfiguredSession` implementation returns unavailable rather
+than falling back to a conformer's legacy `createSession` implementation.
+
+Keep an immutable request body and UUID for an explicit retry after a network
+or 5xx error. Do not automatically resubmit prompts, reuse a UUID after changing
+the project or launch options, or retain pending retries indefinitely. A matching
+retry returns the original session, even if it moved projects; a changed intent
+returns 409. Historical sessions without an intent fingerprint accept retries
+only through the legacy `sessions/create` route. Configured and review routes
+return 409 for those unverifiable historical replays, including optionless
+configured requests and old review attempts. The host persists intent hashes,
+not starting-prompt text.
+An existing terminal socket without a stored intent cannot satisfy a configured
+or review create, even if its master may have exited; it returns 409 rather than assuming
+the requested intent is safe to repeat. Fresh configured and review
+launches clear stale Copilot resume markers before creating a terminal.
+
+Binding survives workspace or ledger repair while either retains the intent.
+Closed-session tombstones remain bounded to seven days and 512 records; after
+expiry or eviction a UUID can create again. Launch still precedes workspace and
+ledger persistence, so this is not an exactly-once guarantee across a crash that
+loses all creation evidence and the terminal master.
 
 ### Notification deep links
 

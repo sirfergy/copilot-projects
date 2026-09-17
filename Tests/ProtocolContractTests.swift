@@ -35,6 +35,17 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertEqual(session.negotiatedOperationSupport(protocolInfo: nil), .unavailable)
     }
 
+    func testConfiguredCreationRequiresExplicitCapability() throws {
+        XCTAssertNil(try workspace("legacy-workspace").protocolInfo)
+        XCTAssertFalse(try XCTUnwrap(workspace("receipt-workspace").protocolInfo)
+            .supports(RemoteProtocolInfo.configuredSessionCreation))
+        XCTAssertEqual(RemoteProtocolInfo.configuredSessionCreation, "configured-session-creation")
+        XCTAssertTrue(RemoteProtocolInfo.current.supports(RemoteProtocolInfo.configuredSessionCreation))
+        let decoded = try JSONDecoder().decode(
+            RemoteProtocolInfo.self, from: JSONEncoder().encode(RemoteProtocolInfo.current))
+        XCTAssertTrue(decoded.supports(RemoteProtocolInfo.configuredSessionCreation))
+    }
+
     func testUnavailableAndUnknownSupportNeverDowngradeToLegacy() throws {
         let unavailable = try workspace("unavailable-workspace")
         let session = try XCTUnwrap(unavailable.projects.first?.sessions.first)

@@ -9,6 +9,10 @@ public enum RemoteSessionContract {
     /// style so both sides share one source of truth.
     public static let createPath = "sessions/create"
 
+    /// Explicit launch options use a separate path so older hosts cannot silently
+    /// ignore a starting prompt or create Copilot instead of a plain terminal.
+    public static let configuredCreatePath = "sessions/create-configured"
+
     /// Response header carrying a stable machine-readable creation error code.
     public static let errorCodeHeader = "X-Copilot-Projects-Error"
 
@@ -21,6 +25,10 @@ public enum RemoteSessionContract {
     public static let reviewPath = "sessions/review"
 }
 
+public enum RemoteSessionKind: String, Codable, Equatable, Sendable {
+    case copilot, terminal
+}
+
 /// A remote client's request to create a new session in a host project. The
 /// `requestId` is client-generated and retained across retries so the host can
 /// make creation idempotent (the same request never spawns two sessions).
@@ -28,15 +36,21 @@ public struct RemoteCreateSessionRequest: Codable, Equatable, Sendable {
     public let requestId: UUID
     public let projectId: String
     public let pullRequestURL: String?
+    public let kind: RemoteSessionKind?
+    public let initialPrompt: String?
 
     public init(
         requestId: UUID,
         projectId: String,
-        pullRequestURL: String? = nil
+        pullRequestURL: String? = nil,
+        kind: RemoteSessionKind? = nil,
+        initialPrompt: String? = nil
     ) {
         self.requestId = requestId
         self.projectId = projectId
         self.pullRequestURL = pullRequestURL
+        self.kind = kind
+        self.initialPrompt = initialPrompt
     }
 }
 
@@ -104,7 +118,7 @@ public struct PullRequestReviewTarget: Equatable, Sendable {
 }
 
 /// The host's answer to a `RemoteCreateSessionRequest`. `sessionId` is the
-/// deterministic id derived from `requestId`, echoed so the client can select the
+/// canonical UUID string of `requestId`, echoed so the client can select the
 /// session once the next workspace snapshot includes it. `projectId` reflects the
 /// project that actually owns the session (identical to the request for a fresh
 /// create; the owning project for an idempotent duplicate).

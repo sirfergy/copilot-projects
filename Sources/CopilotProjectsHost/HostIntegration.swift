@@ -32,6 +32,7 @@ public protocol SessionHost: AnyObject, Sendable {
     func workspace() -> RemoteWorkspaceSnapshot?
     func hasSession(_ sessionId: String) -> Bool
     func createSession(_ request: RemoteCreateSessionRequest) -> RemoteSessionCreationOutcome
+    func createConfiguredSession(_ request: RemoteCreateSessionRequest) -> RemoteSessionCreationOutcome
     func createAdversarialReviewSession(_ request: RemoteCreateSessionRequest) -> RemoteSessionCreationOutcome
     func screenRevision(sessionId: String) -> RemoteTerminalRevision?
     func screen(sessionId: String, revision: RemoteTerminalRevision, afterLine: Int?) -> RemoteTerminalScreen?
@@ -52,4 +53,11 @@ public protocol SessionHost: AnyObject, Sendable {
     func answerElicitation(sessionId: String, answer: RemoteElicitationAnswer, operation: CLIOperationRequest?) -> RemoteUserInputResult
     func setModel(sessionId: String, selection: RemoteModelSelection, operation: CLIOperationRequest?) -> RemoteUserInputResult
     func performSessionAction(sessionId: String, action: RemoteSessionAction, operation: CLIOperationRequest) -> RemoteUserInputResult
+}
+
+public extension SessionHost {
+    /// Older conformers must fail closed, not silently use legacy launch semantics.
+    func createConfiguredSession(_ request: RemoteCreateSessionRequest) -> RemoteSessionCreationOutcome {
+        .unavailable
+    }
 }

@@ -9,6 +9,8 @@ import CopilotProjectsCore
 final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     let sessionId: String
     let terminalView: ProjectsTerminalView
+    /// In-memory recovery only; never resubmitted or written to workspace state.
+    let startingPrompt: String?
 
     /// PID of the shell this terminal is running (0 until spawned). Used for the
     /// process-liveness check.
@@ -146,6 +148,7 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
          launchCopilotInitialPrompt: String? = nil,
          kittyImageDiskStore: RemoteKittyImageDiskStore = .shared) {
         self.sessionId = sessionId
+        self.startingPrompt = launchCopilotInitialPrompt
         self.terminalView = ProjectsTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         super.init()

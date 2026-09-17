@@ -23,8 +23,12 @@ struct CopilotProjectsApp: App {
                 Toggle("Keep Running When Window Closes", isOn: $keepRunning)
             }
             CommandMenu("Session") {
-                Button("New Session") { appDelegate.model.addSessionToSelected() }
+                Button("New Copilot Session") { appDelegate.model.addSessionToSelected() }
                     .keyboardShortcut("t", modifiers: .command)
+                Button("Start with Prompt…") { appDelegate.model.addPromptedSessionToSelected() }
+                Button("New Terminal") { appDelegate.model.addTerminalToSelected() }
+                    .keyboardShortcut("t", modifiers: [.command, .option])
+                Divider()
                 Button("Close Session") { appDelegate.model.closeSelectedSession() }
                     .keyboardShortcut("w", modifiers: .command)
                 Divider()
@@ -183,6 +187,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleKeyEvent(_ event: NSEvent) -> NSEvent? {
+        guard NSApp.modalWindow == nil else {
+            hintWork?.cancel()
+            model.setNumberHint(.none)
+            return event
+        }
         switch event.type {
         case .scrollWheel:
             // Forward the wheel into the active terminal (mouse-reporting TUI,

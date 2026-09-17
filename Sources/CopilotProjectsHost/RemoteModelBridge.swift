@@ -51,6 +51,10 @@ final class RemoteModelBridge: SessionHost {
         model?.createRemoteSession(request) ?? .unavailable
     }
 
+    func createConfiguredSession(_ request: RemoteCreateSessionRequest) -> RemoteSessionCreationOutcome {
+        model?.createRemoteConfiguredSession(request) ?? .unavailable
+    }
+
     func createAdversarialReviewSession(
         _ request: RemoteCreateSessionRequest
     ) -> RemoteSessionCreationOutcome {

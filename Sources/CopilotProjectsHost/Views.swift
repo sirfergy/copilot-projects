@@ -155,7 +155,12 @@ struct SidebarView: View {
                         dropTargetProjectId: $dropTargetProjectId,
                         model: model))
                     .contextMenu {
-                        Button("New Session") { model.addSession(toProjectId: project.id) }
+                        Button("New Copilot Session") { model.addCopilotSessionInteractive(toProjectId: project.id) }
+                        Button("Start with Prompt…") {
+                            model.addCopilotSessionInteractive(toProjectId: project.id, withPrompt: true)
+                        }
+                        Button("New Terminal") { model.addSession(toProjectId: project.id) }
+                        Divider()
                         Button("Rename…") { model.renameProjectInteractive(project.id) }
                         Divider()
                         Button("Close Project", role: .destructive) {
@@ -413,6 +418,15 @@ struct SessionTabBar: View {
                             onSelect: { model.selectSession(projectId: project.id, sessionId: session.id) },
                             onClose: { model.requestCloseSession(projectId: project.id, sessionId: session.id) }
                         )
+                        .contextMenu {
+                            if model.startingPrompt(for: session.id) != nil {
+                                Button("Copy Starting Prompt") { model.copyStartingPrompt(for: session.id) }
+                                Divider()
+                            }
+                            Button("Close Session", role: .destructive) {
+                                model.requestCloseSession(projectId: project.id, sessionId: session.id)
+                            }
+                        }
                         .overlay(alignment: .leading) {
                             insertionBar.opacity(dropTargetId == session.id ? 1 : 0).offset(x: -4)
                         }
@@ -454,14 +468,36 @@ struct SessionTabBar: View {
             .accessibilityLabel("Review Pull Request")
             .padding(.trailing, 4)
 
-            Button { model.addSession(toProjectId: project.id) } label: {
-                Image(systemName: "plus")
-                    .font(.caption)
-                    .frame(width: 24, height: 22)
+            HStack(spacing: 0) {
+                Button { model.addCopilotSessionInteractive(toProjectId: project.id) } label: {
+                    Label("Copilot", systemImage: "plus")
+                        .font(.callout)
+                        .padding(.horizontal, 6)
+                        .frame(height: 22)
+                }
+                .buttonStyle(.borderless)
+                .hoverHighlight()
+                .help("New Copilot Session (⌘T)")
+                .accessibilityLabel("New Copilot Session")
+
+                Divider().frame(height: 14)
+
+                Menu {
+                    Button("Start with Prompt…") {
+                        model.addCopilotSessionInteractive(toProjectId: project.id, withPrompt: true)
+                    }
+                    Button("New Terminal") { model.addSession(toProjectId: project.id) }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.caption2)
+                        .frame(width: 22, height: 22)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("More Session Options")
+                .accessibilityLabel("More Session Options")
             }
-            .buttonStyle(.borderless)
-            .hoverHighlight()
-            .help("New Session (⌘T)")
             .padding(.trailing, 8)
         }
     }

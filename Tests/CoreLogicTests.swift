@@ -4552,6 +4552,7 @@ final class CoreLogicTests: XCTestCase {
 
     func testRemoteCreateSessionContractRoundTrips() throws {
         XCTAssertEqual(RemoteSessionContract.createPath, "sessions/create")
+        XCTAssertEqual(RemoteSessionContract.configuredCreatePath, "sessions/create-configured")
         XCTAssertEqual(RemoteSessionContract.reviewPath, "sessions/review")
         let requestId = UUID()
         let request = RemoteCreateSessionRequest(
@@ -4576,6 +4577,39 @@ final class CoreLogicTests: XCTestCase {
         )
         XCTAssertEqual(decodedResponse, response)
         XCTAssertEqual(decodedResponse.sessionId, requestId.uuidString)
+    }
+
+    func testRemoteConfiguredCreateSessionContractPreservesLegacyDefaults() throws {
+        let requestId = UUID()
+        let legacy = Data("""
+            {"requestId":"\(requestId.uuidString)","projectId":"project-1"}
+            """.utf8)
+        let decoded = try JSONDecoder().decode(RemoteCreateSessionRequest.self, from: legacy)
+        XCTAssertNil(decoded.kind)
+        XCTAssertNil(decoded.initialPrompt)
+        XCTAssertNil(decoded.pullRequestURL)
+        XCTAssertEqual(decoded, RemoteCreateSessionRequest(requestId: requestId, projectId: "project-1"))
+
+        for kind in [RemoteSessionKind.copilot, .terminal] {
+            let request = RemoteCreateSessionRequest(
+                requestId: requestId,
+                projectId: "project-1",
+                kind: kind,
+                initialPrompt: kind == .copilot ? "first line\nsecond line" : nil
+            )
+            XCTAssertEqual(
+                try JSONDecoder().decode(
+                    RemoteCreateSessionRequest.self, from: JSONEncoder().encode(request)),
+                request
+            )
+        }
+    }
+
+    func testRemoteConfiguredCreateSessionContractRejectsUnknownKinds() {
+        let unknown = Data("""
+            {"requestId":"\(UUID().uuidString)","projectId":"project-1","kind":"unknown"}
+            """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(RemoteCreateSessionRequest.self, from: unknown))
     }
 
     func testPullRequestReviewTargetNormalizesGitHubPRURLs() {

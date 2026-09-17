@@ -7,6 +7,7 @@ struct Session: Identifiable, Codable, Equatable {
     var id: String
     var title: String
     var cwd: String
+    var creationFingerprint: String?
 
     // Transient (not persisted): reset on load.
     var status: SessionStatus = .idle
@@ -38,12 +39,18 @@ struct Session: Identifiable, Codable, Equatable {
     }
     var hasPendingInput: Bool { agentActivity?.hasPendingInput == true }
 
-    private enum CodingKeys: String, CodingKey { case id, title, cwd }
+    private enum CodingKeys: String, CodingKey { case id, title, cwd, creationFingerprint }
 
-    init(id: String = UUID().uuidString, title: String, cwd: String) {
+    init(
+        id: String = UUID().uuidString,
+        title: String,
+        cwd: String,
+        creationFingerprint: String? = nil
+    ) {
         self.id = id
         self.title = title
         self.cwd = cwd
+        self.creationFingerprint = creationFingerprint
     }
 }
 

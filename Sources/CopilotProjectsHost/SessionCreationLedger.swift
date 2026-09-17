@@ -1,5 +1,7 @@
 import Foundation
+import CryptoKit
 import CopilotProjectsCore
+import CopilotProjectsProtocol
 
 /// One remembered remote session creation: the client `requestId` mapped to the
 /// project/session it produced and when. Persisted so a duplicate request after a
@@ -10,6 +12,50 @@ struct SessionCreationRecord: Codable, Equatable, Sendable {
     let projectId: String
     let sessionId: String
     let createdAt: Date
+    let creationFingerprint: String?
+
+    init(
+        requestId: String,
+        projectId: String,
+        sessionId: String,
+        createdAt: Date,
+        creationFingerprint: String? = nil
+    ) {
+        self.requestId = requestId
+        self.projectId = projectId
+        self.sessionId = sessionId
+        self.createdAt = createdAt
+        self.creationFingerprint = creationFingerprint
+    }
+
+    static func fingerprint(
+        projectId: String,
+        kind: RemoteSessionKind,
+        initialPrompt: String?,
+        pullRequestURL: String?
+    ) -> String {
+        var hash = SHA256()
+        let fields: [String?] = [
+            "copilot-projects/session-creation/v1",
+            pullRequestURL == nil ? "create" : "review",
+            projectId,
+            kind.rawValue,
+            initialPrompt,
+            pullRequestURL,
+        ]
+        for field in fields {
+            guard let field else {
+                hash.update(data: Data([0]))
+                continue
+            }
+            hash.update(data: Data([1]))
+            let bytes = Data(field.utf8)
+            var length = UInt64(bytes.count).bigEndian
+            withUnsafeBytes(of: &length) { hash.update(data: Data($0)) }
+            hash.update(data: bytes)
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 /// Thread-safe, bounded, persisted ledger of remote session creations. Acts as the
