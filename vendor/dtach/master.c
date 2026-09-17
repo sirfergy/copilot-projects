@@ -16,6 +16,7 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "dtach.h"
+#include <time.h>
 
 /* The pty struct - The pty information is stored here. */
 struct pty
@@ -83,6 +84,45 @@ die(int sig)
 		return;
 	}
 	exit(1);
+}
+
+/* Observe termination without consuming the status used by the EOF path. */
+static int
+child_has_exited(void)
+{
+	siginfo_t info;
+	int result;
+
+	do
+	{
+		memset(&info, 0, sizeof(info));
+		result = waitid(P_PID, the_pty.pid, &info,
+			WEXITED | WNOHANG | WNOWAIT);
+	} while (result < 0 && errno == EINTR);
+	if (result < 0)
+	{
+		if (errno == ECHILD)
+			return 1;
+		perror("dtach: waitid");
+		exit(1);
+	}
+	/* Darwin can report a stopped child even when only WEXITED was requested. */
+	return info.si_pid == the_pty.pid &&
+		(info.si_code == CLD_EXITED || info.si_code == CLD_KILLED ||
+		 info.si_code == CLD_DUMPED);
+}
+
+static struct timespec
+monotonic_now(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+	{
+		perror("dtach: clock_gettime");
+		exit(1);
+	}
+	return now;
 }
 
 /* Sets a file descriptor to non-blocking mode. */
@@ -261,7 +301,10 @@ pty_activity(int s)
 	ssize_t len;
 	struct client *p, *next;
 	fd_set readfds, writefds, deferred;
-	int highest_fd, nclients;
+	struct timeval timeout;
+	struct timespec exit_deadline, now;
+	int highest_fd, nclients, selected, made_progress;
+	int watching_exit = 0;
 
 	/* Read the pty activity */
 	len = read(the_pty.fd, buf, sizeof(buf));
@@ -315,15 +358,32 @@ top:
 	}
 	if (nclients == 0)
 		return;
-	if (select(highest_fd + 1, &readfds, &writefds, NULL, NULL) < 0)
+	/* Bound only the output wait: SIGCHLD can arrive before select starts.
+	** Keep retrying live children and readers that continue making progress. */
+	if (!watching_exit && child_has_exited())
+	{
+		exit_deadline = monotonic_now();
+		exit_deadline.tv_sec++;
+		watching_exit = 1;
+	}
+	timeout.tv_sec = 1;
+	timeout.tv_usec = 0;
+	selected = select(highest_fd + 1, &readfds, &writefds, NULL, &timeout);
+	if (selected < 0)
 	{
 		if (errno == EINTR || errno == EAGAIN)
 			goto top;
 		return;
 	}
-
+	made_progress = 0;
 	if (FD_ISSET(s, &readfds))
+	{
+		struct client *previous = clients;
+
 		control_activity(s);
+		if (clients != previous)
+			made_progress = 1;
+	}
 	for (p = clients; p; p = next)
 	{
 		struct packet pkt;
@@ -341,6 +401,9 @@ top:
 			FD_SET(p->fd, &deferred);
 			continue;
 		}
+		if (available == (ssize_t)sizeof(pkt) && pkt.type == MSG_ATTACH &&
+		    !p->attached)
+			made_progress = 1;
 		client_activity(p);
 	}
 
@@ -357,6 +420,7 @@ top:
 			if (n > 0)
 			{
 				p->written += n;
+				made_progress = 1;
 				continue;
 			}
 			else if (n < 0 && errno == EINTR)
@@ -371,7 +435,22 @@ top:
 
 	/* Try again if nothing happened. */
 	if (nclients == 0)
+	{
+		if (watching_exit)
+		{
+			now = monotonic_now();
+			if (made_progress)
+			{
+				exit_deadline = now;
+				exit_deadline.tv_sec++;
+			}
+			else if (now.tv_sec > exit_deadline.tv_sec ||
+				 (now.tv_sec == exit_deadline.tv_sec &&
+				  now.tv_nsec >= exit_deadline.tv_nsec))
+				return;
+		}
 		goto top;
+	}
 }
 
 /* Process activity on the control socket */
