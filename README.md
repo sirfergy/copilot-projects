@@ -30,8 +30,8 @@ distribution rather than replacing it with the standalone download.
   windows. Background tabs keep running while you work elsewhere.
 - **Attention at a glance.** Running and waiting indicators, unread markers,
   and native notifications help you find the session that needs you.
-- **Session details.** Read completed turns as Markdown, inspect the latest
-  task result, and see usage, background agents, and schedules when the
+- **Session details.** Read completed turns as Markdown and see usage,
+  background agents, and schedules when the
   connected Copilot CLI supports them.
 - **Local pull-request reviews.** The shield button opens a Copilot CLI session
   with a local adversarial-review prompt for a GitHub pull request.
@@ -44,14 +44,9 @@ report status through the CLI.
 
 ### A closer look
 
-<table>
-  <tr>
-    <td><img src="docs/project-status.png" alt="Current project rows showing running, waiting, and ready status indicators" width="360"></td>
-    <td><img src="docs/task-result.png" alt="Current session details showing a completed task summary, branch, and executed-checks disclosure" width="560"></td>
-  </tr>
-</table>
+<img src="docs/project-status.png" alt="Current project rows showing running, waiting, and ready status indicators" width="360">
 
-These component previews use illustrative sample data.
+This component preview uses illustrative sample data.
 
 ## Everyday controls
 

@@ -133,7 +133,6 @@ if (validSessionId && socketPath) {
     const workflowPaths = new Map(workflowKinds.map((kind) => [
         kind, join(sessionsDir, `${appSessionId}.${kind}.json`),
     ]));
-    const taskResultPath = join(sessionsDir, `${appSessionId}.task-result.json`);
     const closeSessionRequestPath = join(
         sessionsDir, `${appSessionId}.close-session-request`
     );
@@ -261,12 +260,6 @@ if (validSessionId && socketPath) {
     let workflowContext = null;
     let pendingBudgetRequest = null;
     const pendingBudgetIds = new Set();
-    let workflowResultRevision = 0;
-    let workflowSummary = null;
-    let workflowTaskStatus = "finished";
-    const workflowChecks = new Map();
-    const workflowPRs = new Set();
-    const workflowPRTools = new Set();
     const liveMessageStreams = new Map();
     let workflowLiveTurnId = null;
     const unavailableWorkflowActions = new Set();
@@ -1601,31 +1594,12 @@ if (validSessionId && socketPath) {
         }
     }
 
-    function workflowCheckTitle(event) {
-        if (event.data.mcpServerName || !["bash", "shell", "powershell"].includes(event.data.toolName)) {
-            return null;
-        }
-        const command = event.data.arguments?.command;
-        // Only name simple direct checks. Compound shells can mask a failure;
-        // the UI reports an exit status, never an inferred test-pass count.
-        if (typeof command !== "string" || /[;&|<>`$\r\n]/.test(command)) return null;
-        const match = /^\s*((?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|lint|typecheck|build)\b|node\s+--test\b|swift\s+test\b|go\s+test\b|cargo\s+test\b|dotnet\s+test\b|(?:python3?\s+-m\s+)?pytest\b)/.exec(command);
-        return match ? match[1].trim() : null;
-    }
-
     function observeWorkflowEvent(event) {
         const root = !event.agentId;
         if (root && event.type === "user.message" && classifyUserMessage(event)) {
             workflowLiveTurnId = event.id;
             liveMessageStreams.clear();
-            workflowResultRevision += 1;
-            workflowChecks.clear();
-            workflowPRs.clear();
-            workflowPRTools.clear();
-            workflowSummary = null;
-            workflowTaskStatus = "finished";
         }
-        if (root && event.type === "assistant.turn_start") workflowResultRevision += 1;
         if (root && ["assistant.message_delta", "assistant.message"].includes(event.type)
                 && typeof event.data.messageId === "string") {
             const id = boundedMetadataText(event.data.messageId);
@@ -1651,47 +1625,6 @@ if (validSessionId && socketPath) {
                     }
                 } else {
                     schedulePublishTranscript();
-                }
-            }
-        }
-        if (root && event.type === "session.task_complete") {
-            workflowSummary = truncatedText(event.data.summary, 8_192) || null;
-            if (event.data.success === false) workflowTaskStatus = "blocked";
-        }
-        if (root && event.type === "session.error") workflowTaskStatus = "blocked";
-        const toolKey = `${event.agentId || copilotSessionId}:${event.data?.toolCallId}`;
-        if (event.type === "tool.execution_start" && workflowChecks.size < 64) {
-            const title = workflowCheckTitle(event);
-            if (title) workflowChecks.set(toolKey, { id: toolKey, title, exitCode: null });
-            const command = event.data.arguments?.command;
-            if (!event.data.mcpServerName && event.data.toolName === "bash"
-                    && typeof command === "string" && /^\s*gh\s+pr\s+(create|view)\b/.test(command)
-                    && !/[;&|<>`$\r\n]/.test(command) && workflowPRTools.size < 64) {
-                workflowPRTools.add(toolKey);
-            }
-        }
-        if (event.type === "tool.execution_complete") {
-            const check = workflowChecks.get(toolKey);
-            if (check) {
-                const exits = (event.data.result?.contents || []).filter((entry) =>
-                    ["shell_exit", "terminal"].includes(entry.type) && Number.isSafeInteger(entry.exitCode)
-                );
-                if (exits.length === 1) {
-                    check.exitCode = exits[0].exitCode;
-                    check.workingDirectory = truncatedText(exits[0].cwd, 1_024) || null;
-                }
-            }
-            // A link is a destination reported by a tool, not a claim about PR state.
-            for (const entry of event.data.result?.contents || []) {
-                if (entry.type === "resource_link" && typeof entry.uri === "string"
-                        && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(entry.uri)
-                        && workflowPRs.size < 8) workflowPRs.add(entry.uri);
-            }
-            if (workflowPRTools.has(toolKey) && event.data.success === true) {
-                for (const match of (event.data.result?.content || "").matchAll(
-                    /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*/g
-                )) {
-                    if (workflowPRs.size < 8) workflowPRs.add(match[0]);
                 }
             }
         }
@@ -1723,118 +1656,8 @@ if (validSessionId && socketPath) {
         if (root && event.type === "session.idle") {
             pendingBudgetIds.clear();
             pendingBudgetRequest = null;
-            const context = workflowContextToken();
-            const revision = workflowResultRevision;
-            const turnId = workflowLiveTurnId || pendingTranscriptTurn?.id;
-            const turn = pendingTranscriptTurn?.id === turnId
-                ? pendingTranscriptTurn : transcriptTurns.find((entry) => entry.id === turnId);
             workflowLiveTurnId = null;
-            const checks = [...workflowChecks.values()].map((check) => ({ ...check }));
-            const summary = workflowSummary
-                || truncatedText(turn?.assistantMessages.at(-1)?.content, 8_192) || null;
-            const status = event.data.aborted === true ? "stopped" : workflowTaskStatus;
-            const pullRequests = [...workflowPRs];
-            queueMicrotask(() => {
-                if (turnId && operationAuthorityCurrent(context) && revision === workflowResultRevision) {
-                    captureTaskResult(context, revision, {
-                        turnId, checks, summary, status, pullRequests,
-                    });
-                }
-            });
             refreshWorkflow(true);
-        }
-    }
-
-    function boundedWorkflowDiff(value) {
-        if (!value || !Array.isArray(value.changes) || typeof value.isFallback !== "boolean"
-                || !["session", "unstaged", "branch"].includes(value.mode)) return null;
-        const changes = [];
-        let bytes = 0;
-        let truncated = false;
-        for (const entry of value.changes) {
-            if (changes.length >= 50) { truncated = true; break; }
-            if (typeof entry.path !== "string" || typeof entry.diff !== "string") continue;
-            const change = {
-                path: truncatedText(entry.path, 2_048),
-                diff: truncatedText(entry.diff, 24_000),
-                truncated: entry.isTruncated === true || entry.diff.length > 24_000,
-            };
-            const size = Buffer.byteLength(JSON.stringify(change));
-            if (bytes + size > 96 * 1_024) { truncated = true; break; }
-            changes.push(change);
-            bytes += size;
-        }
-        return {
-            requestedMode: "session", mode: value.mode, isFallback: value.isFallback,
-            unavailableReason: truncatedText(value.unavailableReason, 200) || null,
-            changes, truncated,
-        };
-    }
-
-    async function captureTaskResult(context, revision, result) {
-        const current = () => revision === workflowResultRevision && operationAuthorityCurrent(context);
-        if (!workflowRuntime || !result.turnId || !current()) return;
-        const temporary = `${taskResultPath}.${process.pid}.tmp`;
-        const saveFailure = (error) => {
-            if (!current()) return;
-            console.error("[copilot-projects] could not capture task result:", error);
-            const failure = {
-                schemaVersion: 1,
-                copilotSessionId: context.copilotSessionId,
-                conversationEpoch: context.conversationEpoch,
-                result: {
-                    turnId: result.turnId, capturedAt: new Date().toISOString(), status: result.status,
-                    summary: null, branch: null, repository: null, diff: null,
-                    checks: [], pullRequests: [],
-                    error: "Task result capture failed. Inspect the terminal for current evidence.",
-                },
-            };
-            try {
-                const encoded = JSON.stringify(failure);
-                if (Buffer.byteLength(encoded) > 256 * 1_024) throw new Error("task-result-too-large");
-                if (!current()) return;
-                writeFileSync(temporary, encoded, { mode: 0o600 });
-                if (!current()) return;
-                renameSync(temporary, taskResultPath);
-            } catch (writeError) {
-                if (!current()) return;
-                console.error(
-                    "[copilot-projects] could not persist task result failure; previous result may remain:",
-                    writeError
-                );
-            }
-        };
-        const [metadata, diff] = await Promise.allSettled([
-            workflowRead("session.metadata.snapshot", {}, context),
-            workflowRead("session.workspaces.diff", { mode: "session" }, context),
-        ]);
-        if (!current()) return;
-        const snapshot = metadata.status === "fulfilled" ? metadata.value : null;
-        if (snapshot?.sessionId !== context.copilotSessionId || snapshot.isRemote !== false) {
-            saveFailure(metadata.status === "rejected"
-                ? metadata.reason : new Error("invalid task result session metadata"));
-            return;
-        }
-        const normalizedDiff = diff.status === "fulfilled" ? boundedWorkflowDiff(diff.value) : null;
-        const envelope = {
-            schemaVersion: 1,
-            copilotSessionId: context.copilotSessionId,
-            conversationEpoch: context.conversationEpoch,
-            result: {
-                ...result, capturedAt: new Date().toISOString(),
-                branch: truncatedText(snapshot.workspace?.branch, 512) || null,
-                repository: truncatedText(snapshot.workspace?.repository, 512) || null,
-                diff: normalizedDiff,
-                error: normalizedDiff ? null : "Diff unavailable; inspect the working tree in the terminal",
-            },
-        };
-        try {
-            const encoded = JSON.stringify(envelope);
-            if (Buffer.byteLength(encoded) > 256 * 1_024) throw new Error("task-result-too-large");
-            writeFileSync(temporary, encoded, { mode: 0o600 });
-            renameSync(temporary, taskResultPath);
-        } catch (error) {
-            saveFailure(error);
         }
     }
 
@@ -3871,12 +3694,6 @@ if (validSessionId && socketPath) {
         workflowContext = null;
         pendingBudgetRequest = null;
         pendingBudgetIds.clear();
-        workflowResultRevision += 1;
-        workflowSummary = null;
-        workflowTaskStatus = "finished";
-        workflowChecks.clear();
-        workflowPRs.clear();
-        workflowPRTools.clear();
         workflowLiveTurnId = null;
         liveMessageStreams.clear();
         foregroundSessionActive = false;
@@ -4001,7 +3818,6 @@ if (validSessionId && socketPath) {
             removeFile(elicitationResponsePath);
             removeFile(setModelRequestPath);
             for (const path of workflowPaths.values()) removeFile(path);
-            removeFile(taskResultPath);
         }
         if (event) applyModelFromEvent(event);
         // Republish the (now empty) per-conversation state immediately so

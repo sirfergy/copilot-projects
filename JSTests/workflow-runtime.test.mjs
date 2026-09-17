@@ -99,9 +99,6 @@ test("native workflow RPCs target the requested session", {
   assert.equal((await first.getEvents()).some((event) =>
     event.type === "user.message" && event.data.content.startsWith("Reply fixture")
   ), false);
-  const diff = await call("session.workspaces.diff", { mode: "session" });
-  assert.ok(Array.isArray(diff.changes));
-  assert.equal(typeof diff.isFallback, "boolean");
   const metrics = await call("session.usage.getMetrics");
   assert.equal(typeof metrics.totalUserRequests, "number");
   const abort = await call("session.abort");
