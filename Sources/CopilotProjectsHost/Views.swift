@@ -455,19 +455,6 @@ struct SessionTabBar: View {
             }
             .frame(maxWidth: .infinity)
 
-            Button {
-                model.addAdversarialReviewSessionInteractive(toProjectId: project.id)
-            } label: {
-                Image(systemName: "checkmark.shield")
-                    .font(.caption)
-                    .frame(width: 24, height: 22)
-            }
-            .buttonStyle(.borderless)
-            .hoverHighlight()
-            .help("Review Pull Request")
-            .accessibilityLabel("Review Pull Request")
-            .padding(.trailing, 4)
-
             HStack(spacing: 0) {
                 Button { model.addCopilotSessionInteractive(toProjectId: project.id) } label: {
                     Image(systemName: "plus")
@@ -485,6 +472,9 @@ struct SessionTabBar: View {
                         model.addCopilotSessionInteractive(toProjectId: project.id, withPrompt: true)
                     }
                     Button("New Terminal") { model.addSession(toProjectId: project.id) }
+                    Button("Review Pull Request…", systemImage: "checkmark.shield") {
+                        model.addAdversarialReviewSessionInteractive(toProjectId: project.id)
+                    }
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.caption2)

@@ -54,8 +54,9 @@ it does not reconstruct attachment history after image data has been discarded.
 - **Session details.** Read completed turns as Markdown and see usage,
   background agents, and schedules when the
   connected Copilot CLI supports them.
-- **Local pull-request reviews.** The shield button opens a Copilot CLI session
-  with a local adversarial-review prompt for a GitHub pull request.
+- **Local pull-request reviews.** Choose **Review Pull Request…** from the split
+  button's dropdown to open a Copilot CLI session with a local adversarial-review
+  prompt for a GitHub pull request.
 - **Resumable terminals.** The bundled `dtach` backend keeps shells and agents
   alive when the app quits or relaunches. You can also reattach over SSH.
 
@@ -86,8 +87,10 @@ button to open the completed-turn drawer.
 
 The **+** side of the split button starts an interactive Copilot CLI session immediately,
 inheriting the current session's working directory. Its dropdown offers
-**Start with Prompt…** (a multiline composer) and **New Terminal** (just a shell).
-The Session menu and project context menus offer the same choices. New projects
+**Start with Prompt…** (a multiline composer), **New Terminal** (just a shell), and
+**Review Pull Request…** (a GitHub pull request URL dialog).
+The Session menu and project context menus also offer Copilot, starting-prompt,
+and plain-terminal creation. New projects
 created with `⌘N` also start with Copilot. All new desktop Copilot sessions use
 `--allow-all`, with or without a starting prompt.
 

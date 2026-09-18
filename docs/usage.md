@@ -31,8 +31,9 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   in its context menu recovers the prompt until that tab closes or the app quits.
   Prompts are never retried automatically. All new desktop Copilot sessions use
   `--allow-all`, with or without a starting prompt.
-- **Local PR reviews:** the shield button beside the **+** split button accepts a GitHub pull request
-  URL and opens a new Copilot CLI tab with a local adversarial-review prompt.
+- **Local PR reviews:** choose **Review Pull Request…** from the **+** split button's
+  dropdown, paste a GitHub pull request URL, and open a new Copilot CLI tab with a
+  local adversarial-review prompt in the current project.
 - **Status:** each session reports `idle` / `running` / `waiting`. Running and waiting
   counts appear in the sidebar; a blue dot on the session tab marks work that finished
   while you were away. With the Copilot CLI hooks installed (below), this is driven automatically.
