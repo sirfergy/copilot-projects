@@ -3,8 +3,9 @@ import CopilotProjectsProtocol
 
 /// Pure association of currently-retained inline images to transcript turns.
 ///
-/// An image is attached to the turn that was *active* when it was displayed —
+/// An image is attached to the turn active at its retained content's origin —
 /// the turn with the greatest `startedAt` that is still `<= displayedAt`.
+/// Unchanged, still-advertised retransmissions preserve that origin timestamp.
 /// This deliberately uses only `startedAt` (never `endedAt`), so the still-open
 /// streaming turn's ever-growing `[startedAt, now]` window can't reshuffle
 /// associations between requests: once a turn exists with a `startedAt` at or
