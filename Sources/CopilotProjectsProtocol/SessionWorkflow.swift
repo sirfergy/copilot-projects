@@ -39,6 +39,7 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
     public var maxAiCredits: Double?
     public var requestId: String?
     public var additionalAiCredits: Double?
+    public var attachmentIds: [String]?
 
     public init(
         kind: RemoteSessionActionKind,
@@ -46,7 +47,8 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
         mode: RemotePromptMode? = nil,
         maxAiCredits: Double? = nil,
         requestId: String? = nil,
-        additionalAiCredits: Double? = nil
+        additionalAiCredits: Double? = nil,
+        attachmentIds: [String]? = nil
     ) {
         self.kind = kind
         self.prompt = prompt
@@ -54,9 +56,16 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
         self.maxAiCredits = maxAiCredits
         self.requestId = requestId
         self.additionalAiCredits = additionalAiCredits
+        self.attachmentIds = attachmentIds
     }
 
     public var isValid: Bool {
+        if let attachmentIds {
+            guard kind == .send, !attachmentIds.isEmpty,
+                  attachmentIds.count <= RemoteAttachmentContract.maxImages,
+                  Set(attachmentIds).count == attachmentIds.count,
+                  attachmentIds.allSatisfy(RemoteAttachmentContract.validID) else { return false }
+        }
         switch kind {
         case .send:
             guard let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -117,6 +126,7 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
     public let agents: [RemoteWorkflowAgent]
     public let schedules: [String]
     public let error: String?
+    public let imageAttachments: RemoteImageCapabilities?
 
     public init(
         version: Int = 1,
@@ -132,7 +142,8 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
         budgetRequest: RemoteBudgetRequest? = nil,
         agents: [RemoteWorkflowAgent] = [],
         schedules: [String] = [],
-        error: String? = nil
+        error: String? = nil,
+        imageAttachments: RemoteImageCapabilities? = nil
     ) {
         self.version = version
         self.observedAtMilliseconds = observedAtMilliseconds
@@ -148,6 +159,7 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
         self.agents = agents
         self.schedules = schedules
         self.error = error
+        self.imageAttachments = imageAttachments
     }
 
     public func isFresh(at date: Date = Date()) -> Bool {

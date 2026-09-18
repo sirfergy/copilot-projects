@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -1360,6 +1360,9 @@ if (validSessionId && socketPath) {
             observedAtMilliseconds: observation?.observedAtMilliseconds ?? 0,
             capabilities,
             sendReady: fresh === true && !workflowHasPendingInput(),
+            imageAttachments: fresh ? availableModels?.find(
+                (model) => model.id === currentModel?.name
+            )?.imageAttachments ?? null : null,
             legacyPromptFallback: workflowRuntime === false || runtimeActivityUnsupported
                 || observation?.legacyPromptFallback === true
                 || unavailableWorkflowActions.has("session-send"),
@@ -1424,7 +1427,7 @@ if (validSessionId && socketPath) {
             workflowObservation = {
                 observedAtMilliseconds,
                 capabilities: [
-                    "session-send", "session-abort", "answer-session-budget",
+                    "session-send", "session-abort", "answer-session-budget", "image-attachments-v1",
                     ...(limitsKnown ? ["set-session-budget"] : []),
                 ],
                 totalAiCredits, limitsKnown,
@@ -1448,6 +1451,15 @@ if (validSessionId && socketPath) {
 
     function validWorkflowAction(action, kind) {
         if (!action || action.kind !== kind) return false;
+        if (action.attachmentIds != null && (kind !== "session-send"
+                || !Array.isArray(action.attachmentIds)
+                || action.attachmentIds.length < 1 || action.attachmentIds.length > 4
+                || new Set(action.attachmentIds).size !== action.attachmentIds.length
+                || !action.attachmentIds.every((id) =>
+                    typeof id === "string"
+                    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)))) {
+            return false;
+        }
         const absent = (...keys) => keys.every((key) => action[key] == null);
         switch (kind) {
         case "session-send":
@@ -1472,11 +1484,74 @@ if (validSessionId && socketPath) {
         }
     }
 
-    async function invokeWorkflowAction(action, context) {
+    function imageCapabilities(entry) {
+        if (entry?.capabilities?.supports?.vision !== true) return null;
+        const vision = entry.capabilities.limits?.vision;
+        const count = pickKey(vision, "max_prompt_images", "maxPromptImages");
+        const bytes = pickKey(vision, "max_prompt_image_size", "maxPromptImageSize");
+        const types = pickKey(vision, "supported_media_types", "supportedMediaTypes");
+        if (!Number.isSafeInteger(count) || count < 1
+                || !Number.isSafeInteger(bytes) || bytes < 1 || !Array.isArray(types)) return null;
+        const mimeTypes = ["image/png", "image/jpeg"].filter((type) => types.includes(type));
+        return mimeTypes.length ? {
+            maxImages: Math.min(4, count), maxBytes: Math.min(2 * 1024 * 1024, bytes), mimeTypes,
+        } : null;
+    }
+
+    async function loadImageAttachments(action, context) {
+        if (!action.attachmentIds) return undefined;
+        // Read-only preflight runs before accepting the operation. A missing
+        // image or unsupported model rejects the WHOLE message, never just its images.
+        const current = await workflowRead("session.model.getCurrent", {}, context);
+        const catalog = await workflowRead("session.model.list", {}, context);
+        const limits = imageCapabilities(catalog?.list?.find((model) => model.id === current?.modelId));
+        if (!limits || action.attachmentIds.length > limits.maxImages) {
+            throw new Error("The selected model does not support these screenshots");
+        }
+        const root = join(sessionsDir, "attachments-v1");
+        if (!lstatSync(root).isDirectory() || lstatSync(root).isSymbolicLink()) {
+            throw new Error("Invalid screenshot store");
+        }
+        const readBounded = (path, max) => {
+            const stat = lstatSync(path);
+            if (!stat.isFile() || stat.size < 1 || stat.size > max) throw new Error("Invalid screenshot file");
+            const bytes = readFileSync(path);
+            if (bytes.length > max) throw new Error("Screenshot is too large");
+            return bytes;
+        };
+        const attachments = action.attachmentIds.map((id) => {
+            const record = JSON.parse(readBounded(join(root, `${id}.json`), 4096));
+            const metadata = record.attachment;
+            if (metadata?.id !== id || metadata.sessionId !== appSessionId
+                    || metadata.conversationEpoch !== context.conversationEpoch
+                    || !Number.isSafeInteger(metadata.expiresAtMilliseconds)
+                    || metadata.expiresAtMilliseconds <= Date.now()
+                    || !limits.mimeTypes.includes(metadata.mimeType)
+                    || !Number.isSafeInteger(metadata.byteCount)
+                    || metadata.byteCount < 1 || metadata.byteCount > limits.maxBytes) {
+                throw new Error("Screenshot is expired or belongs to another conversation");
+            }
+            const bytes = readBounded(join(root, `${id}.image`), limits.maxBytes);
+            if (bytes.length !== metadata.byteCount
+                    || createHash("sha256").update(bytes).digest("hex") !== record.sha256) {
+                throw new Error("Screenshot bytes changed");
+            }
+            return {
+                type: "blob", mimeType: metadata.mimeType,
+                displayName: metadata.mimeType === "image/png" ? "Screenshot.png" : "Screenshot.jpg",
+                data: bytes.toString("base64"),
+            };
+        });
+        if (!operationAuthorityCurrent(context)) throw new Error("Conversation changed during screenshot preflight");
+        return attachments;
+    }
+
+    async function invokeWorkflowAction(action, context, attachments) {
         switch (action.kind) {
         case "session-send": {
             const result = await workflowRPC("session.send", {
                 prompt: action.prompt, mode: action.mode,
+                ...(attachments ? { attachments } : {}),
             }, context);
             return typeof result?.messageId === "string" && result.messageId.length > 0
                 ? { state: "applied" } : { state: "indeterminate", errorCode: "rpc-indeterminate" };
@@ -1559,6 +1634,27 @@ if (validSessionId && socketPath) {
             publishRejectedPreflight(context, "target-unavailable", path, encoded);
             return;
         }
+        let attachments;
+        if (kind === "session-send" && action.attachmentIds) {
+            // Reserve execution before awaits so the filesystem watcher and
+            // poll cannot preflight and dispatch the same operation twice.
+            const preparingKey = operationExecutionKey(context.conversationEpoch, context.operationId);
+            if (activeOperationKeys.has(preparingKey)) return;
+            activeOperationKeys.add(preparingKey);
+            try {
+                attachments = await loadImageAttachments(action, context);
+            } catch (error) {
+                console.error("[copilot-projects] screenshot preflight failed:", error);
+                publishRejectedPreflight(context, "attachments-unavailable", path, encoded);
+                return;
+            } finally {
+                activeOperationKeys.delete(preparingKey);
+            }
+            if (!operationAuthorityCurrent(context) || workflowHasPendingInput()) {
+                publishRejectedPreflight(context, "target-unavailable", path, encoded);
+                return;
+            }
+        }
         if (!publishAcceptedReceipt(context)) return;
         const key = operationExecutionKey(context.conversationEpoch, context.operationId);
         activeOperationKeys.add(key);
@@ -1568,7 +1664,7 @@ if (validSessionId && socketPath) {
             }
         }, 10_000);
         try {
-            const outcome = await invokeWorkflowAction(action, context);
+            const outcome = await invokeWorkflowAction(action, context, attachments);
             if (!operationAuthorityCurrent(context)) return;
             if (publishTerminalReceipt(context, outcome.state, outcome.errorCode)) {
                 removeCapturedHandoff(path, encoded, context);
@@ -3883,6 +3979,8 @@ if (validSessionId && socketPath) {
             const name = rawName.slice(0, 200);
             if (!id || !name) continue;
             const model = { id, name };
+            const images = imageCapabilities(entry);
+            if (images) model.imageAttachments = images;
             // Efforts live on the capability block at runtime; the top-level
             // `supportedReasoningEfforts` is the documented camelCase form.
             // `supports.reasoningEffort` is typed as a bool, so only arrays

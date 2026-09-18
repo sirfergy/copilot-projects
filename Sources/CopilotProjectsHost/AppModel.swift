@@ -2527,6 +2527,10 @@ final class AppModel: ObservableObject {
                       workflow.supports(action.kind, at: now) else { return false }
                 switch action.kind {
                 case .send:
+                    if action.attachmentIds != nil {
+                        guard workflow.capabilities.contains(RemoteAttachmentContract.capability),
+                              workflow.imageAttachments?.isValid == true else { return false }
+                    }
                     return workflow.sendReady && !snapshot.hasPendingInput
                 case .abort:
                     return true
