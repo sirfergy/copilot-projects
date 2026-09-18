@@ -2766,7 +2766,8 @@ if (validSessionId && socketPath) {
                 && turn.tools.length === 0) return null;
         const assistantMessages = turn.assistantMessages.slice();
         for (const stream of liveMessageStreams.values()) {
-            if (stream.turnId === turn.id && !assistantMessages.some((message) => message.id === stream.id)
+            if (stream.turnId === turn.id && stream.content.trim().length > 0
+                    && !assistantMessages.some((message) => message.id === stream.id)
                     && assistantMessages.length < MAX_TRANSCRIPT_ASSISTANT_MESSAGES) {
                 assistantMessages.push({ id: stream.id, timestamp: stream.timestamp, content: stream.content });
             }
@@ -2994,7 +2995,7 @@ if (validSessionId && socketPath) {
     }
 
     function appendTranscriptAssistantMessage(event, value) {
-        if (typeof value !== "string" || value.length === 0) return;
+        if (typeof value !== "string" || value.trim().length === 0) return;
         ensureSyntheticTranscriptTurn(event);
         const content = boundedText(value);
         const id = boundedMetadataText(event.data.messageId || event.id);
