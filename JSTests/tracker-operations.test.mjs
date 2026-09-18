@@ -709,6 +709,72 @@ test("live deltas are replaced by final messages without duplicate transcript te
   assert.deepEqual(messages.map((message) => message.content), ["complete"]);
 });
 
+test("live transcripts omit blank assistant messages without dropping tools", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await runtime.session.emit("user.message", { content: "review" });
+  await runtime.session.emit("assistant.turn_start");
+  await runtime.session.emit("assistant.message", { messageId: "reply", content: "Review complete." });
+  const blanks = ["", "", " ", "\t", "\n", "\r\n", " \t\n "];
+  for (const [index, content] of blanks.entries()) {
+    const toolCallId = `tool-${index}`;
+    await runtime.session.emit("assistant.message", {
+      messageId: `blank-${index}`, content, toolRequests: [{ toolCallId }],
+    });
+    await runtime.session.emit("tool.execution_start", { toolCallId, toolName: "view" });
+    await runtime.session.emit("tool.execution_complete", { toolCallId, success: true });
+  }
+  const path = join(runtime.sessions, `${runtime.appSessionId}.transcript.json`);
+  const turn = await waitFor(() => {
+    const turn = JSON.parse(realReadFileSync(path, "utf8")).turns.at(-1);
+    return turn?.tools.length === blanks.length && turn.tools.every((tool) => tool.success) && turn;
+  }, "tool-only messages did not reach the live transcript");
+  assert.equal(turn.endedAt, null);
+  assert.deepEqual(turn.assistantMessages.map(({ id, content }) => ({ id, content })), [
+    { id: "reply", content: "Review complete." },
+  ]);
+  await runtime.session.emit("session.idle");
+  const completed = await waitFor(() => {
+    const turn = JSON.parse(realReadFileSync(path, "utf8")).turns.at(-1);
+    return turn?.endedAt && turn;
+  }, "completed transcript missing");
+  assert.deepEqual(completed.assistantMessages, turn.assistantMessages);
+  assert.deepEqual(completed.tools, turn.tools);
+});
+
+test("blank live deltas preserve whitespace and identity when text arrives", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await runtime.session.emit("user.message", { content: "stream" });
+  await runtime.session.emit("assistant.turn_start");
+  await runtime.session.emit("assistant.message_delta", { messageId: "stream", deltaContent: " \n" });
+  await runtime.session.emit("tool.execution_start", { toolCallId: "marker", toolName: "view" });
+  const path = join(runtime.sessions, `${runtime.appSessionId}.transcript.json`);
+  const readTurn = () => JSON.parse(realReadFileSync(path, "utf8")).turns.at(-1);
+  await waitFor(() => readTurn()?.tools.length === 1, "live transcript not published");
+  assert.deepEqual(readTurn().assistantMessages, []);
+
+  await runtime.session.emit("assistant.message_delta", { messageId: "stream", deltaContent: "Reply" });
+  await waitFor(() => readTurn().assistantMessages.some((message) => message.content === " \nReply"),
+    "leading whitespace or streamed text was lost", 4_000);
+  const finalContent = " \nReply complete.\n";
+  await runtime.session.emit("assistant.message", { messageId: "stream", content: finalContent });
+  await waitFor(() => readTurn().assistantMessages.some((message) => message.content === finalContent),
+    "final text did not replace streamed text");
+  assert.deepEqual(readTurn().assistantMessages.map(({ id, content }) => ({ id, content })), [
+    { id: "stream", content: finalContent },
+  ]);
+
+  await runtime.session.emit("assistant.message_delta", { messageId: "discarded", deltaContent: "partial" });
+  await waitFor(() => readTurn().assistantMessages.some((message) => message.id === "discarded"),
+    "partial text missing", 4_000);
+  await runtime.session.emit("assistant.message", { messageId: "discarded", content: "" });
+  await waitFor(() => !readTurn().assistantMessages.some((message) => message.id === "discarded"),
+    "empty final message left a stale partial or blank bubble");
+});
+
 test("an unknown native send outcome upgrades when its exact late SDK reply arrives", {
   concurrency: false,
 }, async (t) => {
