@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { registerHooks, syncBuiltinESMExports } from "node:module";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
@@ -199,6 +199,8 @@ class FakeSession {
         if (method === "session.metadata.isProcessing") return this.processingHandler(params);
         if (method === "session.usage.getMetrics") return this.usageHandler(params);
         if (method === "session.workspaces.diff") return this.diffHandler(params);
+        if (method === "session.model.getCurrent") return { modelId: "gpt-5.6-sol" };
+        if (method === "session.model.list") return this.modelListHandler();
         this.workflowCalls.push({ method, ...params });
         if (method === "session.send") return this.sendHandler(params);
         if (method === "session.abort") {
@@ -446,6 +448,78 @@ test("native send uses explicit owner and mode, and exact replay cannot submit t
     assert.equal(Object.hasOwn(call, "source"), false);
   }
   assert.deepEqual(runtime.session.closeCalls, []);
+});
+
+test("screenshots are captured as blobs for the exact conversation and cannot replay", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, (session) => {
+    session.modelListHandler = async () => ({ list: [{
+      id: "gpt-5.6-sol", capabilities: {
+        supports: { vision: true },
+        limits: { vision: { max_prompt_images: 4, max_prompt_image_size: 2097152,
+          supported_media_types: ["image/png", "image/jpeg"] } },
+      },
+    }] });
+  });
+  await workflowReady(runtime);
+  const id = uuid();
+  const bytes = Buffer.from("fixture image bytes");
+  const directory = join(runtime.sessions, "attachments-v1");
+  realMkdirSync(directory);
+  const fields = operationFields(runtime, "session-send");
+  const metadata = {
+    id, sessionId: runtime.appSessionId, conversationEpoch: fields.conversationEpoch,
+    mimeType: "image/png", byteCount: bytes.length, expiresAtMilliseconds: Date.now() + 60000,
+  };
+  realWriteFileSync(join(directory, `${id}.image`), bytes);
+  realWriteFileSync(join(directory, `${id}.json`), JSON.stringify({
+    attachment: metadata, sha256: createHash("sha256").update(bytes).digest("hex"),
+  }));
+  const request = workflowHandoff(runtime, "session-send", {
+    prompt: "Inspect this screenshot", mode: "enqueue", attachmentIds: [id],
+  }, fields);
+  trigger(runtime, `${runtime.appSessionId}.session-send.json`);
+  await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "attachment not delivered");
+  const sends = runtime.session.workflowCalls.filter((call) => call.method === "session.send");
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].sessionId, runtime.copilotSessionId);
+  assert.equal(sends[0].attachments[0].data, bytes.toString("base64"));
+  assert.equal(sends[0].attachments[0].type, "blob");
+  realRmSync(directory, { recursive: true });
+  writeHandoff(runtime, request.path, request.payload);
+  trigger(runtime, `${runtime.appSessionId}.session-send.json`);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runtime.session.workflowCalls.filter((call) => call.method === "session.send").length, 1);
+});
+
+test("missing images, foreign epochs, and unsupported models reject the whole prompt", {
+  concurrency: false,
+}, async (t) => {
+  for (const scenario of ["missing", "foreign", "model"]) {
+    const runtime = await createRuntime(t, (session) => {
+      session.modelListHandler = async () => ({ list: [{
+        id: "gpt-5.6-sol", capabilities: {
+          supports: { vision: scenario !== "model" },
+          limits: { vision: { max_prompt_images: 4, max_prompt_image_size: 2097152,
+            supported_media_types: ["image/png"] } },
+        },
+      }] });
+    });
+    await workflowReady(runtime);
+    const id = uuid(), directory = join(runtime.sessions, "attachments-v1");
+    realMkdirSync(directory);
+    if (scenario === "foreign") {
+      realWriteFileSync(join(directory, `${id}.json`), JSON.stringify({
+        attachment: { id, sessionId: runtime.appSessionId, conversationEpoch: "other" },
+      }));
+    }
+    const request = workflowHandoff(runtime, "session-send", {
+      prompt: "Must never send text alone", mode: "immediate", attachmentIds: [id],
+    });
+    await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", scenario);
+    assert.equal(runtime.session.workflowCalls.some((call) => call.method === "session.send"), false);
+  }
 });
 
 test("native stop is independent of an unresolved send and never closes the terminal", {

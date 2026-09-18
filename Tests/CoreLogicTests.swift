@@ -71,18 +71,21 @@ final class CoreLogicTests: XCTestCase {
     func testCopilotExtensionNormalizesSnakeCaseModelCatalog() throws {
         try requireNodeForJavaScriptTests()
         guard let start = CopilotExtension.script.range(of: "function pickKey"),
-              let end = CopilotExtension.script.range(of: "async function refreshModels")
+              let end = CopilotExtension.script.range(of: "async function refreshModels"),
+              let imageStart = CopilotExtension.script.range(of: "function imageCapabilities"),
+              let imageEnd = CopilotExtension.script.range(of: "async function loadImageAttachments")
         else {
             return XCTFail("catalog mapping helpers not found in extension script")
         }
         let mapping = String(CopilotExtension.script[start.lowerBound..<end.lowerBound])
+        let imageMapping = String(CopilotExtension.script[imageStart.lowerBound..<imageEnd.lowerBound])
 
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let script = root.appendingPathComponent("mapping.mjs")
-        try (mapping + Self.modelCatalogAssertions).write(
+        try (imageMapping + mapping + Self.modelCatalogAssertions).write(
             to: script,
             atomically: true,
             encoding: .utf8
@@ -128,7 +131,14 @@ final class CoreLogicTests: XCTestCase {
             name: "Claude Haiku 4.5",
             model_picker_category: "lightweight",
             model_picker_enabled: true,
-            capabilities: { supports: { vision: true } },
+            capabilities: {
+                supports: { vision: true },
+                limits: { vision: {
+                    max_prompt_images: 10,
+                    max_prompt_image_size: 10 * 1024 * 1024,
+                    supported_media_types: ["image/png", "image/jpeg", "image/webp"],
+                } },
+            },
             billing: { token_prices: {} },
         },
         {
@@ -158,11 +168,18 @@ final class CoreLogicTests: XCTestCase {
     check(sol.longContextAvailable === true, "long context must come from billing.token_prices.long_context");
     check(sol.category === "powerful", "category must come from model_picker_category");
     check(sol.disabled !== true, "an enabled model must not be marked disabled");
+    check(sol.imageAttachments === undefined, "a model without vision must omit image attachments");
 
     const haiku = snakeCase[1];
     check(haiku.supportedReasoningEfforts === undefined, "a model without reasoning support must omit efforts");
     check(haiku.longContextAvailable === false, "a model without a long context tier must report false");
     check(haiku.category === "lightweight", "lightweight category must round-trip");
+    check(haiku.imageAttachments.maxImages === 4, "snake_case image count must be capped at four");
+    check(haiku.imageAttachments.maxBytes === 2 * 1024 * 1024, "snake_case image bytes must be capped at 2 MiB");
+    check(
+        JSON.stringify(haiku.imageAttachments.mimeTypes) === JSON.stringify(["image/png", "image/jpeg"]),
+        "image MIME types must be limited to supported screenshot formats"
+    );
 
     check(snakeCase[2].disabled === true, "model_picker_enabled:false must mark the model disabled");
     check(snakeCase[3].disabled === true, "policy.state:disabled must mark the model disabled");
@@ -176,6 +193,14 @@ final class CoreLogicTests: XCTestCase {
             modelPickerCategory: "versatile",
             supportedReasoningEfforts: ["low", "high"],
             defaultReasoningEffort: "high",
+            capabilities: {
+                supports: { vision: true },
+                limits: { vision: {
+                    maxPromptImages: 2,
+                    maxPromptImageSize: 1024,
+                    supportedMediaTypes: ["image/jpeg"],
+                } },
+            },
             billing: { tokenPrices: { longContext: { inputPrice: 1 } } },
         },
     ]);
@@ -186,6 +211,12 @@ final class CoreLogicTests: XCTestCase {
     );
     check(camelCase[0].defaultReasoningEffort === "high", "camelCase default effort must still map");
     check(camelCase[0].longContextAvailable === true, "camelCase long context must still map");
+    check(camelCase[0].imageAttachments.maxImages === 2, "stricter camelCase image count must be preserved");
+    check(camelCase[0].imageAttachments.maxBytes === 1024, "stricter camelCase image bytes must be preserved");
+    check(
+        JSON.stringify(camelCase[0].imageAttachments.mimeTypes) === JSON.stringify(["image/jpeg"]),
+        "camelCase image MIME types must still map"
+    );
 
     // `supports.reasoningEffort` is typed as a boolean, so it must not become a list.
     const boolEffort = normalizeAvailableModels([

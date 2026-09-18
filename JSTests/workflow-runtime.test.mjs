@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { crc32, deflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -18,10 +19,12 @@ test("native workflow RPCs target the requested session", {
   const root = await mkdtemp(join(tmpdir(), "copilot-workflow-rpc-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   execFileSync("git", ["init", "--quiet", root]);
+  const requests = [];
   const server = createServer(async (request, response) => {
     let body = "";
     for await (const chunk of request) body += chunk;
     const input = JSON.parse(body || "{}");
+    requests.push(input);
     const id = "offline-workflow-fixture";
     if (input.stream) {
       response.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -58,6 +61,11 @@ test("native workflow RPCs target the requested session", {
   const config = {
     model: "fixture",
     availableTools: new ToolSet(),
+    modelCapabilities: {
+      supports: { vision: true },
+      limits: { vision: { supported_media_types: ["image/png", "image/jpeg"],
+        max_prompt_images: 4, max_prompt_image_size: 2097152 } },
+    },
     workingDirectory: root,
     provider: {
       type: "openai",
@@ -99,6 +107,29 @@ test("native workflow RPCs target the requested session", {
   assert.equal((await first.getEvents()).some((event) =>
     event.type === "user.message" && event.data.content.startsWith("Reply fixture")
   ), false);
+  // Exercise the real protocol's maximum frame, not merely a tiny image or
+  // a session event which could report acceptance after silently omitting it.
+  const png = maximumScreenshotPNG();
+  assert.equal(png.length, 2097152);
+  for (const mode of ["enqueue", "immediate"]) {
+    const idle = new Promise((resolve) => {
+      const unsubscribe = second.on("session.idle", () => { unsubscribe(); resolve(); });
+    });
+    const before = requests.length;
+    await call("session.send", {
+      prompt: `Inspect all four screenshots (${mode}).`, mode,
+      attachments: Array.from({ length: 4 }, (_, i) => ({
+        type: "blob", mimeType: "image/png", displayName: `Screenshot-${i}.png`,
+        data: png.toString("base64"),
+      })),
+    });
+    await idle;
+    const images = requests.slice(before).flatMap((request) => request.messages ?? [])
+      .filter((message) => message.role === "user" && Array.isArray(message.content))
+      .at(-1)?.content.filter((part) => part.type === "image_url") ?? [];
+    assert.equal(images.length, 4, "all image bytes must reach the provider");
+    assert.ok(images.every((image) => image.image_url.url.startsWith("data:image/png;base64,")));
+  }
   const metrics = await call("session.usage.getMetrics");
   assert.equal(typeof metrics.totalUserRequests, "number");
   const abort = await call("session.abort");
@@ -111,3 +142,62 @@ test("native workflow RPCs target the requested session", {
   assert.equal((await call("session.metadata.snapshot")).sessionLimits, null);
   console.log("Verified runtime:", await client.getStatus());
 });
+
+test("live selected model matches its own image-capability catalog", {
+  skip: !process.env.COPILOT_WORKFLOW_SDK || !process.env.COPILOT_WORKFLOW_MODEL,
+  timeout: 60_000,
+}, async (t) => {
+  const { CopilotClient, RuntimeConnection, ToolSet } = await import(
+    pathToFileURL(join(process.env.COPILOT_WORKFLOW_SDK, "index.js")).href
+  );
+  const root = await mkdtemp(join(tmpdir(), "copilot-image-model-"));
+  const client = new CopilotClient({
+    connection: RuntimeConnection.forStdio({ path: process.env.COPILOT_WORKFLOW_CLI || "copilot" }),
+    mode: "empty", useLoggedInUser: true, baseDirectory: root, workingDirectory: root,
+  });
+  t.after(async () => {
+    await client.stop();
+    await rm(root, { recursive: true, force: true });
+  });
+  await client.start();
+  const session = await client.createSession({
+    model: process.env.COPILOT_WORKFLOW_MODEL, availableTools: new ToolSet(), workingDirectory: root,
+  });
+  const current = await session.connection.sendRequest("session.model.getCurrent", { sessionId: session.sessionId });
+  const catalog = await session.connection.sendRequest("session.model.list", { sessionId: session.sessionId });
+  assert.equal(typeof current.modelId, "string");
+  assert.ok(current.modelId.length > 0);
+  const selected = catalog.list.find((model) => model.id === current.modelId);
+  assert.ok(selected, "selected model must be found by ID, not display name");
+  assert.equal(selected.capabilities?.supports?.vision, true);
+  const limits = selected.capabilities?.limits?.vision;
+  assert.ok(limits.max_prompt_images > 0);
+  assert.ok(limits.max_prompt_image_size > 0);
+  assert.ok(limits.supported_media_types.includes("image/png"));
+});
+
+function maximumScreenshotPNG() {
+  function chunk(type, bytes) {
+    const body = Buffer.concat([Buffer.from(type), bytes]);
+    const length = Buffer.alloc(4), checksum = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length); checksum.writeUInt32BE(crc32(body));
+    return Buffer.concat([length, body, checksum]);
+  }
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(700, 0); header.writeUInt32BE(700, 4);
+  header[8] = 8; header[9] = 6;
+  const pixels = Buffer.alloc((700 * 4 + 1) * 700);
+  let random = 1234567;
+  for (let y = 0; y < 700; y++) {
+    for (let x = 1; x <= 2800; x++) {
+      random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+      pixels[y * 2801 + x] = random >>> 24;
+    }
+  }
+  const parts = [Buffer.from("89504e470d0a1a0a", "hex"), chunk("IHDR", header),
+    chunk("IDAT", deflateSync(pixels))];
+  const end = chunk("IEND", Buffer.alloc(0));
+  const padding = Buffer.alloc(2097152 - Buffer.concat(parts).length - end.length - 12, 65);
+  padding.write("Comment\0");
+  return Buffer.concat([...parts, chunk("tEXt", padding), end]);
+}

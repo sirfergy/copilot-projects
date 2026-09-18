@@ -24,6 +24,22 @@ built separately; they are not included in the public desktop distribution.
 If you already use a remote-enabled installation, keep using its integrated
 distribution rather than replacing it with the standalone download.
 
+## Remote screenshot attachments
+
+Remote integrations can stage PNG/JPEG screenshots privately and attach them to
+an existing Copilot conversation through the native SDK message path. This needs
+an updated integrated host/client and a restarted Copilot tracker advertising
+`image-attachments-v1`; text-only clients remain compatible. The tracker verifies
+the selected model's image limits and resolves session/epoch-bound upload IDs to
+inline image bytes before sending. Missing or unsupported images reject the
+whole message, never fall back to terminal input.
+
+Uploads are limited to four images, 2 MiB each, and 16 megapixels, further reduced
+by the selected model's limits. They live outside project repositories in the
+private state directory, expire after seven days, and are reclaimed on subsequent
+uploads. Storage is capped at 128 MiB/128 entries without evicting unexpired
+uploads. This repository does not add an upload UI to the standalone desktop app.
+
 ## A workspace for parallel work
 
 - **Projects and tabs.** Group sessions by project without juggling terminal
