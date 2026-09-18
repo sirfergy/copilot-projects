@@ -61,17 +61,20 @@ struct Project: Identifiable, Codable, Equatable {
     var cwd: String
     var sessions: [Session]
     var selectedSessionId: String?
+    var creationFingerprint: String?
 
     init(id: String = UUID().uuidString,
          name: String,
          cwd: String,
          sessions: [Session] = [],
-         selectedSessionId: String? = nil) {
+         selectedSessionId: String? = nil,
+         creationFingerprint: String? = nil) {
         self.id = id
         self.name = name
         self.cwd = cwd
         self.sessions = sessions
         self.selectedSessionId = selectedSessionId
+        self.creationFingerprint = creationFingerprint
     }
 }
 

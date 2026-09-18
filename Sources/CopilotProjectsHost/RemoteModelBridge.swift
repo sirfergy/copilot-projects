@@ -39,6 +39,10 @@ final class RemoteModelBridge: SessionHost {
         model?.remoteWorkspaceSnapshot()
     }
 
+    func createProject(_ request: RemoteCreateProjectRequest) -> RemoteProjectCreationOutcome {
+        model?.createRemoteProject(request) ?? .unavailable
+    }
+
     func hasSession(_ sessionId: String) -> Bool {
         model?.projects.contains {
             $0.sessions.contains { $0.id == sessionId }
