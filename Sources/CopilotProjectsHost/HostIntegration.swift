@@ -30,6 +30,7 @@ public protocol HostIntegration: AnyObject {
 @MainActor
 public protocol SessionHost: AnyObject, Sendable {
     func workspace() -> RemoteWorkspaceSnapshot?
+    func createProject(_ request: RemoteCreateProjectRequest) -> RemoteProjectCreationOutcome
     func hasSession(_ sessionId: String) -> Bool
     func createSession(_ request: RemoteCreateSessionRequest) -> RemoteSessionCreationOutcome
     func createConfiguredSession(_ request: RemoteCreateSessionRequest) -> RemoteSessionCreationOutcome
@@ -56,6 +57,10 @@ public protocol SessionHost: AnyObject, Sendable {
 }
 
 public extension SessionHost {
+    func createProject(_ request: RemoteCreateProjectRequest) -> RemoteProjectCreationOutcome {
+        .unsupported
+    }
+
     /// Older conformers must fail closed, not silently use legacy launch semantics.
     func createConfiguredSession(_ request: RemoteCreateSessionRequest) -> RemoteSessionCreationOutcome {
         .unavailable
