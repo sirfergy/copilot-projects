@@ -31,6 +31,8 @@ public struct RemoteCreateProjectRequest: Codable, Equatable, Sendable {
     }
 }
 
+/// `projectId` is the canonical UUID string of `requestId`; clients can verify
+/// this identity, which remains stable when the project is renamed.
 public struct RemoteCreateProjectResponse: Codable, Equatable, Sendable {
     public let requestId: UUID
     public let projectId: String

@@ -8,6 +8,7 @@ struct ProjectCreationRecord: Codable, Equatable, Sendable {
     let creationFingerprint: String
 
     static func fingerprint(name: String) -> String {
+        // Bind retries without retaining renamed or deleted project names in the ledger.
         SHA256.hash(data: Data("copilot-projects/project-creation/v1\u{0}\(name)".utf8))
             .map { String(format: "%02x", $0) }.joined()
     }
