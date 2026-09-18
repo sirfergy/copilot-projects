@@ -183,6 +183,12 @@ The public `CopilotProjectsHost`, `CopilotProjectsProtocol`, and
 making the desktop depend on a private repository. The standalone app reports
 remote commands as unavailable and leaves existing remote settings unchanged.
 
+`SessionHost.createProject` creates an empty, named group without starting a shell
+or requiring Copilot, `dtach`, or a repository folder. Integrations retain the
+same request ID and name for retries. Successful creation is acknowledged only
+after workspace and replay-ledger persistence; remembered requests cannot recreate
+a deleted project. Replay records are bounded to 512 entries and seven days.
+
 ## License
 
 [MIT](LICENSE). The bundled `dtach` helper is licensed under GPLv2; its source is

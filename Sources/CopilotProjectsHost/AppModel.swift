@@ -137,6 +137,17 @@ struct RemoteElicitationTerminalTarget {
     let sendEnter: () -> Bool
 }
 
+public enum RemoteProjectCreationOutcome: Equatable, Sendable {
+    case created(RemoteCreateProjectResponse)
+    case existing(RemoteCreateProjectResponse)
+    case conflict
+    case gone
+    case badRequest
+    case unsupported
+    case unavailable
+    case persistenceUnavailable
+}
+
 /// Outcome of a remote `POST /sessions/create`. Each case maps to a distinct HTTP
 /// status at the gateway so the client can react precisely (select, retry, or show
 /// an unsupported/unavailable message).
@@ -464,6 +475,7 @@ final class AppModel: ObservableObject {
           _ initialPrompt: String?, _ allowAll: Bool) -> Void)?
     /// Persistent idempotency/tombstone store behind remote session creation.
     private let sessionCreationLedger: SessionCreationLedger
+    private let projectCreationLedger: ProjectCreationLedger
 
     /// Sessions hosting a live agent (refreshed by the liveness reconciler). Used
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.
@@ -513,6 +525,7 @@ final class AppModel: ObservableObject {
         },
         remoteSessionLauncher: ((String, String?, String?, Bool) -> Void)? = nil,
         sessionCreationLedger: SessionCreationLedger = SessionCreationLedger(),
+        projectCreationLedger: ProjectCreationLedger = ProjectCreationLedger(),
         agentActivityRefreshThrottle: TimeInterval = 0.5,
         agentActivityCooldownScheduler: @escaping (
             _ delay: TimeInterval,
@@ -551,6 +564,7 @@ final class AppModel: ObservableObject {
         self.remoteSessionBackendAvailable = remoteSessionBackendAvailable
         self.remoteSessionLauncher = remoteSessionLauncher
         self.sessionCreationLedger = sessionCreationLedger
+        self.projectCreationLedger = projectCreationLedger
         self.agentActivityRefreshThrottle = agentActivityRefreshThrottle
         self.agentActivityCooldownScheduler = agentActivityCooldownScheduler
         self.agentActivityScanObserver = agentActivityScanObserver
@@ -1090,6 +1104,50 @@ final class AppModel: ObservableObject {
         alert.messageText = title
         alert.informativeText = message
         alert.runModal()
+    }
+
+    func createRemoteProject(
+        _ request: RemoteCreateProjectRequest,
+        now: Date = Date()
+    ) -> RemoteProjectCreationOutcome {
+        guard !isTerminating else { return .unavailable }
+        guard !didFailToLoadWorkspaceState else { return .persistenceUnavailable }
+        guard let name = RemoteProjectContract.normalizedName(request.name) else { return .badRequest }
+        let projectId = request.requestId.uuidString
+        let fingerprint = ProjectCreationRecord.fingerprint(name: name)
+        let response = RemoteCreateProjectResponse(requestId: request.requestId, projectId: projectId)
+        do {
+            let record = try projectCreationLedger.record(for: request.requestId, now: now)
+            if let record, record.creationFingerprint != fingerprint { return .conflict }
+            let outcome: RemoteProjectCreationOutcome
+            if let index = projectIndex(projectId) {
+                let bound = record?.creationFingerprint ?? projects[index].creationFingerprint
+                guard bound == fingerprint else { return .conflict }
+                projects[index].creationFingerprint = fingerprint
+                outcome = .existing(response)
+            } else {
+                guard record == nil else { return .gone }
+                projects.append(Project(
+                    id: projectId, name: name, cwd: Paths.defaultStartupDir,
+                    creationFingerprint: fingerprint
+                ))
+                if selectedProjectId == nil { selectedProjectId = projectId }
+                outcome = .created(response)
+            }
+            // Retain the live intent if persistence fails so the same request can repair it.
+            try persistWorkspace()
+            try projectCreationLedger.remember(
+                record ?? ProjectCreationRecord(
+                    requestId: projectId, createdAt: now, creationFingerprint: fingerprint
+                ),
+                now: now
+            )
+            return outcome
+        } catch {
+            NSLog("copilot-projects: could not persist remote project request "
+                + "\(projectId); retry with the same request id: \(error.localizedDescription)")
+            return .persistenceUnavailable
+        }
     }
 
     /// Create (or idempotently resolve) a session for a remote `POST /sessions/create`.

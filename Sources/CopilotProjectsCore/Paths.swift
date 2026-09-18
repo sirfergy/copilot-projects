@@ -242,6 +242,10 @@ public enum Paths {
         stateDir.appendingPathComponent("session-creation-ledger.json")
     }
 
+    public static var projectCreationLedgerPath: URL {
+        stateDir.appendingPathComponent("project-creation-ledger.json")
+    }
+
     /// Root for the durable Kitty inline-image store (`RemoteKittyImageDiskStore`):
     /// exact retained PNG bytes + persisted current-selection/placement metadata,
     /// so a session's images survive an app relaunch (or a reboot that kills the

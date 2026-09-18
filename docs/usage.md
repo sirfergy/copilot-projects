@@ -92,6 +92,8 @@ Stop has its own handoff lane, so an unresolved send cannot block cancellation.
 
 The session drawer and native/web conversation views render live response updates
 within their conversation turns. Final messages replace their matching streamed text.
+Newly observed empty or whitespace-only assistant messages are omitted from live
+and completed transcripts; their tool activity remains visible.
 
 **Usage and background work** shows accumulated session AI credits, the latest
 context observation, active agents, and schedules. Session totals and the current

@@ -64,20 +64,6 @@ struct SessionCreationRecord: Codable, Equatable, Sendable {
 /// silently recreated by a retried request. Entries expire after a week and the
 /// file is capped so a long-lived host can't grow it without bound.
 final class SessionCreationLedger: @unchecked Sendable {
-    private enum PersistenceError: LocalizedError {
-        case couldNotCreateTemporaryFile(String)
-        case couldNotReplaceLedger(path: String, code: Int32)
-
-        var errorDescription: String? {
-            switch self {
-            case .couldNotCreateTemporaryFile(let path):
-                return "Could not create temporary session creation ledger at \(path)"
-            case .couldNotReplaceLedger(let path, let code):
-                return "Could not replace session creation ledger at \(path) (errno \(code))"
-            }
-        }
-    }
-
     /// Keep at most this many records — the most recently created win once the cap
     /// is exceeded. Real usage is a handful; the bound only guards against abuse.
     static let maxRecords = 512
@@ -137,18 +123,7 @@ final class SessionCreationLedger: @unchecked Sendable {
     // MARK: - Persistence
 
     private func load() throws -> [SessionCreationRecord] {
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch {
-            let nsError = error as NSError
-            let isMissing =
-                (nsError.domain == NSCocoaErrorDomain
-                    && nsError.code == CocoaError.Code.fileReadNoSuchFile.rawValue)
-                || (nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(ENOENT))
-            if isMissing { return [] }
-            throw error
-        }
+        guard let data = try CreationLedgerFile.read(from: url) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(LedgerFile.self, from: data).records
@@ -158,41 +133,9 @@ final class SessionCreationLedger: @unchecked Sendable {
     /// created with 0600, fsynced, then `rename(2)`'d over the destination so a
     /// reader never observes a partial or world-readable file.
     private func persist(_ records: [SessionCreationRecord]) throws {
-        let directoryURL = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(
-            at: directoryURL,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(LedgerFile(records: records))
-        let temporaryURL = directoryURL
-            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
-        guard FileManager.default.createFile(
-            atPath: temporaryURL.path,
-            contents: nil,
-            attributes: [.posixPermissions: 0o600]
-        ) else {
-            throw PersistenceError.couldNotCreateTemporaryFile(temporaryURL.path)
-        }
-        do {
-            let handle = try FileHandle(forWritingTo: temporaryURL)
-            do {
-                try handle.write(contentsOf: data)
-                try handle.synchronize()
-                try handle.close()
-            } catch {
-                try? handle.close()
-                throw error
-            }
-            if rename(temporaryURL.path, url.path) != 0 {
-                let code = errno
-                throw PersistenceError.couldNotReplaceLedger(path: url.path, code: code)
-            }
-        } catch {
-            try? FileManager.default.removeItem(at: temporaryURL)
-            throw error
-        }
+        try CreationLedgerFile.write(data, to: url)
     }
 }
