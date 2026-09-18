@@ -540,13 +540,14 @@ final class RemoteKittyImageCapture {
     private var dataByKey: [StoredKey: Data] = [:]
     private var totalBytes = 0
     private var latestVersion: [UInt32: UInt64] = [:]
-    /// Wall-clock time each retained `(imageId, version)` was captured/displayed,
-    /// used only to associate an image with the transcript turn active at that
-    /// moment (see `retainedImageMetadata`). In-memory only and intentionally
+    /// Origin time for each retained `(imageId, version)`. An unchanged redraw
+    /// of an advertised image keeps its earlier origin so it stays with the
+    /// same transcript turn (see `retainedImageMetadata`). In-memory only and intentionally
     /// NOT persisted to the disk store: after a relaunch a restored image has no
     /// display time, so it simply isn't associated to any turn (it still renders
     /// in Terminal mode). Kept in lockstep with `dataByKey`.
     private var displayedAt: [StoredKey: Date] = [:]
+    private let now: () -> Date
 
     // Ids with a currently *active* Unicode-placeholder placement — tracked
     // separately from `latestVersion`/`dataByKey` (retained PNG bytes) so the
@@ -720,12 +721,14 @@ final class RemoteKittyImageCapture {
     ///     `nil` (no persistence at all) rather than the real shared
     ///     singleton, so every existing test — and any other caller that
     ///     never passes one explicitly — can never touch disk.
+    ///   - now: Clock for capture origins; tests control turn/redraw ordering.
     init(
         sessionId: String = UUID().uuidString,
         epoch: UInt32 = UInt32.random(in: UInt32.min ... UInt32.max),
         budget: RemoteKittyImageCaptureBudget? = nil,
         maxAccumulatedBase64Bytes: Int = remoteKittyMaxAccumulatedBase64Bytes,
-        diskStore: RemoteKittyImageDiskStore? = nil
+        diskStore: RemoteKittyImageDiskStore? = nil,
+        now: @escaping () -> Date = Date.init
     ) {
         self.sessionId = sessionId
         self.epoch = epoch
@@ -738,6 +741,7 @@ final class RemoteKittyImageCapture {
         self.budget = budget ?? .shared
         self.maxAccumulatedBase64Bytes = maxAccumulatedBase64Bytes
         self.diskStore = diskStore
+        self.now = now
     }
 
     /// Feeds raw terminal output bytes. Safe to call with any chunking of the
@@ -1389,11 +1393,18 @@ final class RemoteKittyImageCapture {
     }
 
     private func retain(imageId: UInt32, data: Data, activates: Bool, explicitPlacementId: UInt32?) {
+        // Capture before either the retained version or placement state changes.
+        let hadAdvertisedVersion = latestVersion[imageId] != nil && isAnyPlacementActive(imageId: imageId)
+        let originalDisplayTime = latestVersion[imageId].flatMap { previousVersion -> Date? in
+            let previousKey = StoredKey(imageId: imageId, version: previousVersion)
+            guard hadAdvertisedVersion, dataByKey[previousKey] == data else { return nil }
+            return displayedAt[previousKey]
+        }
         let version = nextVersion()
         let key = StoredKey(imageId: imageId, version: version)
         order.append(key)
         dataByKey[key] = data
-        displayedAt[key] = Date()
+        displayedAt[key] = originalDisplayTime ?? now()
         totalBytes += data.count
         if activates, let rows = pendingRows, let columns = pendingColumns {
             let geometryKey = PlacementGeometryKey(
@@ -1405,11 +1416,6 @@ final class RemoteKittyImageCapture {
                 rows: rows, columns: columns, x: pendingX, y: pendingY, z: pendingZ
             )
         }
-        // Whether a *previous* version was already being advertised for
-        // `imageId` — captured before either `latestVersion` or activation
-        // state changes below — determines whether this retain's new
-        // version necessarily changes what a scan currently discovers.
-        let hadAdvertisedVersion = latestVersion[imageId] != nil && isAnyPlacementActive(imageId: imageId)
         latestVersion[imageId] = version
         // `a=T` (transmit + display) always (re)activates a placement —
         // whether `imageId` was previously active, had its placement

@@ -40,6 +40,11 @@ private state directory, expire after seven days, and are reclaimed on subsequen
 uploads. Storage is capped at 128 MiB/128 entries without evicting unexpired
 uploads. This repository does not add an upload UI to the standalone desktop app.
 
+Remote transcript images keep their original turn when the terminal retransmits
+unchanged, still-advertised image data. A redraw does not move an older image to
+the newest reply. This retains the existing one-image-per-terminal-ID model;
+it does not reconstruct attachment history after image data has been discarded.
+
 ## A workspace for parallel work
 
 - **Projects and tabs.** Group sessions by project without juggling terminal
