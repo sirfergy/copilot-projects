@@ -5,6 +5,26 @@ import AppKit
 
 final class NotificationIndicatorTests: XCTestCase {
     @MainActor
+    func testSessionTabAccessibilityKeepsSelectionAndAttentionDistinct() {
+        var session = Session(title: "Review", cwd: "/tmp")
+        session.status = .waiting
+        session.hasUnread = true
+        let selected = SessionTab(session: session, isActive: true, onSelect: {}, onClose: {})
+        XCTAssertEqual(selected.accessibilityStatus, "Selected, Waiting for input, Unread")
+
+        session.status = .idle
+        session.finishedUnseen = true
+        let background = SessionTab(session: session, isActive: false, onSelect: {}, onClose: {})
+        XCTAssertEqual(background.accessibilityStatus, "Finished, Unread")
+        session.hasUnread = false
+        session.finishedUnseen = false
+        XCTAssertEqual(
+            SessionTab(session: session, isActive: false, onSelect: {}, onClose: {}).accessibilityStatus,
+            "Idle"
+        )
+    }
+
+    @MainActor
     func testUnreadIndicatorDoesNotDuplicateFinishedDot() {
         let cases: [(status: SessionStatus, finished: Bool, unread: Bool, showNumber: Bool, expected: Bool)] = [
             (.idle, false, false, false, false),

@@ -4,6 +4,7 @@ import CopilotProjectsProtocol
 import CopilotProjectsUI
 
 struct TranscriptOverlay: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var controller: TranscriptController
     let isOpen: Bool
     let onClose: () -> Void
@@ -22,7 +23,7 @@ struct TranscriptOverlay: View {
                     onClose: onClose,
                     onAction: onAction
                 )
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
             } else {
                 Button(action: onOpen) {
                     Label("Show session details", systemImage: "sidebar.trailing")

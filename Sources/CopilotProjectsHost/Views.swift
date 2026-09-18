@@ -587,6 +587,20 @@ struct SessionTab: View {
         session.hasUnread && (showNumber || session.status != .idle || !session.finishedUnseen)
     }
 
+    var accessibilityStatus: String {
+        var states: [String] = []
+        if isActive { states.append("Selected") }
+        switch session.status {
+        case .running: states.append("Running")
+        case .waiting: states.append("Waiting for input")
+        case .idle: states.append(session.finishedUnseen ? "Finished" : "Idle")
+        }
+        if session.hasUnread { states.append("Unread") }
+        if session.hasBackgroundWork { states.append("Background work active") }
+        if !session.schedules.isEmpty { states.append("Scheduled work") }
+        return states.joined(separator: ", ")
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             ZStack {
@@ -632,5 +646,13 @@ struct SessionTab: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
+        .accessibilityRepresentation {
+            HStack {
+                Button(session.title, action: onSelect)
+                    .accessibilityValue(accessibilityStatus)
+                    .accessibilityAddTraits(isActive ? .isSelected : [])
+                Button("Close \(session.title)", action: onClose)
+            }
+        }
     }
 }
