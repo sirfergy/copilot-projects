@@ -85,6 +85,10 @@ This component preview uses illustrative sample data.
 Hold `⌘` or `⌃` to reveal numbered navigation hints. Use the session-details
 button to open the completed-turn drawer.
 
+VoiceOver exposes each session's selection and attention state, with separate
+select and close actions. The session-details drawer uses a fade instead of
+sliding when Reduce Motion is enabled.
+
 The **+** side of the split button starts an interactive Copilot CLI session immediately,
 inheriting the current session's working directory. Its dropdown offers
 **Start with Prompt…** (a multiline composer), **New Terminal** (just a shell), and
