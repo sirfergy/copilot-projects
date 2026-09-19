@@ -1098,6 +1098,8 @@ test("cursor reads recover text, boolean, choice, and multiselect when live noti
   for (const [kind, field, answer] of [
     ["text", { type: "string" }, "https://example.com"],
     ["boolean", { type: "boolean", default: true }, true],
+    ["boolean-other", { type: "boolean", default: true }, "Keep the deferred threads open."],
+    ["boolean-other-literal", { type: "boolean" }, "false"],
     ["choice", { type: "string", enum: ["a", "b"] }, "b"],
     ["multiple", { type: "array", items: { type: "string", enum: ["a", "b"] } }, ["a", "b"]],
   ]) {
@@ -1117,12 +1119,13 @@ test("cursor reads recover text, boolean, choice, and multiselect when live noti
     });
     trigger(runtime, `${runtime.appSessionId}.elicitation-response.json`);
     await waitFor(() => receipt(runtime, fields.operationId)?.state === "applied", "answer not applied");
+    assert.deepEqual(runtime.session.elicitationCalls.at(-1).result.content, { answer });
     await runtime.session.emit("elicitation.completed", { requestId, action: "accept" }, {}, false);
     runtime.intervalCallback();
     await waitFor(() => readSnapshot(runtime).trackedElicitations.length === 0, "answered form remained");
     await new Promise((resolve) => setImmediate(resolve));
   }
-  assert.equal(runtime.session.elicitationCalls.length, 4);
+  assert.equal(runtime.session.elicitationCalls.length, 6);
   assert.ok(runtime.session.questionEventCalls.every((call) =>
     call.sessionId === runtime.copilotSessionId && call.includeEphemeral === true
       && call.types.length === 4 && call.agentScope === "all"
