@@ -122,6 +122,12 @@ stops their processes; project files are not deleted.
 These are user-interface safeguards based on reported activity, not a new process
 detector. Automation and raw terminal commands retain their existing behavior.
 
+Remote clients can send **Other** text answers to Copilot's boolean questions.
+The host preserves these as strings; ordinary True/False answers remain booleans.
+MCP-provided boolean forms and synthetic terminal-default prompts remain
+boolean-only. Ship this host update before a client that offers boolean Other
+answers; older hosts reject those strings.
+
 ## Command-line access
 
 On first launch, the app installs a launcher at `~/.local/bin/copilot-projects`.

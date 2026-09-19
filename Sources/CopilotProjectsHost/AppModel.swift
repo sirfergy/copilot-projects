@@ -2814,8 +2814,11 @@ final class AppModel: ObservableObject {
                   number.rounded() == number else { return false }
             return numberSatisfiesBounds(number, schema: schema)
         case "boolean":
-            guard case .bool = value else { return false }
-            return true
+            if case .bool = value { return true }
+            if allowFreeformStringChoice, case .string(let text) = value {
+                return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            return false
         case "array":
             guard case .array(let values) = value else { return false }
             if let minimum = jsonNumber(schema["minItems"]),

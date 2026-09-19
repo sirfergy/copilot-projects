@@ -3929,6 +3929,10 @@ final class AppLogicTests: XCTestCase {
             ["fruit": .string("apple"), "date": .string("2026-99-99")],
             ["fruit": .string("apple"), "dateTime": .string("tomorrow")],
             ["fruit": .string("apple"), "extra": .string("x")],
+            ["fruit": .string("apple"), "ripe": .string("")],
+            ["fruit": .string("apple"), "ripe": .string(" \n\t")],
+            ["fruit": .string("apple"), "ripe": .number(1)],
+            ["fruit": .string("apple"), "ripe": .array([.string("yes")])],
         ]
         for unsupportedContent in unsupportedContents {
             XCTAssertEqual(
@@ -3959,6 +3963,38 @@ final class AppLogicTests: XCTestCase {
             )
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
+
+        for text in ["Keep the deferred threads open.", "true", "false", "  Explain first.\n"] {
+            let content: [String: RemoteJSONValue] = [
+                "fruit": .string("apple"),
+                "ripe": .string(text),
+            ]
+            XCTAssertEqual(
+                model.answerElicitation(
+                    sessionId: session.id,
+                    answer: RemoteElicitationAnswer(
+                        requestId: "req-mcp-form", action: .accept, content: content
+                    )
+                ),
+                .invalid,
+                "MCP boolean schemas must never receive a string"
+            )
+            XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
+            XCTAssertEqual(
+                model.answerElicitation(
+                    sessionId: session.id,
+                    answer: RemoteElicitationAnswer(
+                        requestId: "req-form", action: .accept, content: content
+                    )
+                ),
+                .accepted
+            )
+            let written = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: responseURL)) as? [String: Any]
+            )
+            XCTAssertEqual((written["content"] as? [String: Any])?["ripe"] as? String, text)
+            try FileManager.default.removeItem(at: responseURL)
+        }
 
         let customChoiceContent: [String: RemoteJSONValue] = [
             "fruit": .string("banana"),
