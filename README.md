@@ -77,7 +77,7 @@ This component preview uses illustrative sample data.
 | New project | `⌘N` |
 | New Copilot session | `⌘T` |
 | New plain terminal | `⌥⌘T` |
-| Close the current session | `⌘W` |
+| End the current session | `⌘W` |
 | Next / previous session | `⌃Tab` / `⌃⇧Tab` |
 | Jump to a project | `⌘1`–`⌘9` |
 | Jump to a session | `⌃1`–`⌃9` |
@@ -86,7 +86,7 @@ Hold `⌘` or `⌃` to reveal numbered navigation hints. Use the session-details
 button to open the completed-turn drawer.
 
 VoiceOver exposes each session's selection and attention state, with separate
-select and close actions. The session-details drawer uses a fade instead of
+select and end actions. The session-details drawer uses a fade instead of
 sliding when Reduce Motion is enabled.
 
 The **+** side of the split button starts an interactive Copilot CLI session immediately,
@@ -110,6 +110,17 @@ in-memory copy is never automatically resubmitted.
 **Keep Running When Window Closes** to leave the host in the menu bar.
 Plain-shell scrollback does not survive a detach; full-screen tools can repaint
 when reattached.
+
+**End Session** (including `⌘W` and the tab's x button) asks for confirmation when
+the app reports running, waiting, background, scheduled, or pending-input work.
+A single idle session ends immediately; unread completion markers alone do not
+trigger a prompt. **End Project** also confirms whenever it contains multiple
+sessions. Cancel ends nothing, and a project that gains sessions while the dialog
+is open must be reviewed again. Ending removes sessions from the workspace and
+stops their processes; project files are not deleted.
+
+These are user-interface safeguards based on reported activity, not a new process
+detector. Automation and raw terminal commands retain their existing behavior.
 
 ## Command-line access
 

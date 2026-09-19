@@ -457,6 +457,7 @@ final class AppModel: ObservableObject {
     private let remoteControlDeliveryLedger = RemoteControlDeliveryLedger()
     private let gracefulSessionDestroyer: GracefulSessionDestroyer
     private let forcedSessionDestroyer: ForcedSessionDestroyer
+    private let alertPresenter: (NSAlert) -> NSApplication.ModalResponse
     private var pendingSessionDestroys: [String: PendingSessionDestroy] = [:]
 
     var remoteControlDeliveryEpoch: String { remoteControlDeliveryLedger.epoch }
@@ -546,6 +547,9 @@ final class AppModel: ObservableObject {
         },
         forcedSessionDestroyer: @escaping ForcedSessionDestroyer = {
             SessionArtifacts.forceDestroy(sessionIds: $0)
+        },
+        alertPresenter: @escaping (NSAlert) -> NSApplication.ModalResponse = {
+            $0.runModal()
         }
     ) {
         self.stateRepository = stateRepository
@@ -571,6 +575,7 @@ final class AppModel: ObservableObject {
         self.kittyImageDiskStore = kittyImageDiskStore
         self.gracefulSessionDestroyer = gracefulSessionDestroyer
         self.forcedSessionDestroyer = forcedSessionDestroyer
+        self.alertPresenter = alertPresenter
         load()
     }
 
@@ -1103,7 +1108,7 @@ final class AppModel: ObservableObject {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        alert.runModal()
+        _ = alertPresenter(alert)
     }
 
     func createRemoteProject(
@@ -1510,16 +1515,37 @@ final class AppModel: ObservableObject {
         ) ? .closed : .failed
     }
 
-    /// User-initiated close (⌘W / tab ✕). Ends the session immediately with no
-    /// confirmation — an explicit close is intentional, and app restarts resume
-    /// sessions, so there's nothing to protect against here.
+    /// User-facing ending uses reported activity; automation retains the raw close path.
     func requestCloseSession(projectId pid: String, sessionId sid: String) {
+        guard let pi = projectIndex(pid),
+              let session = projects[pi].sessions.first(where: { $0.id == sid }) else { return }
+        if session.requiresEndConfirmation {
+            guard confirmEnding(
+                title: "End session \"\(session.title)\"?",
+                message: "This session has active or pending work. Ending it stops its processes and removes its tab. It will not resume when the app restarts. Project files are not deleted.",
+                action: "End Session"
+            ) else { return }
+        }
         if !destroySession(projectId: pid, sessionId: sid) {
             presentAlert(
-                title: "Could Not Close Session",
-                message: "The close could not be saved. The session has been left open."
+                title: "Could Not End Session",
+                message: "The session may have changed or its state could not be saved. Review it before trying again."
             )
         }
+    }
+
+    private func confirmEnding(title: String, message: String, action: String) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        let cancel = alert.addButton(withTitle: "Cancel")
+        let end = alert.addButton(withTitle: action)
+        cancel.keyEquivalent = "\u{1b}"
+        end.keyEquivalent = ""
+        end.hasDestructiveAction = true
+        alert.window.initialFirstResponder = cancel
+        return alertPresenter(alert) == .alertSecondButtonReturn
     }
 
     /// Permanently end a session: ask Copilot to exit through its own TUI, retain
@@ -2878,6 +2904,37 @@ final class AppModel: ObservableObject {
         return strings
     }
 
+    func requestCloseProject(_ pid: String) {
+        guard let pi = projectIndex(pid) else { return }
+        let project = projects[pi]
+        let approvedIDs = Set(project.sessions.map(\.id))
+        let activeCount = project.sessions.filter(\.requiresEndConfirmation).count
+        if project.sessions.count > 1 || activeCount > 0 {
+            let names = project.sessions.prefix(5).map(\.title).joined(separator: ", ")
+            let remainder = project.sessions.count > 5
+                ? " and \(project.sessions.count - 5) more" : ""
+            let scope = project.sessions.count == 1
+                ? "This ends 1 session" : "This ends all \(project.sessions.count) sessions"
+            let activity = activeCount == 1
+                ? " One session has active or pending work."
+                : activeCount > 1 ? " \(activeCount) sessions have active or pending work." : ""
+            guard confirmEnding(
+                title: "End project \"\(project.name)\"?",
+                message: "\(scope): \(names)\(remainder).\(activity)\n\nAll affected processes stop and the project is removed from the sidebar. Ended sessions will not resume when the app restarts. Project files are not deleted.",
+                action: "End Project"
+            ) else { return }
+            guard let current = projectIndex(pid) else { return }
+            guard Set(projects[current].sessions.map(\.id)).isSubset(of: approvedIDs) else {
+                presentAlert(
+                    title: "Project Sessions Changed",
+                    message: "A session was added to this project while confirmation was open. Nothing was ended. Review the project before trying again."
+                )
+                return
+            }
+        }
+        closeProject(pid)
+    }
+
     func closeProject(_ pid: String) {
         guard let pi = projectIndex(pid) else { return }
         guard acceptSessionCloses(
@@ -2885,8 +2942,8 @@ final class AppModel: ObservableObject {
             projectIds: [pid]
         ) else {
             presentAlert(
-                title: "Could Not Close Project",
-                message: "The close could not be saved. The project has been left open."
+                title: "Could Not End Project",
+                message: "The end request could not be saved. The project has been left open."
             )
             return
         }
