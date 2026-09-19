@@ -494,7 +494,11 @@ the only emulator.
 
 - **Quit / relaunch / crash:** the dtach master daemonizes away from the app, so shells +
   agents keep running. Relaunch reattaches (`dtach -A`).
-- **Close a tab (⌘W / ✕):** *ends* that session (kills its dtach master).
+- **End a session (⌘W / ✕):** stops its processes and removes its tab. A single idle
+  session ends immediately. Reported active or pending work requires confirmation.
+- **End Project:** ends its sessions and removes the group, not project files.
+  Multiple sessions require confirmation even when idle. Cancel changes nothing;
+  sessions added while a confirmation is open are not silently included.
 - **Reconnect from another host:**
   ```bash
   ssh you@mac

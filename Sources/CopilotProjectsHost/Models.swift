@@ -39,6 +39,10 @@ struct Session: Identifiable, Codable, Equatable {
     }
     var hasPendingInput: Bool { agentActivity?.hasPendingInput == true }
 
+    var requiresEndConfirmation: Bool {
+        status != .idle || hasBackgroundWork || !schedules.isEmpty || hasPendingInput
+    }
+
     private enum CodingKeys: String, CodingKey { case id, title, cwd, creationFingerprint }
 
     init(

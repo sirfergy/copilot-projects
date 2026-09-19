@@ -163,8 +163,8 @@ struct SidebarView: View {
                         Divider()
                         Button("Rename…") { model.renameProjectInteractive(project.id) }
                         Divider()
-                        Button("Close Project", role: .destructive) {
-                            model.closeProject(project.id)
+                        Button("End Project", role: .destructive) {
+                            model.requestCloseProject(project.id)
                         }
                     }
             }
@@ -423,7 +423,7 @@ struct SessionTabBar: View {
                                 Button("Copy Starting Prompt") { model.copyStartingPrompt(for: session.id) }
                                 Divider()
                             }
-                            Button("Close Session", role: .destructive) {
+                            Button("End Session", role: .destructive) {
                                 model.requestCloseSession(projectId: project.id, sessionId: session.id)
                             }
                         }
@@ -628,7 +628,7 @@ struct SessionTab: View {
             }
             .buttonStyle(.borderless)
             .opacity(0.6)
-            .help("Close Session")
+            .help("End Session")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
@@ -651,7 +651,7 @@ struct SessionTab: View {
                 Button(session.title, action: onSelect)
                     .accessibilityValue(accessibilityStatus)
                     .accessibilityAddTraits(isActive ? .isSelected : [])
-                Button("Close \(session.title)", action: onClose)
+                Button("End \(session.title)", action: onClose)
             }
         }
     }

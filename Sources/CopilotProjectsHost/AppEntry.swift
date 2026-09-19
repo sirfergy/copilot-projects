@@ -29,7 +29,7 @@ struct CopilotProjectsApp: App {
                 Button("New Terminal") { appDelegate.model.addTerminalToSelected() }
                     .keyboardShortcut("t", modifiers: [.command, .option])
                 Divider()
-                Button("Close Session") { appDelegate.model.closeSelectedSession() }
+                Button("End Session") { appDelegate.model.closeSelectedSession() }
                     .keyboardShortcut("w", modifiers: .command)
                 Divider()
                 Button("Next Session") { appDelegate.model.selectAdjacentSession(1) }
