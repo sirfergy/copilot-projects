@@ -164,6 +164,31 @@ copilot-projects attach <id-or-prefix>
 
 Use `Ctrl-\` to detach without ending the session.
 
+## Studio Console visual system
+
+Studio Console frames the native terminal workspace with adaptive graphite/satin
+surfaces, steel session selection, and readable system type. The separate title
+and tab strips, native controls, keyboard shortcuts, drag/drop, and ending
+safeguards remain; session details stay secondary. The source-grounded
+[design record](DESIGN.md) and [token sidecar](.impeccable/design.json) accompany
+the [product context](PRODUCT.md). Appearance follows macOS rather than a separate
+theme picker.
+
+### Native workspace screenshots
+
+The **Capture macOS workspace** Actions workflow renders the actual native views
+with isolated synthetic sessions on the M4 runner. It uploads dark, light, and
+compact window captures with a source-SHA manifest and diagnostic logs. Each
+successful image must contain the terminal's unique OCR marker and use the Metal
+renderer; an empty terminal or unavailable GUI/capture permission fails the run.
+It never captures the whole desktop, launches a live host, or changes TCC grants.
+
+The initial run is triggered by a push to `sirfergy/studio-console`. Manual
+dispatch becomes available after the workflow is present on the default branch.
+Ordinary test runs skip the capture. The driver uses a private temporary home and
+state directory, a harmless terminal process, and a replacement environment that
+does not expose runner credentials to the fixture.
+
 ## Build and contribute
 
 Requires Xcode 26 or later and macOS 26 or later.

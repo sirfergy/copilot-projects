@@ -1,0 +1,53 @@
+name: Capture macOS workspace
+
+on:
+  push:
+    branches: [sirfergy/studio-console]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-workspace-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    if: >-
+      github.repository == 'sirfergy/copilot-projects' &&
+      (github.ref == 'refs/heads/sirfergy/studio-console' ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: [self-hosted, macOS, ARM64, m4-mini]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Allocate private capture output
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d "${RUNNER_TEMP:?}/workspace-capture.XXXXXX")"
+          echo "CAPTURE_ROOT=$root" >> "$GITHUB_ENV"
+      - name: Capture driver contracts
+        run: python3 scripts/test-capture-workspace.py
+      - name: Build the capture test without opening a window
+        timeout-minutes: 15
+        run: swift test --filter WorkspaceCaptureTests > "$CAPTURE_ROOT/build.log" 2>&1
+      - name: Capture the isolated native workspace
+        timeout-minutes: 4
+        run: python3 scripts/capture-workspace.py "$CAPTURE_ROOT"
+      - name: Upload capture evidence
+        if: always() && env.CAPTURE_ROOT != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-workspace-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CAPTURE_ROOT }}/images/*.png
+            ${{ env.CAPTURE_ROOT }}/metadata.json
+            ${{ env.CAPTURE_ROOT }}/driver-error.txt
+            ${{ env.CAPTURE_ROOT }}/build.log
+            ${{ env.CAPTURE_ROOT }}/test.log
+          if-no-files-found: error
+          retention-days: 7

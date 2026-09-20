@@ -29,18 +29,25 @@ struct RootView: View {
             }
         }
         .ignoresSafeArea(.container, edges: .top)
+        .background(StudioStyle.chrome)
         .background(WindowConfigurator())
     }
 
     private var topStrip: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 12) {
+            Text(model.selectedProject?.name ?? "Copilot Projects")
+                .font(.callout.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .allowsHitTesting(false)
             Spacer(minLength: 0)
             FleetStatusBar(model: model)
-                .padding(.trailing, 12)
         }
+        .padding(.leading, 80)
+        .padding(.trailing, 12)
         .frame(height: titleStripHeight)
         .frame(maxWidth: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(StudioStyle.chrome)
     }
 
     private var tabRow: some View {
@@ -51,9 +58,9 @@ struct RootView: View {
                 Spacer(minLength: 0)
             }
         }
-        .frame(height: 32)
+        .frame(height: 38)
         .frame(maxWidth: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(StudioStyle.chrome)
     }
 }
 
@@ -103,10 +110,11 @@ struct FleetStatusBar: View {
             if waiting > 0 { Text("\(waiting) waiting").foregroundStyle(.orange) }
             if ready > 0 { Text("\(ready) ready").foregroundStyle(.blue) }
             if running == 0, background == 0, scheduled == 0, waiting == 0, ready == 0 {
-                Text("all idle").foregroundStyle(.tertiary)
+                Text("all idle").foregroundStyle(StudioStyle.secondaryText)
             }
         }
         .font(.system(size: 12))
+        .monospacedDigit()
         .lineLimit(1)
         .fixedSize()
         .allowsHitTesting(false)
@@ -171,6 +179,8 @@ struct SidebarView: View {
             .onMove { model.moveProjects(fromOffsets: $0, toOffset: $1) }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(StudioStyle.sidebar)
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 8) {
                 Button {
@@ -187,9 +197,10 @@ struct SidebarView: View {
 
                 Text("v\(CLIMain.versionNumber)")
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(StudioStyle.secondaryText)
             }
-            .padding(8)
+            .padding(12)
+            .background(StudioStyle.sidebar)
         }
     }
 }
@@ -202,11 +213,12 @@ struct ProjectRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(project.name).lineLimit(1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(project.name)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
                 Text("\(project.sessions.count) session\(project.sessions.count == 1 ? "" : "s")")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                 statusLine
                     .font(.caption)
@@ -221,7 +233,7 @@ struct ProjectRow: View {
                     .font(.caption)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 5)
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(Color.accentColor, lineWidth: isDropTarget ? 2 : 0)
@@ -257,7 +269,7 @@ struct ProjectRow: View {
                 if waiting > 0 { Text("\(waiting) waiting").foregroundStyle(.orange) }
             }
         } else {
-            Text("idle").foregroundStyle(.tertiary)
+            Text("idle")
         }
     }
 }
@@ -360,6 +372,7 @@ struct NumberBadge: View {
 
 struct DetailView: View {
     @ObservedObject var model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         // One persistent AppKit container hosts every session's terminal across all
@@ -392,7 +405,7 @@ struct DetailView: View {
                     }
                 )
                 .id(sessionId)
-                .animation(.easeOut(duration: 0.18), value:
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value:
                     model.isTranscriptDrawerOpen(sessionId: sessionId))
             }
         }
@@ -501,6 +514,7 @@ struct SessionTabBar: View {
 
 private struct HoverHighlightModifier: ViewModifier {
     @State private var isHovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         content
@@ -510,7 +524,7 @@ private struct HoverHighlightModifier: ViewModifier {
             )
             .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             .onHover { isHovering = $0 }
-            .animation(.easeOut(duration: 0.12), value: isHovering)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovering)
     }
 }
 
@@ -581,6 +595,7 @@ struct SessionTab: View {
     var showNumber: Bool = false
     let onSelect: () -> Void
     let onClose: () -> Void
+    @State private var isHovering = false
 
     var showsUnreadIndicator: Bool {
         // Avoid duplicating the idle completion dot unless the tab-number hint hides it.
@@ -612,7 +627,7 @@ struct SessionTab: View {
             }
             .frame(width: 18, height: 18)
             Text(session.title)
-                .font(.callout)
+                .font(.callout.weight(.medium))
                 .lineLimit(1)
                 .help(session.statusText ?? session.title)
             if session.hasBackgroundWork {
@@ -624,27 +639,27 @@ struct SessionTab: View {
                 Circle().fill(Color.blue).frame(width: 6, height: 6)
             }
             Button(action: onClose) {
-                Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .frame(width: 20, height: 20)
             }
             .buttonStyle(.borderless)
-            .opacity(0.6)
+            .foregroundStyle(.secondary)
             .help("End Session")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.vertical, 4)
         .frame(maxWidth: 210)
         .background(
-            RoundedRectangle(cornerRadius: 7)
-                .fill(isActive
-                      ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.25)
-                      : Color(nsColor: .controlBackgroundColor))
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isActive ? StudioStyle.selection : isHovering ? StudioStyle.raised : .clear)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(isActive ? Color.accentColor.opacity(0.55) : Color.gray.opacity(0.15),
-                        lineWidth: 1)
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isActive ? StudioStyle.selectionEdge : .clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
         .onTapGesture(perform: onSelect)
         .accessibilityRepresentation {
             HStack {
