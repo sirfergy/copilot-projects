@@ -12,6 +12,8 @@ jobs:
       - uses: actions/checkout@v5
       - name: Release entrypoint contracts
         run: python3 scripts/test-release.py
+      - name: Native capture driver contracts
+        run: python3 scripts/test-capture-workspace.py
       - name: Terminal reattachment under backpressure
         run: python3 scripts/test-dtach.py
       - name: Pure session rules
