@@ -2,34 +2,35 @@
 version: 1
 slug: "sources-copilotprojectshost-views-swift"
 primary_target: "Sources/CopilotProjectsHost/Views.swift"
-related_targets: ["Sources/CopilotProjectsHost/TranscriptDrawer.swift"]
+related_targets: ["Sources/CopilotProjectsHost/HostLifetime.swift","Sources/CopilotProjectsHost/AppEntry.swift"]
 ---
 
-# Studio Console workspace
+# Two-Level Browser
 
-Mode: Operate. Native macOS leads the suite. Preserve terminal behavior,
-keyboard shortcuts, identity, drag/drop, accessibility, and ending safeguards.
+Mode: Operate. The user explicitly approved navigation changes and selected
+the two-column project/session browser. Preserve terminal behavior, existing
+shortcuts and session actions, drag/reorder, identity, and ending safeguards.
 
 ## Direction contract
 
-THESIS: One well-made instrument for parallel coding sessions, not a collection
-of outlined cards. The live terminal remains the dominant work surface.
+THESIS: Make project, session, and working content distinct levels. Replace the
+horizontal session strip, rather than merely repainting the existing layout.
 
-OWN-WORLD: Graphite chrome in dark appearance, satin gray in light appearance,
-cool steel selection, system typography, and precise session strips. Native
-controls and semantic state colors remain native.
+OWN-WORLD: Inherit Studio Console's graphite/satin surfaces, steel selection,
+readable ink, system typography, and native controls. No new visual identity.
 
-STORY: Identify the project, choose a session, read its status, and return to
-work. Conversation and details are available without competing with the terminal.
+STORY: Select a project, scan its session names and explicit states, then work
+in the selected terminal. Hide Projects when the task needs more room.
 
-FIRST VIEWPORT: A compact native title strip names the current project. A
-roughly 240-point sidebar sits beside a 38-point session strip and the continuous
-terminal. Creation controls stay at the strip's trailing edge. Selection becomes
-brighter, never larger. The signature interaction is a steady selection change
-with a quiet details disclosure; no terminal choreography, and reduced motion
-disables custom transitions.
+FIRST VIEWPORT: Keep the 38-point native title strip. Below it, a compact
+project rail and a vertically scrolling session column sit beside the terminal.
+Aligned column headers establish hierarchy; an active-session heading replaces
+the old tabs. The terminal remains at least half the window width at supported
+capture sizes. The signature interaction collapses only the project column,
+reclaiming width without remounting or restarting the terminal.
 
-FORM: Studio Console, grounded candidate 1, selected by the user over the
-assigned candidate from direction seed 207346d7. Code-led; no approved pixel comp.
+FORM: Two-Level Browser, grounded structural candidate 5, chosen by the user
+from the three structures dealt by surface seed 2bd5ac36. The established visual
+world remains Studio Console (direction seed 207346d7). Code-led, no pixel comp.
 
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance

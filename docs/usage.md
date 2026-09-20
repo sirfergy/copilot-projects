@@ -1,8 +1,8 @@
 # Copilot Projects: usage and development
 
 A deliberately small macOS terminal app that organizes CLI sessions by **project**.
-Projects are listed vertically in a sidebar; each project's terminal sessions are laid
-out horizontally. It keeps the parts of [cmux](https://github.com/manaflow-ai/cmux) that
+Projects and their sessions occupy separate vertical navigation columns beside
+the working terminal. It keeps the parts of [cmux](https://github.com/manaflow-ai/cmux) that
 matter most for working with coding agents — **status indicators** and **notifications** —
 and drops everything else.
 
@@ -20,22 +20,27 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 
 - **Projects (vertical sidebar):** a project is just a named group of sessions. Create one
   with `⌘N` (name it; no folder required). Jump to one with **`⌘1`–`⌘9`**.
-- **Sessions (browser-style tabs):** each project shows a horizontal tab strip; one terminal
-  is visible at a time. Start Copilot with `⌘T` or a plain shell with `⌥⌘T`, switch with a click / **`⌃Tab`** (next) / `⌃⇧Tab`
-  (prev) / **`⌃1`–`⌃9`** / `⌘⇧[` / `⌘⇧]`, close with `⌘W` or the tab's ✕. Background tabs keep
-  running. Hold **⌘** (projects) or **⌃** (tabs) to see the number on each.
+  Use **`⌘0`**, the View menu, or the session-header button to hide/show the project column.
+  The project rail has a compact fixed width; hover a truncated name to read it in full.
+- **Sessions (vertical browser):** the selected project's sessions appear beside the project
+  column, with their names and explicit state. One terminal is visible at a time.
+  Start Copilot with `⌘T` or a plain shell with `⌥⌘T`, switch with a click / **`⌃Tab`** (next) / `⌃⇧Tab`
+  (prev) / **`⌃1`–`⌃9`** / `⌘⇧[` / `⌘⇧]`, or end with `⌘W` or the row's ✕.
+  Drag a row to reorder it or onto another project to move it (show Projects first
+  if that column is hidden). Background sessions keep
+  running. Hold **⌘** (projects) or **⌃** (sessions) to see numbered hints.
 - **Prompt-first sessions:** the **+** split button's dropdown, Session menu, and project context
   menu offer **Start with Prompt…**. Compose multiple lines, then use `⌘Return` to launch
-  an interactive session (not a one-shot/headless command). Cancel creates no tab.
-  Startup checks retain the draft on failure; after a tab opens, **Copy Starting Prompt**
-  in its context menu recovers the prompt until that tab closes or the app quits.
+  an interactive session (not a one-shot/headless command). Cancel creates no session.
+  Startup checks retain the draft on failure; after a session opens, **Copy Starting Prompt**
+  in its context menu recovers the prompt until that session ends or the app quits.
   Prompts are never retried automatically. All new desktop Copilot sessions use
   `--allow-all`, with or without a starting prompt.
 - **Local PR reviews:** choose **Review Pull Request…** from the **+** split button's
-  dropdown, paste a GitHub pull request URL, and open a new Copilot CLI tab with a
+  dropdown, paste a GitHub pull request URL, and open a new Copilot CLI session with a
   local adversarial-review prompt in the current project.
 - **Status:** each session reports `idle` / `running` / `waiting`. Running and waiting
-  counts appear in the sidebar; a blue dot on the session tab marks work that finished
+  labeled symbol counts appear in the project column; a blue dot on the session row marks work that finished
   while you were away. With the Copilot CLI hooks installed (below), this is driven automatically.
 - **Completed-turn drawer:** Copilot CLI remains the native interactive terminal, while a
   collapsible drawer overlays its right edge with independently scrollable completed turns
@@ -59,9 +64,9 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   omit code blocks, and fall back to the generic alert when the matching transcript
   is unavailable. Response previews can appear on your devices' lock screens.
   Clicking one focuses that session. Unread sessions get a bell
-  badge + a Dock badge count. Completed tabs show one blue attention dot, not two.
+  badge + a Dock badge count. Completed sessions show one blue attention dot, not two.
   Returning to the Mac app marks the selected session read without
-  needing to switch tabs.
+  needing to switch sessions.
 - **Control socket + CLI:** the same `copilot-projects` binary is also a CLI that talks to the
   running app over a Unix socket — ideal for agent hooks.
 - **Resumable sessions:** each terminal runs under a bundled [dtach](https://github.com/crigler/dtach),
@@ -79,7 +84,7 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 With Copilot CLI 1.0.84 or newer on SDK protocol 3, the tracker offers native
 session controls to the desktop and optional integrations. Separately built iOS and web composers
 can **Run after current task** or **Steer current task** without clearing the
-desktop CLI draft. **Stop task** requests cancellation without closing the tab,
+desktop CLI draft. **Stop task** requests cancellation without closing the session,
 shell, or dtach session. Terminal controls remain available for other TUIs and
 unsupported CLI versions.
 
@@ -88,7 +93,7 @@ receipt checks. HTTP acceptance is not completion. A send's `applied` receipt
 means Copilot accepted the message, not that it finished the task. Unknown
 outcomes are never automatically resubmitted or downgraded to terminal input.
 The web queue removes the confirmed message when its receipt arrives, without
-another click or tab switch; messages still awaiting confirmation stay visible.
+another click or session switch; messages still awaiting confirmation stay visible.
 Stop has its own handoff lane, so an unresolved send cannot block cancellation.
 
 The session drawer and native/web conversation views render live response updates
@@ -494,7 +499,7 @@ the only emulator.
 
 - **Quit / relaunch / crash:** the dtach master daemonizes away from the app, so shells +
   agents keep running. Relaunch reattaches (`dtach -A`).
-- **End a session (⌘W / ✕):** stops its processes and removes its tab. A single idle
+- **End a session (⌘W / ✕):** stops its processes and removes its row. A single idle
   session ends immediately. Reported active or pending work requires confirmation.
 - **End Project:** ends its sessions and removes the group, not project files.
   Multiple sessions require confirmation even when idle. Cancel changes nothing;

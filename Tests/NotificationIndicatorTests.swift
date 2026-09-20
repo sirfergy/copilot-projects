@@ -5,21 +5,23 @@ import AppKit
 
 final class NotificationIndicatorTests: XCTestCase {
     @MainActor
-    func testSessionTabAccessibilityKeepsSelectionAndAttentionDistinct() {
+    func testSessionRowAccessibilityKeepsSelectionAndAttentionDistinct() {
         var session = Session(title: "Review", cwd: "/tmp")
         session.status = .waiting
         session.hasUnread = true
-        let selected = SessionTab(session: session, isActive: true, onSelect: {}, onClose: {})
+        let selected = SessionRow(session: session, isActive: true, onSelect: {}, onClose: {})
         XCTAssertEqual(selected.accessibilityStatus, "Selected, Waiting for input, Unread")
+        XCTAssertEqual(selected.stateLabel, "Waiting for input")
 
         session.status = .idle
         session.finishedUnseen = true
-        let background = SessionTab(session: session, isActive: false, onSelect: {}, onClose: {})
+        let background = SessionRow(session: session, isActive: false, onSelect: {}, onClose: {})
         XCTAssertEqual(background.accessibilityStatus, "Finished, Unread")
+        XCTAssertEqual(background.stateLabel, "Finished")
         session.hasUnread = false
         session.finishedUnseen = false
         XCTAssertEqual(
-            SessionTab(session: session, isActive: false, onSelect: {}, onClose: {}).accessibilityStatus,
+            SessionRow(session: session, isActive: false, onSelect: {}, onClose: {}).accessibilityStatus,
             "Idle"
         )
     }
@@ -46,12 +48,12 @@ final class NotificationIndicatorTests: XCTestCase {
             session.status = status
             session.finishedUnseen = finished
             session.hasUnread = unread
-            let tab = SessionTab(
+            let row = SessionRow(
                 session: session, isActive: false, showNumber: showNumber,
                 onSelect: {}, onClose: {}
             )
             XCTAssertEqual(
-                tab.showsUnreadIndicator, expected,
+                row.showsUnreadIndicator, expected,
                 "status=\(status), finished=\(finished), unread=\(unread), showNumber=\(showNumber)"
             )
         }
@@ -126,7 +128,7 @@ final class NotificationIndicatorTests: XCTestCase {
         let runningSession = model.projects[0].sessions[1]
         XCTAssertFalse(runningSession.finishedUnseen)
         XCTAssertTrue(runningSession.hasUnread)
-        XCTAssertTrue(SessionTab(
+        XCTAssertTrue(SessionRow(
             session: runningSession, isActive: false, onSelect: {}, onClose: {}
         ).showsUnreadIndicator)
     }

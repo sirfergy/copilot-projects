@@ -54,17 +54,28 @@ class CaptureDriverTests(unittest.TestCase):
                 images.append({
                     "file": name, "renderer": "metal", "terminalMarkerVisible": True,
                     "appearance": capture.APPEARANCES[name],
+                    "projectsVisible": name != "macos-compact-projects-hidden.png",
+                    "terminalWidth": 600,
                     "pixelWidth": 1280, "pixelHeight": 800,
                 })
-            report = {"completed": True, "sourceSHA": "a" * 40, "images": images}
+            report = {
+                "completed": True, "collapseVerified": True, "emptyProjectCollapseVerified": True,
+                "focusedTerminalCollapseVerified": True,
+                "sourceSHA": "a" * 40, "images": images,
+            }
             manifest = root / "metadata.json"
             manifest.write_text(json.dumps(report))
             capture.verify_capture(root, "a" * 40)
             for change in (
                 {"completed": False}, {"sourceSHA": "b" * 40}, {"images": images[:2]},
+                {"collapseVerified": False},
+                {"emptyProjectCollapseVerified": False},
+                {"focusedTerminalCollapseVerified": False},
                 {"images": [dict(image, terminalMarkerVisible=False) for image in images]},
                 {"images": [dict(image, renderer="coretext") for image in images]},
                 {"images": [dict(image, appearance="wrong") for image in images]},
+                {"images": [dict(image, projectsVisible="wrong") for image in images]},
+                {"images": [dict(image, terminalWidth=100) for image in images]},
                 {"images": [dict(image, pixelWidth=1) for image in images]},
             ):
                 manifest.write_text(json.dumps(report | change))

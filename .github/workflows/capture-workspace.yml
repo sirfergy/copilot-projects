@@ -2,7 +2,7 @@ name: Capture macOS workspace
 
 on:
   push:
-    branches: [sirfergy/studio-console]
+    branches: [sirfergy/studio-console, sirfergy/studio-console-bold]
   workflow_dispatch:
 
 permissions:
@@ -17,6 +17,7 @@ jobs:
     if: >-
       github.repository == 'sirfergy/copilot-projects' &&
       (github.ref == 'refs/heads/sirfergy/studio-console' ||
+       github.ref == 'refs/heads/sirfergy/studio-console-bold' ||
        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     runs-on: [self-hosted, macOS, ARM64, m4-mini]
     timeout-minutes: 25

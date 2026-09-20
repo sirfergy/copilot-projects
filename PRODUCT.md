@@ -26,7 +26,9 @@ to the right live session.
 
 The Mac workspace leads the suite. The live terminal is primary; completed
 turns and session details live in a secondary drawer. Project navigation,
-session tabs, native window controls, and keyboard speed remain central.
+session navigation, native window controls, and keyboard speed remain central.
+The user approved replacing horizontal tabs with a Two-Level Browser: separate
+project and session columns, with the project column collapsible.
 Web and iOS adapt this language rather than reproducing Mac chrome; their
 existing conversation-first defaults remain intentional.
 
