@@ -13,6 +13,11 @@ import sys
 
 REPO = Path(__file__).resolve().parents[1]
 IMAGE_NAMES = {"macos-dark.png", "macos-light.png", "macos-compact.png"}
+APPEARANCES = {
+    "macos-dark.png": "NSAppearanceNameDarkAqua",
+    "macos-light.png": "NSAppearanceNameAqua",
+    "macos-compact.png": "NSAppearanceNameDarkAqua",
+}
 
 
 def capture_environment(root, source_sha, original):
@@ -49,6 +54,8 @@ def verify_capture(root, source_sha):
     if len(images) != 3 or {image.get("file") for image in images} != IMAGE_NAMES:
         raise ValueError("The capture must contain exactly the three requested views.")
     for image in images:
+        if image.get("appearance") != APPEARANCES[image["file"]]:
+            raise ValueError("A screenshot does not match its requested appearance.")
         if image.get("renderer") != "metal" or image.get("terminalMarkerVisible") is not True:
             raise ValueError("A capture is missing its rendered Metal terminal.")
         data = (root / "images" / image["file"]).read_bytes()

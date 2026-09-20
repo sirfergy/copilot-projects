@@ -15,6 +15,7 @@ final class WorkspaceCaptureTests: XCTestCase {
         let pixelWidth: Int
         let pixelHeight: Int
         let backingScale: Double
+        let appearance: String
         let renderer: String
         let terminalMarkerVisible: Bool
     }
@@ -121,6 +122,7 @@ final class WorkspaceCaptureTests: XCTestCase {
                 }
             )
             defer { model.detachAllClients() }
+            let terminal = try XCTUnwrap(model.controller(for: sessions[0].id)).terminalView
             model.setStatus(sessionId: sessions[1].id, status: .waiting, text: nil, timestamp: 100)
             let window = NSWindow(
                 contentRect: NSRect(x: 40, y: 40, width: 1280, height: 800),
@@ -139,8 +141,6 @@ final class WorkspaceCaptureTests: XCTestCase {
             }
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
-            try await Task.sleep(for: .milliseconds(500))
-            let terminal = try XCTUnwrap(model.terminalView(for: sessions[0].id))
             let marker = "NATIVE TERMINAL PIXELS"
 
             for (name, appearance, width, height): (String, NSAppearance.Name, Int, Int) in [
@@ -164,6 +164,10 @@ final class WorkspaceCaptureTests: XCTestCase {
                     try await Task.sleep(for: .milliseconds(500))
                     window.contentView?.layoutSubtreeIfNeeded()
                     window.displayIfNeeded()
+                    terminal.forceRedraw()
+                    report.diagnostics["terminalModelContainsMarker"] = String(
+                        terminal.terminalStateSnapshot().visibleRows.contains { $0.text.contains(marker) }
+                    )
                     let content = try await SCShareableContent.currentProcess
                     report.diagnostics["ownWindowCount"] = String(content.windows.count)
                     report.diagnostics["windowVisible"] = String(window.isVisible)
@@ -204,7 +208,9 @@ final class WorkspaceCaptureTests: XCTestCase {
                         report.images.append(ImageProof(
                             file: file, requestedWidth: width, requestedHeight: height,
                             pixelWidth: image.width, pixelHeight: image.height,
-                            backingScale: Double(scale), renderer: terminal.rendererName,
+                            backingScale: Double(scale),
+                            appearance: window.effectiveAppearance.name.rawValue,
+                            renderer: terminal.rendererName,
                             terminalMarkerVisible: true
                         ))
                         captured = true

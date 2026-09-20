@@ -53,6 +53,7 @@ class CaptureDriverTests(unittest.TestCase):
                 )
                 images.append({
                     "file": name, "renderer": "metal", "terminalMarkerVisible": True,
+                    "appearance": capture.APPEARANCES[name],
                     "pixelWidth": 1280, "pixelHeight": 800,
                 })
             report = {"completed": True, "sourceSHA": "a" * 40, "images": images}
@@ -63,6 +64,7 @@ class CaptureDriverTests(unittest.TestCase):
                 {"completed": False}, {"sourceSHA": "b" * 40}, {"images": images[:2]},
                 {"images": [dict(image, terminalMarkerVisible=False) for image in images]},
                 {"images": [dict(image, renderer="coretext") for image in images]},
+                {"images": [dict(image, appearance="wrong") for image in images]},
                 {"images": [dict(image, pixelWidth=1) for image in images]},
             ):
                 manifest.write_text(json.dumps(report | change))
