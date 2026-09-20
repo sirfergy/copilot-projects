@@ -164,6 +164,16 @@ copilot-projects attach <id-or-prefix>
 
 Use `Ctrl-\` to detach without ending the session.
 
+## Studio Console visual system
+
+Studio Console frames the native terminal workspace with adaptive graphite/satin
+surfaces, steel session selection, and readable system type. The separate title
+and tab strips, native controls, keyboard shortcuts, drag/drop, and ending
+safeguards remain; session details stay secondary. The source-grounded
+[design record](DESIGN.md) and [token sidecar](.impeccable/design.json) accompany
+the [product context](PRODUCT.md). Appearance follows macOS rather than a separate
+theme picker.
+
 ## Build and contribute
 
 Requires Xcode 26 or later and macOS 26 or later.

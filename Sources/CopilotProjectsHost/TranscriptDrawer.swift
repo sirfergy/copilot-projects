@@ -57,7 +57,7 @@ private struct TranscriptDrawer: View {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.borderless)
-                .help("Hide completed turns")
+                .help("Hide session details")
             }
             .padding(.horizontal, 14)
             .frame(height: 44)
@@ -85,7 +85,8 @@ private struct TranscriptDrawer: View {
                             .onAppear { isAtBottom = true }
                             .onDisappear { isAtBottom = false }
                     }
-                    .padding(14)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 6)
                 }
                 .onAppear {
                     proxy.scrollTo("transcript-bottom", anchor: .bottom)
@@ -98,7 +99,7 @@ private struct TranscriptDrawer: View {
         }
         .frame(width: 420)
         .frame(maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(StudioStyle.chrome)
         .overlay(alignment: .leading) { Divider() }
         .shadow(color: .black.opacity(0.2), radius: 12, x: -4)
     }
@@ -113,7 +114,7 @@ private struct TranscriptTurnCard: View {
                 Text(turn.kind == "scheduled" ? "Scheduled" :
                     turn.kind == "automated" ? "Automated" : "You")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(StudioStyle.secondaryText)
                 if turn.isAborted {
                     Text("Stopped")
                         .font(.caption2.weight(.semibold))
@@ -125,7 +126,7 @@ private struct TranscriptTurnCard: View {
                 Spacer()
                 Text(turn.startedAt, style: .time)
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(StudioStyle.secondaryText)
             }
 
             if !turn.userContent.isEmpty {
@@ -133,7 +134,7 @@ private struct TranscriptTurnCard: View {
                     .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: 9)
-                            .fill(Color.accentColor.opacity(0.1))
+                            .fill(StudioStyle.message)
                     )
             }
 
@@ -141,26 +142,19 @@ private struct TranscriptTurnCard: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Copilot")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(StudioStyle.secondaryText)
                     transcriptText(message.content)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(10)
-                .background(
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                )
+                .padding(.vertical, 6)
             }
 
             if !turn.tools.isEmpty {
                 TranscriptTools(tools: turn.tools)
             }
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Color.primary.opacity(0.1))
-        )
+        .padding(.vertical, 12)
+        .overlay(alignment: .bottom) { Divider() }
     }
 
     private func transcriptText(_ text: String) -> some View {

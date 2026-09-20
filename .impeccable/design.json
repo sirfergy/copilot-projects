@@ -1,0 +1,534 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-20T00:31:11Z",
+  "title": "Design System: Copilot Projects - Studio Console",
+  "extensions": {
+    "colorMeta": {
+      "selection": {
+        "role": "primary",
+        "displayName": "Selection",
+        "tonalRamp": [
+          "oklch(15% 0.0271 244.4)",
+          "oklch(26% 0.0271 244.4)",
+          "oklch(38% 0.0271 244.4)",
+          "oklch(49% 0.0271 244.4)",
+          "oklch(61% 0.0271 244.4)",
+          "oklch(72% 0.0271 244.4)",
+          "oklch(84% 0.0271 244.4)",
+          "oklch(95% 0.0271 244.4)"
+        ]
+      },
+      "selection-edge": {
+        "role": "primary",
+        "displayName": "Selection Edge",
+        "tonalRamp": [
+          "oklch(15% 0.0405 237.7)",
+          "oklch(26% 0.0405 237.7)",
+          "oklch(38% 0.0405 237.7)",
+          "oklch(49% 0.0405 237.7)",
+          "oklch(61% 0.0405 237.7)",
+          "oklch(72% 0.0405 237.7)",
+          "oklch(84% 0.0405 237.7)",
+          "oklch(95% 0.0405 237.7)"
+        ]
+      },
+      "message": {
+        "role": "neutral",
+        "displayName": "Message",
+        "tonalRamp": [
+          "oklch(15% 0.0238 243.7)",
+          "oklch(26% 0.0238 243.7)",
+          "oklch(38% 0.0238 243.7)",
+          "oklch(49% 0.0238 243.7)",
+          "oklch(61% 0.0238 243.7)",
+          "oklch(72% 0.0238 243.7)",
+          "oklch(84% 0.0238 243.7)",
+          "oklch(95% 0.0238 243.7)"
+        ]
+      },
+      "chrome": {
+        "role": "neutral",
+        "displayName": "Chrome",
+        "tonalRamp": [
+          "oklch(15% 0.0087 255.6)",
+          "oklch(26% 0.0087 255.6)",
+          "oklch(38% 0.0087 255.6)",
+          "oklch(49% 0.0087 255.6)",
+          "oklch(61% 0.0087 255.6)",
+          "oklch(72% 0.0087 255.6)",
+          "oklch(84% 0.0087 255.6)",
+          "oklch(95% 0.0087 255.6)"
+        ]
+      },
+      "sidebar": {
+        "role": "neutral",
+        "displayName": "Sidebar",
+        "tonalRamp": [
+          "oklch(15% 0.0109 254.0)",
+          "oklch(26% 0.0109 254.0)",
+          "oklch(38% 0.0109 254.0)",
+          "oklch(49% 0.0109 254.0)",
+          "oklch(61% 0.0109 254.0)",
+          "oklch(72% 0.0109 254.0)",
+          "oklch(84% 0.0109 254.0)",
+          "oklch(95% 0.0109 254.0)"
+        ]
+      },
+      "raised": {
+        "role": "neutral",
+        "displayName": "Raised",
+        "tonalRamp": [
+          "oklch(15% 0.0149 252.3)",
+          "oklch(26% 0.0149 252.3)",
+          "oklch(38% 0.0149 252.3)",
+          "oklch(49% 0.0149 252.3)",
+          "oklch(61% 0.0149 252.3)",
+          "oklch(72% 0.0149 252.3)",
+          "oklch(84% 0.0149 252.3)",
+          "oklch(95% 0.0149 252.3)"
+        ]
+      },
+      "secondary-text": {
+        "role": "neutral",
+        "displayName": "Secondary Text",
+        "tonalRamp": [
+          "oklch(15% 0.0179 248.0)",
+          "oklch(26% 0.0179 248.0)",
+          "oklch(38% 0.0179 248.0)",
+          "oklch(49% 0.0179 248.0)",
+          "oklch(61% 0.0179 248.0)",
+          "oklch(72% 0.0179 248.0)",
+          "oklch(84% 0.0179 248.0)",
+          "oklch(95% 0.0179 248.0)"
+        ]
+      },
+      "selection-light": {
+        "role": "primary",
+        "displayName": "Selection Light",
+        "tonalRamp": [
+          "oklch(15% 0.0199 245.7)",
+          "oklch(26% 0.0199 245.7)",
+          "oklch(38% 0.0199 245.7)",
+          "oklch(49% 0.0199 245.7)",
+          "oklch(61% 0.0199 245.7)",
+          "oklch(72% 0.0199 245.7)",
+          "oklch(84% 0.0199 245.7)",
+          "oklch(95% 0.0199 245.7)"
+        ]
+      },
+      "selection-edge-light": {
+        "role": "primary",
+        "displayName": "Selection Edge Light",
+        "tonalRamp": [
+          "oklch(15% 0.0620 243.2)",
+          "oklch(26% 0.0620 243.2)",
+          "oklch(38% 0.0620 243.2)",
+          "oklch(49% 0.0620 243.2)",
+          "oklch(61% 0.0620 243.2)",
+          "oklch(72% 0.0620 243.2)",
+          "oklch(84% 0.0620 243.2)",
+          "oklch(95% 0.0620 243.2)"
+        ]
+      },
+      "message-light": {
+        "role": "neutral",
+        "displayName": "Message Light",
+        "tonalRamp": [
+          "oklch(15% 0.0118 239.9)",
+          "oklch(26% 0.0118 239.9)",
+          "oklch(38% 0.0118 239.9)",
+          "oklch(49% 0.0118 239.9)",
+          "oklch(61% 0.0118 239.9)",
+          "oklch(72% 0.0118 239.9)",
+          "oklch(84% 0.0118 239.9)",
+          "oklch(95% 0.0118 239.9)"
+        ]
+      },
+      "chrome-light": {
+        "role": "neutral",
+        "displayName": "Chrome Light",
+        "tonalRamp": [
+          "oklch(15% 0.0034 247.9)",
+          "oklch(26% 0.0034 247.9)",
+          "oklch(38% 0.0034 247.9)",
+          "oklch(49% 0.0034 247.9)",
+          "oklch(61% 0.0034 247.9)",
+          "oklch(72% 0.0034 247.9)",
+          "oklch(84% 0.0034 247.9)",
+          "oklch(95% 0.0034 247.9)"
+        ]
+      },
+      "sidebar-light": {
+        "role": "neutral",
+        "displayName": "Sidebar Light",
+        "tonalRamp": [
+          "oklch(15% 0.0069 247.9)",
+          "oklch(26% 0.0069 247.9)",
+          "oklch(38% 0.0069 247.9)",
+          "oklch(49% 0.0069 247.9)",
+          "oklch(61% 0.0069 247.9)",
+          "oklch(72% 0.0069 247.9)",
+          "oklch(84% 0.0069 247.9)",
+          "oklch(95% 0.0069 247.9)"
+        ]
+      },
+      "raised-light": {
+        "role": "neutral",
+        "displayName": "Raised Light",
+        "tonalRamp": [
+          "oklch(15% 0.0000 0.0)",
+          "oklch(26% 0.0000 0.0)",
+          "oklch(38% 0.0000 0.0)",
+          "oklch(49% 0.0000 0.0)",
+          "oklch(61% 0.0000 0.0)",
+          "oklch(72% 0.0000 0.0)",
+          "oklch(84% 0.0000 0.0)",
+          "oklch(95% 0.0000 0.0)"
+        ]
+      },
+      "secondary-text-light": {
+        "role": "neutral",
+        "displayName": "Secondary Text Light",
+        "tonalRamp": [
+          "oklch(15% 0.0304 248.5)",
+          "oklch(26% 0.0304 248.5)",
+          "oklch(38% 0.0304 248.5)",
+          "oklch(49% 0.0304 248.5)",
+          "oklch(61% 0.0304 248.5)",
+          "oklch(72% 0.0304 248.5)",
+          "oklch(84% 0.0304 248.5)",
+          "oklch(95% 0.0304 248.5)"
+        ]
+      },
+      "selection-high-light": {
+        "role": "primary",
+        "displayName": "Selection High Light",
+        "tonalRamp": [
+          "oklch(15% 0.0247 238.4)",
+          "oklch(26% 0.0247 238.4)",
+          "oklch(38% 0.0247 238.4)",
+          "oklch(49% 0.0247 238.4)",
+          "oklch(61% 0.0247 238.4)",
+          "oklch(72% 0.0247 238.4)",
+          "oklch(84% 0.0247 238.4)",
+          "oklch(95% 0.0247 238.4)"
+        ]
+      },
+      "selection-edge-high-light": {
+        "role": "primary",
+        "displayName": "Selection Edge High Light",
+        "tonalRamp": [
+          "oklch(15% 0.0616 243.0)",
+          "oklch(26% 0.0616 243.0)",
+          "oklch(38% 0.0616 243.0)",
+          "oklch(49% 0.0616 243.0)",
+          "oklch(61% 0.0616 243.0)",
+          "oklch(72% 0.0616 243.0)",
+          "oklch(84% 0.0616 243.0)",
+          "oklch(95% 0.0616 243.0)"
+        ]
+      },
+      "message-high-light": {
+        "role": "neutral",
+        "displayName": "Message High Light",
+        "tonalRamp": [
+          "oklch(15% 0.0118 239.9)",
+          "oklch(26% 0.0118 239.9)",
+          "oklch(38% 0.0118 239.9)",
+          "oklch(49% 0.0118 239.9)",
+          "oklch(61% 0.0118 239.9)",
+          "oklch(72% 0.0118 239.9)",
+          "oklch(84% 0.0118 239.9)",
+          "oklch(95% 0.0118 239.9)"
+        ]
+      },
+      "chrome-high-light": {
+        "role": "neutral",
+        "displayName": "Chrome High Light",
+        "tonalRamp": [
+          "oklch(15% 0.0000 0.0)",
+          "oklch(26% 0.0000 0.0)",
+          "oklch(38% 0.0000 0.0)",
+          "oklch(49% 0.0000 0.0)",
+          "oklch(61% 0.0000 0.0)",
+          "oklch(72% 0.0000 0.0)",
+          "oklch(84% 0.0000 0.0)",
+          "oklch(95% 0.0000 0.0)"
+        ]
+      },
+      "sidebar-high-light": {
+        "role": "neutral",
+        "displayName": "Sidebar High Light",
+        "tonalRamp": [
+          "oklch(15% 0.0087 247.9)",
+          "oklch(26% 0.0087 247.9)",
+          "oklch(38% 0.0087 247.9)",
+          "oklch(49% 0.0087 247.9)",
+          "oklch(61% 0.0087 247.9)",
+          "oklch(72% 0.0087 247.9)",
+          "oklch(84% 0.0087 247.9)",
+          "oklch(95% 0.0087 247.9)"
+        ]
+      },
+      "raised-high-light": {
+        "role": "neutral",
+        "displayName": "Raised High Light",
+        "tonalRamp": [
+          "oklch(15% 0.0069 247.9)",
+          "oklch(26% 0.0069 247.9)",
+          "oklch(38% 0.0069 247.9)",
+          "oklch(49% 0.0069 247.9)",
+          "oklch(61% 0.0069 247.9)",
+          "oklch(72% 0.0069 247.9)",
+          "oklch(84% 0.0069 247.9)",
+          "oklch(95% 0.0069 247.9)"
+        ]
+      },
+      "secondary-text-high-light": {
+        "role": "neutral",
+        "displayName": "Secondary Text High Light",
+        "tonalRamp": [
+          "oklch(15% 0.0326 247.0)",
+          "oklch(26% 0.0326 247.0)",
+          "oklch(38% 0.0326 247.0)",
+          "oklch(49% 0.0326 247.0)",
+          "oklch(61% 0.0326 247.0)",
+          "oklch(72% 0.0326 247.0)",
+          "oklch(84% 0.0326 247.0)",
+          "oklch(95% 0.0326 247.0)"
+        ]
+      },
+      "selection-high-dark": {
+        "role": "primary",
+        "displayName": "Selection High Dark",
+        "tonalRamp": [
+          "oklch(15% 0.0349 242.5)",
+          "oklch(26% 0.0349 242.5)",
+          "oklch(38% 0.0349 242.5)",
+          "oklch(49% 0.0349 242.5)",
+          "oklch(61% 0.0349 242.5)",
+          "oklch(72% 0.0349 242.5)",
+          "oklch(84% 0.0349 242.5)",
+          "oklch(95% 0.0349 242.5)"
+        ]
+      },
+      "selection-edge-high-dark": {
+        "role": "primary",
+        "displayName": "Selection Edge High Dark",
+        "tonalRamp": [
+          "oklch(15% 0.0277 236.2)",
+          "oklch(26% 0.0277 236.2)",
+          "oklch(38% 0.0277 236.2)",
+          "oklch(49% 0.0277 236.2)",
+          "oklch(61% 0.0277 236.2)",
+          "oklch(72% 0.0277 236.2)",
+          "oklch(84% 0.0277 236.2)",
+          "oklch(95% 0.0277 236.2)"
+        ]
+      },
+      "message-high-dark": {
+        "role": "neutral",
+        "displayName": "Message High Dark",
+        "tonalRamp": [
+          "oklch(15% 0.0278 240.5)",
+          "oklch(26% 0.0278 240.5)",
+          "oklch(38% 0.0278 240.5)",
+          "oklch(49% 0.0278 240.5)",
+          "oklch(61% 0.0278 240.5)",
+          "oklch(72% 0.0278 240.5)",
+          "oklch(84% 0.0278 240.5)",
+          "oklch(95% 0.0278 240.5)"
+        ]
+      },
+      "chrome-high-dark": {
+        "role": "neutral",
+        "displayName": "Chrome High Dark",
+        "tonalRamp": [
+          "oklch(15% 0.0000 0.0)",
+          "oklch(26% 0.0000 0.0)",
+          "oklch(38% 0.0000 0.0)",
+          "oklch(49% 0.0000 0.0)",
+          "oklch(61% 0.0000 0.0)",
+          "oklch(72% 0.0000 0.0)",
+          "oklch(84% 0.0000 0.0)",
+          "oklch(95% 0.0000 0.0)"
+        ]
+      },
+      "sidebar-high-dark": {
+        "role": "neutral",
+        "displayName": "Sidebar High Dark",
+        "tonalRamp": [
+          "oklch(15% 0.0092 255.6)",
+          "oklch(26% 0.0092 255.6)",
+          "oklch(38% 0.0092 255.6)",
+          "oklch(49% 0.0092 255.6)",
+          "oklch(61% 0.0092 255.6)",
+          "oklch(72% 0.0092 255.6)",
+          "oklch(84% 0.0092 255.6)",
+          "oklch(95% 0.0092 255.6)"
+        ]
+      },
+      "raised-high-dark": {
+        "role": "neutral",
+        "displayName": "Raised High Dark",
+        "tonalRamp": [
+          "oklch(15% 0.0132 253.0)",
+          "oklch(26% 0.0132 253.0)",
+          "oklch(38% 0.0132 253.0)",
+          "oklch(49% 0.0132 253.0)",
+          "oklch(61% 0.0132 253.0)",
+          "oklch(72% 0.0132 253.0)",
+          "oklch(84% 0.0132 253.0)",
+          "oklch(95% 0.0132 253.0)"
+        ]
+      },
+      "secondary-text-high-dark": {
+        "role": "neutral",
+        "displayName": "Secondary Text High Dark",
+        "tonalRamp": [
+          "oklch(15% 0.0171 242.4)",
+          "oklch(26% 0.0171 242.4)",
+          "oklch(38% 0.0171 242.4)",
+          "oklch(49% 0.0171 242.4)",
+          "oklch(61% 0.0171 242.4)",
+          "oklch(72% 0.0171 242.4)",
+          "oklch(84% 0.0171 242.4)",
+          "oklch(95% 0.0171 242.4)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Project title",
+        "purpose": "Native callout semibold in the title strip; semantic size remains platform-owned."
+      },
+      "session": {
+        "displayName": "Session title",
+        "purpose": "Native callout medium, without inactive-title dimming."
+      },
+      "label": {
+        "displayName": "Transcript label",
+        "purpose": "Native caption semibold for message roles."
+      },
+      "metadata": {
+        "displayName": "Secondary metadata",
+        "purpose": "Native caption/caption2 for project-row metadata, footer version, and transcript timestamps. Project-row count/idle labels inherit native List ink; custom-chrome metadata uses secondaryText. Sizes remain semantic."
+      },
+      "status": {
+        "displayName": "Fleet status",
+        "purpose": "System 12pt text with monospaced digits."
+      }
+    },
+    "shadows": [
+      {
+        "name": "details-drawer",
+        "value": "-4px 0 12px rgba(0,0,0,0.2)",
+        "purpose": "Schematic CSS equivalent of the native drawer shadow: black at 20%, radius 12pt, x -4pt; not a pixel-equivalent blur contract."
+      },
+      {
+        "name": "modifier-number",
+        "value": "0 0.5px 1px rgba(0,0,0,0.25)",
+        "purpose": "Schematic CSS equivalent of the existing native number-badge shadow."
+      }
+    ],
+    "motion": [
+      {
+        "name": "details-disclosure",
+        "value": "180ms ease-out",
+        "purpose": "Existing trailing move plus opacity; Reduce Motion removes custom animation and uses opacity-only transition."
+      },
+      {
+        "name": "control-hover",
+        "value": "120ms ease-out",
+        "purpose": "Existing borderless-control hover highlight; disabled with Reduce Motion."
+      }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Selected session",
+      "kind": "nav",
+      "refersTo": "session-selected",
+      "description": "Schematic dark native tab; placeholder label, not a live session. Browser-native focus stands in for platform focus.",
+      "html": "<button class=\"ds-session-selected\" type=\"button\" aria-current=\"true\">Session title</button>",
+      "css": ".ds-session-selected { color-scheme:dark; font:menu; font-weight:500; color:CanvasText; padding:4px 10px; max-width:210px; border:1px solid #AAC6D9; border-radius:6px; background:#3C4A56; } .ds-session-selected:hover { background:#3C4A56; } .ds-session-selected:focus-visible { outline:auto; }"
+    },
+    {
+      "name": "Inactive session",
+      "kind": "nav",
+      "refersTo": "session-inactive",
+      "description": "Full-strength native title with raised hover, shown on a schematic chrome backdrop.",
+      "html": "<div class=\"ds-tab-strip\"><button class=\"ds-session-inactive\" type=\"button\">Session title</button></div>",
+      "css": ".ds-tab-strip { color-scheme:dark; background:#202327; } .ds-session-inactive { font:menu; font-weight:500; color:CanvasText; padding:4px 10px; max-width:210px; border:1px solid transparent; border-radius:6px; background:transparent; } .ds-session-inactive:hover { background:#30363D; } .ds-session-inactive:focus-visible { outline:auto; }"
+    },
+    {
+      "name": "New Project",
+      "kind": "button",
+      "refersTo": "new-project",
+      "description": "Borderless native action preview; the actual button retains its native label, symbol, control size, and action.",
+      "html": "<div class=\"ds-sidebar\"><button class=\"ds-new-project\" type=\"button\">New Project</button></div>",
+      "css": ".ds-sidebar { color-scheme:dark; background:#25292E; } .ds-new-project { font:menu; color:CanvasText; background:transparent; border:0; border-radius:5px; padding:4px 6px; transition:background 120ms ease-out; } .ds-new-project:hover { background:rgba(255,255,255,0.08); } .ds-new-project:focus-visible { outline:auto; } @media (prefers-reduced-motion:reduce) { .ds-new-project { transition:none; } }"
+    },
+    {
+      "name": "Project row",
+      "kind": "nav",
+      "refersTo": "project-row",
+      "description": "Static unselected hierarchy preview: project name, session count, and idle inherit the list-container ink. Native List owns selection/emphasis colors; selection, context menus, status symbols, and drag/drop are not reimplemented.",
+      "html": "<div class=\"ds-project-list\"><div class=\"ds-project-row\"><strong class=\"ds-project-title\">Project name</strong><span>Session count</span><span>idle</span></div></div>",
+      "css": ".ds-project-list { color-scheme:dark; background:#25292E; color:CanvasText; font:menu; } .ds-project-row { display:grid; gap:3px; padding:5px 0; } .ds-project-title { font-weight:500; }"
+    },
+    {
+      "name": "User message",
+      "kind": "card",
+      "refersTo": "user-message",
+      "description": "Schematic individual user-text surface, not an enclosing turn card. Text is a documentation placeholder.",
+      "html": "<div class=\"ds-user-message\">Message text</div>",
+      "css": ".ds-user-message { color-scheme:dark; font:menu; color:CanvasText; padding:10px; background:#2D3943; border-radius:9px; white-space:pre-wrap; overflow-wrap:anywhere; }"
+    },
+    {
+      "name": "Session details drawer",
+      "kind": "custom",
+      "refersTo": "details-drawer",
+      "description": "Schematic dark drawer shell; native dividers, Markdown, workflow controls, and Metal terminal output are not represented.",
+      "html": "<aside class=\"ds-drawer\"><div class=\"ds-drawer-title\">Session details</div><div class=\"ds-drawer-body\">Completed turns</div></aside>",
+      "css": ".ds-drawer { color-scheme:dark; width:420px; background:#202327; color:CanvasText; font:menu; box-shadow:-4px 0 12px rgba(0,0,0,0.2); } .ds-drawer-title { display:flex; align-items:center; height:44px; padding:0 14px; font-weight:600; } .ds-drawer-body { padding:6px 18px; color:#BAC4CE; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Studio Console",
+    "overview": "A precise native workspace for parallel coding sessions. Graphite layers in dark\nappearance and satin gray layers in light appearance frame the work without\ncompeting with terminal output. Steel selection is steady and legible.\n\nNative controls, readable system type, and compact spacing carry the character.\nDetails are available on demand; glow, ornamental hardware, and decorative\nterminal motion are not part of the selected direction.",
+    "keyCharacteristics": [
+      "Adaptive native surfaces, not a user-selectable theme.",
+      "Stable steel selection with readable inactive labels.",
+      "Terminal-first work with secondary details."
+    ],
+    "rules": [
+      {
+        "name": "The Readable Layers Rule",
+        "body": "Resolve all seven roles together from system appearance for custom chrome; keep their ink readable without overriding native List selection/emphasis colors on project names, session counts, or idle labels.",
+        "section": "colors"
+      },
+      {
+        "name": "The Native Type Rule",
+        "body": "Preserve system text semantics and full-strength inactive session titles; hierarchy comes from weight, spacing, and surface rather than dimming the whole tab.",
+        "section": "typography"
+      },
+      {
+        "name": "The Steady Selection Rule",
+        "body": "Change fill and edge without scaling or moving the selected session; retain separate select, end, and drag actions.",
+        "section": "layout"
+      }
+    ],
+    "dos": [
+      "Do resolve the complete native appearance family for custom chrome, while leaving native List row ink inherited.",
+      "Do retain native labels, traffic lights, keyboard shortcuts, drag/drop, and ending safeguards.",
+      "Do keep the terminal primary and the details drawer secondary."
+    ],
+    "donts": [
+      "Don't dim inactive tab titles or merge high-contrast-light surface roles.",
+      "Don't add glow, ornamental hardware, or selection scaling.",
+      "Don't turn documentation tokens into a theme picker or a shared runtime dependency."
+    ]
+  }
+}
