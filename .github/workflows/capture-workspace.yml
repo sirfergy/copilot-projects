@@ -37,7 +37,9 @@ jobs:
         run: python3 scripts/test-capture-workspace.py
       - name: Build the capture test without opening a window
         timeout-minutes: 15
-        run: swift test --filter WorkspaceCaptureTests > "$CAPTURE_ROOT/build.log" 2>&1
+        run: |
+          swift test --filter WorkspaceCaptureTests > "$CAPTURE_ROOT/build.log" 2>&1
+          swift build --product workspace-capture-host >> "$CAPTURE_ROOT/build.log" 2>&1
       - name: Run the isolated GUI test host
         timeout-minutes: 6
         run: python3 scripts/capture-workspace.py "$CAPTURE_ROOT"

@@ -204,9 +204,9 @@ It never captures the whole desktop, launches a live host, or changes TCC grants
 Capture runs are triggered by pushes to `sirfergy/studio-console` and
 `sirfergy/studio-console-bold`. Manual
 dispatch becomes available after the workflow is present on the default branch.
-Ordinary test runs skip the capture. The driver builds a test-only application
-around the existing SwiftPM XCTest bundle, without starting the shipping host's
-bootstrap or services. Its real AppKit event loop hosts the same native fixture,
+Ordinary test runs skip the capture. The driver packages a debug-only SwiftPM
+application without starting the shipping host's bootstrap or services. Its real
+AppKit event loop runs the same asynchronous fixture as the XCTest wrapper,
 including active/key-window keyboard and image-preview lifecycle checks. The
 driver uses a private temporary home and state directory, a harmless terminal
 process, a bounded application lifetime, and a replacement environment that does

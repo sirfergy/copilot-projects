@@ -104,17 +104,11 @@ def build_capture_host(root):
     build = Path(subprocess.check_output(
         ["swift", "build", "--show-bin-path"], cwd=REPO, text=True
     ).strip()).resolve(strict=True)
-    bundles = list(build.glob("*.xctest"))
-    if len(bundles) != 1:
-        raise ValueError("Expected exactly one prebuilt SwiftPM test bundle.")
-    frameworks = Path(subprocess.check_output(
-        ["xcrun", "--show-sdk-platform-path"], text=True
-    ).strip()) / "Developer/Library/Frameworks"
-    testing_libraries = frameworks.parent.parent / "usr/lib"
     app = root / "sandbox/Workspace Capture.app"
     contents = app / "Contents"
     executable = contents / "MacOS/workspace-capture-host"
     executable.parent.mkdir(parents=True)
+    shutil.copy2(build / "workspace-capture-host", executable)
     resources = contents / "Resources"
     resources.mkdir()
     for name in ("SwiftTerm_SwiftTerm.bundle", "copilot-projects_CopilotProjectsCore.bundle"):
@@ -131,15 +125,9 @@ def build_capture_host(root):
             "LSMinimumSystemVersion": "26.0",
         }, plist)
     with (root / "build.log").open("a") as log:
-        subprocess.run([
-            "xcrun", "swiftc", "-parse-as-library", str(REPO / "scripts/workspace-capture-host.swift"),
-            "-F", str(frameworks), "-Xlinker", "-rpath", "-Xlinker", str(frameworks),
-            "-Xlinker", "-rpath", "-Xlinker", str(testing_libraries),
-            "-o", str(executable),
-        ], cwd=REPO, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=90)
         subprocess.run(["codesign", "--force", "--sign", "-", str(app)],
                        stdout=log, stderr=subprocess.STDOUT, check=True, timeout=15)
-    return executable, bundles[0]
+    return executable
 
 
 def stop_capture_host(process):
@@ -198,9 +186,9 @@ def main():
         (root / "sandbox" / name).mkdir(parents=True, mode=0o700)
     (root / "images").mkdir(mode=0o700)
     try:
-        executable, test_bundle = build_capture_host(root)
+        executable = build_capture_host(root)
         with (root / "test.log").open("w") as log:
-            run_capture_host([str(executable), str(test_bundle)], environment, log)
+            run_capture_host([str(executable)], environment, log)
         verify_capture(root, source_sha)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         (root / "driver-error.txt").write_text(f"{type(error).__name__}: {error}\n")

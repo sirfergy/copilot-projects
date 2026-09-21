@@ -20,25 +20,20 @@ SPEC.loader.exec_module(capture)
 
 
 class CaptureDriverTests(unittest.TestCase):
-    def test_host_uses_the_debug_bundle_and_xcode_testing_libraries(self):
+    def test_host_packages_the_debug_executable_and_resource_bundles(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             build = root / "debug"
             build.mkdir()
-            bundle = build / "CaptureTests.xctest"
-            bundle.mkdir()
+            (build / "workspace-capture-host").write_bytes(b"debug host")
             for name in ("SwiftTerm_SwiftTerm.bundle", "copilot-projects_CopilotProjectsCore.bundle"):
                 (build / name).mkdir()
-            with mock.patch.object(capture.subprocess, "check_output", side_effect=[
-                str(build), "/Xcode/MacOSX.platform",
-            ]), mock.patch.object(capture.subprocess, "run") as run:
-                executable, actual_bundle = capture.build_capture_host(root)
-            self.assertEqual(actual_bundle, bundle.resolve())
+            with mock.patch.object(capture.subprocess, "check_output", return_value=str(build)), \
+                 mock.patch.object(capture.subprocess, "run") as run:
+                executable = capture.build_capture_host(root)
             self.assertEqual(executable.name, "workspace-capture-host")
-            compile_command = run.call_args_list[0].args[0]
-            self.assertIn("/Xcode/MacOSX.platform/Developer/Library/Frameworks", compile_command)
-            self.assertIn("/Xcode/MacOSX.platform/Developer/usr/lib", compile_command)
-            self.assertEqual(run.call_args_list[1].args[0][0], "codesign")
+            self.assertEqual(executable.read_bytes(), b"debug host")
+            self.assertEqual(run.call_args.args[0][0], "codesign")
             with (executable.parent.parent / "Info.plist").open("rb") as stream:
                 info = plistlib.load(stream)
             self.assertEqual(info["CFBundlePackageType"], "APPL")
