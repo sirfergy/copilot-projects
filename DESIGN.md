@@ -181,6 +181,9 @@ below it. A fixed project rail (176pt), resizable Sessions column
 (420pt minimum) share aligned headers (56pt). The Sessions divider persists
 under `copilot-projects.sessions`. Session rows scroll vertically with a 6pt gap
 and 10pt column inset. The main pane identifies the active session and its project.
+Its session-details opener sits beside the terminal glyph in that heading,
+not over terminal output or in the native title strip. It appears only when
+transcript or workflow details are available and the drawer is closed.
 
 Projects can collapse immediately while Sessions remains visible. Visibility is
 scene-owned ephemeral `@State`, passed as a `Binding` through `MainWindowContent`;

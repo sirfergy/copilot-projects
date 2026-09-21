@@ -2,7 +2,7 @@
 version: 1
 slug: "sources-copilotprojectshost-views-swift"
 primary_target: "Sources/CopilotProjectsHost/Views.swift"
-related_targets: ["Sources/CopilotProjectsHost/HostLifetime.swift","Sources/CopilotProjectsHost/AppEntry.swift"]
+related_targets: ["Sources/CopilotProjectsHost/HostLifetime.swift","Sources/CopilotProjectsHost/AppEntry.swift","Sources/CopilotProjectsHost/TranscriptDrawer.swift"]
 ---
 
 # Two-Level Browser
@@ -28,6 +28,11 @@ Aligned column headers establish hierarchy; an active-session heading replaces
 the old tabs. The terminal remains at least half the window width at supported
 capture sizes. The signature interaction collapses only the project column,
 reclaiming width without remounting or restarting the terminal.
+
+The session-details opener sits beside the decorative terminal glyph in the
+active-session heading, not in the native title strip or over terminal output.
+The user explicitly chose this placement. Retain the existing availability and
+per-session open state; the drawer and its close action remain unchanged.
 
 FORM: Two-Level Browser, grounded structural candidate 5, chosen by the user
 from the three structures dealt by surface seed 2bd5ac36. The established visual

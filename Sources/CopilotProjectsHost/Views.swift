@@ -107,6 +107,16 @@ private struct WorkspaceHeading: View {
             Image(systemName: "terminal")
                 .foregroundStyle(StudioStyle.secondaryText)
                 .accessibilityHidden(true)
+            if let sessionId = model.globalSelectedSessionId,
+               let transcript = model.activeTranscriptController {
+                TranscriptButton(
+                    controller: transcript,
+                    isOpen: model.isTranscriptDrawerOpen(sessionId: sessionId),
+                    hasWorkflow: model.sessionWorkflow(sessionId: sessionId) != nil,
+                    onOpen: { model.openTranscriptDrawer(sessionId: sessionId) }
+                )
+                .id(sessionId)
+            }
         }
         .padding(.horizontal, 18)
         .frame(height: 56)
@@ -472,7 +482,6 @@ struct DetailView: View {
                     controller: transcript,
                     isOpen: model.isTranscriptDrawerOpen(sessionId: sessionId),
                     onClose: { model.closeTranscriptDrawer(sessionId: sessionId) },
-                    onOpen: { model.openTranscriptDrawer(sessionId: sessionId) },
                     workflow: model.sessionWorkflow(sessionId: sessionId),
                     operation: model.sessionOperationProjection(sessionId: sessionId),
                     onAction: { action in
