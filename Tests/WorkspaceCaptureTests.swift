@@ -514,7 +514,9 @@ final class WorkspaceCaptureTests: XCTestCase {
                 let state = "loaded=\(loaded) focusedValue=\(navigation.previewFocused)"
                     + " active=\(NSApp.isActive) key=\(NSApp.keyWindow?.windowNumber ?? -1)"
                     + " parent=\(window.windowNumber) sheet=\(sheet?.windowNumber ?? -1)"
-                    + " responder=\(String(describing: sheet?.firstResponder))"
+                    + " sheetResponder=\(String(describing: sheet?.firstResponder))"
+                    + " parentResponder=\(String(describing: window.firstResponder))"
+                    + " keyResponder=\(String(describing: NSApp.keyWindow?.firstResponder))"
                 report.diagnostics[stage] = state
                 NSLog("Transcript preview %@: %@", stage, state)
                 try saveReport()
@@ -540,10 +542,25 @@ final class WorkspaceCaptureTests: XCTestCase {
             report.transcriptImages.append(try await captureTranscriptImage(
                 window: previewWindow, file: "macos-transcript-preview.png", output: output
             ))
+            try recordPreviewState("done-before-activation", sheet: previewWindow)
+            previewWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            try await waitFor("The Done fixture preview did not become active and key.") {
+                NSApp.isActive && NSApp.keyWindow === previewWindow
+            }
+            try recordPreviewState("before-done", sheet: previewWindow)
             let previewClose = try XCTUnwrap(findControl("close-transcript-image", in: previewWindow))
             try require(previewClose.accessibilityPerformPress?() == true, "The image preview did not accept Done.")
             try await waitFor("The image preview did not dismiss.") { window.attachedSheet == nil }
             try recordPreviewState("after-done", sheet: window.attachedSheet)
+            if NSApp.keyWindow !== window {
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            try await waitFor("The parent window did not become active and key after Done.") {
+                NSApp.isActive && NSApp.keyWindow === window
+            }
+            try recordPreviewState("after-done-parent-key", sheet: window.attachedSheet)
             try await waitFor("Preview focus stayed active after Done.") { !navigation.previewFocused }
             let reopen = try XCTUnwrap(findControl(imageIdentifier, in: rootView))
             try require(reopen.accessibilityPerformPress?() == true, "The image preview could not be reopened.")
@@ -560,7 +577,7 @@ final class WorkspaceCaptureTests: XCTestCase {
             commandWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             try await waitFor("The reopened image preview did not become the key window.") {
-                NSApp.keyWindow === commandWindow
+                NSApp.isActive && NSApp.keyWindow === commandWindow
             }
             try recordPreviewState("before-command-w", sheet: commandWindow)
             let generationBeforeCommandW = terminal.remoteContentGeneration
@@ -585,7 +602,8 @@ final class WorkspaceCaptureTests: XCTestCase {
             escapeWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             try await waitFor("The Escape fixture preview did not take keyboard focus.") {
-                NSApp.keyWindow === escapeWindow && self.findControl("close-transcript-image", in: escapeWindow) != nil
+                NSApp.isActive && NSApp.keyWindow === escapeWindow
+                    && self.findControl("close-transcript-image", in: escapeWindow) != nil
             }
             try recordPreviewState("before-escape", sheet: escapeWindow)
             let escape = try XCTUnwrap(NSEvent.keyEvent(
