@@ -4,8 +4,11 @@ A native macOS terminal workspace for keeping coding-agent sessions organized.
 Projects and sessions occupy separate navigation columns, and status indicators tell
 you what is running, what needs input, and what finished while you were away.
 
+![Two-Level Browser with separate project and session columns beside the native terminal](docs/workspace.png)
+
 Native workspace captures use isolated sample projects and illustrative terminal
-text. No live workspace content is shown.
+text. No live workspace content is shown. This unfocused-window capture was
+produced by the native Actions workflow; its origin is embedded in the PNG.
 
 ## Install
 
@@ -62,6 +65,14 @@ it does not reconstruct attachment history after image data has been discarded.
 Copilot CLI hooks and a local tracker supply automatic status and session
 details. Other command-line tools work as ordinary terminal sessions and can
 report status through the CLI.
+
+### Compact project navigation
+
+<img src="docs/project-status.png" alt="Compact project rail with selected project, session count, and a labeled waiting-status indicator" width="176">
+
+The rail stays compact while session names have their own scrollable column.
+Full project names and activity summaries remain available through tooltips and
+accessibility labels.
 
 ## Everyday controls
 

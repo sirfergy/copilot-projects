@@ -27,17 +27,20 @@ to the right live session.
 The Mac workspace leads the suite. The live terminal is primary; completed
 turns and session details live in a secondary drawer. Project navigation,
 session navigation, native window controls, and keyboard speed remain central.
-The user approved replacing horizontal tabs with a Two-Level Browser: separate
-project and session columns, with the project column collapsible.
-Web and iOS adapt this language rather than reproducing Mac chrome; their
-existing conversation-first defaults remain intentional.
+The Two-Level Browser separates project navigation from vertically listed
+sessions, with two-line names, explicit states, and a collapsible Projects rail.
+This navigation change is macOS-only; web and iOS retain their established
+conversation-first workflows rather than reproducing Mac chrome.
 
 ## Capabilities and Constraints
 
 Preserve persistent terminals, project/session identity, keyboard shortcuts,
-drag/drop, native labels, attention states, details access, and session-ending
-safeguards. Studio Console changes visual hierarchy, not terminal behavior,
-message delivery, control leases, queues, or shared package contracts.
+drag/reorder, native labels, attention states, creation/context actions, details
+access, and session-ending safeguards. Projects can be hidden from the native
+View menu or session header without restarting the terminal or losing its
+identity; cross-project drops require Projects to be shown. This changes
+navigation and visual hierarchy, not terminal behavior, message delivery,
+control leases, queues, or shared package contracts.
 
 ## Brand Commitments
 
@@ -50,11 +53,24 @@ restrained attention colors, without glow or ornamental hardware.
 
 ## Evidence on Hand
 
-The current `StudioStyle.swift`, `Views.swift`, and `TranscriptDrawer.swift` in
-`Sources/CopilotProjectsHost/` define the recorded implementation. Native
-contrast tests cover the palette roles. This record is source-grounded, not
-complete macOS full-window visual certification; VoiceOver and hardware
-interaction are not certified by the companion rendered finish review.
+The current `StudioStyle.swift`, `Views.swift`, `AppEntry.swift`, `HostLifetime.swift`,
+and `TranscriptDrawer.swift` in `Sources/CopilotProjectsHost/` define the recorded
+implementation. The selected Two-Level Browser is option 3, grounded candidate 5
+from surface seed `2bd5ac36`, within the unchanged Studio Console world.
+
+The rendered finish review accepted seven native before/after captures
+(`afedb70` / `3ebd069`) with matched synthetic data, sizes, appearances, and
+unfocused windows. After states cover dark/light 1280x800 and compact 820x520,
+including compact Projects-hidden; observed terminal widths are 822pt, 420pt,
+and 539pt respectively. These are real Metal terminal screenshots, not generated
+mockups. `docs/workspace.png` matches the after-dark pixels; `docs/project-status.png`
+is its disclosed crop, and both carry provenance.
+
+Palette checks and automated container/process/focus-collapse assertions are
+bounded evidence, not full interaction certification. Active windows, opened
+details, high-contrast runtime, real drag/keyboard use, VoiceOver, and hardware
+remain unapproved. Native inactive-sidebar dimming was present in the baseline;
+it is not a new regression or an app-owned styling rule.
 
 ## Product Principles
 

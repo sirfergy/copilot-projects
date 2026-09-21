@@ -63,19 +63,28 @@ components:
     backgroundColor: "{colors.chrome}"
     typography: "{typography.title}"
     height: "38px"
-  session-strip:
+  project-rail:
+    backgroundColor: "{colors.sidebar}"
+    width: "176px"
+  session-browser:
     backgroundColor: "{colors.chrome}"
-    height: "38px"
+    width: "224px"
+  browser-header:
+    backgroundColor: "{colors.chrome}"
+    height: "56px"
+  workspace-heading:
+    backgroundColor: "{colors.raised}"
+    height: "56px"
   session-selected:
     backgroundColor: "{colors.selection}"
     typography: "{typography.session}"
     rounded: "{rounded.session}"
-    padding: "4px 10px"
+    padding: "10px"
   session-inactive:
     backgroundColor: "transparent"
     typography: "{typography.session}"
     rounded: "{rounded.session}"
-    padding: "4px 10px"
+    padding: "10px"
   session-hover:
     backgroundColor: "{colors.raised}"
   project-row:
@@ -111,7 +120,7 @@ terminal motion are not part of the selected direction.
 - Stable steel selection with readable inactive labels.
 - Terminal-first work with secondary details.
 
-Source: `Sources/CopilotProjectsHost/{StudioStyle.swift,Views.swift,TranscriptDrawer.swift}`.
+Source: `Sources/CopilotProjectsHost/{StudioStyle.swift,Views.swift,AppEntry.swift,HostLifetime.swift,TranscriptDrawer.swift}`.
 The frontmatter expands seven app-owned color roles into four system appearances;
 it is a record, not a shared runtime dependency. Portable size tokens express
 SwiftUI points as CSS pixels for documentation previews. Semantic native type
@@ -126,11 +135,12 @@ sizes are deliberately not frozen into pixel values.
 
 ### Neutral
 
-`chrome` frames the title, tabs, and drawer; `sidebar` recesses navigation;
-`raised` gives inactive-tab hover a distinct surface. `secondary-text` is explicit
-readable ink for fleet idle, footer version, and transcript labels/timestamps on
-custom chrome. Primary text remains native `Color.primary`/label color, not a
-new fixed color.
+`chrome` frames the title, session browser, and drawer; `sidebar` recesses the
+project rail; `raised` distinguishes the active-session heading and inactive-row
+hover. `secondary-text` is explicit readable ink for session states, project
+context, fleet idle, footer version, and transcript labels/timestamps on custom
+chrome. Primary text remains native `Color.primary`/label color, not a new fixed
+color.
 
 In system-owned project rows, the project name, session count, and idle label
 have no explicit `foregroundStyle`. They inherit native List selection/emphasis
@@ -151,25 +161,38 @@ These are palette checks, not a claim of complete visual or accessibility approv
 
 ## Typography
 
-Use native system text styles: callout semibold for the project title, callout
-medium for session titles, body medium for project rows, caption for row metadata,
-caption semibold for transcript labels, caption2 for timestamps, and headline for
-the drawer title. Fleet counts use the `status` token with monospaced digits.
-Terminal fonts and ANSI rendering belong to the existing terminal renderer.
+Use native system text styles: callout semibold for the application title,
+headline for browser headers, title3 semibold for the active-session heading,
+body medium for project and session names, and caption for states and project
+context. Session names wrap to two lines. Transcript labels use caption semibold,
+timestamps use caption2, and the drawer title uses headline. Fleet counts use the
+`status` token with monospaced digits. Terminal fonts and ANSI rendering belong
+to the existing terminal renderer.
 
-**The Native Type Rule.** Preserve system text semantics and full-strength inactive session titles; hierarchy comes from weight, spacing, and surface rather than dimming the whole tab.
+**The Native Type Rule.** Preserve system text semantics and full-strength inactive session titles; hierarchy comes from weight, spacing, and surface rather than dimming the whole row.
 
 ## Layout
 
-The title strip and session strip are separate equal-height rows. The title
-leaves leading room for traffic lights (80pt); tabs stay outside the window-drag
-region so their existing drag gesture reorders sessions. The native split
-sidebar ranges from 200pt to 360pt, ideally 240pt, with a persisted divider.
-Tabs scroll horizontally, cap at 210pt, and leave creation controls at the
-trailing edge. The terminal stays continuously mounted.
+The macOS [Two-Level Browser](.impeccable/surfaces/sources-copilotprojectshost-views-swift.md)
+separates projects, sessions, and working content. The native top drag strip
+(38pt) leaves leading room for traffic lights (80pt); navigation controls sit
+below it. A fixed project rail (176pt), resizable Sessions column
+(200pt minimum, 224pt ideal, 280pt maximum), and terminal/detail pane
+(420pt minimum) share aligned headers (56pt). The Sessions divider persists
+under `copilot-projects.sessions`. Session rows scroll vertically with a 6pt gap
+and 10pt column inset. The main pane identifies the active session and its project.
 
-The details drawer overlays the trailing side, with a 44pt heading row and
-18pt horizontal transcript inset. It does not become a second primary workspace.
+Projects can collapse immediately while Sessions remains visible. Visibility is
+scene-owned ephemeral `@State`, passed as a `Binding` through `MainWindowContent`;
+it is neither `AppModel` state nor a persisted preference. The native View menu's
+Show Projects toggle (Command-0) and the resident session-header toggle share it.
+Collapse preserves the terminal container, instance, and process. Focus leaves
+the hidden project table for the visible terminal, or is cleared for an empty
+project; an already-focused terminal is not blurred and refocused.
+
+The root no-project and empty-session states remain. The unchanged details
+drawer overlays the trailing side (420pt), with a 44pt heading row and 18pt
+horizontal transcript inset. It does not become a second primary workspace.
 
 **The Steady Selection Rule.** Change fill and edge without scaling or moving the selected session; retain separate select, end, and drag actions.
 
@@ -187,20 +210,26 @@ control-hover animation is ease-out (0.12s), disabled with Reduce Motion.
 ## Shapes
 
 Use the recorded control, session, and message corners for their named purposes.
-Selected tabs retain a one-point edge. Native List selection, status symbols,
+Selected session rows retain a one-point edge. Native List selection, status symbols,
 capsules, window buttons, menus, and drag indicators keep their own geometry.
 
 ## Components
 
-**Session tabs:** steel selected fill and edge; raised hover only when inactive.
-Titles retain native primary ink. The end button remains a separate labeled
-action, including in the accessibility representation.
+**Session browser:** vertically stacked, two-line names with explicit Running,
+Waiting for input, Finished, or Idle states. Selected rows use steel fill and
+edge; raised hover applies only when inactive. Titles retain native primary ink.
+Select and End remain separate actions and accessibility buttons. Existing
+project/session shortcuts, modifier-number hints, reordering, context actions,
+and session-ending safeguards remain.
 
-**Project navigation and creation:** native sidebar List, persistent status line,
-native context menus and drag/drop. Project names, session counts, and idle labels
-share inherited List ink; there is no custom selected-row foreground switch.
-New Project remains a borderless native button; session creation remains the
-trailing split control.
+**Project navigation and creation:** native sidebar List with a stable compact
+activity line. `ViewThatFits` shows activity symbols and counts when they fit,
+otherwise the first active status in waiting/running/background/scheduled
+priority order. Tooltips and accessibility labels retain all active counts;
+project names have full-name tooltips. Names, counts, and idle labels inherit
+List ink, with no custom selected-row foreground switch. Cross-project session
+drop requires Projects to be shown. New Project remains a borderless native
+button; session creation stays in the Sessions header's trailing split control.
 
 **Transcript and details:** user text receives the message fill; assistant text
 uses the drawer surface. Turns are separated rather than enclosed in nested
@@ -218,6 +247,6 @@ renders. Its generated tonal ramps are swatch previews, not additional app token
 - Do keep the terminal primary and the details drawer secondary.
 
 ### Don't:
-- Don't dim inactive tab titles or merge high-contrast-light surface roles.
+- Don't dim inactive session titles or merge high-contrast-light surface roles.
 - Don't add glow, ornamental hardware, or selection scaling.
 - Don't turn documentation tokens into a theme picker or a shared runtime dependency.

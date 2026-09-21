@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-09-20T00:31:11Z",
+  "generatedAt": "2026-09-21T01:15:21Z",
   "title": "Design System: Copilot Projects - Studio Console",
   "extensions": {
     "colorMeta": {
@@ -399,12 +399,12 @@
     },
     "typographyMeta": {
       "title": {
-        "displayName": "Project title",
-        "purpose": "Native callout semibold in the title strip; semantic size remains platform-owned."
+        "displayName": "Application title",
+        "purpose": "Native callout semibold in the top drag strip; semantic size remains platform-owned."
       },
       "session": {
         "displayName": "Session title",
-        "purpose": "Native callout medium, without inactive-title dimming."
+        "purpose": "Native body medium in vertical session rows, wrapping to two lines without inactive-title dimming."
       },
       "label": {
         "displayName": "Transcript label",
@@ -412,7 +412,7 @@
       },
       "metadata": {
         "displayName": "Secondary metadata",
-        "purpose": "Native caption/caption2 for project-row metadata, footer version, and transcript timestamps. Project-row count/idle labels inherit native List ink; custom-chrome metadata uses secondaryText. Sizes remain semantic."
+        "purpose": "Native caption/caption2 for session states, project context, project-row metadata, footer version, and transcript timestamps. Project-row count/idle labels inherit native List ink; custom-chrome metadata uses secondaryText. Sizes remain semantic."
       },
       "status": {
         "displayName": "Fleet status",
@@ -447,20 +447,28 @@
   },
   "components": [
     {
+      "name": "Session browser header",
+      "kind": "nav",
+      "refersTo": "browser-header",
+      "description": "Schematic Views.swift SessionBrowser header at the 224pt ideal column width and 56pt aligned height. The resident Projects toggle shares scene-owned visibility with the native View menu (Command-0); creation stays trailing. Native controls and resizing are not reimplemented.",
+      "html": "<div class=\"ds-browser-header\"><button class=\"ds-projects-toggle\" type=\"button\" aria-label=\"Hide Projects\" title=\"Hide Projects (Command-0)\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" aria-hidden=\"true\"><rect x=\"2\" y=\"3\" width=\"12\" height=\"10\" rx=\"1\"/><path d=\"M6 3v10\"/></svg></button><div class=\"ds-browser-title\"><strong>Sessions</strong><span>Project name</span></div><div class=\"ds-session-creation\"><button class=\"ds-new-session\" type=\"button\" aria-label=\"New Copilot Session\" title=\"New Copilot Session\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 12 12\" fill=\"none\" stroke=\"currentColor\" aria-hidden=\"true\"><path d=\"M6 1v10M1 6h10\"/></svg></button><span class=\"ds-creation-divider\"></span><button class=\"ds-session-options\" type=\"button\" aria-label=\"More Session Options\" title=\"More Session Options\"><svg width=\"10\" height=\"10\" viewBox=\"0 0 10 10\" fill=\"none\" stroke=\"currentColor\" aria-hidden=\"true\"><path d=\"m2 4 3 3 3-3\"/></svg></button></div></div>",
+      "css": ".ds-browser-header { color-scheme:dark; width:204px; height:56px; padding:0 10px; display:flex; align-items:center; gap:8px; background:#202327; color:CanvasText; font:menu; } .ds-browser-header button { display:grid; place-items:center; flex-shrink:0; padding:0; border:0; background:transparent; color:inherit; } .ds-projects-toggle { width:28px; height:28px; } .ds-browser-title { display:grid; gap:3px; min-width:0; flex:1; } .ds-browser-title strong { font-weight:600; } .ds-browser-title span { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:#BAC4CE; font:caption; } .ds-session-creation { display:flex; align-items:center; border-radius:5px; transition:background 120ms ease-out; } .ds-session-creation:hover { background:rgba(255,255,255,0.08); } .ds-new-session { width:24px; height:22px; } .ds-session-options { width:22px; height:22px; } .ds-creation-divider { height:14px; border-left:1px solid GrayText; } .ds-browser-header button:focus-visible { outline:auto; } @media (prefers-reduced-motion:reduce) { .ds-session-creation { transition:none; } }"
+    },
+    {
       "name": "Selected session",
       "kind": "nav",
       "refersTo": "session-selected",
-      "description": "Schematic dark native tab; placeholder label, not a live session. Browser-native focus stands in for platform focus.",
-      "html": "<button class=\"ds-session-selected\" type=\"button\" aria-current=\"true\">Session title</button>",
-      "css": ".ds-session-selected { color-scheme:dark; font:menu; font-weight:500; color:CanvasText; padding:4px 10px; max-width:210px; border:1px solid #AAC6D9; border-radius:6px; background:#3C4A56; } .ds-session-selected:hover { background:#3C4A56; } .ds-session-selected:focus-visible { outline:auto; }"
+      "description": "Schematic dark Views.swift SessionRow: two-line name, explicit Idle state, steel fill and one-point edge. Select and End are separate buttons, as in the native accessibility representation. Placeholder text and browser-native focus are not interaction certification.",
+      "html": "<div class=\"ds-selected-preview\"><div class=\"ds-session-selected\"><button class=\"ds-selected-select\" type=\"button\" aria-current=\"true\" aria-label=\"Session title spanning two lines, Selected, Idle\"><span class=\"ds-selected-slot\" aria-hidden=\"true\"></span><span class=\"ds-selected-copy\"><span class=\"ds-selected-title\">Session title spanning two lines</span><span class=\"ds-selected-state\">Idle</span></span></button><button class=\"ds-selected-end\" type=\"button\" aria-label=\"End Session title spanning two lines\" title=\"End Session title spanning two lines\"><svg width=\"9\" height=\"9\" viewBox=\"0 0 9 9\" fill=\"none\" stroke=\"currentColor\" aria-hidden=\"true\"><path d=\"m1 1 7 7M8 1 1 8\"/></svg></button></div></div>",
+      "css": ".ds-selected-preview { color-scheme:dark; width:204px; padding:10px; background:#202327; color:CanvasText; font:menu; } .ds-session-selected { display:flex; align-items:center; gap:6px; padding:0 10px; border-radius:6px; background:#3C4A56; box-shadow:inset 0 0 0 1px #AAC6D9; } .ds-selected-select { display:flex; align-items:flex-start; gap:7px; flex:1; min-width:0; padding:10px 0; border:0; background:transparent; color:inherit; text-align:left; font:inherit; } .ds-selected-slot { width:18px; height:18px; flex-shrink:0; } .ds-selected-copy { display:grid; gap:5px; min-width:0; } .ds-selected-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; font-weight:500; } .ds-selected-state { font:caption; color:#BAC4CE; } .ds-selected-end { display:grid; place-items:center; width:20px; height:20px; flex-shrink:0; padding:0; border:0; background:transparent; color:GrayText; } .ds-session-selected:hover { background:#3C4A56; } .ds-selected-select:focus-visible, .ds-selected-end:focus-visible { outline:auto; }"
     },
     {
       "name": "Inactive session",
       "kind": "nav",
       "refersTo": "session-inactive",
-      "description": "Full-strength native title with raised hover, shown on a schematic chrome backdrop.",
-      "html": "<div class=\"ds-tab-strip\"><button class=\"ds-session-inactive\" type=\"button\">Session title</button></div>",
-      "css": ".ds-tab-strip { color-scheme:dark; background:#202327; } .ds-session-inactive { font:menu; font-weight:500; color:CanvasText; padding:4px 10px; max-width:210px; border:1px solid transparent; border-radius:6px; background:transparent; } .ds-session-inactive:hover { background:#30363D; } .ds-session-inactive:focus-visible { outline:auto; }"
+      "description": "Schematic vertical SessionRow with full-strength two-line name, explicit Idle state, and raised hover. Selection and ending remain separate; the empty indicator slot represents idle without unread work.",
+      "html": "<div class=\"ds-inactive-preview\"><div class=\"ds-session-inactive\"><button class=\"ds-inactive-select\" type=\"button\" aria-label=\"Another session title spanning two lines, Idle\"><span class=\"ds-inactive-slot\" aria-hidden=\"true\"></span><span class=\"ds-inactive-copy\"><span class=\"ds-inactive-title\">Another session title spanning two lines</span><span class=\"ds-inactive-state\">Idle</span></span></button><button class=\"ds-inactive-end\" type=\"button\" aria-label=\"End Another session title spanning two lines\" title=\"End Another session title spanning two lines\"><svg width=\"9\" height=\"9\" viewBox=\"0 0 9 9\" fill=\"none\" stroke=\"currentColor\" aria-hidden=\"true\"><path d=\"m1 1 7 7M8 1 1 8\"/></svg></button></div></div>",
+      "css": ".ds-inactive-preview { color-scheme:dark; width:204px; padding:10px; background:#202327; color:CanvasText; font:menu; } .ds-session-inactive { display:flex; align-items:center; gap:6px; padding:0 10px; border-radius:6px; background:transparent; } .ds-inactive-select { display:flex; align-items:flex-start; gap:7px; flex:1; min-width:0; padding:10px 0; border:0; background:transparent; color:inherit; text-align:left; font:inherit; } .ds-inactive-slot { width:18px; height:18px; flex-shrink:0; } .ds-inactive-copy { display:grid; gap:5px; min-width:0; } .ds-inactive-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; font-weight:500; } .ds-inactive-state { font:caption; color:#BAC4CE; } .ds-inactive-end { display:grid; place-items:center; width:20px; height:20px; flex-shrink:0; padding:0; border:0; background:transparent; color:GrayText; } .ds-session-inactive:hover { background:#30363D; } .ds-inactive-select:focus-visible, .ds-inactive-end:focus-visible { outline:auto; }"
     },
     {
       "name": "New Project",
@@ -474,8 +482,8 @@
       "name": "Project row",
       "kind": "nav",
       "refersTo": "project-row",
-      "description": "Static unselected hierarchy preview: project name, session count, and idle inherit the list-container ink. Native List owns selection/emphasis colors; selection, context menus, status symbols, and drag/drop are not reimplemented.",
-      "html": "<div class=\"ds-project-list\"><div class=\"ds-project-row\"><strong class=\"ds-project-title\">Project name</strong><span>Session count</span><span>idle</span></div></div>",
+      "description": "Static unselected ProjectRow hierarchy: full-name tooltip and inherited List ink for the name, count, and idle. Active counts use native symbols with ViewThatFits priority fallback and complete tooltip/accessibility counts in Views.swift; native selection, fallback, menus, and drag/drop are not reimplemented here.",
+      "html": "<div class=\"ds-project-list\"><div class=\"ds-project-row\"><strong class=\"ds-project-title\" title=\"Project name\">Project name</strong><span>Session count</span><span>idle</span></div></div>",
       "css": ".ds-project-list { color-scheme:dark; background:#25292E; color:CanvasText; font:menu; } .ds-project-row { display:grid; gap:3px; padding:5px 0; } .ds-project-title { font-weight:500; }"
     },
     {
@@ -511,7 +519,7 @@
       },
       {
         "name": "The Native Type Rule",
-        "body": "Preserve system text semantics and full-strength inactive session titles; hierarchy comes from weight, spacing, and surface rather than dimming the whole tab.",
+        "body": "Preserve system text semantics and full-strength inactive session titles; hierarchy comes from weight, spacing, and surface rather than dimming the whole row.",
         "section": "typography"
       },
       {
@@ -526,7 +534,7 @@
       "Do keep the terminal primary and the details drawer secondary."
     ],
     "donts": [
-      "Don't dim inactive tab titles or merge high-contrast-light surface roles.",
+      "Don't dim inactive session titles or merge high-contrast-light surface roles.",
       "Don't add glow, ornamental hardware, or selection scaling.",
       "Don't turn documentation tokens into a theme picker or a shared runtime dependency."
     ]
