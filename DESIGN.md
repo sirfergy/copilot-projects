@@ -243,6 +243,8 @@ the PNG's fitted geometry; unavailable images are labeled rather than hidden.
 Image corners reuse the 9pt message shape and native border treatment. Selecting
 an image opens a larger native preview with pan/zoom and explicit dismissal.
 Preview sheets own keyboard input; workspace shortcuts do not act behind them.
+An open preview retains its captured image while the inline list responds to
+eviction; changing session or closing the drawer dismisses the preview.
 
 The [sidecar](.impeccable/design.json) contains schematic dark-appearance HTML/CSS
 previews of these roles, not replacements for native controls or pixel-certified

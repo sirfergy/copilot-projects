@@ -8,6 +8,7 @@ struct CopilotProjectsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @AppStorage(HostLifetimePolicy.settingKey) private var keepRunning = false
     @State private var showsProjects = true
+    @FocusedValue(\.transcriptImagePreviewPresented) private var imagePreviewPresented
 
     var body: some Scene {
         Window("Copilot Projects", id: "main") {
@@ -19,6 +20,7 @@ struct CopilotProjectsApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Project…") { appDelegate.model.addProjectInteractive() }
                     .keyboardShortcut("n", modifiers: .command)
+                    .disabled(imagePreviewPresented == true)
             }
             CommandGroup(after: .appSettings) {
                 Toggle("Keep Running When Window Closes", isOn: $keepRunning)
@@ -26,21 +28,25 @@ struct CopilotProjectsApp: App {
             CommandGroup(before: .sidebar) {
                 Toggle("Show Projects", isOn: $showsProjects)
                     .keyboardShortcut("0", modifiers: .command)
+                    .disabled(imagePreviewPresented == true)
             }
             CommandMenu("Session") {
-                Button("New Copilot Session") { appDelegate.model.addSessionToSelected() }
-                    .keyboardShortcut("t", modifiers: .command)
-                Button("Start with Prompt…") { appDelegate.model.addPromptedSessionToSelected() }
-                Button("New Terminal") { appDelegate.model.addTerminalToSelected() }
-                    .keyboardShortcut("t", modifiers: [.command, .option])
-                Divider()
-                Button("End Session") { appDelegate.model.closeSelectedSession() }
-                    .keyboardShortcut("w", modifiers: .command)
-                Divider()
-                Button("Next Session") { appDelegate.model.selectAdjacentSession(1) }
-                    .keyboardShortcut("]", modifiers: [.command, .shift])
-                Button("Previous Session") { appDelegate.model.selectAdjacentSession(-1) }
-                    .keyboardShortcut("[", modifiers: [.command, .shift])
+                Group {
+                    Button("New Copilot Session") { appDelegate.model.addSessionToSelected() }
+                        .keyboardShortcut("t", modifiers: .command)
+                    Button("Start with Prompt…") { appDelegate.model.addPromptedSessionToSelected() }
+                    Button("New Terminal") { appDelegate.model.addTerminalToSelected() }
+                        .keyboardShortcut("t", modifiers: [.command, .option])
+                    Divider()
+                    Button("End Session") { appDelegate.model.closeSelectedSession() }
+                        .keyboardShortcut("w", modifiers: .command)
+                    Divider()
+                    Button("Next Session") { appDelegate.model.selectAdjacentSession(1) }
+                        .keyboardShortcut("]", modifiers: [.command, .shift])
+                    Button("Previous Session") { appDelegate.model.selectAdjacentSession(-1) }
+                        .keyboardShortcut("[", modifiers: [.command, .shift])
+                }
+                .disabled(imagePreviewPresented == true)
             }
         }
         MenuBarExtra("Copilot Projects", systemImage: "terminal", isInserted: $keepRunning) {

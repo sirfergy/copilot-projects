@@ -88,6 +88,7 @@ private struct TranscriptDrawer: View {
     let onClose: () -> Void
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
     @State private var isAtBottom = true
+    @State private var preview: TranscriptImagePreviewItem?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -121,7 +122,7 @@ private struct TranscriptDrawer: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(turns) { turn in
-                            TranscriptTurnCard(turn: turn, imageCapture: imageCapture)
+                            TranscriptTurnCard(turn: turn, imageCapture: imageCapture) { preview = $0 }
                         }
                         Color.clear
                             .frame(height: 1)
@@ -146,12 +147,16 @@ private struct TranscriptDrawer: View {
         .background(StudioStyle.chrome)
         .overlay(alignment: .leading) { Divider() }
         .shadow(color: .black.opacity(0.2), radius: 12, x: -4)
+        .sheet(item: $preview) { item in
+            TranscriptImagePreview(item: item)
+        }
     }
 }
 
 private struct TranscriptTurnCard: View {
     let turn: TranscriptTurn
     let imageCapture: RemoteKittyImageCapture?
+    let onPreview: (TranscriptImagePreviewItem) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -205,7 +210,8 @@ private struct TranscriptTurnCard: View {
                             imageId: image.imageId,
                             version: image.contentVersion
                         ),
-                        data: imageCapture.imageData(imageId: image.imageId, version: image.contentVersion)
+                        data: imageCapture.imageData(imageId: image.imageId, version: image.contentVersion),
+                        onPreview: onPreview
                     )
                 }
             }

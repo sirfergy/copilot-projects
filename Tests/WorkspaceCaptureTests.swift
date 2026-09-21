@@ -27,14 +27,25 @@ final class WorkspaceCaptureTests: XCTestCase {
     @MainActor
     private final class Navigation: ObservableObject {
         @Published var showsProjects = true
+        var previewFocused = false
+    }
+
+    @MainActor
+    private final class CommandProbe: NSObject {
+        var endRequests = 0
+        @objc func endSession(_ sender: Any?) { endRequests += 1 }
     }
 
     private struct CaptureRoot: View {
         let model: AppModel
         @ObservedObject var navigation: Navigation
+        @FocusedValue(\.transcriptImagePreviewPresented) private var imagePreviewPresented
 
         var body: some View {
             RootView(model: model, showsProjects: $navigation.showsProjects)
+                .onChange(of: imagePreviewPresented, initial: true) { _, value in
+                    navigation.previewFocused = value == true
+                }
         }
     }
 
@@ -465,6 +476,36 @@ final class WorkspaceCaptureTests: XCTestCase {
                     window: window, file: file, output: output
                 ))
             }
+            let commandProbe = CommandProbe()
+            let previousMenu = NSApp.mainMenu
+            let menu = previousMenu ?? NSMenu()
+            let sessionMenuItem = NSMenuItem(title: "Session", action: nil, keyEquivalent: "")
+            let sessionMenu = NSMenu(title: "Session")
+            let endItem = NSMenuItem(
+                title: "End Session", action: #selector(CommandProbe.endSession(_:)), keyEquivalent: "w"
+            )
+            endItem.target = commandProbe
+            endItem.keyEquivalentModifierMask = .command
+            sessionMenu.addItem(endItem)
+            sessionMenuItem.submenu = sessionMenu
+            menu.addItem(sessionMenuItem)
+            NSApp.mainMenu = menu
+            let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                if AppDelegate.shouldHandleWorkspaceEvent(
+                    window: event.window, keyWindow: NSApp.keyWindow, modalWindow: NSApp.modalWindow
+                ), event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
+                   event.charactersIgnoringModifiers == "w" {
+                    commandProbe.endRequests += 1
+                    return nil
+                }
+                return event
+            }
+            defer {
+                if let monitor { NSEvent.removeMonitor(monitor) }
+                menu.removeItem(sessionMenuItem)
+                NSApp.mainMenu = previousMenu
+            }
+
             let imageControl = try XCTUnwrap(findControl(imageIdentifier, in: rootView))
             try require(imageControl.accessibilityPerformPress?() == true, "The image preview action failed.")
             try await waitFor("The native image preview did not open.") {
@@ -474,6 +515,7 @@ final class WorkspaceCaptureTests: XCTestCase {
                     && self.findControl("transcript-image-preview", in: sheet, role: nil) != nil
             }
             let previewWindow = try XCTUnwrap(window.attachedSheet)
+            try await waitFor("Preview focus did not suppress workspace commands.") { navigation.previewFocused }
             try require(!AppDelegate.shouldHandleWorkspaceEvent(
                 window: previewWindow, keyWindow: previewWindow, modalWindow: nil
             ), "Preview shortcuts would reach workspace session actions.")
@@ -489,12 +531,28 @@ final class WorkspaceCaptureTests: XCTestCase {
             let reopen = try XCTUnwrap(findControl(imageIdentifier, in: rootView))
             try require(reopen.accessibilityPerformPress?() == true, "The image preview could not be reopened.")
             try await waitFor("The reopened image preview did not open.") { window.attachedSheet != nil }
-            let escapeWindow = try XCTUnwrap(window.attachedSheet)
+            let commandWindow = try XCTUnwrap(window.attachedSheet)
             try await waitFor("The reopened image preview did not finish loading.") {
-                escapeWindow.contentView?.layoutSubtreeIfNeeded()
-                return self.findControl("transcript-image-preview", in: escapeWindow, role: nil) != nil
-                    && escapeWindow.firstResponder != nil && escapeWindow.firstResponder !== terminal
+                commandWindow.contentView?.layoutSubtreeIfNeeded()
+                return self.findControl("transcript-image-preview", in: commandWindow, role: nil) != nil
+                    && NSApp.keyWindow === commandWindow
             }
+            let closeKey = try XCTUnwrap(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                windowNumber: commandWindow.windowNumber, context: nil,
+                characters: "w", charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13
+            ))
+            NSApp.sendEvent(closeKey)
+            try await waitFor("Command-W did not close the image preview.") { window.attachedSheet == nil }
+            try require(commandProbe.endRequests == 0, "Command-W reached a workspace close handler.")
+
+            let openForEscape = try XCTUnwrap(findControl(imageIdentifier, in: rootView))
+            try require(openForEscape.accessibilityPerformPress?() == true, "The Escape fixture preview could not open.")
+            try await waitFor("The Escape fixture preview did not take keyboard focus.") {
+                guard let sheet = window.attachedSheet else { return false }
+                return NSApp.keyWindow === sheet && self.findControl("close-transcript-image", in: sheet) != nil
+            }
+            let escapeWindow = try XCTUnwrap(window.attachedSheet)
             let escape = try XCTUnwrap(NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                 windowNumber: escapeWindow.windowNumber, context: nil,
@@ -502,12 +560,13 @@ final class WorkspaceCaptureTests: XCTestCase {
                 isARepeat: false, keyCode: 53
             ))
             let generationBeforeEscape = terminal.remoteContentGeneration
-            escapeWindow.sendEvent(escape)
+            NSApp.sendEvent(escape)
             try await waitFor("Escape did not close the image preview.") { window.attachedSheet == nil }
             try require(terminal.remoteContentGeneration == generationBeforeEscape,
                         "Escape was echoed into the fixture terminal instead of being contained by the preview.")
             try require(AppDelegate.shouldHandleWorkspaceEvent(window: window, keyWindow: window, modalWindow: nil),
                         "Closing the preview did not restore workspace shortcuts.")
+            try await waitFor("Preview focus stayed active after dismissal.") { !navigation.previewFocused }
             try require(model.globalSelectedSessionId == sessions[0].id
                         && model.terminalView(for: sessions[0].id) === terminal
                         && controller.shellPID == terminalPID,
@@ -517,8 +576,17 @@ final class WorkspaceCaptureTests: XCTestCase {
                         "The image preview could not be opened before deletion.")
             try await waitFor("The deletion fixture preview did not open.") { window.attachedSheet != nil }
             terminal.consumeProcessOutput(RemoteKittyReplayEncoding.apcFrame(control: "a=d,d=I,i=42,q=2")[...])
-            try await waitFor("Deleted image bytes remained in the transcript.") {
-                self.findControl(imageIdentifier, in: rootView) == nil && window.attachedSheet == nil
+            try await waitFor("Deleted image bytes remained in the inline transcript.") {
+                self.findControl(imageIdentifier, in: rootView) == nil
+            }
+            try require(window.attachedSheet != nil, "Retiring an inline image interrupted its pinned preview.")
+            model.selectSession(projectId: project.id, sessionId: sessions[1].id)
+            try await waitFor("Changing session did not dismiss the image preview.") {
+                window.attachedSheet == nil && self.findControl("hide-session-details", in: rootView) == nil
+            }
+            model.selectSession(projectId: project.id, sessionId: sessions[0].id)
+            try await waitFor("The original drawer did not return after the preview test.") {
+                self.findControl("hide-session-details", in: rootView) != nil
             }
             report.transcriptImagesVerified = true
             model.closeTranscriptDrawer(sessionId: sessions[0].id)
@@ -584,13 +652,17 @@ final class WorkspaceCaptureTests: XCTestCase {
         window.contentView?.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
         let content = try await SCShareableContent.currentProcess
-        let shared = try XCTUnwrap(content.windows.first { $0.windowID == CGWindowID(window.windowNumber) })
+        let captureWindow = window.sheetParent ?? window
+        let shared = try XCTUnwrap(content.windows.first { $0.windowID == CGWindowID(captureWindow.windowNumber) })
+        let filter = SCContentFilter(desktopIndependentWindow: shared)
         let configuration = SCStreamConfiguration()
-        configuration.width = Int(window.frame.width * window.backingScaleFactor)
-        configuration.height = Int(window.frame.height * window.backingScaleFactor)
+        configuration.includeChildWindows = true
+        configuration.ignoreShadowsSingleWindow = true
+        configuration.width = Int(filter.contentRect.width * CGFloat(filter.pointPixelScale))
+        configuration.height = Int(filter.contentRect.height * CGFloat(filter.pointPixelScale))
         configuration.showsCursor = false
         let image = try await SCScreenshotManager.captureImage(
-            contentFilter: SCContentFilter(desktopIndependentWindow: shared), configuration: configuration
+            contentFilter: filter, configuration: configuration
         )
         let png = try XCTUnwrap(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
         try png.write(to: output.appendingPathComponent("images/\(file)"), options: .atomic)

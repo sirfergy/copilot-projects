@@ -55,6 +55,8 @@ the newest reply. This retains the existing one-image-per-terminal-ID model;
 it does not reconstruct attachment history after image data has been discarded.
 Images restored from disk without a recorded display origin remain available in
 the terminal but are not guessed into a historical transcript turn.
+An open preview pins the image being inspected, even if the terminal later
+discards it. Closing the drawer or switching sessions dismisses that preview.
 
 ## A workspace for parallel work
 

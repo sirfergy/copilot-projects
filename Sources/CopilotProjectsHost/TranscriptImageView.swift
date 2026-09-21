@@ -49,7 +49,7 @@ private struct LoadedTranscriptImage {
     }
 }
 
-private struct TranscriptImagePreviewItem: Identifiable {
+struct TranscriptImagePreviewItem: Identifiable {
     let id: TranscriptImageIdentity
     let data: Data
 }
@@ -57,9 +57,9 @@ private struct TranscriptImagePreviewItem: Identifiable {
 struct TranscriptImageView: View {
     let identity: TranscriptImageIdentity
     let data: Data?
+    let onPreview: (TranscriptImagePreviewItem) -> Void
     @State private var loaded: LoadedTranscriptImage?
     @State private var failed: TranscriptImageIdentity?
-    @State private var preview: TranscriptImagePreviewItem?
 
     private var readyImage: CGImage? {
         guard let loaded, loaded.matches(identity, data: data) else { return nil }
@@ -70,7 +70,7 @@ struct TranscriptImageView: View {
         Group {
             if let data, let size = RemoteKittyPNGValidation.pixelSize(data) {
                 Button {
-                    preview = TranscriptImagePreviewItem(id: identity, data: data)
+                    onPreview(TranscriptImagePreviewItem(id: identity, data: data))
                 } label: {
                     ZStack {
                         StudioStyle.raised
@@ -127,13 +127,21 @@ struct TranscriptImageView: View {
                 NSLog("Transcript image %u could not be decoded: %@", identity.imageId, String(describing: error))
             }
         }
-        .sheet(item: $preview) { item in
-            TranscriptImagePreview(item: item)
-        }
     }
 }
 
-private struct TranscriptImagePreview: View {
+private struct TranscriptImagePreviewFocus: FocusedValueKey {
+    typealias Value = Bool
+}
+
+extension FocusedValues {
+    var transcriptImagePreviewPresented: Bool? {
+        get { self[TranscriptImagePreviewFocus.self] }
+        set { self[TranscriptImagePreviewFocus.self] = newValue }
+    }
+}
+
+struct TranscriptImagePreview: View {
     let item: TranscriptImagePreviewItem
     @Environment(\.dismiss) private var dismiss
     @State private var image: CGImage?
@@ -169,8 +177,6 @@ private struct TranscriptImagePreview: View {
                                    height: CGFloat(image.height) * scale * zoom)
                             .frame(minWidth: geometry.size.width, minHeight: geometry.size.height)
                     }
-                    .focusable()
-                    .focused($canvasFocused)
                     .accessibilityLabel("Transcript image preview")
                     .accessibilityIdentifier("transcript-image-preview")
                 } else {
@@ -182,10 +188,14 @@ private struct TranscriptImagePreview: View {
             }
         }
         .padding(16)
-        .frame(minWidth: 360, idealWidth: 720, maxWidth: 960,
+        .frame(minWidth: 640, idealWidth: 720, maxWidth: 960,
                minHeight: 280, idealHeight: 520, maxHeight: 720)
         .background(StudioStyle.chrome)
+        .focusable()
+        .focused($canvasFocused)
+        .focusedSceneValue(\.transcriptImagePreviewPresented, true)
         .onExitCommand { dismiss() }
+        .onAppear { canvasFocused = true }
         .task(id: item.id) {
             do {
                 let decoded = try await TranscriptImageDecoder.shared.decode(
@@ -193,7 +203,6 @@ private struct TranscriptImagePreview: View {
                 )
                 guard !Task.isCancelled else { return }
                 image = decoded
-                canvasFocused = true
             } catch is CancellationError {
                 return
             } catch {
