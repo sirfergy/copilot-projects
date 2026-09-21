@@ -38,8 +38,8 @@ jobs:
       - name: Build the capture test without opening a window
         timeout-minutes: 15
         run: swift test --filter WorkspaceCaptureTests > "$CAPTURE_ROOT/build.log" 2>&1
-      - name: Capture the isolated native workspace
-        timeout-minutes: 4
+      - name: Run the isolated GUI test host
+        timeout-minutes: 6
         run: python3 scripts/capture-workspace.py "$CAPTURE_ROOT"
       - name: Upload capture evidence
         if: always() && env.CAPTURE_ROOT != ''

@@ -7,6 +7,8 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest import mock
+import subprocess
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -61,6 +63,7 @@ class CaptureDriverTests(unittest.TestCase):
             report = {
                 "completed": True, "collapseVerified": True, "emptyProjectCollapseVerified": True,
                 "focusedTerminalCollapseVerified": True, "transcriptImagesVerified": True,
+                "guiHostVerified": True, "terminalCleanupVerified": True,
                 "sourceSHA": "a" * 40, "images": images,
             }
             transcript_images = []
@@ -82,6 +85,7 @@ class CaptureDriverTests(unittest.TestCase):
                 {"emptyProjectCollapseVerified": False},
                 {"focusedTerminalCollapseVerified": False},
                 {"transcriptImagesVerified": False},
+                {"guiHostVerified": False}, {"terminalCleanupVerified": False},
                 {"transcriptImages": []},
                 {"transcriptImages": [dict(image, markerVisible=False) for image in transcript_images]},
                 {"transcriptImages": [dict(image, pixelWidth=1) for image in transcript_images]},
@@ -99,6 +103,31 @@ class CaptureDriverTests(unittest.TestCase):
             (root / "images" / images[0]["file"]).unlink()
             with self.assertRaises(FileNotFoundError):
                 capture.verify_capture(root, "a" * 40)
+
+    def test_host_timeout_stops_only_its_process_and_children(self):
+        process = mock.Mock(pid=123)
+        process.wait.side_effect = [subprocess.TimeoutExpired("host", 180), 0]
+        process.poll.return_value = None
+        children = subprocess.CompletedProcess([], 0, "456\n", "")
+        with mock.patch.object(capture.subprocess, "Popen", return_value=process), \
+             mock.patch.object(capture.subprocess, "run", return_value=children) as run, \
+             mock.patch.object(capture.os, "kill") as kill:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                capture.run_capture_host(["host", "tests.xctest"], {"HOME": "/isolated"}, mock.Mock())
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["ps", "-o", "pid=", "-P", "123"])
+        kill.assert_called_once_with(456, capture.signal.SIGTERM)
+        process.terminate.assert_called_once()
+        process.kill.assert_not_called()
+
+    def test_host_failure_is_not_a_success_shaped_manifest(self):
+        process = mock.Mock()
+        process.wait.return_value = 1
+        process.poll.return_value = 1
+        with mock.patch.object(capture.subprocess, "Popen", return_value=process):
+            with self.assertRaises(subprocess.CalledProcessError):
+                capture.run_capture_host(["host", "tests.xctest"], {}, mock.Mock())
+        process.terminate.assert_not_called()
 
 
 if __name__ == "__main__":

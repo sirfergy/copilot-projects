@@ -72,6 +72,8 @@ final class WorkspaceCaptureTests: XCTestCase {
         var focusedTerminalCollapseVerified = false
         var detailsHeaderVerified = false
         var transcriptImagesVerified = false
+        var guiHostVerified = false
+        var terminalCleanupVerified = false
         var diagnostics: [String: String] = [:]
         var images: [ImageProof] = []
         var transcriptImages: [TranscriptImageProof] = []
@@ -135,8 +137,9 @@ final class WorkspaceCaptureTests: XCTestCase {
             report.diagnostics["reducedTransparency"] = String(NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency)
             try saveReport()
 
-            _ = NSApplication.shared
-            let previousPolicy = NSApp.activationPolicy()
+            try require(NSApp?.isRunning == true
+                        && Bundle.main.bundleIdentifier == "com.obvioussean.copilot-projects.workspace-capture",
+                        "Capture requires the running GUI test host.")
             let previousApp = NSWorkspace.shared.frontmostApplication
             let splitKeys = ["projects", "sessions"].map { "NSSplitView Subview Frames copilot-projects.\($0)" }
             let previousSplits = splitKeys.map { UserDefaults.standard.object(forKey: $0) }
@@ -149,10 +152,7 @@ final class WorkspaceCaptureTests: XCTestCase {
                 if NSApp.isActive, previousApp?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
                     previousApp?.activate(options: [])
                 }
-                NSApp.setActivationPolicy(previousPolicy)
             }
-            NSApp.setActivationPolicy(.regular)
-            NSApp.finishLaunching()
             report.diagnostics["activationPolicy"] = String(NSApp.activationPolicy().rawValue)
             report.diagnostics["screenCount"] = String(NSScreen.screens.count)
             try saveReport()
@@ -204,6 +204,10 @@ final class WorkspaceCaptureTests: XCTestCase {
             }
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            try await waitFor("The GUI host did not become active with its fixture window key.") {
+                NSApp.isRunning && NSApp.isActive && NSApp.keyWindow === window
+            }
+            report.guiHostVerified = true
             let marker = "NATIVE TERMINAL PIXELS"
 
             try await waitFor("The fixture did not lay out its terminal.") { terminal.bounds.width >= 420 }
@@ -682,6 +686,12 @@ final class WorkspaceCaptureTests: XCTestCase {
             let hiddenTableHasFocus = (window.firstResponder as? NSView)?.isDescendant(of: projects) ?? false
             try require(!hiddenTableHasFocus, "Empty-project collapse left focus in the hidden browser.")
             report.emptyProjectCollapseVerified = true
+            let terminalPIDs = model.hostedTerminals.compactMap { $0.view.process?.shellPid }.filter { $0 > 0 }
+            model.detachAllClients()
+            try await waitFor("A fixture terminal survived GUI host cleanup.") {
+                terminalPIDs.allSatisfy { kill($0, 0) == -1 && errno == ESRCH }
+            }
+            report.terminalCleanupVerified = true
             report.completed = true
             try saveReport()
         } catch {
@@ -789,13 +799,6 @@ final class WorkspaceCaptureTests: XCTestCase {
     private func waitFor(_ message: String, condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(2)
         while ContinuousClock.now < deadline {
-            // XCTest doesn't run NSApplication.run(), so dispatch our process's
-            // pending window-server events before observing keyboard focus.
-            while ContinuousClock.now < deadline,
-                  let event = NSApp.nextEvent(matching: .any, until: .distantPast,
-                                              inMode: .default, dequeue: true) {
-                NSApp.sendEvent(event)
-            }
             if condition() { return }
             try await Task.sleep(for: .milliseconds(20))
         }

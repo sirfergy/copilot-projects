@@ -4,8 +4,10 @@
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -62,6 +64,8 @@ def verify_capture(root, source_sha):
         raise ValueError("Project collapse did not preserve the already-focused terminal.")
     if report.get("transcriptImagesVerified") is not True:
         raise ValueError("Transcript image interaction and ownership were not verified.")
+    if report.get("guiHostVerified") is not True or report.get("terminalCleanupVerified") is not True:
+        raise ValueError("The GUI host lifecycle and terminal cleanup were not verified.")
     images = report.get("images", [])
     if len(images) != len(IMAGE_NAMES) or {image.get("file") for image in images} != IMAGE_NAMES:
         raise ValueError("The capture must contain exactly the requested views.")
@@ -96,6 +100,81 @@ def verify_capture(root, source_sha):
             raise ValueError("Transcript image dimensions do not match the capture manifest.")
 
 
+def build_capture_host(root):
+    build = Path(subprocess.check_output(
+        ["swift", "build", "--show-bin-path"], cwd=REPO, text=True
+    ).strip()).resolve(strict=True)
+    bundles = list(build.glob("*.xctest"))
+    if len(bundles) != 1:
+        raise ValueError("Expected exactly one prebuilt SwiftPM test bundle.")
+    frameworks = Path(subprocess.check_output(
+        ["xcrun", "--show-sdk-platform-path"], text=True
+    ).strip()) / "Developer/Library/Frameworks"
+    app = root / "sandbox/Workspace Capture.app"
+    contents = app / "Contents"
+    executable = contents / "MacOS/workspace-capture-host"
+    executable.parent.mkdir(parents=True)
+    resources = contents / "Resources"
+    resources.mkdir()
+    for name in ("SwiftTerm_SwiftTerm.bundle", "copilot-projects_CopilotProjectsCore.bundle"):
+        shutil.copytree(build / name, resources / name)
+    with (contents / "Info.plist").open("wb") as plist:
+        plistlib.dump({
+            "CFBundleName": "Workspace Capture",
+            "CFBundleExecutable": executable.name,
+            "CFBundleIdentifier": "com.obvioussean.copilot-projects.workspace-capture",
+            "CFBundlePackageType": "APPL",
+            "CFBundleVersion": "1",
+            "NSPrincipalClass": "NSApplication",
+            "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "26.0",
+        }, plist)
+    with (root / "build.log").open("a") as log:
+        subprocess.run([
+            "xcrun", "swiftc", "-parse-as-library", str(REPO / "scripts/workspace-capture-host.swift"),
+            "-F", str(frameworks), "-Xlinker", "-rpath", "-Xlinker", str(frameworks),
+            "-o", str(executable),
+        ], cwd=REPO, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=90)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(app)],
+                       stdout=log, stderr=subprocess.STDOUT, check=True, timeout=15)
+    return executable, bundles[0]
+
+
+def stop_capture_host(process):
+    if process.poll() is not None:
+        return
+    # These are direct children of this still-live, test-owned application.
+    try:
+        children = subprocess.run(
+            ["ps", "-o", "pid=", "-P", str(process.pid)], text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=5,
+        )
+        if children.returncode not in (0, 1):
+            raise RuntimeError(f"Could not enumerate capture children: {children.stderr}")
+        for child in children.stdout.split():
+            try:
+                os.kill(int(child), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def run_capture_host(command, environment, log):
+    process = subprocess.Popen(command, cwd=REPO, env=environment, stdout=log, stderr=subprocess.STDOUT)
+    try:
+        result = process.wait(timeout=180)
+        if result != 0:
+            raise subprocess.CalledProcessError(result, command)
+    finally:
+        stop_capture_host(process)
+
+
 def main():
     if len(sys.argv) != 2:
         raise ValueError("Usage: capture-workspace.py <fresh Actions capture directory>")
@@ -117,14 +196,11 @@ def main():
         (root / "sandbox" / name).mkdir(parents=True, mode=0o700)
     (root / "images").mkdir(mode=0o700)
     try:
+        executable, test_bundle = build_capture_host(root)
         with (root / "test.log").open("w") as log:
-            subprocess.run(
-                ["swift", "test", "--skip-build", "--filter",
-                 "WorkspaceCaptureTests/testNativeWorkspaceCapture"],
-                cwd=REPO, env=environment, stdout=log, stderr=subprocess.STDOUT, check=True,
-            )
+            run_capture_host([str(executable), str(test_bundle)], environment, log)
         verify_capture(root, source_sha)
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         (root / "driver-error.txt").write_text(f"{type(error).__name__}: {error}\n")
         raise
     finally:
