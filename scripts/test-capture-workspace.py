@@ -4,6 +4,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import plistlib
 import struct
 import tempfile
 import unittest
@@ -19,6 +20,30 @@ SPEC.loader.exec_module(capture)
 
 
 class CaptureDriverTests(unittest.TestCase):
+    def test_host_uses_the_debug_bundle_and_xcode_testing_libraries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build = root / "debug"
+            build.mkdir()
+            bundle = build / "CaptureTests.xctest"
+            bundle.mkdir()
+            for name in ("SwiftTerm_SwiftTerm.bundle", "copilot-projects_CopilotProjectsCore.bundle"):
+                (build / name).mkdir()
+            with mock.patch.object(capture.subprocess, "check_output", side_effect=[
+                str(build), "/Xcode/MacOSX.platform",
+            ]), mock.patch.object(capture.subprocess, "run") as run:
+                executable, actual_bundle = capture.build_capture_host(root)
+            self.assertEqual(actual_bundle, bundle.resolve())
+            self.assertEqual(executable.name, "workspace-capture-host")
+            compile_command = run.call_args_list[0].args[0]
+            self.assertIn("/Xcode/MacOSX.platform/Developer/Library/Frameworks", compile_command)
+            self.assertIn("/Xcode/MacOSX.platform/Developer/usr/lib", compile_command)
+            self.assertEqual(run.call_args_list[1].args[0][0], "codesign")
+            with (executable.parent.parent / "Info.plist").open("rb") as stream:
+                info = plistlib.load(stream)
+            self.assertEqual(info["CFBundlePackageType"], "APPL")
+            self.assertEqual(info["CFBundleIdentifier"], "com.obvioussean.copilot-projects.workspace-capture")
+
     def test_environment_is_replaced_and_tracking_is_preserved(self):
         root = Path("/private/capture")
         original = {

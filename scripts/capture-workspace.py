@@ -110,6 +110,7 @@ def build_capture_host(root):
     frameworks = Path(subprocess.check_output(
         ["xcrun", "--show-sdk-platform-path"], text=True
     ).strip()) / "Developer/Library/Frameworks"
+    testing_libraries = frameworks.parent.parent / "usr/lib"
     app = root / "sandbox/Workspace Capture.app"
     contents = app / "Contents"
     executable = contents / "MacOS/workspace-capture-host"
@@ -133,6 +134,7 @@ def build_capture_host(root):
         subprocess.run([
             "xcrun", "swiftc", "-parse-as-library", str(REPO / "scripts/workspace-capture-host.swift"),
             "-F", str(frameworks), "-Xlinker", "-rpath", "-Xlinker", str(frameworks),
+            "-Xlinker", "-rpath", "-Xlinker", str(testing_libraries),
             "-o", str(executable),
         ], cwd=REPO, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=90)
         subprocess.run(["codesign", "--force", "--sign", "-", str(app)],
