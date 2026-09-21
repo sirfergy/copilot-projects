@@ -196,8 +196,23 @@ final class WorkspaceCaptureTests: XCTestCase {
                 options: .atomic
             )
             transcript.reload()
-            try await waitFor("A late transcript did not reveal the header control.") {
-                self.findControl("show-session-details", in: rootView) != nil
+            do {
+                try await waitFor("A late transcript did not reveal the header control.") {
+                    rootView.layoutSubtreeIfNeeded()
+                    window.displayIfNeeded()
+                    return self.findControl("show-session-details", in: rootView) != nil
+                }
+            } catch {
+                report.diagnostics["transcriptLoaded"] = String(transcript.snapshot != nil)
+                report.diagnostics["rootAccessibility"] = accessibilitySummary(rootView)
+                report.diagnostics["windowAccessibility"] = accessibilitySummary(window)
+                if let bitmap = rootView.bitmapImageRepForCachingDisplay(in: rootView.bounds) {
+                    rootView.cacheDisplay(in: rootView.bounds, to: bitmap)
+                    if let png = bitmap.representation(using: .png, properties: [:]) {
+                        try png.write(to: output.appendingPathComponent("images/diagnostic-chrome-only.png"))
+                    }
+                }
+                throw error
             }
             let opener = try XCTUnwrap(findControl("show-session-details", in: rootView))
             try require(opener.accessibilityPerformPress(), "The header control could not be pressed.")
@@ -409,6 +424,19 @@ final class WorkspaceCaptureTests: XCTestCase {
 
     private func captureError(_ message: String) -> NSError {
         NSError(domain: "WorkspaceCapture", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    @MainActor
+    private func accessibilitySummary(_ element: Any, depth: Int = 0) -> String {
+        guard depth < 12 else { return "depth limit\n" }
+        guard let node = element as? any NSAccessibilityProtocol else {
+            return "\(type(of: element)): no NSAccessibilityProtocol conformance\n"
+        }
+        let line = "\(type(of: element)): role=\(node.accessibilityRole()?.rawValue ?? "-") "
+            + "id=\(node.accessibilityIdentifier() ?? "-") label=\(node.accessibilityLabel() ?? "-")\n"
+        return line + (node.accessibilityChildren() ?? []).prefix(80).map {
+            accessibilitySummary($0, depth: depth + 1)
+        }.joined()
     }
 
     @MainActor
