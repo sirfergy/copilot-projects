@@ -277,6 +277,7 @@ public final class WorkspaceCaptureFixture {
             }
             let opener = try unwrap(findControl("show-session-details", in: rootView))
             report.diagnostics["rootAccessibility"] = accessibilitySummary(rootView)
+            NSLog("Capture phase: existing session-details controls")
             try require(opener.accessibilityPerformPress?() == true, "The header control could not be pressed.")
             try await waitFor("The header control did not open this session's details.") {
                 model.isTranscriptDrawerOpen(sessionId: sessions[0].id)
@@ -331,6 +332,7 @@ public final class WorkspaceCaptureFixture {
                         && controller.shellPID == terminalPID, "Details replaced or restarted the terminal.")
             report.detailsHeaderVerified = true
 
+            NSLog("Capture phase: existing workspace raster captures")
             var originalContainer: TerminalsContainerView?
             var compactTerminalWidth: CGFloat?
             for (name, appearance, width, height, projectsVisible): (String, NSAppearance.Name, Int, Int, Bool) in [
@@ -464,6 +466,7 @@ public final class WorkspaceCaptureFixture {
             navigation.showsProjects = true
             window.setContentSize(NSSize(width: 1280, height: 800))
             window.appearance = NSAppearance(named: .darkAqua)
+            NSLog("Capture phase: inline image delivery and captures")
             model.openTranscriptDrawer(sessionId: sessions[0].id)
             try await waitFor("The image fixture drawer did not open.") {
                 rootView.layoutSubtreeIfNeeded()
@@ -609,6 +612,16 @@ public final class WorkspaceCaptureFixture {
                         "Escape queued input to the fixture terminal.")
             try recordPreviewState("after-escape", sheet: window.attachedSheet)
             try requireUnchangedWorkspace()
+            do {
+                try await waitFor("The inline image control did not return after Escape.") {
+                    rootView.layoutSubtreeIfNeeded()
+                    return self.findControl(imageIdentifier, in: rootView)?.accessibilityLabel?() == "Open transcript image"
+                }
+            } catch {
+                report.diagnostics["afterEscapeImages"] = String(describing: terminal.kittyImageCapture.retainedImageMetadata())
+                report.diagnostics["afterEscapeAccessibility"] = accessibilitySummary(rootView)
+                throw error
+            }
             let openBeforeDelete = try unwrap(findControl(imageIdentifier, in: rootView))
             try require(openBeforeDelete.accessibilityPerformPress?() == true,
                         "The image preview could not be opened before deletion.")
