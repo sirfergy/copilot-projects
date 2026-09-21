@@ -96,6 +96,14 @@ The web queue removes the confirmed message when its receipt arrives, without
 another click or session switch; messages still awaiting confirmation stay visible.
 Stop has its own handoff lane, so an unresolved send cannot block cancellation.
 
+The tracker retains the latest 64 completed operation receipts for the current
+conversation, without a time limit, so a mobile client can recover a missed
+confirmation after reconnecting or restarting its app. This history ends when
+the Copilot conversation or tracker process changes, and older receipts can be
+evicted by later operations. An unavailable receipt remains an unknown outcome,
+not permission to resend. Updating the tracker cannot recover receipts that
+already expired; check the conversation before discarding a stuck queued copy.
+
 The session drawer and native/web conversation views render live response updates
 within their conversation turns. Final messages replace their matching streamed text.
 Newly observed empty or whitespace-only assistant messages are omitted from live

@@ -450,6 +450,44 @@ test("native send uses explicit owner and mode, and exact replay cannot submit t
   assert.deepEqual(runtime.session.closeCalls, []);
 });
 
+test("native send receipts survive long disconnects without replaying messages", {
+  concurrency: false,
+}, async (t) => {
+  let clock = originalDateNow();
+  Date.now = () => clock;
+  t.after(() => { Date.now = originalDateNow; });
+  for (const mode of ["enqueue", "immediate"]) {
+    const runtime = await createRuntime(t);
+    await workflowReady(runtime);
+    const request = workflowHandoff(runtime, "session-send", { prompt: "Send once", mode });
+    await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "send not accepted");
+    const applied = receipt(runtime, request.operationId);
+
+    clock += 6 * 60 * 60 * 1_000;
+    runtime.intervalCallback();
+    await waitFor(
+      () => readSnapshot(runtime).workflow?.observedAtMilliseconds === clock,
+      "workflow did not refresh after reconnect"
+    );
+    await workflowReady(runtime);
+    assert.deepEqual(receipt(runtime, request.operationId), applied);
+
+    writeHandoff(runtime, request.path, request.payload);
+    trigger(runtime, `${runtime.appSessionId}.session-send.json`);
+    await waitFor(() => !realExistsSync(request.path), "replayed handoff was not acknowledged");
+    assert.deepEqual(receipt(runtime, request.operationId), applied);
+    assert.equal(runtime.session.workflowCalls.filter((call) => call.method === "session.send").length, 1);
+
+    runtime.session.sessionId = uuid();
+    await runtime.session.emit("session.start", { sessionId: runtime.session.sessionId });
+    assert.equal(receipt(runtime, request.operationId), undefined);
+    writeHandoff(runtime, request.path, request.payload);
+    trigger(runtime, `${runtime.appSessionId}.session-send.json`);
+    await waitFor(() => !realExistsSync(request.path), "old-conversation handoff was not discarded");
+    assert.equal(runtime.session.workflowCalls.filter((call) => call.method === "session.send").length, 1);
+  }
+});
+
 test("screenshots are captured as blobs for the exact conversation and cannot replay", {
   concurrency: false,
 }, async (t) => {
@@ -2597,11 +2635,12 @@ test("validation, explicit RPC false, and exceptions map to safe terminal states
   assert.equal(runtime.session.elicitationCalls.length, 0);
 });
 
-test("terminal receipts expire at 64 while accepted receipts remain and bound new work", {
+test("terminal receipts remain count-bounded without expiring and accepted receipts bound new work", {
   concurrency: false,
 }, async (t) => {
   let clock = 1_000_000;
   Date.now = () => clock;
+  t.after(() => { Date.now = originalDateNow; });
   const terminalRuntime = await createRuntime(t);
   for (let index = 0; index < 70; index += 1) {
     clock += 1;
@@ -2624,7 +2663,7 @@ test("terminal receipts expire at 64 while accepted receipts remain and bound ne
     );
     assert.equal(realExistsSync(terminalRuntime.userInputPath), false);
   }
-  let terminalReceipts = readSnapshot(terminalRuntime).operationReceipts;
+  const terminalReceipts = readSnapshot(terminalRuntime).operationReceipts;
   assert.equal(terminalReceipts.length, 64);
   assert.equal(
     terminalReceipts.some((entry) => entry.operationId === "terminal-0"),
@@ -2636,8 +2675,7 @@ test("terminal receipts expire at 64 while accepted receipts remain and bound ne
   );
   clock += 120_001;
   terminalRuntime.intervalCallback();
-  terminalReceipts = readSnapshot(terminalRuntime).operationReceipts;
-  assert.deepEqual(terminalReceipts, []);
+  assert.deepEqual(readSnapshot(terminalRuntime).operationReceipts, terminalReceipts);
 
   Date.now = originalDateNow;
   const acceptedRuntime = await createRuntime(t);
