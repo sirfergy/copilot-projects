@@ -130,39 +130,76 @@ def build_capture_host(root):
     return executable
 
 
-def stop_capture_host(process):
+def capture_host_pid(root, executable):
+    receipt = root / "host-pid"
+    if not receipt.exists():
+        return None
+    pid = int(receipt.read_text().strip())
+    if pid <= 1:
+        raise ValueError("Invalid capture application PID.")
+    identity = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "comm="], text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=5,
+    )
+    if identity.returncode == 1:
+        return None
+    if identity.returncode != 0 or Path(identity.stdout.strip()).resolve() != executable.resolve():
+        raise RuntimeError("Refusing to signal a process that is not this capture application.")
+    return pid
+
+
+def stop_capture_host(process, root, executable):
     if process.poll() is not None:
         return
-    # These are direct children of this still-live, test-owned application.
     try:
-        children = subprocess.run(
-            ["ps", "-o", "pid=", "-P", str(process.pid)], text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=5,
-        )
-        if children.returncode not in (0, 1):
-            raise RuntimeError(f"Could not enumerate capture children: {children.stderr}")
-        for child in children.stdout.split():
+        pid = capture_host_pid(root, executable)
+        if pid is not None:
+            # LaunchServices owns the application, not the `open` waiter.
             try:
-                os.kill(int(child), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+                children = subprocess.run(
+                    ["ps", "-o", "pid=", "-P", str(pid)], text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=5,
+                )
+                if children.returncode not in (0, 1):
+                    raise RuntimeError(f"Could not enumerate capture children: {children.stderr}")
+                for child in children.stdout.split():
+                    try:
+                        os.kill(int(child), signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+            finally:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pid = capture_host_pid(root, executable)
+                if pid is not None:
+                    os.kill(pid, signal.SIGKILL)
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
-def run_capture_host(command, environment, log):
+def run_capture_host(executable, root, environment, log):
+    command = [
+        "/usr/bin/open", "-n", "-W", "-a", str(executable.parent.parent.parent),
+        "--stdout", str(root / "test.log"), "--stderr", str(root / "test.log"),
+    ]
     process = subprocess.Popen(command, cwd=REPO, env=environment, stdout=log, stderr=subprocess.STDOUT)
     try:
         result = process.wait(timeout=180)
         if result != 0:
             raise subprocess.CalledProcessError(result, command)
     finally:
-        stop_capture_host(process)
+        stop_capture_host(process, root, executable)
 
 
 def main():
@@ -188,7 +225,7 @@ def main():
     try:
         executable = build_capture_host(root)
         with (root / "test.log").open("w") as log:
-            run_capture_host([str(executable)], environment, log)
+            run_capture_host(executable, root, environment, log)
         verify_capture(root, source_sha)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         (root / "driver-error.txt").write_text(f"{type(error).__name__}: {error}\n")

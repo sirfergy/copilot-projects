@@ -35,8 +35,20 @@ enum WorkspaceCaptureHost {
         let environment = ProcessInfo.processInfo.environment
         guard environment["GITHUB_ACTIONS"] == "true",
               environment["RUNNER_TRACKING_ID"] != nil,
-              environment["WORKSPACE_CAPTURE_ROOT"] != nil else {
+              let outputPath = environment["WORKSPACE_CAPTURE_ROOT"] else {
             fputs("Workspace capture host requires the isolated Actions driver.\n", stderr)
+            exit(1)
+        }
+        let root = URL(fileURLWithPath: outputPath).resolvingSymlinksInPath()
+        guard Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
+            .resolvingSymlinksInPath().path == root.path else {
+            fputs("Workspace capture application is outside its isolated output directory.\n", stderr)
+            exit(1)
+        }
+        do {
+            try Data("\(getpid())\n".utf8).write(to: root.appendingPathComponent("host-pid"), options: .atomic)
+        } catch {
+            fputs("Could not record capture application identity: \(error)\n", stderr)
             exit(1)
         }
         let app = NSApplication.shared

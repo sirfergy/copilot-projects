@@ -127,17 +127,21 @@ class CaptureDriverTests(unittest.TestCase):
     def test_host_timeout_stops_only_its_process_and_children(self):
         process = mock.Mock(pid=123)
         process.wait.side_effect = [subprocess.TimeoutExpired("host", 180), 0]
-        process.poll.return_value = None
+        process.poll.side_effect = [None, 0]
         children = subprocess.CompletedProcess([], 0, "456\n", "")
         with mock.patch.object(capture.subprocess, "Popen", return_value=process), \
              mock.patch.object(capture.subprocess, "run", return_value=children) as run, \
+             mock.patch.object(capture, "capture_host_pid", return_value=234), \
              mock.patch.object(capture.os, "kill") as kill:
             with self.assertRaises(subprocess.TimeoutExpired):
-                capture.run_capture_host(["host", "tests.xctest"], {"HOME": "/isolated"}, mock.Mock())
+                capture.run_capture_host(Path("/capture/App.app/Contents/MacOS/host"), Path("/capture"),
+                                         {"HOME": "/isolated"}, mock.Mock())
         run.assert_called_once()
-        self.assertEqual(run.call_args.args[0], ["ps", "-o", "pid=", "-P", "123"])
-        kill.assert_called_once_with(456, capture.signal.SIGTERM)
-        process.terminate.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["ps", "-o", "pid=", "-P", "234"])
+        self.assertEqual(kill.call_args_list, [
+            mock.call(456, capture.signal.SIGTERM), mock.call(234, capture.signal.SIGTERM),
+        ])
+        process.terminate.assert_not_called()
         process.kill.assert_not_called()
 
     def test_host_failure_is_not_a_success_shaped_manifest(self):
@@ -146,8 +150,18 @@ class CaptureDriverTests(unittest.TestCase):
         process.poll.return_value = 1
         with mock.patch.object(capture.subprocess, "Popen", return_value=process):
             with self.assertRaises(subprocess.CalledProcessError):
-                capture.run_capture_host(["host", "tests.xctest"], {}, mock.Mock())
+                capture.run_capture_host(Path("/capture/App.app/Contents/MacOS/host"), Path("/capture"),
+                                         {}, mock.Mock())
         process.terminate.assert_not_called()
+
+    def test_cleanup_refuses_a_reused_or_unrelated_pid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "host-pid").write_text("234\n")
+            unrelated = subprocess.CompletedProcess([], 0, "/some/other/application\n", "")
+            with mock.patch.object(capture.subprocess, "run", return_value=unrelated):
+                with self.assertRaises(RuntimeError):
+                    capture.capture_host_pid(root, root / "sandbox/App.app/Contents/MacOS/host")
 
 
 if __name__ == "__main__":
