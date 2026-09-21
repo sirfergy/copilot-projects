@@ -513,6 +513,8 @@ final class WorkspaceCaptureTests: XCTestCase {
                 } ?? false
                 let state = "loaded=\(loaded) focusedValue=\(navigation.previewFocused)"
                     + " active=\(NSApp.isActive) key=\(NSApp.keyWindow?.windowNumber ?? -1)"
+                    + " appRunning=\(NSApp.isRunning)"
+                    + " runningApplicationActive=\(NSRunningApplication.current.isActive)"
                     + " parent=\(window.windowNumber) sheet=\(sheet?.windowNumber ?? -1)"
                     + " sheetResponder=\(String(describing: sheet?.firstResponder))"
                     + " parentResponder=\(String(describing: window.firstResponder))"
@@ -785,7 +787,15 @@ final class WorkspaceCaptureTests: XCTestCase {
 
     @MainActor
     private func waitFor(_ message: String, condition: () -> Bool) async throws {
-        for _ in 0..<100 {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
+            // XCTest doesn't run NSApplication.run(), so dispatch our process's
+            // pending window-server events before observing keyboard focus.
+            while ContinuousClock.now < deadline,
+                  let event = NSApp.nextEvent(matching: .any, until: .distantPast,
+                                              inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+            }
             if condition() { return }
             try await Task.sleep(for: .milliseconds(20))
         }
