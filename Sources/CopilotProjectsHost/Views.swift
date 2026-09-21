@@ -13,7 +13,7 @@ struct RootView: View {
     var body: some View {
         VStack(spacing: 0) {
             topStrip
-            HStack(spacing: 0) {
+            ProjectSplitView(showsProjects: showsProjects, onProjectsHidden: focusVisibleWorkspace) {
                 VStack(spacing: 0) {
                     HStack {
                         Text("Projects").font(.headline)
@@ -27,16 +27,10 @@ struct RootView: View {
                     SidebarView(model: model)
                 }
                 .background(StudioStyle.sidebar)
-                .frame(width: showsProjects ? 176 : 0)
-                .clipped()
                 .disabled(!showsProjects)
                 .allowsHitTesting(showsProjects)
                 .accessibilityHidden(!showsProjects)
-
-                Divider()
-                    .frame(width: showsProjects ? 1 : 0)
-                    .opacity(showsProjects ? 1 : 0)
-
+            } content: {
                 HSplitView {
                     SessionBrowser(model: model, showsProjects: $showsProjects)
                         .frame(minWidth: 200, idealWidth: 224, maxWidth: 280)
@@ -53,14 +47,16 @@ struct RootView: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .background(StudioStyle.chrome)
-        .background(WindowConfigurator(showsProjects: showsProjects) { window in
-            if let terminal = model.activeController?.terminalView,
-               !terminal.isHidden, terminal.window === window {
-                model.focusActiveTerminal()
-            } else {
-                window.makeFirstResponder(nil)
-            }
-        })
+        .background(WindowConfigurator())
+    }
+
+    private func focusVisibleWorkspace(in window: NSWindow) {
+        if let terminal = model.activeController?.terminalView,
+           !terminal.isHidden, terminal.window === window {
+            model.focusActiveTerminal()
+        } else {
+            window.makeFirstResponder(nil)
+        }
     }
 
     private var topStrip: some View {
@@ -128,16 +124,6 @@ private struct WorkspaceHeading: View {
 /// accent color under the strip) and keeps chrome minimal. Retries until the
 /// window is attached (it's nil at first).
 struct WindowConfigurator: NSViewRepresentable {
-    let showsProjects: Bool
-    let onProjectsHidden: (NSWindow) -> Void
-
-    final class Coordinator {
-        var showsProjects: Bool
-        init(showsProjects: Bool) { self.showsProjects = showsProjects }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(showsProjects: showsProjects) }
-
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         func apply(_ attempt: Int) {
@@ -151,13 +137,7 @@ struct WindowConfigurator: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        let wasVisible = context.coordinator.showsProjects
-        context.coordinator.showsProjects = showsProjects
-        if wasVisible && !showsProjects, let window = nsView.window {
-            onProjectsHidden(window)
-        }
-    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 /// Roll-up of what every agent is doing, drawn as a trailing title-bar accessory:
@@ -209,6 +189,10 @@ struct SplitViewAutosaver: NSViewRepresentable {
             var ancestor = view?.superview
             while let current = ancestor, !(current is NSSplitView) { ancestor = current.superview }
             if let split = ancestor as? NSSplitView, split.autosaveName != name {
+                // Keep Sessions at its chosen width when Projects collapses; its controller owns sizing.
+                if let controller = split.delegate as? NSSplitViewController {
+                    controller.splitViewItems.first?.holdingPriority = .init(251)
+                }
                 split.autosaveName = name
             }
         }
