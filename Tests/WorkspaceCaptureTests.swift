@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Metal
 import ScreenCaptureKit
 import SwiftUI
@@ -182,6 +183,17 @@ final class WorkspaceCaptureTests: XCTestCase {
 
             try await waitFor("The fixture did not lay out its terminal.") { terminal.bounds.width >= 420 }
             let rootView = try XCTUnwrap(window.contentView)
+            // A client query materializes SwiftUI's lazy accessibility tree.
+            // Keep the main actor available for AppKit to answer this own-process request.
+            let accessibilityResult = await Task.detached {
+                let application = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+                var windows: CFTypeRef?
+                return AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &windows)
+            }.value
+            report.diagnostics["accessibilityRequest"] = String(accessibilityResult.rawValue)
+            try saveReport()
+            try require(accessibilityResult == .success,
+                        "The fixture could not query its own accessibility tree: \(accessibilityResult.rawValue).")
             try require(findControl("show-session-details", in: rootView) == nil,
                         "Session details appeared without a transcript or workflow.")
             let transcript = try XCTUnwrap(model.activeTranscriptController)
@@ -215,7 +227,8 @@ final class WorkspaceCaptureTests: XCTestCase {
                 throw error
             }
             let opener = try XCTUnwrap(findControl("show-session-details", in: rootView))
-            try require(opener.accessibilityPerformPress(), "The header control could not be pressed.")
+            report.diagnostics["rootAccessibility"] = accessibilitySummary(rootView)
+            try require(opener.accessibilityPerformPress?() == true, "The header control could not be pressed.")
             try await waitFor("The header control did not open this session's details.") {
                 model.isTranscriptDrawerOpen(sessionId: sessions[0].id)
                     && self.findControl("hide-session-details", in: rootView) != nil
@@ -242,14 +255,14 @@ final class WorkspaceCaptureTests: XCTestCase {
                 self.findControl("show-session-details", in: rootView) != nil
             }
             let otherOpener = try XCTUnwrap(findControl("show-session-details", in: rootView))
-            try require(otherOpener.accessibilityPerformPress(), "The second session's opener could not be pressed.")
+            try require(otherOpener.accessibilityPerformPress?() == true, "The second session's opener could not be pressed.")
             try await waitFor("The header control targeted the wrong session after selection changed.") {
                 model.isTranscriptDrawerOpen(sessionId: sessions[0].id)
                     && model.isTranscriptDrawerOpen(sessionId: sessions[1].id)
                     && self.findControl("hide-session-details", in: rootView) != nil
             }
             let otherCloser = try XCTUnwrap(findControl("hide-session-details", in: rootView))
-            try require(otherCloser.accessibilityPerformPress(), "The second session's close control could not be pressed.")
+            try require(otherCloser.accessibilityPerformPress?() == true, "The second session's close control could not be pressed.")
             try await waitFor("Closing the second drawer did not restore its opener.") {
                 !model.isTranscriptDrawerOpen(sessionId: sessions[1].id)
                     && self.findControl("hide-session-details", in: rootView) == nil
@@ -260,7 +273,7 @@ final class WorkspaceCaptureTests: XCTestCase {
                 self.findControl("hide-session-details", in: rootView) != nil
             }
             let closer = try XCTUnwrap(findControl("hide-session-details", in: rootView))
-            try require(closer.accessibilityPerformPress(), "The drawer close control could not be pressed.")
+            try require(closer.accessibilityPerformPress?() == true, "The drawer close control could not be pressed.")
             try await waitFor("Closing the drawer did not restore the header control.") {
                 !model.isTranscriptDrawerOpen(sessionId: sessions[0].id)
                     && self.findControl("show-session-details", in: rootView) != nil
@@ -314,7 +327,7 @@ final class WorkspaceCaptureTests: XCTestCase {
                     guard let detailsButton = findControl("show-session-details", in: rootView) else {
                         throw captureError("\(name) is missing its closed-drawer header control.")
                     }
-                    let detailsFrame = detailsButton.accessibilityFrame()
+                    let detailsFrame = try XCTUnwrap(detailsButton.accessibilityFrame?())
                     let terminalFrame = window.convertToScreen(terminal.convert(terminal.bounds, to: nil))
                     try require(detailsFrame.width > 0 && detailsFrame.minY >= terminalFrame.maxY
                                 && detailsFrame.maxY <= terminalFrame.maxY + 56,
@@ -429,21 +442,21 @@ final class WorkspaceCaptureTests: XCTestCase {
     @MainActor
     private func accessibilitySummary(_ element: Any, depth: Int = 0) -> String {
         guard depth < 12 else { return "depth limit\n" }
-        guard let node = element as? any NSAccessibilityProtocol else {
-            return "\(type(of: element)): no NSAccessibilityProtocol conformance\n"
-        }
-        let line = "\(type(of: element)): role=\(node.accessibilityRole()?.rawValue ?? "-") "
-            + "id=\(node.accessibilityIdentifier() ?? "-") label=\(node.accessibilityLabel() ?? "-")\n"
-        return line + (node.accessibilityChildren() ?? []).prefix(80).map {
+        let node = element as AnyObject
+        let line = "\(type(of: element)): role=\(node.accessibilityRole?()?.rawValue ?? "-") "
+            + "id=\(node.accessibilityIdentifier?() ?? "-") label=\(node.accessibilityLabel?() ?? "-") "
+            + "formalProtocol=\(element is any NSAccessibilityProtocol)\n"
+        return line + (node.accessibilityChildren?() ?? []).prefix(80).map {
             accessibilitySummary($0, depth: depth + 1)
         }.joined()
     }
 
     @MainActor
-    private func findControl(_ identifier: String, in element: Any) -> (any NSAccessibilityProtocol)? {
-        guard let node = element as? any NSAccessibilityProtocol else { return nil }
-        if node.accessibilityIdentifier() == identifier, node.accessibilityRole() == .button { return node }
-        for child in node.accessibilityChildren() ?? [] {
+    private func findControl(_ identifier: String, in element: Any) -> AnyObject? {
+        // SwiftUI virtual nodes expose public ObjC getters without full protocol conformance.
+        let node = element as AnyObject
+        if node.accessibilityIdentifier?() == identifier, node.accessibilityRole?() == .button { return node }
+        for child in node.accessibilityChildren?() ?? [] {
             if let match = findControl(identifier, in: child) { return match }
         }
         return nil
