@@ -222,7 +222,9 @@ capsules, window buttons, menus, and drag indicators keep their own geometry.
 **Session browser:** vertically stacked, two-line names with explicit Running,
 Waiting for input, Finished, or Idle states. Selected rows use steel fill and
 edge; raised hover applies only when inactive. Titles retain native primary ink.
-Select and End remain separate actions and accessibility buttons. Existing
+Single-click selects; double-click on the selector ends that session through
+the existing active-work confirmation. The dedicated End control and separate
+accessibility buttons remain. Existing
 project/session shortcuts, modifier-number hints, reordering, context actions,
 and session-ending safeguards remain.
 

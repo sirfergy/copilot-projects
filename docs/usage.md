@@ -27,7 +27,9 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 - **Sessions (vertical browser):** the selected project's sessions appear beside the project
   column, with their names and explicit state. One terminal is visible at a time.
   Start Copilot with `⌘T` or a plain shell with `⌥⌘T`, switch with a click / **`⌃Tab`** (next) / `⌃⇧Tab`
-  (prev) / **`⌃1`–`⌃9`** / `⌘⇧[` / `⌘⇧]`, or end with `⌘W` or the row's ✕.
+  (prev) / **`⌃1`–`⌃9`** / `⌘⇧[` / `⌘⇧]`, or end with `⌘W`, the row's ✕,
+  or a double-click on the session selector. Sessions with active or pending work
+  still ask for confirmation before ending.
   Drag a row to reorder it or onto another project to move it (show Projects first
   if that column is hidden). Background sessions keep
   running. Hold **⌘** (projects) or **⌃** (sessions) to see numbered hints.

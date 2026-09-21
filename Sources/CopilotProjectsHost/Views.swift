@@ -784,6 +784,10 @@ struct SessionRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .onTapGesture(perform: onSelect)
+            .simultaneousGesture(TapGesture(count: 2).onEnded {
+                // Finish the second click's selection before removing its row.
+                DispatchQueue.main.async(execute: onClose)
+            })
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .semibold))
