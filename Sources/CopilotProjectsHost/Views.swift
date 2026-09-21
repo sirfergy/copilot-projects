@@ -88,17 +88,11 @@ private struct WorkspaceHeading: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(session?.title ?? model.selectedProject?.name ?? "Workspace")
-                    .font(.title3.weight(.semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(session?.title ?? model.selectedProject?.name ?? "Workspace")
-                Text(model.selectedProject?.name ?? "Choose a project to get started")
-                    .font(.caption)
-                    .foregroundStyle(StudioStyle.secondaryText)
-                    .lineLimit(1)
-            }
+            Text(session?.title ?? model.selectedProject?.name ?? "Workspace")
+                .font(.title3.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(session?.title ?? model.selectedProject?.name ?? "Workspace")
             Spacer(minLength: 0)
             Image(systemName: "terminal")
                 .foregroundStyle(StudioStyle.secondaryText)

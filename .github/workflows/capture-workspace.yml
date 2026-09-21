@@ -2,7 +2,7 @@ name: Capture macOS workspace
 
 on:
   push:
-    branches: [sirfergy/studio-console, sirfergy/studio-console-bold, sirfergy/session-details-header]
+    branches: [sirfergy/studio-console, sirfergy/studio-console-bold, sirfergy/session-details-header, sirfergy/simplify-session-heading]
   workflow_dispatch:
 
 permissions:
@@ -19,6 +19,7 @@ jobs:
       (github.ref == 'refs/heads/sirfergy/studio-console' ||
        github.ref == 'refs/heads/sirfergy/studio-console-bold' ||
        github.ref == 'refs/heads/sirfergy/session-details-header' ||
+       github.ref == 'refs/heads/sirfergy/simplify-session-heading' ||
        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     runs-on: [self-hosted, macOS, ARM64, m4-mini]
     timeout-minutes: 25

@@ -181,7 +181,8 @@ below it. A resizable project rail (176pt minimum/default, 360pt maximum), Sessi
 (420pt minimum) share aligned headers (56pt). The Sessions divider persists
 under `copilot-projects.sessions`; Projects uses `copilot-projects.projects`.
 Drag either native divider to adjust the navigation widths. Session rows scroll vertically with a 6pt gap
-and 10pt column inset. The main pane identifies the active session and its project.
+and 10pt column inset. The main pane identifies the active session; its project
+appears in the Sessions header rather than being repeated beneath the session title.
 Its session-details opener sits beside the terminal glyph in that heading,
 not over terminal output or in the native title strip. It appears only when
 transcript or workflow details are available and the drawer is closed.
