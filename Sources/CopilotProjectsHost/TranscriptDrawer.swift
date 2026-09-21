@@ -147,7 +147,9 @@ private struct TranscriptDrawer: View {
         .frame(width: 420)
         .frame(maxHeight: .infinity)
         .background(StudioStyle.chrome)
-        .overlay(alignment: .leading) { Divider() }
+        .overlay(alignment: .leading) {
+            Color(nsColor: .separatorColor).frame(width: 1).allowsHitTesting(false)
+        }
         .shadow(color: .black.opacity(0.2), radius: 12, x: -4)
     }
 }
