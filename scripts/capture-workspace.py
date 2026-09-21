@@ -4,8 +4,10 @@
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -19,6 +21,11 @@ APPEARANCES = {
     "macos-compact-projects-hidden.png": "NSAppearanceNameDarkAqua",
 }
 IMAGE_NAMES = set(APPEARANCES)
+TRANSCRIPT_IMAGE_NAMES = {
+    "macos-transcript-dark.png",
+    "macos-transcript-light.png",
+    "macos-transcript-preview.png",
+}
 
 
 def capture_environment(root, source_sha, original):
@@ -51,10 +58,20 @@ def verify_capture(root, source_sha):
     report = json.loads((root / "metadata.json").read_text())
     if report.get("completed") is not True or report.get("sourceSHA") != source_sha:
         raise ValueError("The native capture did not complete for the checked-out commit.")
+    if (root / "host-exit-status").read_text().strip() != "0":
+        raise ValueError("The native GUI host did not shut down successfully.")
     if report.get("collapseVerified") is not True or report.get("emptyProjectCollapseVerified") is not True:
         raise ValueError("The native project-column collapse was not verified.")
     if report.get("focusedTerminalCollapseVerified") is not True:
         raise ValueError("Project collapse did not preserve the already-focused terminal.")
+    if report.get("transcriptImagesVerified") is not True:
+        raise ValueError("Transcript image interaction and ownership were not verified.")
+    if report.get("guiHostVerified") is not True or report.get("terminalCleanupVerified") is not True:
+        raise ValueError("The GUI host lifecycle and terminal cleanup were not verified.")
+    if report.get("inputDispatchVerified") is not True:
+        raise ValueError("The production preview input dispatch was not verified.")
+    if report.get("physicalKeyboardValidation") != "unverified-headless":
+        raise ValueError("Headless dispatch evidence must not claim physical keyboard validation.")
     images = report.get("images", [])
     if len(images) != len(IMAGE_NAMES) or {image.get("file") for image in images} != IMAGE_NAMES:
         raise ValueError("The capture must contain exactly the requested views.")
@@ -73,6 +90,125 @@ def verify_capture(root, source_sha):
         dimensions = struct.unpack(">II", data[16:24])
         if dimensions != (image.get("pixelWidth"), image.get("pixelHeight")) or min(dimensions) <= 0:
             raise ValueError("Screenshot dimensions do not match the capture manifest.")
+    transcript_images = report.get("transcriptImages", [])
+    if len(transcript_images) != len(TRANSCRIPT_IMAGE_NAMES) or {
+        image.get("file") for image in transcript_images
+    } != TRANSCRIPT_IMAGE_NAMES:
+        raise ValueError("The capture must contain the transcript image and preview views.")
+    for image in transcript_images:
+        if image.get("markerVisible") is not True:
+            raise ValueError("A transcript image capture is missing its actual image pixels.")
+        data = (root / "images" / image["file"]).read_bytes()
+        if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+            raise ValueError("A transcript image capture is not a PNG.")
+        dimensions = struct.unpack(">II", data[16:24])
+        if dimensions != (image.get("pixelWidth"), image.get("pixelHeight")) or min(dimensions) <= 0:
+            raise ValueError("Transcript image dimensions do not match the capture manifest.")
+
+
+def build_capture_host(root):
+    build = Path(subprocess.check_output(
+        ["swift", "build", "--show-bin-path"], cwd=REPO, text=True
+    ).strip()).resolve(strict=True)
+    app = root / "sandbox/Workspace Capture.app"
+    contents = app / "Contents"
+    executable = contents / "MacOS/workspace-capture-host"
+    executable.parent.mkdir(parents=True)
+    shutil.copy2(build / "workspace-capture-host", executable)
+    resources = contents / "Resources"
+    resources.mkdir()
+    for name in ("SwiftTerm_SwiftTerm.bundle", "copilot-projects_CopilotProjectsCore.bundle"):
+        shutil.copytree(build / name, resources / name)
+    with (contents / "Info.plist").open("wb") as plist:
+        plistlib.dump({
+            "CFBundleName": "Workspace Capture",
+            "CFBundleExecutable": executable.name,
+            "CFBundleIdentifier": "com.obvioussean.copilot-projects.workspace-capture",
+            "CFBundlePackageType": "APPL",
+            "CFBundleVersion": "1",
+            "NSPrincipalClass": "NSApplication",
+            "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "26.0",
+        }, plist)
+    with (root / "build.log").open("a") as log:
+        subprocess.run(["codesign", "--force", "--sign", "-", str(app)],
+                       stdout=log, stderr=subprocess.STDOUT, check=True, timeout=15)
+    return executable
+
+
+def capture_host_pid(root, executable):
+    receipt = root / "host-pid"
+    if not receipt.exists():
+        return None
+    pid = int(receipt.read_text().strip())
+    if pid <= 1:
+        raise ValueError("Invalid capture application PID.")
+    identity = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "comm="], text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=5,
+    )
+    if identity.returncode == 1:
+        return None
+    if identity.returncode != 0 or Path(identity.stdout.strip()).resolve() != executable.resolve():
+        raise RuntimeError("Refusing to signal a process that is not this capture application.")
+    return pid
+
+
+def stop_capture_host(process, root, executable):
+    if process.poll() is not None:
+        return
+    try:
+        pid = capture_host_pid(root, executable)
+        if pid is not None:
+            # LaunchServices owns the application, not the `open` waiter.
+            try:
+                children = subprocess.run(
+                    ["ps", "-axo", "pid=,ppid="], text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=5,
+                )
+                if children.returncode != 0:
+                    raise RuntimeError(f"Could not enumerate capture children: {children.stderr}")
+                for row in children.stdout.splitlines():
+                    child, parent = map(int, row.split())
+                    if parent != pid:
+                        continue
+                    try:
+                        os.kill(child, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+            finally:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pid = capture_host_pid(root, executable)
+                if pid is not None:
+                    os.kill(pid, signal.SIGKILL)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
+def run_capture_host(executable, root, environment, log):
+    command = [
+        "/usr/bin/open", "-n", "-g", "-W", "-a", str(executable.parent.parent.parent),
+        "--stdout", str(root / "test.log"), "--stderr", str(root / "test.log"),
+    ]
+    process = subprocess.Popen(command, cwd=REPO, env=environment, stdout=log, stderr=subprocess.STDOUT)
+    try:
+        result = process.wait(timeout=180)
+        if result != 0:
+            raise subprocess.CalledProcessError(result, command)
+    finally:
+        stop_capture_host(process, root, executable)
 
 
 def main():
@@ -96,19 +232,16 @@ def main():
         (root / "sandbox" / name).mkdir(parents=True, mode=0o700)
     (root / "images").mkdir(mode=0o700)
     try:
+        executable = build_capture_host(root)
         with (root / "test.log").open("w") as log:
-            subprocess.run(
-                ["swift", "test", "--skip-build", "--filter",
-                 "WorkspaceCaptureTests/testNativeWorkspaceCapture"],
-                cwd=REPO, env=environment, stdout=log, stderr=subprocess.STDOUT, check=True,
-            )
+            run_capture_host(executable, root, environment, log)
         verify_capture(root, source_sha)
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         (root / "driver-error.txt").write_text(f"{type(error).__name__}: {error}\n")
         raise
     finally:
         shutil.rmtree(root / "sandbox")
-    print(f"Captured {len(IMAGE_NAMES)} native workspace views for {source_sha}.")
+    print(f"Captured {len(IMAGE_NAMES)} workspace and {len(TRANSCRIPT_IMAGE_NAMES)} transcript-image views for {source_sha}.")
 
 
 if __name__ == "__main__":

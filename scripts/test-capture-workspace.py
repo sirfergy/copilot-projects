@@ -4,9 +4,14 @@
 import importlib.util
 import json
 from pathlib import Path
+import plistlib
 import struct
 import tempfile
 import unittest
+from unittest import mock
+import subprocess
+import os
+import sys
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -17,6 +22,25 @@ SPEC.loader.exec_module(capture)
 
 
 class CaptureDriverTests(unittest.TestCase):
+    def test_host_packages_the_debug_executable_and_resource_bundles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build = root / "debug"
+            build.mkdir()
+            (build / "workspace-capture-host").write_bytes(b"debug host")
+            for name in ("SwiftTerm_SwiftTerm.bundle", "copilot-projects_CopilotProjectsCore.bundle"):
+                (build / name).mkdir()
+            with mock.patch.object(capture.subprocess, "check_output", return_value=str(build)), \
+                 mock.patch.object(capture.subprocess, "run") as run:
+                executable = capture.build_capture_host(root)
+            self.assertEqual(executable.name, "workspace-capture-host")
+            self.assertEqual(executable.read_bytes(), b"debug host")
+            self.assertEqual(run.call_args.args[0][0], "codesign")
+            with (executable.parent.parent / "Info.plist").open("rb") as stream:
+                info = plistlib.load(stream)
+            self.assertEqual(info["CFBundlePackageType"], "APPL")
+            self.assertEqual(info["CFBundleIdentifier"], "com.obvioussean.copilot-projects.workspace-capture")
+
     def test_environment_is_replaced_and_tracking_is_preserved(self):
         root = Path("/private/capture")
         original = {
@@ -45,6 +69,7 @@ class CaptureDriverTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "images").mkdir()
+            (root / "host-exit-status").write_text("0\n")
             images = []
             for name in capture.IMAGE_NAMES:
                 (root / "images" / name).write_bytes(
@@ -60,9 +85,21 @@ class CaptureDriverTests(unittest.TestCase):
                 })
             report = {
                 "completed": True, "collapseVerified": True, "emptyProjectCollapseVerified": True,
-                "focusedTerminalCollapseVerified": True,
+                "focusedTerminalCollapseVerified": True, "transcriptImagesVerified": True,
+                "guiHostVerified": True, "terminalCleanupVerified": True,
+                "inputDispatchVerified": True, "physicalKeyboardValidation": "unverified-headless",
                 "sourceSHA": "a" * 40, "images": images,
             }
+            transcript_images = []
+            for name in capture.TRANSCRIPT_IMAGE_NAMES:
+                (root / "images" / name).write_bytes(
+                    b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+                    + struct.pack(">II", 1280, 800) + b"\x08\x06\x00\x00\x00" + b"\x00" * 4
+                )
+                transcript_images.append({
+                    "file": name, "markerVisible": True, "pixelWidth": 1280, "pixelHeight": 800,
+                })
+            report["transcriptImages"] = transcript_images
             manifest = root / "metadata.json"
             manifest.write_text(json.dumps(report))
             capture.verify_capture(root, "a" * 40)
@@ -71,6 +108,12 @@ class CaptureDriverTests(unittest.TestCase):
                 {"collapseVerified": False},
                 {"emptyProjectCollapseVerified": False},
                 {"focusedTerminalCollapseVerified": False},
+                {"transcriptImagesVerified": False},
+                {"guiHostVerified": False}, {"terminalCleanupVerified": False},
+                {"inputDispatchVerified": False}, {"physicalKeyboardValidation": "verified"},
+                {"transcriptImages": []},
+                {"transcriptImages": [dict(image, markerVisible=False) for image in transcript_images]},
+                {"transcriptImages": [dict(image, pixelWidth=1) for image in transcript_images]},
                 {"images": [dict(image, terminalMarkerVisible=False) for image in images]},
                 {"images": [dict(image, renderer="coretext") for image in images]},
                 {"images": [dict(image, appearance="wrong") for image in images]},
@@ -82,9 +125,77 @@ class CaptureDriverTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     capture.verify_capture(root, "a" * 40)
             manifest.write_text(json.dumps(report))
+            (root / "host-exit-status").write_text("1\n")
+            with self.assertRaises(ValueError):
+                capture.verify_capture(root, "a" * 40)
+            (root / "host-exit-status").write_text("0\n")
             (root / "images" / images[0]["file"]).unlink()
             with self.assertRaises(FileNotFoundError):
                 capture.verify_capture(root, "a" * 40)
+
+    def test_host_timeout_stops_only_its_process_and_children(self):
+        process = mock.Mock(pid=123)
+        process.wait.side_effect = [subprocess.TimeoutExpired("host", 180), 0]
+        process.poll.side_effect = [None, 0]
+        children = subprocess.CompletedProcess([], 0, "456 234\n789 999\n234 1\n", "")
+        with mock.patch.object(capture.subprocess, "Popen", return_value=process), \
+             mock.patch.object(capture.subprocess, "run", return_value=children) as run, \
+             mock.patch.object(capture, "capture_host_pid", return_value=234), \
+             mock.patch.object(capture.os, "kill") as kill:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                capture.run_capture_host(Path("/capture/App.app/Contents/MacOS/host"), Path("/capture"),
+                                         {"HOME": "/isolated"}, mock.Mock())
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["ps", "-axo", "pid=,ppid="])
+        self.assertEqual(kill.call_args_list, [
+            mock.call(456, capture.signal.SIGTERM), mock.call(234, capture.signal.SIGTERM),
+        ])
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+
+    def test_cleanup_reports_failed_process_enumeration(self):
+        process = mock.Mock()
+        process.poll.side_effect = [None, 0]
+        failure = subprocess.CompletedProcess([], 1, "", "ps failed")
+        with mock.patch.object(capture, "capture_host_pid", return_value=234), \
+             mock.patch.object(capture.subprocess, "run", return_value=failure), \
+             mock.patch.object(capture.os, "kill") as kill:
+            with self.assertRaisesRegex(RuntimeError, "Could not enumerate capture children: ps failed"):
+                capture.stop_capture_host(process, Path("/capture"), Path("/capture/host"))
+        kill.assert_called_once_with(234, capture.signal.SIGTERM)
+
+    def test_native_process_listing_finds_a_real_child(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        process = mock.Mock()
+        process.poll.side_effect = [None, 0]
+        try:
+            with mock.patch.object(capture, "capture_host_pid", return_value=os.getpid()), \
+                 mock.patch.object(capture.os, "kill") as kill:
+                capture.stop_capture_host(process, Path("/capture"), Path("/capture/host"))
+            self.assertIn(mock.call(child.pid, capture.signal.SIGTERM), kill.call_args_list)
+            self.assertEqual(kill.call_args_list[-1], mock.call(os.getpid(), capture.signal.SIGTERM))
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
+    def test_host_failure_is_not_a_success_shaped_manifest(self):
+        process = mock.Mock()
+        process.wait.return_value = 1
+        process.poll.return_value = 1
+        with mock.patch.object(capture.subprocess, "Popen", return_value=process):
+            with self.assertRaises(subprocess.CalledProcessError):
+                capture.run_capture_host(Path("/capture/App.app/Contents/MacOS/host"), Path("/capture"),
+                                         {}, mock.Mock())
+        process.terminate.assert_not_called()
+
+    def test_cleanup_refuses_a_reused_or_unrelated_pid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "host-pid").write_text("234\n")
+            unrelated = subprocess.CompletedProcess([], 0, "/some/other/application\n", "")
+            with mock.patch.object(capture.subprocess, "run", return_value=unrelated):
+                with self.assertRaises(RuntimeError):
+                    capture.capture_host_pid(root, root / "sandbox/App.app/Contents/MacOS/host")
 
 
 if __name__ == "__main__":

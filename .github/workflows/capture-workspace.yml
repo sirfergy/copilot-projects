@@ -2,7 +2,7 @@ name: Capture macOS workspace
 
 on:
   push:
-    branches: [sirfergy/studio-console, sirfergy/studio-console-bold, sirfergy/session-details-header]
+    branches: [sirfergy/studio-console, sirfergy/studio-console-bold, sirfergy/session-details-header, sirfergy/transcript-images]
   workflow_dispatch:
 
 permissions:
@@ -19,6 +19,7 @@ jobs:
       (github.ref == 'refs/heads/sirfergy/studio-console' ||
        github.ref == 'refs/heads/sirfergy/studio-console-bold' ||
        github.ref == 'refs/heads/sirfergy/session-details-header' ||
+       github.ref == 'refs/heads/sirfergy/transcript-images' ||
        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     runs-on: [self-hosted, macOS, ARM64, m4-mini]
     timeout-minutes: 25
@@ -36,9 +37,11 @@ jobs:
         run: python3 scripts/test-capture-workspace.py
       - name: Build the capture test without opening a window
         timeout-minutes: 15
-        run: swift test --filter WorkspaceCaptureTests > "$CAPTURE_ROOT/build.log" 2>&1
-      - name: Capture the isolated native workspace
-        timeout-minutes: 4
+        run: |
+          swift test --filter WorkspaceCaptureTests > "$CAPTURE_ROOT/build.log" 2>&1
+          swift build --product workspace-capture-host >> "$CAPTURE_ROOT/build.log" 2>&1
+      - name: Run the isolated GUI test host
+        timeout-minutes: 6
         run: python3 scripts/capture-workspace.py "$CAPTURE_ROOT"
       - name: Upload capture evidence
         if: always() && env.CAPTURE_ROOT != ''
@@ -49,6 +52,7 @@ jobs:
             ${{ env.CAPTURE_ROOT }}/images/*.png
             ${{ env.CAPTURE_ROOT }}/metadata.json
             ${{ env.CAPTURE_ROOT }}/driver-error.txt
+            ${{ env.CAPTURE_ROOT }}/host-exit-status
             ${{ env.CAPTURE_ROOT }}/build.log
             ${{ env.CAPTURE_ROOT }}/test.log
           if-no-files-found: error

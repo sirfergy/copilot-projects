@@ -26,34 +26,70 @@ struct TranscriptButton: View {
 struct TranscriptOverlay: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var controller: TranscriptController
+    let imageCapture: () -> RemoteKittyImageCapture?
     let isOpen: Bool
     let onClose: () -> Void
     let workflow: RemoteSessionWorkflow?
     let operation: AgentOperationProjection
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
+    let onPreview: (TranscriptImagePreviewItem) -> Void
 
     var body: some View {
         if controller.snapshot != nil || workflow != nil {
             if isOpen {
-                TranscriptDrawer(
-                    turns: controller.snapshot?.turns ?? [],
-                    workflow: workflow,
-                    operation: operation,
-                    onClose: onClose,
-                    onAction: onAction
-                )
+                Group {
+                    if let capture = imageCapture() {
+                        ImageAssociatedTranscriptDrawer(
+                            capture: capture, snapshot: controller.snapshot,
+                            workflow: workflow, operation: operation,
+                            onClose: onClose, onAction: onAction, onPreview: onPreview
+                        )
+                    } else {
+                        TranscriptDrawer(
+                            turns: controller.snapshot.map {
+                                TranscriptImageAssociation.attach(images: [], to: $0).turns
+                            } ?? [],
+                            imageCapture: nil,
+                            workflow: workflow, operation: operation,
+                            onClose: onClose, onAction: onAction, onPreview: onPreview
+                        )
+                    }
+                }
                 .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
             }
         }
     }
 }
 
-private struct TranscriptDrawer: View {
-    let turns: [TranscriptTurn]
+private struct ImageAssociatedTranscriptDrawer: View {
+    @ObservedObject var capture: RemoteKittyImageCapture
+    let snapshot: TranscriptSnapshot?
     let workflow: RemoteSessionWorkflow?
     let operation: AgentOperationProjection
     let onClose: () -> Void
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
+    let onPreview: (TranscriptImagePreviewItem) -> Void
+
+    var body: some View {
+        TranscriptDrawer(
+            turns: snapshot.map {
+                TranscriptImageAssociation.attach(images: capture.retainedImageMetadata(), to: $0).turns
+            } ?? [],
+            imageCapture: capture,
+            workflow: workflow, operation: operation,
+            onClose: onClose, onAction: onAction, onPreview: onPreview
+        )
+    }
+}
+
+private struct TranscriptDrawer: View {
+    let turns: [TranscriptTurn]
+    let imageCapture: RemoteKittyImageCapture?
+    let workflow: RemoteSessionWorkflow?
+    let operation: AgentOperationProjection
+    let onClose: () -> Void
+    let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
+    let onPreview: (TranscriptImagePreviewItem) -> Void
     @State private var isAtBottom = true
 
     var body: some View {
@@ -88,7 +124,7 @@ private struct TranscriptDrawer: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(turns) { turn in
-                            TranscriptTurnCard(turn: turn)
+                            TranscriptTurnCard(turn: turn, imageCapture: imageCapture, onPreview: onPreview)
                         }
                         Color.clear
                             .frame(height: 1)
@@ -111,13 +147,17 @@ private struct TranscriptDrawer: View {
         .frame(width: 420)
         .frame(maxHeight: .infinity)
         .background(StudioStyle.chrome)
-        .overlay(alignment: .leading) { Divider() }
+        .overlay(alignment: .leading) {
+            Color(nsColor: .separatorColor).frame(width: 1).allowsHitTesting(false)
+        }
         .shadow(color: .black.opacity(0.2), radius: 12, x: -4)
     }
 }
 
 private struct TranscriptTurnCard: View {
     let turn: TranscriptTurn
+    let imageCapture: RemoteKittyImageCapture?
+    let onPreview: (TranscriptImagePreviewItem) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -162,6 +202,19 @@ private struct TranscriptTurnCard: View {
 
             if !turn.tools.isEmpty {
                 TranscriptTools(tools: turn.tools)
+            }
+            if let imageCapture, let images = turn.images {
+                ForEach(images, id: \.imageId) { image in
+                    TranscriptImageView(
+                        identity: TranscriptImageIdentity(
+                            sessionId: imageCapture.sessionId,
+                            imageId: image.imageId,
+                            version: image.contentVersion
+                        ),
+                        data: imageCapture.imageData(imageId: image.imageId, version: image.contentVersion),
+                        onPreview: onPreview
+                    )
+                }
             }
         }
         .padding(.vertical, 12)

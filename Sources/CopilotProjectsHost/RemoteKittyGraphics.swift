@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import SwiftTerm
 import CopilotProjectsProtocol
 import ImageIO
@@ -136,20 +137,29 @@ enum RemoteKittyGraphics {
 /// large image.
 enum RemoteKittyPNGValidation {
     static func isStructurallyValid(_ data: Data) -> Bool {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+        pixelSize(data) != nil
+    }
+
+    static func pixelSize(_ data: Data) -> CGSize? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [
+                kCGImageSourceShouldCache: false
+              ] as CFDictionary),
               CGImageSourceGetCount(source) == 1,
               let type = CGImageSourceGetType(source), type as String == UTType.png.identifier,
               CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int,
               let height = properties[kCGImagePropertyPixelHeight] as? Int
-        else { return false }
+        else { return nil }
         guard width > 0, height > 0,
               width <= remoteKittyMaxImageDimension,
               height <= remoteKittyMaxImageDimension
-        else { return false }
-        guard width * height <= remoteKittyMaxImagePixels else { return false }
-        return true
+        else { return nil }
+        guard width * height <= remoteKittyMaxImagePixels else { return nil }
+        let orientation = properties[kCGImagePropertyOrientation] as? Int ?? 1
+        return (5...8).contains(orientation)
+            ? CGSize(width: height, height: width)
+            : CGSize(width: width, height: height)
     }
 }
 
@@ -498,7 +508,7 @@ enum RemoteKittyPlacementScanner {
 /// data) can never be misparsed as the start of our own Kitty APC: the
 /// scanner only ever looks for a fresh APC from `.ground`, never mid-string.
 @MainActor
-final class RemoteKittyImageCapture {
+final class RemoteKittyImageCapture: ObservableObject {
     private struct StoredKey: Hashable {
         let imageId: UInt32
         let version: UInt64
@@ -692,7 +702,7 @@ final class RemoteKittyImageCapture {
     /// `RemoteTerminalRevision`) invalidates itself exactly when a
     /// previously-advertised placement could now 404, including across
     /// sessions sharing the same process-wide budget.
-    private(set) var imageAvailabilityGeneration: UInt64 = 0
+    @Published private(set) var imageAvailabilityGeneration: UInt64 = 0
 
     /// - Parameters:
     ///   - sessionId: The owning session, used only as the durable disk

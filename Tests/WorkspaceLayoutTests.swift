@@ -24,10 +24,11 @@ final class WorkspaceLayoutTests: XCTestCase {
 
     private struct Workspace: View {
         let model: AppModel
+        let input: WorkspaceInputController
         @ObservedObject var navigation: Navigation
 
         var body: some View {
-            RootView(model: model, showsProjects: $navigation.showsProjects)
+            RootView(model: model, input: input, showsProjects: $navigation.showsProjects)
         }
     }
 
@@ -98,7 +99,9 @@ final class WorkspaceLayoutTests: XCTestCase {
         let window = WorkspaceWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
             styleMask: [.titled, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.contentView = NSHostingView(rootView: Workspace(model: model, navigation: navigation))
+        window.contentView = NSHostingView(rootView: Workspace(
+            model: model, input: WorkspaceInputController(model: model), navigation: navigation
+        ))
         defer {
             _ = window.makeFirstResponder(nil)
             window.contentView = nil
@@ -208,7 +211,9 @@ final class WorkspaceLayoutTests: XCTestCase {
                     forKey: "NSSplitView Subview Frames copilot-projects.projects"))
                 window.contentView = nil
                 navigation.showsProjects = true
-                window.contentView = NSHostingView(rootView: Workspace(model: model, navigation: navigation))
+                window.contentView = NSHostingView(rootView: Workspace(
+                    model: model, input: WorkspaceInputController(model: model), navigation: navigation
+                ))
                 try await settle(window)
                 let restoredProjects = try XCTUnwrap(split(
                     named: "copilot-projects.projects", in: try XCTUnwrap(window.contentView)))
@@ -224,7 +229,9 @@ final class WorkspaceLayoutTests: XCTestCase {
             navigation.showsProjects = false
             try await settle(window)
             window.contentView = nil
-            window.contentView = NSHostingView(rootView: Workspace(model: model, navigation: navigation))
+            window.contentView = NSHostingView(rootView: Workspace(
+                model: model, input: WorkspaceInputController(model: model), navigation: navigation
+            ))
             try await settle(window)
             let hiddenProjects = try XCTUnwrap(split(
                 named: nil, in: try XCTUnwrap(window.contentView)))

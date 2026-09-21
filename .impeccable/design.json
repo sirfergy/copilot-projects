@@ -498,7 +498,7 @@
       "name": "Session details drawer",
       "kind": "custom",
       "refersTo": "details-drawer",
-      "description": "Schematic dark drawer shell, opened beside the terminal glyph in the active-session heading when details are available and closed. Native dividers, Markdown, workflow controls, and Metal terminal output are not represented.",
+      "description": "Schematic dark drawer shell, opened beside the terminal glyph in the active-session heading. Native turns may include retained terminal images with intrinsic aspect ratio, a 280pt inline height cap, 9pt corners, and a larger native preview. Image pixels, dividers, Markdown, workflow controls, and Metal output are not represented by this schematic.",
       "html": "<aside class=\"ds-drawer\"><div class=\"ds-drawer-title\">Session details</div><div class=\"ds-drawer-body\">Completed turns</div></aside>",
       "css": ".ds-drawer { color-scheme:dark; width:420px; background:#202327; color:CanvasText; font:menu; box-shadow:-4px 0 12px rgba(0,0,0,0.2); } .ds-drawer-title { display:flex; align-items:center; height:44px; padding:0 14px; font-weight:600; } .ds-drawer-body { padding:6px 18px; color:#BAC4CE; }"
     }
