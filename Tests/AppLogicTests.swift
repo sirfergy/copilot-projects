@@ -1592,11 +1592,17 @@ final class AppLogicTests: XCTestCase {
         )
         await fulfillment(of: [prematureCompletion], timeout: 0.1)
         XCTAssertFalse(model.projects[0].sessions[1].hasUnread)
+        XCTAssertFalse(model.projects[0].sessions[1].finishedUnseen)
+        XCTAssertFalse(model.remoteWorkspaceSnapshot().projects[0].sessions[1].ready)
+        XCTAssertEqual(model.totalReady, 1)
         XCTAssertEqual(notifications.calls.count, 1)
 
         notifications.onPost = nil
         model.setBackgroundAgentsActive(sessionId: backgroundSession.id, active: false)
         XCTAssertTrue(model.projects[0].sessions[1].hasUnread)
+        XCTAssertTrue(model.projects[0].sessions[1].finishedUnseen)
+        XCTAssertTrue(model.remoteWorkspaceSnapshot().projects[0].sessions[1].ready)
+        XCTAssertEqual(model.totalReady, 2)
         XCTAssertEqual(notifications.calls, [
             NotificationSpy.Call(
                 title: StatusNotificationKind.completed.title,
@@ -1613,6 +1619,88 @@ final class AppLogicTests: XCTestCase {
                 sessionId: backgroundSession.id
             )
         ])
+    }
+
+    @MainActor
+    func testCompletionIndicatorWaitsForLateSubagentSnapshot() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let activityDirectory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: activityDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(title: "review", cwd: "/tmp")
+        defer { SessionArtifacts.removeFiles(sessionId: session.id) }
+        let project = Project(name: "reviews", cwd: "/tmp", sessions: [session])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: nil))
+        let model = AppModel(
+            stateRepository: repository,
+            completionNotificationDelayNanoseconds: 10_000_000,
+            isAppActive: { false },
+            agentActivityDirectory: activityDirectory,
+            remotePromptTarget: { _ in RemotePromptTarget(activity: .idle, send: { _ in false }) }
+        )
+        let notifications = NotificationSpy()
+        model.attach(notifications: notifications)
+        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 100)
+        model.setStatus(
+            sessionId: session.id, status: .idle, text: nil,
+            timestamp: 200, source: "agent-stop"
+        )
+        XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
+        XCTAssertEqual(model.totalReady, 0)
+        XCTAssertFalse(model.remoteWorkspaceSnapshot().projects[0].sessions[0].ready)
+
+        var snapshot = AgentActivitySnapshot(
+            schemaVersion: 1,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            foregroundTurnActive: false,
+            scheduledTurnActive: false,
+            activeSubagents: [
+                TrackedSubagent(id: "reviewer", name: "reviewer", description: "", model: nil),
+            ],
+            schedules: [],
+            idleGeneration: 0,
+            lastIdleAborted: false,
+            lastIdleTurnKind: nil,
+            error: nil
+        )
+        let snapshotURL = activityDirectory
+            .appendingPathComponent("\(session.id).agent-activity.json")
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
+        model.refreshAgentActivitySnapshots()
+        let prematureCompletion = expectation(description: "subagents suppress completion")
+        prematureCompletion.isInverted = true
+        notifications.onPost = { _ in prematureCompletion.fulfill() }
+        await fulfillment(of: [prematureCompletion], timeout: 0.1)
+        XCTAssertEqual(model.projects[0].sessions[0].activeSubagentCount, 1)
+        XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
+        XCTAssertEqual(model.totalReady, 0)
+        XCTAssertFalse(model.remoteWorkspaceSnapshot().projects[0].sessions[0].ready)
+        XCTAssertTrue(notifications.calls.isEmpty)
+
+        notifications.onPost = nil
+        snapshot.activeSubagents = []
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
+        model.refreshAgentActivitySnapshots()
+        model.reconcileAgentFooters()
+        XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
+        XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
+        XCTAssertEqual(model.totalReady, 1)
+        XCTAssertTrue(model.remoteWorkspaceSnapshot().projects[0].sessions[0].ready)
+        XCTAssertEqual(notifications.calls.count, 1)
+
+        model.reconcileAgentFooters()
+        model.setStatus(
+            sessionId: session.id, status: .idle, text: nil,
+            timestamp: 300, source: "session-idle", notification: .completed
+        )
+        XCTAssertEqual(notifications.calls.count, 1)
     }
 
     @MainActor
