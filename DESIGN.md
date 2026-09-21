@@ -176,10 +176,11 @@ to the existing terminal renderer.
 The macOS [Two-Level Browser](.impeccable/surfaces/sources-copilotprojectshost-views-swift.md)
 separates projects, sessions, and working content. The native top drag strip
 (38pt) leaves leading room for traffic lights (80pt); navigation controls sit
-below it. A fixed project rail (176pt), resizable Sessions column
+below it. A resizable project rail (176pt minimum/default, 360pt maximum), Sessions column
 (200pt minimum, 224pt ideal, 280pt maximum), and terminal/detail pane
 (420pt minimum) share aligned headers (56pt). The Sessions divider persists
-under `copilot-projects.sessions`. Session rows scroll vertically with a 6pt gap
+under `copilot-projects.sessions`; Projects uses `copilot-projects.projects`.
+Drag either native divider to adjust the navigation widths. Session rows scroll vertically with a 6pt gap
 and 10pt column inset. The main pane identifies the active session and its project.
 Its session-details opener sits beside the terminal glyph in that heading,
 not over terminal output or in the native title strip. It appears only when
@@ -221,7 +222,9 @@ capsules, window buttons, menus, and drag indicators keep their own geometry.
 **Session browser:** vertically stacked, two-line names with explicit Running,
 Waiting for input, Finished, or Idle states. Selected rows use steel fill and
 edge; raised hover applies only when inactive. Titles retain native primary ink.
-Select and End remain separate actions and accessibility buttons. Existing
+Single-click selects; double-click on the selector ends that session through
+the existing active-work confirmation. The dedicated End control and separate
+accessibility buttons remain. Existing
 project/session shortcuts, modifier-number hints, reordering, context actions,
 and session-ending safeguards remain.
 

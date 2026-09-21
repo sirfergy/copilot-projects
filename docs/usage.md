@@ -21,11 +21,15 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 - **Projects (vertical sidebar):** a project is just a named group of sessions. Create one
   with `⌘N` (name it; no folder required). Jump to one with **`⌘1`–`⌘9`**.
   Use **`⌘0`**, the View menu, or the session-header button to hide/show the project column.
-  The project rail has a compact fixed width; hover a truncated name to read it in full.
+  Drag the divider beside Projects or Sessions to resize that column. Widths are
+  remembered across launches, and hiding/showing Projects preserves its width.
+  Hover a truncated project name to read it in full.
 - **Sessions (vertical browser):** the selected project's sessions appear beside the project
   column, with their names and explicit state. One terminal is visible at a time.
   Start Copilot with `⌘T` or a plain shell with `⌥⌘T`, switch with a click / **`⌃Tab`** (next) / `⌃⇧Tab`
-  (prev) / **`⌃1`–`⌃9`** / `⌘⇧[` / `⌘⇧]`, or end with `⌘W` or the row's ✕.
+  (prev) / **`⌃1`–`⌃9`** / `⌘⇧[` / `⌘⇧]`, or end with `⌘W`, the row's ✕,
+  or a double-click on the session selector. Sessions with active or pending work
+  still ask for confirmation before ending.
   Drag a row to reorder it or onto another project to move it (show Projects first
   if that column is hidden). Background sessions keep
   running. Hold **⌘** (projects) or **⌃** (sessions) to see numbered hints.

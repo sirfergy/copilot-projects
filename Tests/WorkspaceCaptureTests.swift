@@ -138,12 +138,14 @@ final class WorkspaceCaptureTests: XCTestCase {
             _ = NSApplication.shared
             let previousPolicy = NSApp.activationPolicy()
             let previousApp = NSWorkspace.shared.frontmostApplication
-            let splitKey = "NSSplitView Subview Frames copilot-projects.sessions"
-            let previousSplit = UserDefaults.standard.object(forKey: splitKey)
-            UserDefaults.standard.removeObject(forKey: splitKey)
+            let splitKeys = ["projects", "sessions"].map { "NSSplitView Subview Frames copilot-projects.\($0)" }
+            let previousSplits = splitKeys.map { UserDefaults.standard.object(forKey: $0) }
+            for key in splitKeys { UserDefaults.standard.removeObject(forKey: key) }
             defer {
-                if let previousSplit { UserDefaults.standard.set(previousSplit, forKey: splitKey) }
-                else { UserDefaults.standard.removeObject(forKey: splitKey) }
+                for (key, value) in zip(splitKeys, previousSplits) {
+                    if let value { UserDefaults.standard.set(value, forKey: key) }
+                    else { UserDefaults.standard.removeObject(forKey: key) }
+                }
                 if NSApp.isActive, previousApp?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
                     previousApp?.activate(options: [])
                 }
