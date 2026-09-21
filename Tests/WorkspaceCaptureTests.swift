@@ -5,6 +5,7 @@ import SwiftUI
 import Vision
 import XCTest
 import CopilotProjectsCore
+import CopilotProjectsProtocol
 @testable import CopilotProjectsHost
 
 final class WorkspaceCaptureTests: XCTestCase {
@@ -55,6 +56,7 @@ final class WorkspaceCaptureTests: XCTestCase {
         var collapseVerified = false
         var emptyProjectCollapseVerified = false
         var focusedTerminalCollapseVerified = false
+        var detailsHeaderVerified = false
         var diagnostics: [String: String] = [:]
         var images: [ImageProof] = []
         var error: String?
@@ -177,6 +179,53 @@ final class WorkspaceCaptureTests: XCTestCase {
             NSApp.activate(ignoringOtherApps: true)
             let marker = "NATIVE TERMINAL PIXELS"
 
+            try await waitFor("The fixture did not lay out its terminal.") { terminal.bounds.width >= 420 }
+            let rootView = try XCTUnwrap(window.contentView)
+            try require(findControl("show-session-details", in: rootView) == nil,
+                        "Session details appeared without a transcript or workflow.")
+            let transcript = try XCTUnwrap(model.activeTranscriptController)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let snapshot = TranscriptSnapshot(
+                schemaVersion: 3, updatedAt: Date(),
+                copilotSessionId: "capture-conversation", turns: []
+            )
+            try encoder.encode(snapshot).write(
+                to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessions[0].id)),
+                options: .atomic
+            )
+            transcript.reload()
+            try await waitFor("A late transcript did not reveal the header control.") {
+                self.findControl("show-session-details", in: rootView) != nil
+            }
+            let opener = try XCTUnwrap(findControl("show-session-details", in: rootView))
+            try require(opener.accessibilityPerformPress(), "The header control could not be pressed.")
+            try await waitFor("The header control did not open this session's details.") {
+                model.isTranscriptDrawerOpen(sessionId: sessions[0].id)
+                    && self.findControl("hide-session-details", in: rootView) != nil
+                    && self.findControl("show-session-details", in: rootView) == nil
+            }
+            model.selectSession(projectId: project.id, sessionId: sessions[1].id)
+            try await waitFor("The details control leaked into a session without details.") {
+                self.findControl("show-session-details", in: rootView) == nil
+                    && self.findControl("hide-session-details", in: rootView) == nil
+            }
+            try require(!model.isTranscriptDrawerOpen(sessionId: sessions[1].id),
+                        "Opening details changed another session's drawer state.")
+            model.selectSession(projectId: project.id, sessionId: sessions[0].id)
+            try await waitFor("Switching sessions lost the open drawer.") {
+                self.findControl("hide-session-details", in: rootView) != nil
+            }
+            let closer = try XCTUnwrap(findControl("hide-session-details", in: rootView))
+            try require(closer.accessibilityPerformPress(), "The drawer close control could not be pressed.")
+            try await waitFor("Closing the drawer did not restore the header control.") {
+                !model.isTranscriptDrawerOpen(sessionId: sessions[0].id)
+                    && self.findControl("show-session-details", in: rootView) != nil
+            }
+            try require(model.terminalView(for: sessions[0].id) === terminal
+                        && controller.shellPID == terminalPID, "Details replaced or restarted the terminal.")
+            report.detailsHeaderVerified = true
+
             var originalContainer: TerminalsContainerView?
             var compactTerminalWidth: CGFloat?
             for (name, appearance, width, height, projectsVisible): (String, NSAppearance.Name, Int, Int, Bool) in [
@@ -219,6 +268,17 @@ final class WorkspaceCaptureTests: XCTestCase {
                                 && controller.shellPID == terminalPID,
                                 "Navigation replaced or restarted the terminal.")
                     try require(terminal.bounds.width >= 420, "Navigation squeezed the terminal below its width contract.")
+                    let detailsButton = try XCTUnwrap(findControl(
+                        "show-session-details", in: try XCTUnwrap(window.contentView)
+                    ))
+                    let detailsFrame = detailsButton.accessibilityFrame()
+                    let terminalFrame = window.convertToScreen(terminal.convert(terminal.bounds, to: nil))
+                    try require(detailsFrame.width > 0 && detailsFrame.minY >= terminalFrame.maxY
+                                && detailsFrame.maxY <= terminalFrame.maxY + 56,
+                                "The details control is not inside the session heading above the terminal.")
+                    try require(detailsFrame.maxX <= terminalFrame.maxX
+                                && detailsFrame.maxX >= terminalFrame.maxX - 70,
+                                "The details control is not at the trailing end of the session heading.")
                     if !projectsVisible {
                         let previousWidth = try XCTUnwrap(compactTerminalWidth)
                         try require(terminal.bounds.width > previousWidth + 80,
@@ -321,6 +381,25 @@ final class WorkspaceCaptureTests: XCTestCase {
 
     private func captureError(_ message: String) -> NSError {
         NSError(domain: "WorkspaceCapture", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    @MainActor
+    private func findControl(_ identifier: String, in element: Any) -> (any NSAccessibilityProtocol)? {
+        guard let node = element as? any NSAccessibilityProtocol else { return nil }
+        if node.accessibilityIdentifier() == identifier, node.accessibilityRole() == .button { return node }
+        for child in node.accessibilityChildren() ?? [] {
+            if let match = findControl(identifier, in: child) { return match }
+        }
+        return nil
+    }
+
+    @MainActor
+    private func waitFor(_ message: String, condition: () -> Bool) async throws {
+        for _ in 0..<100 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        throw captureError(message)
     }
 
     @MainActor

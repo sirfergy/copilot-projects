@@ -3,12 +3,31 @@ import AppKit
 import CopilotProjectsProtocol
 import CopilotProjectsUI
 
+struct TranscriptButton: View {
+    @ObservedObject var controller: TranscriptController
+    let isOpen: Bool
+    let hasWorkflow: Bool
+    let onOpen: () -> Void
+
+    var body: some View {
+        if !isOpen, controller.snapshot != nil || hasWorkflow {
+            Button(action: onOpen) {
+                Label("Show session details", systemImage: "sidebar.trailing")
+                    .labelStyle(.iconOnly)
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.bordered)
+            .help("Show session details")
+            .accessibilityIdentifier("show-session-details")
+        }
+    }
+}
+
 struct TranscriptOverlay: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var controller: TranscriptController
     let isOpen: Bool
     let onClose: () -> Void
-    let onOpen: () -> Void
     let workflow: RemoteSessionWorkflow?
     let operation: AgentOperationProjection
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
@@ -24,16 +43,6 @@ struct TranscriptOverlay: View {
                     onAction: onAction
                 )
                 .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
-            } else {
-                Button(action: onOpen) {
-                    Label("Show session details", systemImage: "sidebar.trailing")
-                        .labelStyle(.iconOnly)
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.bordered)
-                .help("Show session details")
-                .padding(12)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
         }
     }
@@ -58,6 +67,8 @@ private struct TranscriptDrawer: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Hide session details")
+                .accessibilityLabel("Hide session details")
+                .accessibilityIdentifier("hide-session-details")
             }
             .padding(.horizontal, 14)
             .frame(height: 44)
