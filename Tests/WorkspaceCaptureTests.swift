@@ -507,6 +507,18 @@ final class WorkspaceCaptureTests: XCTestCase {
                 menu.removeItem(sessionMenuItem)
                 NSApp.mainMenu = previousMenu
             }
+            func recordPreviewState(_ stage: String, sheet: NSWindow?) throws {
+                let loaded = sheet.map {
+                    findControl("transcript-image-preview", in: $0, role: nil) != nil
+                } ?? false
+                let state = "loaded=\(loaded) focusedValue=\(navigation.previewFocused)"
+                    + " active=\(NSApp.isActive) key=\(NSApp.keyWindow?.windowNumber ?? -1)"
+                    + " parent=\(window.windowNumber) sheet=\(sheet?.windowNumber ?? -1)"
+                    + " responder=\(String(describing: sheet?.firstResponder))"
+                report.diagnostics[stage] = state
+                NSLog("Transcript preview %@: %@", stage, state)
+                try saveReport()
+            }
 
             let imageControl = try XCTUnwrap(findControl(imageIdentifier, in: rootView))
             try require(imageControl.accessibilityPerformPress?() == true, "The image preview action failed.")
@@ -518,6 +530,7 @@ final class WorkspaceCaptureTests: XCTestCase {
             }
             let previewWindow = try XCTUnwrap(window.attachedSheet)
             try await waitFor("Preview focus did not suppress workspace commands.") { navigation.previewFocused }
+            try recordPreviewState("initial-preview", sheet: previewWindow)
             try require(!AppDelegate.shouldHandleWorkspaceEvent(
                 window: previewWindow, keyWindow: previewWindow, modalWindow: nil
             ), "Preview shortcuts would reach workspace session actions.")
@@ -530,15 +543,27 @@ final class WorkspaceCaptureTests: XCTestCase {
             let previewClose = try XCTUnwrap(findControl("close-transcript-image", in: previewWindow))
             try require(previewClose.accessibilityPerformPress?() == true, "The image preview did not accept Done.")
             try await waitFor("The image preview did not dismiss.") { window.attachedSheet == nil }
+            try recordPreviewState("after-done", sheet: window.attachedSheet)
+            try await waitFor("Preview focus stayed active after Done.") { !navigation.previewFocused }
             let reopen = try XCTUnwrap(findControl(imageIdentifier, in: rootView))
             try require(reopen.accessibilityPerformPress?() == true, "The image preview could not be reopened.")
             try await waitFor("The reopened image preview did not open.") { window.attachedSheet != nil }
             let commandWindow = try XCTUnwrap(window.attachedSheet)
+            try recordPreviewState("reopened-before-loading", sheet: commandWindow)
             try await waitFor("The reopened image preview did not finish loading.") {
                 commandWindow.contentView?.layoutSubtreeIfNeeded()
                 return self.findControl("transcript-image-preview", in: commandWindow, role: nil) != nil
-                    && NSApp.keyWindow === commandWindow
             }
+            try recordPreviewState("reopened-loaded", sheet: commandWindow)
+            // AX presses can open a sheet while the runner's application is inactive.
+            // Keyboard dispatch needs our own sheet, not the screenshot, to be key.
+            commandWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            try await waitFor("The reopened image preview did not become the key window.") {
+                NSApp.keyWindow === commandWindow
+            }
+            try recordPreviewState("before-command-w", sheet: commandWindow)
+            let generationBeforeCommandW = terminal.remoteContentGeneration
             let closeKey = try XCTUnwrap(NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
                 windowNumber: commandWindow.windowNumber, context: nil,
@@ -547,14 +572,22 @@ final class WorkspaceCaptureTests: XCTestCase {
             NSApp.sendEvent(closeKey)
             try await waitFor("Command-W did not close the image preview.") { window.attachedSheet == nil }
             try require(commandProbe.endRequests == 0, "Command-W reached a workspace close handler.")
+            try require(terminal.remoteContentGeneration == generationBeforeCommandW,
+                        "Command-W was echoed into the fixture terminal.")
+            try recordPreviewState("after-command-w", sheet: window.attachedSheet)
+            try await waitFor("Preview focus stayed active after Command-W.") { !navigation.previewFocused }
 
             let openForEscape = try XCTUnwrap(findControl(imageIdentifier, in: rootView))
             try require(openForEscape.accessibilityPerformPress?() == true, "The Escape fixture preview could not open.")
-            try await waitFor("The Escape fixture preview did not take keyboard focus.") {
-                guard let sheet = window.attachedSheet else { return false }
-                return NSApp.keyWindow === sheet && self.findControl("close-transcript-image", in: sheet) != nil
-            }
+            try await waitFor("The Escape fixture preview did not open.") { window.attachedSheet != nil }
             let escapeWindow = try XCTUnwrap(window.attachedSheet)
+            try recordPreviewState("escape-before-focus", sheet: escapeWindow)
+            escapeWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            try await waitFor("The Escape fixture preview did not take keyboard focus.") {
+                NSApp.keyWindow === escapeWindow && self.findControl("close-transcript-image", in: escapeWindow) != nil
+            }
+            try recordPreviewState("before-escape", sheet: escapeWindow)
             let escape = try XCTUnwrap(NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                 windowNumber: escapeWindow.windowNumber, context: nil,
@@ -569,6 +602,7 @@ final class WorkspaceCaptureTests: XCTestCase {
             try require(AppDelegate.shouldHandleWorkspaceEvent(window: window, keyWindow: window, modalWindow: nil),
                         "Closing the preview did not restore workspace shortcuts.")
             try await waitFor("Preview focus stayed active after dismissal.") { !navigation.previewFocused }
+            try recordPreviewState("after-escape", sheet: window.attachedSheet)
             try require(model.globalSelectedSessionId == sessions[0].id
                         && model.terminalView(for: sessions[0].id) === terminal
                         && controller.shellPID == terminalPID,
@@ -586,12 +620,34 @@ final class WorkspaceCaptureTests: XCTestCase {
             try await waitFor("Changing session did not dismiss the image preview.") {
                 window.attachedSheet == nil && self.findControl("hide-session-details", in: rootView) == nil
             }
+            try await waitFor("Preview focus stayed active after changing sessions.") { !navigation.previewFocused }
+            try recordPreviewState("after-session-change", sheet: window.attachedSheet)
             model.selectSession(projectId: project.id, sessionId: sessions[0].id)
             try await waitFor("The original drawer did not return after the preview test.") {
                 self.findControl("hide-session-details", in: rootView) != nil
             }
-            report.transcriptImagesVerified = true
+            terminal.consumeProcessOutput(RemoteKittyReplayEncoding.apcFrame(
+                control: "a=T,q=2,U=1,f=100,t=d,i=42,r=8,c=40",
+                payload: png.base64EncodedString()
+            )[...])
+            let restoredRef = try XCTUnwrap(terminal.kittyImageCapture.retainedImageMetadata().first)
+            let restoredIdentifier = "transcript-image-42-\(restoredRef.version)"
+            try await waitFor("The drawer-close fixture image did not load.") {
+                self.findControl(restoredIdentifier, in: rootView)?.accessibilityLabel?() == "Open transcript image"
+            }
+            let openBeforeDrawerClose = try XCTUnwrap(findControl(restoredIdentifier, in: rootView))
+            try require(openBeforeDrawerClose.accessibilityPerformPress?() == true,
+                        "The drawer-close fixture preview could not open.")
+            try await waitFor("The drawer-close fixture preview did not open.") {
+                window.attachedSheet != nil && navigation.previewFocused
+            }
             model.closeTranscriptDrawer(sessionId: sessions[0].id)
+            try await waitFor("Closing the drawer did not dismiss the image preview and clear focus.") {
+                window.attachedSheet == nil && !navigation.previewFocused
+                    && self.findControl("hide-session-details", in: rootView) == nil
+            }
+            try recordPreviewState("after-drawer-close", sheet: window.attachedSheet)
+            report.transcriptImagesVerified = true
 
             navigation.showsProjects = true
             let emptyProject = try XCTUnwrap(model.projects.first { $0.sessions.isEmpty })
@@ -676,6 +732,10 @@ final class WorkspaceCaptureTests: XCTestCase {
         let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
             .joined(separator: " ").uppercased()
         try require(text.contains("TRANSCRIPT IMAGE"), "\(file) did not render the captured image pixels: \(text)")
+        if window.sheetParent != nil {
+            try require(text.contains("IMAGE PREVIEW") || text.contains("100%"),
+                        "\(file) did not render the preview controls: \(text)")
+        }
         return TranscriptImageProof(file: file, pixelWidth: image.width, pixelHeight: image.height, markerVisible: true)
     }
 
