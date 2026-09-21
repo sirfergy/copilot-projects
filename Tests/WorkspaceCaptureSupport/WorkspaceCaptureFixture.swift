@@ -32,25 +32,15 @@ public final class WorkspaceCaptureFixture {
     @MainActor
     private final class Navigation: ObservableObject {
         @Published var showsProjects = true
-        var previewFocused = false
-    }
-
-    @MainActor
-    private final class CommandProbe: NSObject {
-        var endRequests = 0
-        @objc func endSession(_ sender: Any?) { endRequests += 1 }
     }
 
     private struct CaptureRoot: View {
         let model: AppModel
+        let input: WorkspaceInputController
         @ObservedObject var navigation: Navigation
-        @FocusedValue(\.transcriptImagePreviewPresented) private var imagePreviewPresented
 
         var body: some View {
-            RootView(model: model, showsProjects: $navigation.showsProjects)
-                .onChange(of: imagePreviewPresented, initial: true) { _, value in
-                    navigation.previewFocused = value == true
-                }
+            RootView(model: model, input: input, showsProjects: $navigation.showsProjects)
         }
     }
 
@@ -68,7 +58,7 @@ public final class WorkspaceCaptureFixture {
         let terminalWidth: Double
     }
 
-    private struct Report: Codable {
+    private struct Report: Encodable {
         let sourceSHA: String
         let osVersion: String
         var completed = false
@@ -79,6 +69,8 @@ public final class WorkspaceCaptureFixture {
         var transcriptImagesVerified = false
         var guiHostVerified = false
         var terminalCleanupVerified = false
+        var inputDispatchVerified = false
+        let physicalKeyboardValidation = "unverified-headless"
         var diagnostics: [String: String] = [:]
         var images: [ImageProof] = []
         var transcriptImages: [TranscriptImageProof] = []
@@ -145,7 +137,6 @@ public final class WorkspaceCaptureFixture {
             try require(NSApp?.isRunning == true
                         && Bundle.main.bundleIdentifier == "com.obvioussean.copilot-projects.workspace-capture",
                         "Capture requires the running GUI test host.")
-            let previousApp = NSWorkspace.shared.frontmostApplication
             let splitKeys = ["projects", "sessions"].map { "NSSplitView Subview Frames copilot-projects.\($0)" }
             let previousSplits = splitKeys.map { UserDefaults.standard.object(forKey: $0) }
             for key in splitKeys { UserDefaults.standard.removeObject(forKey: key) }
@@ -153,9 +144,6 @@ public final class WorkspaceCaptureFixture {
                 for (key, value) in zip(splitKeys, previousSplits) {
                     if let value { UserDefaults.standard.set(value, forKey: key) }
                     else { UserDefaults.standard.removeObject(forKey: key) }
-                }
-                if NSApp.isActive, previousApp?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
-                    previousApp?.activate(options: [])
                 }
             }
             report.diagnostics["activationPolicy"] = String(NSApp.activationPolicy().rawValue)
@@ -189,10 +177,11 @@ public final class WorkspaceCaptureFixture {
                 alertPresenter: { alert in
                     self.unexpectedAlert = alert.messageText
                     NSLog("The isolated fixture attempted an alert: %@", alert.messageText)
-                    return .alertSecondButtonReturn
+                    return .alertFirstButtonReturn
                 }
             )
             defer { model.detachAllClients() }
+            let input = WorkspaceInputController(model: model)
             model.selectSession(projectId: project.id, sessionId: sessions[0].id)
             let controller = try unwrap(model.controller(for: sessions[0].id))
             let terminal = controller.terminalView
@@ -210,23 +199,24 @@ public final class WorkspaceCaptureFixture {
             window.titlebarAppearsTransparent = true
             let navigation = Navigation()
             NSLog("Capture phase: constructing workspace root")
-            window.contentViewController = NSHostingController(rootView: CaptureRoot(model: model, navigation: navigation))
+            window.contentViewController = NSHostingController(rootView: CaptureRoot(
+                model: model, input: input, navigation: navigation
+            ))
             defer {
                 window.orderOut(nil)
                 window.contentViewController = nil
                 window.contentView = nil
                 window.close()
             }
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            try await waitFor("The GUI host did not become active with its fixture window key.") {
+            window.orderFront(nil)
+            try await waitFor("The GUI host did not display its fixture window.") {
                 report.diagnostics["guiHostWindow"] = "running=\(NSApp.isRunning) active=\(NSApp.isActive)"
                     + " key=\(NSApp.keyWindow?.windowNumber ?? -1) expected=\(window.windowNumber)"
                     + " canBecomeKey=\(window.canBecomeKey) visible=\(window.isVisible)"
                     + " finishedLaunching=\(NSRunningApplication.current.isFinishedLaunching)"
                 report.diagnostics["frontmostApplication"] = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
                     ?? "unavailable"
-                return NSApp.isRunning && NSApp.isActive && NSApp.keyWindow === window
+                return NSApp.isRunning && window.isVisible
             }
             report.guiHostVerified = true
             let marker = "NATIVE TERMINAL PIXELS"
@@ -503,40 +493,11 @@ public final class WorkspaceCaptureFixture {
                     window: window, file: file, output: output
                 ))
             }
-            let commandProbe = CommandProbe()
-            let previousMenu = NSApp.mainMenu
-            let menu = previousMenu ?? NSMenu()
-            let sessionMenuItem = NSMenuItem(title: "Session", action: nil, keyEquivalent: "")
-            let sessionMenu = NSMenu(title: "Session")
-            let endItem = NSMenuItem(
-                title: "End Session", action: #selector(CommandProbe.endSession(_:)), keyEquivalent: "w"
-            )
-            endItem.target = commandProbe
-            endItem.keyEquivalentModifierMask = .command
-            sessionMenu.addItem(endItem)
-            sessionMenuItem.submenu = sessionMenu
-            menu.addItem(sessionMenuItem)
-            NSApp.mainMenu = menu
-            let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                if AppDelegate.shouldHandleWorkspaceEvent(
-                    window: event.window, keyWindow: NSApp.keyWindow, modalWindow: NSApp.modalWindow
-                ), event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
-                   event.charactersIgnoringModifiers == "w" {
-                    commandProbe.endRequests += 1
-                    return nil
-                }
-                return event
-            }
-            defer {
-                if let monitor { NSEvent.removeMonitor(monitor) }
-                menu.removeItem(sessionMenuItem)
-                NSApp.mainMenu = previousMenu
-            }
             func recordPreviewState(_ stage: String, sheet: NSWindow?) throws {
                 let loaded = sheet.map {
                     findControl("transcript-image-preview", in: $0, role: nil) != nil
                 } ?? false
-                let state = "loaded=\(loaded) focusedValue=\(navigation.previewFocused)"
+                let state = "loaded=\(loaded) presented=\(input.imagePreview != nil)"
                     + " active=\(NSApp.isActive) key=\(NSApp.keyWindow?.windowNumber ?? -1)"
                     + " appRunning=\(NSApp.isRunning)"
                     + " runningApplicationActive=\(NSRunningApplication.current.isActive)"
@@ -547,6 +508,21 @@ public final class WorkspaceCaptureFixture {
                 report.diagnostics[stage] = state
                 NSLog("Transcript preview %@: %@", stage, state)
                 try saveReport()
+            }
+            func key(_ characters: String, code: UInt16, modifiers: NSEvent.ModifierFlags = []) throws -> NSEvent {
+                try unwrap(NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                    windowNumber: window.windowNumber, context: nil, characters: characters,
+                    charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code
+                ))
+            }
+            let originalSessionIDs = model.projects.flatMap(\.sessions).map(\.id)
+            func requireUnchangedWorkspace() throws {
+                try require(model.projects.flatMap(\.sessions).map(\.id) == originalSessionIDs
+                            && model.globalSelectedSessionId == sessions[0].id
+                            && model.terminalView(for: sessions[0].id) === terminal
+                            && controller.shellPID == terminalPID,
+                            "Preview input changed the selected workspace, sessions, or terminal process.")
             }
 
             NSLog("Capture phase: presenting first image preview")
@@ -559,37 +535,20 @@ public final class WorkspaceCaptureFixture {
                     && self.findControl("transcript-image-preview", in: sheet, role: nil) != nil
             }
             let previewWindow = try unwrap(window.attachedSheet)
-            try await waitFor("Preview focus did not suppress workspace commands.") { navigation.previewFocused }
+            try require(input.imagePreview?.data == png
+                        && input.imagePreview?.id.sessionId == sessions[0].id,
+                        "The preview did not retain its session-owned image bytes.")
             try recordPreviewState("initial-preview", sheet: previewWindow)
-            try require(!AppDelegate.shouldHandleWorkspaceEvent(
-                window: previewWindow, keyWindow: previewWindow, modalWindow: nil
-            ), "Preview shortcuts would reach workspace session actions.")
-            try require(!AppDelegate.shouldHandleWorkspaceEvent(
-                window: window, keyWindow: previewWindow, modalWindow: nil
-            ), "The parent window would still intercept preview shortcuts.")
             report.transcriptImages.append(try await captureTranscriptImage(
                 window: previewWindow, file: "macos-transcript-preview.png", output: output
             ))
-            try recordPreviewState("done-before-activation", sheet: previewWindow)
-            previewWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            try await waitFor("The Done fixture preview did not become active and key.") {
-                NSApp.isActive && NSApp.keyWindow === previewWindow
-            }
             try recordPreviewState("before-done", sheet: previewWindow)
             let previewClose = try unwrap(findControl("close-transcript-image", in: previewWindow))
             try require(previewClose.accessibilityPerformPress?() == true, "The image preview did not accept Done.")
-            try await waitFor("The image preview did not dismiss.") { window.attachedSheet == nil }
+            try await waitFor("Done did not dismiss the image preview and restore commands.") {
+                window.attachedSheet == nil && input.imagePreview == nil
+            }
             try recordPreviewState("after-done", sheet: window.attachedSheet)
-            if NSApp.keyWindow !== window {
-                window.makeKeyAndOrderFront(nil)
-                NSApp.activate(ignoringOtherApps: true)
-            }
-            try await waitFor("The parent window did not become active and key after Done.") {
-                NSApp.isActive && NSApp.keyWindow === window
-            }
-            try recordPreviewState("after-done-parent-key", sheet: window.attachedSheet)
-            try await waitFor("Preview focus stayed active after Done.") { !navigation.previewFocused }
             let reopen = try unwrap(findControl(imageIdentifier, in: rootView))
             try require(reopen.accessibilityPerformPress?() == true, "The image preview could not be reopened.")
             try await waitFor("The reopened image preview did not open.") { window.attachedSheet != nil }
@@ -600,65 +559,56 @@ public final class WorkspaceCaptureFixture {
                 return self.findControl("transcript-image-preview", in: commandWindow, role: nil) != nil
             }
             try recordPreviewState("reopened-loaded", sheet: commandWindow)
-            // AX presses can open a sheet while the runner's application is inactive.
-            // Keyboard dispatch needs our own sheet, not the screenshot, to be key.
-            commandWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            try await waitFor("The reopened image preview did not become the key window.") {
-                NSApp.isActive && NSApp.keyWindow === commandWindow
-            }
             try recordPreviewState("before-command-w", sheet: commandWindow)
             let generationBeforeCommandW = terminal.remoteContentGeneration
             let sendsBeforeCommandW = terminalProcess.sendCount
-            let closeKey = try unwrap(NSEvent.keyEvent(
-                with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
-                windowNumber: commandWindow.windowNumber, context: nil,
-                characters: "w", charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13
-            ))
-            NSApp.sendEvent(closeKey)
-            try await waitFor("Command-W did not close the image preview.") { window.attachedSheet == nil }
-            try require(commandProbe.endRequests == 0, "Command-W reached a workspace close handler.")
+            for event in [
+                try key("2", code: 19, modifiers: .control),
+                try key("2", code: 19, modifiers: .command),
+                try key("\t", code: 48, modifiers: .control),
+            ] {
+                try require(input.handleKeyDown(event) == nil, "Preview input escaped into workspace navigation.")
+            }
+            try requireUnchangedWorkspace()
+            try require(input.imagePreview != nil, "Workspace navigation dismissed the preview.")
+            try require(input.handleKeyDown(try key("w", code: 13, modifiers: .command)) == nil,
+                        "Production dispatch did not consume preview Command-W.")
+            try await waitFor("Command-W did not dismiss the preview and restore commands.") {
+                window.attachedSheet == nil && input.imagePreview == nil
+            }
+            try requireUnchangedWorkspace()
             try require(terminal.remoteContentGeneration == generationBeforeCommandW,
                         "Command-W was echoed into the fixture terminal.")
             try require(terminalProcess.sendCount == sendsBeforeCommandW,
                         "Command-W queued input to the fixture terminal.")
             try recordPreviewState("after-command-w", sheet: window.attachedSheet)
-            try await waitFor("Preview focus stayed active after Command-W.") { !navigation.previewFocused }
+            try require(input.handleKeyDown(try key("2", code: 19, modifiers: .control)) == nil,
+                        "Workspace navigation was not restored after preview dismissal.")
+            try require(model.globalSelectedSessionId == sessions[1].id, "Restored navigation did not select a session.")
+            try require(input.handleKeyDown(try key("1", code: 18, modifiers: .control)) == nil,
+                        "Workspace navigation could not return to the original session.")
+            try await waitFor("The original drawer did not return after navigation.") {
+                self.findControl(imageIdentifier, in: rootView)?.accessibilityLabel?() == "Open transcript image"
+            }
 
             let openForEscape = try unwrap(findControl(imageIdentifier, in: rootView))
             try require(openForEscape.accessibilityPerformPress?() == true, "The Escape fixture preview could not open.")
             try await waitFor("The Escape fixture preview did not open.") { window.attachedSheet != nil }
             let escapeWindow = try unwrap(window.attachedSheet)
-            try recordPreviewState("escape-before-focus", sheet: escapeWindow)
-            escapeWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            try await waitFor("The Escape fixture preview did not take keyboard focus.") {
-                NSApp.isActive && NSApp.keyWindow === escapeWindow
-                    && self.findControl("close-transcript-image", in: escapeWindow) != nil
-            }
             try recordPreviewState("before-escape", sheet: escapeWindow)
-            let escape = try unwrap(NSEvent.keyEvent(
-                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
-                windowNumber: escapeWindow.windowNumber, context: nil,
-                characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
-                isARepeat: false, keyCode: 53
-            ))
             let generationBeforeEscape = terminal.remoteContentGeneration
             let sendsBeforeEscape = terminalProcess.sendCount
-            NSApp.sendEvent(escape)
-            try await waitFor("Escape did not close the image preview.") { window.attachedSheet == nil }
+            try require(input.handleKeyDown(try key("\u{1b}", code: 53)) == nil,
+                        "Production dispatch did not consume preview Escape.")
+            try await waitFor("Escape did not dismiss the preview and restore commands.") {
+                window.attachedSheet == nil && input.imagePreview == nil
+            }
             try require(terminal.remoteContentGeneration == generationBeforeEscape,
                         "Escape was echoed into the fixture terminal instead of being contained by the preview.")
             try require(terminalProcess.sendCount == sendsBeforeEscape,
                         "Escape queued input to the fixture terminal.")
-            try require(AppDelegate.shouldHandleWorkspaceEvent(window: window, keyWindow: window, modalWindow: nil),
-                        "Closing the preview did not restore workspace shortcuts.")
-            try await waitFor("Preview focus stayed active after dismissal.") { !navigation.previewFocused }
             try recordPreviewState("after-escape", sheet: window.attachedSheet)
-            try require(model.globalSelectedSessionId == sessions[0].id
-                        && model.terminalView(for: sessions[0].id) === terminal
-                        && controller.shellPID == terminalPID,
-                        "The image preview changed the selected terminal or its process.")
+            try requireUnchangedWorkspace()
             let openBeforeDelete = try unwrap(findControl(imageIdentifier, in: rootView))
             try require(openBeforeDelete.accessibilityPerformPress?() == true,
                         "The image preview could not be opened before deletion.")
@@ -676,7 +626,7 @@ public final class WorkspaceCaptureFixture {
             try await waitFor("Changing session did not dismiss the image preview.") {
                 window.attachedSheet == nil && self.findControl("hide-session-details", in: rootView) == nil
             }
-            try await waitFor("Preview focus stayed active after changing sessions.") { !navigation.previewFocused }
+            try require(input.imagePreview == nil, "Changing sessions did not clear preview command ownership.")
             try recordPreviewState("after-session-change", sheet: window.attachedSheet)
             model.selectSession(projectId: project.id, sessionId: sessions[0].id)
             try await waitFor("The original drawer did not return after the preview test.") {
@@ -695,15 +645,26 @@ public final class WorkspaceCaptureFixture {
             try require(openBeforeDrawerClose.accessibilityPerformPress?() == true,
                         "The drawer-close fixture preview could not open.")
             try await waitFor("The drawer-close fixture preview did not open.") {
-                window.attachedSheet != nil && navigation.previewFocused
+                window.attachedSheet != nil && input.imagePreview != nil
             }
             model.closeTranscriptDrawer(sessionId: sessions[0].id)
-            try await waitFor("Closing the drawer did not dismiss the image preview and clear focus.") {
-                window.attachedSheet == nil && !navigation.previewFocused
+            try await waitFor("Closing the drawer did not dismiss the preview and restore commands.") {
+                window.attachedSheet == nil && input.imagePreview == nil
                     && self.findControl("hide-session-details", in: rootView) == nil
             }
             try recordPreviewState("after-drawer-close", sheet: window.attachedSheet)
             report.transcriptImagesVerified = true
+            try require(input.handleKeyDown(try key("3", code: 20, modifiers: .control)) == nil,
+                        "Workspace navigation stayed blocked after the drawer closed.")
+            try require(model.globalSelectedSessionId == sessions[2].id, "The close-control session was not selected.")
+            let closedController = try unwrap(model.activeController)
+            try require(input.handleKeyDown(try key("w", code: 13, modifiers: .command)) == nil,
+                        "Normal workspace Command-W was not consumed.")
+            try await waitFor("Normal workspace Command-W did not end its selected session.", timeout: .seconds(8)) {
+                !model.projects.flatMap(\.sessions).contains { $0.id == sessions[2].id }
+                    && closedController.exited
+            }
+            report.inputDispatchVerified = true
 
             navigation.showsProjects = true
             let emptyProject = try unwrap(model.projects.first { $0.sessions.isEmpty })
@@ -828,8 +789,8 @@ public final class WorkspaceCaptureFixture {
     }
 
     @MainActor
-    private func waitFor(_ message: String, condition: () -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(2)
+    private func waitFor(_ message: String, timeout: Duration = .seconds(2), condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             try require(unexpectedAlert == nil, "The fixture attempted an alert.")
             if condition() { return }

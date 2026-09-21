@@ -68,6 +68,10 @@ def verify_capture(root, source_sha):
         raise ValueError("Transcript image interaction and ownership were not verified.")
     if report.get("guiHostVerified") is not True or report.get("terminalCleanupVerified") is not True:
         raise ValueError("The GUI host lifecycle and terminal cleanup were not verified.")
+    if report.get("inputDispatchVerified") is not True:
+        raise ValueError("The production preview input dispatch was not verified.")
+    if report.get("physicalKeyboardValidation") != "unverified-headless":
+        raise ValueError("Headless dispatch evidence must not claim physical keyboard validation.")
     images = report.get("images", [])
     if len(images) != len(IMAGE_NAMES) or {image.get("file") for image in images} != IMAGE_NAMES:
         raise ValueError("The capture must contain exactly the requested views.")
@@ -192,7 +196,7 @@ def stop_capture_host(process, root, executable):
 
 def run_capture_host(executable, root, environment, log):
     command = [
-        "/usr/bin/open", "-n", "-W", "-a", str(executable.parent.parent.parent),
+        "/usr/bin/open", "-n", "-g", "-W", "-a", str(executable.parent.parent.parent),
         "--stdout", str(root / "test.log"), "--stderr", str(root / "test.log"),
     ]
     process = subprocess.Popen(command, cwd=REPO, env=environment, stdout=log, stderr=subprocess.STDOUT)

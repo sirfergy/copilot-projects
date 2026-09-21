@@ -207,8 +207,11 @@ dispatch becomes available after the workflow is present on the default branch.
 Ordinary test runs skip the capture. The driver packages a debug-only SwiftPM
 application and launches that test-owned app through LaunchServices, without
 starting the shipping host's bootstrap or services. Its real
-AppKit event loop runs the same asynchronous fixture as the XCTest wrapper,
-including active/key-window keyboard and image-preview lifecycle checks. The
+AppKit event loop runs the same asynchronous fixture as the XCTest wrapper.
+Headless runs exercise the production input dispatcher for preview dismissal,
+workspace-action suppression/restoration, and zero terminal input, plus native
+accessibility controls and actual own-window screenshots. They do not require
+an active/key window or claim OS-level physical-key validation. The
 driver uses a private temporary home and state directory, a harmless terminal
 process, a bounded application lifetime, and a replacement environment that does
 not expose runner credentials to the fixture. Successful captures also verify

@@ -85,6 +85,7 @@ class CaptureDriverTests(unittest.TestCase):
                 "completed": True, "collapseVerified": True, "emptyProjectCollapseVerified": True,
                 "focusedTerminalCollapseVerified": True, "transcriptImagesVerified": True,
                 "guiHostVerified": True, "terminalCleanupVerified": True,
+                "inputDispatchVerified": True, "physicalKeyboardValidation": "unverified-headless",
                 "sourceSHA": "a" * 40, "images": images,
             }
             transcript_images = []
@@ -107,6 +108,7 @@ class CaptureDriverTests(unittest.TestCase):
                 {"focusedTerminalCollapseVerified": False},
                 {"transcriptImagesVerified": False},
                 {"guiHostVerified": False}, {"terminalCleanupVerified": False},
+                {"inputDispatchVerified": False}, {"physicalKeyboardValidation": "verified"},
                 {"transcriptImages": []},
                 {"transcriptImages": [dict(image, markerVisible=False) for image in transcript_images]},
                 {"transcriptImages": [dict(image, pixelWidth=1) for image in transcript_images]},

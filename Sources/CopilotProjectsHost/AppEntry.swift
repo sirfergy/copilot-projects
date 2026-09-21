@@ -8,7 +8,6 @@ struct CopilotProjectsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @AppStorage(HostLifetimePolicy.settingKey) private var keepRunning = false
     @State private var showsProjects = true
-    @FocusedValue(\.transcriptImagePreviewPresented) private var imagePreviewPresented
 
     var body: some Scene {
         Window("Copilot Projects", id: "main") {
@@ -17,37 +16,8 @@ struct CopilotProjectsApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("New Project…") { appDelegate.model.addProjectInteractive() }
-                    .keyboardShortcut("n", modifiers: .command)
-                    .disabled(imagePreviewPresented == true)
-            }
-            CommandGroup(after: .appSettings) {
-                Toggle("Keep Running When Window Closes", isOn: $keepRunning)
-            }
-            CommandGroup(before: .sidebar) {
-                Toggle("Show Projects", isOn: $showsProjects)
-                    .keyboardShortcut("0", modifiers: .command)
-                    .disabled(imagePreviewPresented == true)
-            }
-            CommandMenu("Session") {
-                Group {
-                    Button("New Copilot Session") { appDelegate.model.addSessionToSelected() }
-                        .keyboardShortcut("t", modifiers: .command)
-                    Button("Start with Prompt…") { appDelegate.model.addPromptedSessionToSelected() }
-                    Button("New Terminal") { appDelegate.model.addTerminalToSelected() }
-                        .keyboardShortcut("t", modifiers: [.command, .option])
-                    Divider()
-                    Button("End Session") { appDelegate.model.closeSelectedSession() }
-                        .keyboardShortcut("w", modifiers: .command)
-                    Divider()
-                    Button("Next Session") { appDelegate.model.selectAdjacentSession(1) }
-                        .keyboardShortcut("]", modifiers: [.command, .shift])
-                    Button("Previous Session") { appDelegate.model.selectAdjacentSession(-1) }
-                        .keyboardShortcut("[", modifiers: [.command, .shift])
-                }
-                .disabled(imagePreviewPresented == true)
-            }
+            WorkspaceCommands(model: appDelegate.model, input: appDelegate.input,
+                              keepRunning: $keepRunning, showsProjects: $showsProjects)
         }
         MenuBarExtra("Copilot Projects", systemImage: "terminal", isInserted: $keepRunning) {
             HostStatusMenu(keepRunning: $keepRunning)
@@ -55,9 +25,51 @@ struct CopilotProjectsApp: App {
     }
 }
 
+private struct WorkspaceCommands: Commands {
+    let model: AppModel
+    @ObservedObject var input: WorkspaceInputController
+    @Binding var keepRunning: Bool
+    @Binding var showsProjects: Bool
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Project…") { model.addProjectInteractive() }
+                .keyboardShortcut("n", modifiers: .command)
+                .disabled(input.imagePreview != nil)
+        }
+        CommandGroup(after: .appSettings) {
+            Toggle("Keep Running When Window Closes", isOn: $keepRunning)
+        }
+        CommandGroup(before: .sidebar) {
+            Toggle("Show Projects", isOn: $showsProjects)
+                .keyboardShortcut("0", modifiers: .command)
+                .disabled(input.imagePreview != nil)
+        }
+        CommandMenu("Session") {
+            Group {
+                Button("New Copilot Session") { model.addSessionToSelected() }
+                    .keyboardShortcut("t", modifiers: .command)
+                Button("Start with Prompt…") { model.addPromptedSessionToSelected() }
+                Button("New Terminal") { model.addTerminalToSelected() }
+                    .keyboardShortcut("t", modifiers: [.command, .option])
+                Divider()
+                Button("End Session") { model.closeSelectedSession() }
+                    .keyboardShortcut("w", modifiers: .command)
+                Divider()
+                Button("Next Session") { model.selectAdjacentSession(1) }
+                    .keyboardShortcut("]", modifiers: [.command, .shift])
+                Button("Previous Session") { model.selectAdjacentSession(-1) }
+                    .keyboardShortcut("[", modifiers: [.command, .shift])
+            }
+            .disabled(input.imagePreview != nil)
+        }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let model: AppModel
+    let input: WorkspaceInputController
     private let nativeNotifications: NotificationManager
     private let integration: (any HostIntegration)?
     private let notifications: HostNotificationPoster
@@ -75,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.integration = integration
         notifications = HostNotificationPoster(native: native, integration: integration)
         self.model = model
+        input = WorkspaceInputController(model: model)
         model.attach(integration: integration)
         super.init()
     }
@@ -159,7 +172,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.model.markActiveSessionSeen()
-                self?.model.focusActiveTerminal()
+                if self?.input.imagePreview == nil {
+                    self?.model.focusActiveTerminal()
+                }
             }
         }
     }
@@ -197,18 +212,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    static func shouldHandleWorkspaceEvent(
-        window: NSWindow?, keyWindow: NSWindow?, modalWindow: NSWindow?
-    ) -> Bool {
-        modalWindow == nil
-            && window?.sheetParent == nil && window?.attachedSheet == nil
-            && keyWindow?.sheetParent == nil && keyWindow?.attachedSheet == nil
-    }
-
     private func handleKeyEvent(_ event: NSEvent) -> NSEvent? {
-        guard Self.shouldHandleWorkspaceEvent(
-            window: event.window, keyWindow: NSApp.keyWindow, modalWindow: NSApp.modalWindow
-        ) else {
+        if event.type == .keyDown {
+            return input.handleKeyDown(event) { hintWork?.cancel() }
+        }
+        guard input.allowsWorkspaceEvents(event) else {
             hintWork?.cancel()
             model.setNumberHint(.none)
             return event
@@ -225,35 +233,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         case .flagsChanged:
             updateNumberHint(event.modifierFlags)
-            return event
-        case .keyDown:
-            let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
-            // ⌘W closes the current tab. (macOS's default ⌘W closes the *window*,
-            // which quits the app — that's the accidental-quit footgun.)
-            if mods == .command, event.charactersIgnoringModifiers == "w" {
-                model.closeSelectedSession()
-                return nil
-            }
-            // Control+Tab / Control+Shift+Tab cycle tabs (browser-style). Keep the
-            // overlay up if it's showing so you can keep cycling while holding ⌃.
-            if event.keyCode == 48 {  // Tab
-                if mods == .control { model.selectAdjacentSession(1); return nil }
-                if mods == [.control, .shift] { model.selectAdjacentSession(-1); return nil }
-            }
-            // ⌘ / ⌃ + number jumps to a project / tab.
-            if let digit = Self.digit(from: event) {
-                if mods == .command {
-                    hintWork?.cancel(); model.setNumberHint(.none)
-                    model.selectProjectByIndex(digit - 1); return nil
-                }
-                if mods == .control {
-                    hintWork?.cancel(); model.setNumberHint(.none)
-                    model.selectSessionByIndex(digit - 1); return nil
-                }
-            }
-            // Any other key dismisses the overlay.
-            hintWork?.cancel()
-            model.setNumberHint(.none)
             return event
         case .leftMouseDown:
             // Double-click the top title strip (but not the traffic lights) to run
@@ -333,12 +312,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let work = DispatchWorkItem { [weak self] in self?.model.setNumberHint(target) }
         hintWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
-    }
-
-    private static func digit(from event: NSEvent) -> Int? {
-        guard let s = event.charactersIgnoringModifiers, s.count == 1,
-              let n = Int(s), (1...9).contains(n) else { return nil }
-        return n
     }
 
     /// Prompt for microphone access once, up front. Copilot sessions run as child

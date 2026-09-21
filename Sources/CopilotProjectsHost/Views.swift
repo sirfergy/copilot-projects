@@ -5,6 +5,7 @@ import CopilotProjectsCore
 
 struct RootView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var input: WorkspaceInputController
     @Binding var showsProjects: Bool
 
     // Keep controls below the drag strip; AppEntry uses the same 38pt boundary.
@@ -38,7 +39,7 @@ struct RootView: View {
                     VStack(spacing: 0) {
                         WorkspaceHeading(model: model)
                         Divider()
-                        DetailView(model: model)
+                        DetailView(model: model, onPreview: input.presentImage)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
@@ -48,6 +49,21 @@ struct RootView: View {
         .ignoresSafeArea(.container, edges: .top)
         .background(StudioStyle.chrome)
         .background(WindowConfigurator())
+        .sheet(item: $input.imagePreview) { item in
+            TranscriptImagePreview(item: item) { input.imagePreview = nil }
+        }
+        .onChange(of: previewSessionId) { _, sessionId in
+            if let preview = input.imagePreview, preview.id.sessionId != sessionId {
+                input.imagePreview = nil
+            }
+        }
+        .onDisappear { input.imagePreview = nil }
+    }
+
+    private var previewSessionId: String? {
+        guard let sessionId = model.globalSelectedSessionId,
+              model.isTranscriptDrawerOpen(sessionId: sessionId) else { return nil }
+        return sessionId
     }
 
     private func focusVisibleWorkspace(in window: NSWindow) {
@@ -441,6 +457,7 @@ struct NumberBadge: View {
 
 struct DetailView: View {
     @ObservedObject var model: AppModel
+    let onPreview: (TranscriptImagePreviewItem) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -471,7 +488,8 @@ struct DetailView: View {
                     operation: model.sessionOperationProjection(sessionId: sessionId),
                     onAction: { action in
                         await model.performLocalSessionAction(sessionId: sessionId, action: action)
-                    }
+                    },
+                    onPreview: onPreview
                 )
                 .id(sessionId)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value:

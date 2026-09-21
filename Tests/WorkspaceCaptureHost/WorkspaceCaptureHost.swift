@@ -7,7 +7,6 @@ final class CaptureDelegate: NSObject, NSApplicationDelegate {
     var exitStatus: Int32 = 1
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.activate(ignoringOtherApps: true)
         Task { @MainActor in
             do {
                 try await WorkspaceCaptureFixture().run()

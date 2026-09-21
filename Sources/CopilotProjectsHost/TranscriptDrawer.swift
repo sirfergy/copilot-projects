@@ -32,6 +32,7 @@ struct TranscriptOverlay: View {
     let workflow: RemoteSessionWorkflow?
     let operation: AgentOperationProjection
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
+    let onPreview: (TranscriptImagePreviewItem) -> Void
 
     var body: some View {
         if controller.snapshot != nil || workflow != nil {
@@ -41,7 +42,7 @@ struct TranscriptOverlay: View {
                         ImageAssociatedTranscriptDrawer(
                             capture: capture, snapshot: controller.snapshot,
                             workflow: workflow, operation: operation,
-                            onClose: onClose, onAction: onAction
+                            onClose: onClose, onAction: onAction, onPreview: onPreview
                         )
                     } else {
                         TranscriptDrawer(
@@ -50,7 +51,7 @@ struct TranscriptOverlay: View {
                             } ?? [],
                             imageCapture: nil,
                             workflow: workflow, operation: operation,
-                            onClose: onClose, onAction: onAction
+                            onClose: onClose, onAction: onAction, onPreview: onPreview
                         )
                     }
                 }
@@ -67,6 +68,7 @@ private struct ImageAssociatedTranscriptDrawer: View {
     let operation: AgentOperationProjection
     let onClose: () -> Void
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
+    let onPreview: (TranscriptImagePreviewItem) -> Void
 
     var body: some View {
         TranscriptDrawer(
@@ -75,7 +77,7 @@ private struct ImageAssociatedTranscriptDrawer: View {
             } ?? [],
             imageCapture: capture,
             workflow: workflow, operation: operation,
-            onClose: onClose, onAction: onAction
+            onClose: onClose, onAction: onAction, onPreview: onPreview
         )
     }
 }
@@ -87,8 +89,8 @@ private struct TranscriptDrawer: View {
     let operation: AgentOperationProjection
     let onClose: () -> Void
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
+    let onPreview: (TranscriptImagePreviewItem) -> Void
     @State private var isAtBottom = true
-    @State private var preview: TranscriptImagePreviewItem?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -122,7 +124,7 @@ private struct TranscriptDrawer: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(turns) { turn in
-                            TranscriptTurnCard(turn: turn, imageCapture: imageCapture) { preview = $0 }
+                            TranscriptTurnCard(turn: turn, imageCapture: imageCapture, onPreview: onPreview)
                         }
                         Color.clear
                             .frame(height: 1)
@@ -147,9 +149,6 @@ private struct TranscriptDrawer: View {
         .background(StudioStyle.chrome)
         .overlay(alignment: .leading) { Divider() }
         .shadow(color: .black.opacity(0.2), radius: 12, x: -4)
-        .sheet(item: $preview) { item in
-            TranscriptImagePreview(item: item)
-        }
     }
 }
 

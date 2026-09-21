@@ -130,24 +130,12 @@ struct TranscriptImageView: View {
     }
 }
 
-private struct TranscriptImagePreviewFocus: FocusedValueKey {
-    typealias Value = Bool
-}
-
-extension FocusedValues {
-    var transcriptImagePreviewPresented: Bool? {
-        get { self[TranscriptImagePreviewFocus.self] }
-        set { self[TranscriptImagePreviewFocus.self] = newValue }
-    }
-}
-
 struct TranscriptImagePreview: View {
     let item: TranscriptImagePreviewItem
-    @Environment(\.dismiss) private var dismiss
+    let onDismiss: () -> Void
     @State private var image: CGImage?
     @State private var failed = false
     @State private var zoom = 1.0
-    @FocusState private var canvasFocused: Bool
 
     var body: some View {
         VStack(spacing: 12) {
@@ -162,7 +150,7 @@ struct TranscriptImagePreview: View {
                 Text("\(Int(zoom * 100))%")
                     .font(.caption.monospacedDigit())
                     .frame(width: 40)
-                Button("Done") { dismiss() }
+                Button("Done", action: onDismiss)
                     .keyboardShortcut("w", modifiers: .command)
                     .accessibilityIdentifier("close-transcript-image")
             }
@@ -191,11 +179,7 @@ struct TranscriptImagePreview: View {
         .frame(minWidth: 640, idealWidth: 720, maxWidth: 960,
                minHeight: 280, idealHeight: 520, maxHeight: 720)
         .background(StudioStyle.chrome)
-        .focusable()
-        .focused($canvasFocused)
-        .focusedSceneValue(\.transcriptImagePreviewPresented, true)
-        .onExitCommand { dismiss() }
-        .onAppear { canvasFocused = true }
+        .onExitCommand(perform: onDismiss)
         .task(id: item.id) {
             do {
                 let decoded = try await TranscriptImageDecoder.shared.decode(

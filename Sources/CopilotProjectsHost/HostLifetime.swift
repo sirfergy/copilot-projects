@@ -15,7 +15,7 @@ struct MainWindowContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        RootView(model: appDelegate.model, showsProjects: $showsProjects)
+        RootView(model: appDelegate.model, input: appDelegate.input, showsProjects: $showsProjects)
             .onAppear {
                 let action = openWindow
                 appDelegate.model.requestMainWindow = { action(id: "main") }

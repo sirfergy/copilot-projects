@@ -245,7 +245,9 @@ without changing aspect ratio, and cap inline height at 280pt. Loading reserves
 the PNG's fitted geometry; unavailable images are labeled rather than hidden.
 Image corners reuse the 9pt message shape and native border treatment. Selecting
 an image opens a larger native preview with pan/zoom and explicit dismissal.
-Preview sheets own keyboard input; workspace shortcuts do not act behind them.
+The workspace UI input controller owns one preview item, shared by the root sheet
+and command availability. It consumes preview dismissal before workspace or
+terminal actions; this ownership does not depend on OS focus or focused values.
 An open preview retains its captured image while the inline list responds to
 eviction; changing session or closing the drawer dismisses the preview.
 
