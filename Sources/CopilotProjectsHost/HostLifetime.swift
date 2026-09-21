@@ -11,10 +11,11 @@ enum HostLifetimePolicy {
 
 struct MainWindowContent: View {
     let appDelegate: AppDelegate
+    @Binding var showsProjects: Bool
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        RootView(model: appDelegate.model)
+        RootView(model: appDelegate.model, showsProjects: $showsProjects)
             .onAppear {
                 let action = openWindow
                 appDelegate.model.requestMainWindow = { action(id: "main") }

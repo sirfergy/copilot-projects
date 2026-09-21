@@ -8,6 +8,32 @@ import CopilotProjectsCore
 @testable import CopilotProjectsHost
 
 final class WorkspaceCaptureTests: XCTestCase {
+    @MainActor
+    private final class CaptureWindow: NSWindow {
+        var responderChanges = 0
+
+        override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+            let previous = firstResponder
+            let accepted = super.makeFirstResponder(responder)
+            if accepted && firstResponder !== previous { responderChanges += 1 }
+            return accepted
+        }
+    }
+
+    @MainActor
+    private final class Navigation: ObservableObject {
+        @Published var showsProjects = true
+    }
+
+    private struct CaptureRoot: View {
+        let model: AppModel
+        @ObservedObject var navigation: Navigation
+
+        var body: some View {
+            RootView(model: model, showsProjects: $navigation.showsProjects)
+        }
+    }
+
     private struct ImageProof: Codable {
         let file: String
         let requestedWidth: Int
@@ -18,12 +44,17 @@ final class WorkspaceCaptureTests: XCTestCase {
         let appearance: String
         let renderer: String
         let terminalMarkerVisible: Bool
+        let projectsVisible: Bool
+        let terminalWidth: Double
     }
 
     private struct Report: Codable {
         let sourceSHA: String
         let osVersion: String
         var completed = false
+        var collapseVerified = false
+        var emptyProjectCollapseVerified = false
+        var focusedTerminalCollapseVerified = false
         var diagnostics: [String: String] = [:]
         var images: [ImageProof] = []
         var error: String?
@@ -82,7 +113,7 @@ final class WorkspaceCaptureTests: XCTestCase {
             _ = NSApplication.shared
             let previousPolicy = NSApp.activationPolicy()
             let previousApp = NSWorkspace.shared.frontmostApplication
-            let splitKey = "NSSplitView Subview Frames copilot-projects.sidebar"
+            let splitKey = "NSSplitView Subview Frames copilot-projects.sessions"
             let previousSplit = UserDefaults.standard.object(forKey: splitKey)
             UserDefaults.standard.removeObject(forKey: splitKey)
             defer {
@@ -122,9 +153,11 @@ final class WorkspaceCaptureTests: XCTestCase {
                 }
             )
             defer { model.detachAllClients() }
-            let terminal = try XCTUnwrap(model.controller(for: sessions[0].id)).terminalView
+            let controller = try XCTUnwrap(model.controller(for: sessions[0].id))
+            let terminal = controller.terminalView
+            let terminalPID = controller.shellPID
             model.setStatus(sessionId: sessions[1].id, status: .waiting, text: nil, timestamp: 100)
-            let window = NSWindow(
+            let window = CaptureWindow(
                 contentRect: NSRect(x: 40, y: 40, width: 1280, height: 800),
                 styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
                 backing: .buffered, defer: false
@@ -133,7 +166,8 @@ final class WorkspaceCaptureTests: XCTestCase {
             window.title = "Copilot Projects - synthetic workspace"
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
-            window.contentView = NSHostingView(rootView: RootView(model: model))
+            let navigation = Navigation()
+            window.contentView = NSHostingView(rootView: CaptureRoot(model: model, navigation: navigation))
             defer {
                 window.orderOut(nil)
                 window.contentView = nil
@@ -143,11 +177,20 @@ final class WorkspaceCaptureTests: XCTestCase {
             NSApp.activate(ignoringOtherApps: true)
             let marker = "NATIVE TERMINAL PIXELS"
 
-            for (name, appearance, width, height): (String, NSAppearance.Name, Int, Int) in [
-                ("macos-dark", .darkAqua, 1280, 800),
-                ("macos-light", .aqua, 1280, 800),
-                ("macos-compact", .darkAqua, 820, 520),
+            var originalContainer: TerminalsContainerView?
+            var compactTerminalWidth: CGFloat?
+            for (name, appearance, width, height, projectsVisible): (String, NSAppearance.Name, Int, Int, Bool) in [
+                ("macos-dark", .darkAqua, 1280, 800, true),
+                ("macos-light", .aqua, 1280, 800, true),
+                ("macos-compact", .darkAqua, 820, 520, true),
+                ("macos-compact-projects-hidden", .darkAqua, 820, 520, false),
             ] {
+                if !projectsVisible {
+                    let rootView = try XCTUnwrap(window.contentView)
+                    let projects = try XCTUnwrap(findView(NSTableView.self, in: rootView))
+                    XCTAssertTrue(window.makeFirstResponder(projects))
+                }
+                navigation.showsProjects = projectsVisible
                 window.appearance = try XCTUnwrap(NSAppearance(named: appearance))
                 window.setContentSize(NSSize(width: CGFloat(width), height: CGFloat(height)))
                 window.contentView?.layoutSubtreeIfNeeded()
@@ -164,6 +207,26 @@ final class WorkspaceCaptureTests: XCTestCase {
                     try await Task.sleep(for: .milliseconds(500))
                     window.contentView?.layoutSubtreeIfNeeded()
                     window.displayIfNeeded()
+                    let container = try XCTUnwrap(findView(
+                        TerminalsContainerView.self, in: try XCTUnwrap(window.contentView)
+                    ))
+                    if let originalContainer {
+                        try require(container === originalContainer, "Navigation remounted the terminal container.")
+                    } else {
+                        originalContainer = container
+                    }
+                    try require(model.terminalView(for: sessions[0].id) === terminal
+                                && controller.shellPID == terminalPID,
+                                "Navigation replaced or restarted the terminal.")
+                    try require(terminal.bounds.width >= 420, "Navigation squeezed the terminal below its width contract.")
+                    if !projectsVisible {
+                        let previousWidth = try XCTUnwrap(compactTerminalWidth)
+                        try require(terminal.bounds.width > previousWidth + 80,
+                                    "Hiding Projects did not reclaim terminal width.")
+                        try require(window.firstResponder === terminal,
+                                    "Hiding Projects left keyboard focus in the hidden browser.")
+                        report.collapseVerified = true
+                    }
                     terminal.forceRedraw()
                     report.diagnostics["terminalModelContainsMarker"] = String(
                         terminal.terminalStateSnapshot().visibleRows.contains { $0.text.contains(marker) }
@@ -211,14 +274,41 @@ final class WorkspaceCaptureTests: XCTestCase {
                             backingScale: Double(scale),
                             appearance: window.effectiveAppearance.name.rawValue,
                             renderer: terminal.rendererName,
-                            terminalMarkerVisible: true
+                            terminalMarkerVisible: true,
+                            projectsVisible: projectsVisible,
+                            terminalWidth: Double(terminal.bounds.width)
                         ))
+                        if name == "macos-compact" { compactTerminalWidth = terminal.bounds.width }
                         captured = true
                         break
                     }
                 }
                 try require(captured, "\(name) did not contain the rendered Metal terminal marker.")
             }
+            navigation.showsProjects = true
+            try await Task.sleep(for: .milliseconds(500))
+            model.focusActiveTerminal()
+            try require(window.firstResponder === terminal, "The terminal did not accept focus before collapse.")
+            let responderChanges = window.responderChanges
+            navigation.showsProjects = false
+            try await Task.sleep(for: .milliseconds(500))
+            try require(window.firstResponder === terminal && window.responderChanges == responderChanges,
+                        "Hiding Projects blurred and refocused the active terminal.")
+            report.focusedTerminalCollapseVerified = true
+
+            navigation.showsProjects = true
+            let emptyProject = try XCTUnwrap(model.projects.first { $0.sessions.isEmpty })
+            model.selectProject(emptyProject.id)
+            try await Task.sleep(for: .milliseconds(500))
+            window.contentView?.layoutSubtreeIfNeeded()
+            let projects = try XCTUnwrap(findView(NSTableView.self, in: try XCTUnwrap(window.contentView)))
+            XCTAssertTrue(window.makeFirstResponder(projects))
+            navigation.showsProjects = false
+            try await Task.sleep(for: .milliseconds(500))
+            window.contentView?.layoutSubtreeIfNeeded()
+            let hiddenTableHasFocus = (window.firstResponder as? NSView)?.isDescendant(of: projects) ?? false
+            try require(!hiddenTableHasFocus, "Empty-project collapse left focus in the hidden browser.")
+            report.emptyProjectCollapseVerified = true
             report.completed = true
             try saveReport()
         } catch {
@@ -231,6 +321,15 @@ final class WorkspaceCaptureTests: XCTestCase {
 
     private func captureError(_ message: String) -> NSError {
         NSError(domain: "WorkspaceCapture", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    @MainActor
+    private func findView<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
+        if let match = view as? T { return match }
+        for child in view.subviews {
+            if let match = findView(type, in: child) { return match }
+        }
+        return nil
     }
 
     private func require(_ condition: Bool, _ message: String) throws {

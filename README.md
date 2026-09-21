@@ -1,13 +1,14 @@
 # Copilot Projects
 
 A native macOS terminal workspace for keeping coding-agent sessions organized.
-Projects live in the sidebar, sessions live in tabs, and status indicators tell
+Projects and sessions occupy separate navigation columns, and status indicators tell
 you what is running, what needs input, and what finished while you were away.
 
-![Current Copilot Projects desktop showing sample projects, three terminal tabs, and running and waiting indicators](docs/workspace.png)
+![Two-Level Browser with separate project and session columns beside the native terminal](docs/workspace.png)
 
-Captured from a separate instance of the current app with sample projects and
-illustrative terminal text. No live workspace content is shown.
+Native workspace captures use isolated sample projects and illustrative terminal
+text. No live workspace content is shown. This unfocused-window capture was
+produced by the native Actions workflow; its origin is embedded in the PNG.
 
 ## Install
 
@@ -47,8 +48,9 @@ it does not reconstruct attachment history after image data has been discarded.
 
 ## A workspace for parallel work
 
-- **Projects and tabs.** Group sessions by project without juggling terminal
-  windows. Background tabs keep running while you work elsewhere.
+- **Projects, sessions, and work.** Choose a project, scan its vertically listed
+  sessions, and work in the terminal beside them. Hide the project column to
+  reclaim space; background sessions keep running.
 - **Attention at a glance.** Running and waiting indicators, unread markers,
   and native notifications help you find the session that needs you.
 - **Session details.** Read completed turns as Markdown and see usage,
@@ -64,11 +66,13 @@ Copilot CLI hooks and a local tracker supply automatic status and session
 details. Other command-line tools work as ordinary terminal sessions and can
 report status through the CLI.
 
-### A closer look
+### Compact project navigation
 
-<img src="docs/project-status.png" alt="Current project rows showing running, waiting, and ready status indicators" width="360">
+<img src="docs/project-status.png" alt="Compact project rail with selected project, session count, and a labeled waiting-status indicator" width="176">
 
-This component preview uses illustrative sample data.
+The rail stays compact while session names have their own scrollable column.
+Full project names and activity summaries remain available through tooltips and
+accessibility labels.
 
 ## Everyday controls
 
@@ -81,6 +85,7 @@ This component preview uses illustrative sample data.
 | Next / previous session | `⌃Tab` / `⌃⇧Tab` |
 | Jump to a project | `⌘1`–`⌘9` |
 | Jump to a session | `⌃1`–`⌃9` |
+| Show / hide Projects | `⌘0` |
 
 Hold `⌘` or `⌃` to reveal numbered navigation hints. Use the session-details
 button to open the completed-turn drawer.
@@ -99,19 +104,19 @@ created with `⌘N` also start with Copilot. All new desktop Copilot sessions us
 `--allow-all`, with or without a starting prompt.
 
 In the composer, Return adds a line, `⌘Return` starts Copilot, and Cancel creates
-no tab. Failed preflight checks keep your draft. If Copilot or its backend becomes
+no session. Failed preflight checks keep your draft. If Copilot or its backend becomes
 unavailable, choosing **New Terminal** discards the draft and opens a plain shell
-without submitting it. If startup fails after a tab opens, right-click that tab
+without submitting it. If startup fails after a session opens, right-click its row
 and choose **Copy Starting Prompt** before closing it or quitting the app. This
 in-memory copy is never automatically resubmitted.
 
-**Closing a tab ends that session. Quitting the app does not**, when the bundled
+**Ending a session stops its processes. Quitting the app does not**, when the bundled
 `dtach` backend is available. Closing the last window quits by default; enable
 **Keep Running When Window Closes** to leave the host in the menu bar.
 Plain-shell scrollback does not survive a detach; full-screen tools can repaint
 when reattached.
 
-**End Session** (including `⌘W` and the tab's x button) asks for confirmation when
+**End Session** (including `⌘W` and the session row's x button) asks for confirmation when
 the app reports running, waiting, background, scheduled, or pending-input work.
 A single idle session ends immediately; unread completion markers alone do not
 trigger a prompt. **End Project** also confirms whenever it contains multiple
@@ -167,9 +172,10 @@ Use `Ctrl-\` to detach without ending the session.
 ## Studio Console visual system
 
 Studio Console frames the native terminal workspace with adaptive graphite/satin
-surfaces, steel session selection, and readable system type. The separate title
-and tab strips, native controls, keyboard shortcuts, drag/drop, and ending
-safeguards remain; session details stay secondary. The source-grounded
+surfaces, steel session selection, and readable system type. The Two-Level Browser
+replaces horizontal tabs with Projects | Sessions | Terminal, preserving native
+controls, keyboard shortcuts, drag/drop, and ending safeguards. The project column
+can collapse without recreating the terminal; session details stay secondary. The source-grounded
 [design record](DESIGN.md) and [token sidecar](.impeccable/design.json) accompany
 the [product context](PRODUCT.md). Appearance follows macOS rather than a separate
 theme picker.
@@ -177,13 +183,14 @@ theme picker.
 ### Native workspace screenshots
 
 The **Capture macOS workspace** Actions workflow renders the actual native views
-with isolated synthetic sessions on the M4 runner. It uploads dark, light, and
-compact window captures with a source-SHA manifest and diagnostic logs. Each
+with isolated synthetic sessions on the M4 runner. It uploads dark, light, compact,
+and collapsed-project captures with a source-SHA manifest and diagnostic logs. Each
 successful image must contain the terminal's unique OCR marker and use the Metal
 renderer; an empty terminal or unavailable GUI/capture permission fails the run.
 It never captures the whole desktop, launches a live host, or changes TCC grants.
 
-The initial run is triggered by a push to `sirfergy/studio-console`. Manual
+Capture runs are triggered by pushes to `sirfergy/studio-console` and
+`sirfergy/studio-console-bold`. Manual
 dispatch becomes available after the workflow is present on the default branch.
 Ordinary test runs skip the capture. The driver uses a private temporary home and
 state directory, a harmless terminal process, and a replacement environment that

@@ -7,10 +7,11 @@ import CopilotProjectsProtocol
 struct CopilotProjectsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @AppStorage(HostLifetimePolicy.settingKey) private var keepRunning = false
+    @State private var showsProjects = true
 
     var body: some Scene {
         Window("Copilot Projects", id: "main") {
-            MainWindowContent(appDelegate: appDelegate)
+            MainWindowContent(appDelegate: appDelegate, showsProjects: $showsProjects)
                 .frame(minWidth: 820, minHeight: 520)
         }
         .windowStyle(.hiddenTitleBar)
@@ -21,6 +22,10 @@ struct CopilotProjectsApp: App {
             }
             CommandGroup(after: .appSettings) {
                 Toggle("Keep Running When Window Closes", isOn: $keepRunning)
+            }
+            CommandGroup(before: .sidebar) {
+                Toggle("Show Projects", isOn: $showsProjects)
+                    .keyboardShortcut("0", modifiers: .command)
             }
             CommandMenu("Session") {
                 Button("New Copilot Session") { appDelegate.model.addSessionToSelected() }

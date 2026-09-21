@@ -12,12 +12,13 @@ import sys
 
 
 REPO = Path(__file__).resolve().parents[1]
-IMAGE_NAMES = {"macos-dark.png", "macos-light.png", "macos-compact.png"}
 APPEARANCES = {
     "macos-dark.png": "NSAppearanceNameDarkAqua",
     "macos-light.png": "NSAppearanceNameAqua",
     "macos-compact.png": "NSAppearanceNameDarkAqua",
+    "macos-compact-projects-hidden.png": "NSAppearanceNameDarkAqua",
 }
+IMAGE_NAMES = set(APPEARANCES)
 
 
 def capture_environment(root, source_sha, original):
@@ -50,12 +51,20 @@ def verify_capture(root, source_sha):
     report = json.loads((root / "metadata.json").read_text())
     if report.get("completed") is not True or report.get("sourceSHA") != source_sha:
         raise ValueError("The native capture did not complete for the checked-out commit.")
+    if report.get("collapseVerified") is not True or report.get("emptyProjectCollapseVerified") is not True:
+        raise ValueError("The native project-column collapse was not verified.")
+    if report.get("focusedTerminalCollapseVerified") is not True:
+        raise ValueError("Project collapse did not preserve the already-focused terminal.")
     images = report.get("images", [])
-    if len(images) != 3 or {image.get("file") for image in images} != IMAGE_NAMES:
-        raise ValueError("The capture must contain exactly the three requested views.")
+    if len(images) != len(IMAGE_NAMES) or {image.get("file") for image in images} != IMAGE_NAMES:
+        raise ValueError("The capture must contain exactly the requested views.")
     for image in images:
         if image.get("appearance") != APPEARANCES[image["file"]]:
             raise ValueError("A screenshot does not match its requested appearance.")
+        if image.get("projectsVisible") != (image["file"] != "macos-compact-projects-hidden.png"):
+            raise ValueError("A screenshot does not match its requested navigation state.")
+        if image.get("terminalWidth", 0) < 420:
+            raise ValueError("A screenshot violates the minimum terminal width.")
         if image.get("renderer") != "metal" or image.get("terminalMarkerVisible") is not True:
             raise ValueError("A capture is missing its rendered Metal terminal.")
         data = (root / "images" / image["file"]).read_bytes()
@@ -99,7 +108,7 @@ def main():
         raise
     finally:
         shutil.rmtree(root / "sandbox")
-    print(f"Captured three native workspace views for {source_sha}.")
+    print(f"Captured {len(IMAGE_NAMES)} native workspace views for {source_sha}.")
 
 
 if __name__ == "__main__":

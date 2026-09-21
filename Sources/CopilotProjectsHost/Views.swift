@@ -5,37 +5,67 @@ import CopilotProjectsCore
 
 struct RootView: View {
     @ObservedObject var model: AppModel
+    @Binding var showsProjects: Bool
 
-    // Top strip in the window's title-bar region: the fleet status sits at the
-    // right; the traffic lights float over the left. The session tabs live in a
-    // separate thin row just below it — out of the window's drag region — so a
-    // drag reorders them instead of moving the window. (Content in the title-bar
-    // drag region always moves the window on macOS, so the tabs can't live there.)
+    // Keep controls below the drag strip; AppEntry uses the same 38pt boundary.
     private let titleStripHeight: CGFloat = 38
 
     var body: some View {
         VStack(spacing: 0) {
             topStrip
-            HSplitView {
-                SidebarView(model: model)
-                    .frame(minWidth: 200, idealWidth: 240, maxWidth: 360)
-                    .background(SplitViewAutosaver(name: "copilot-projects.sidebar"))
+            HStack(spacing: 0) {
                 VStack(spacing: 0) {
-                    tabRow
+                    HStack {
+                        Text("Projects").font(.headline)
+                        Spacer()
+                        Text(model.projects.count, format: .number)
+                            .foregroundStyle(StudioStyle.secondaryText)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 56)
                     Divider()
-                    DetailView(model: model)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    SidebarView(model: model)
+                }
+                .background(StudioStyle.sidebar)
+                .frame(width: showsProjects ? 176 : 0)
+                .clipped()
+                .disabled(!showsProjects)
+                .allowsHitTesting(showsProjects)
+                .accessibilityHidden(!showsProjects)
+
+                Divider()
+                    .frame(width: showsProjects ? 1 : 0)
+                    .opacity(showsProjects ? 1 : 0)
+
+                HSplitView {
+                    SessionBrowser(model: model, showsProjects: $showsProjects)
+                        .frame(minWidth: 200, idealWidth: 224, maxWidth: 280)
+                        .background(SplitViewAutosaver(name: "copilot-projects.sessions"))
+                    VStack(spacing: 0) {
+                        WorkspaceHeading(model: model)
+                        Divider()
+                        DetailView(model: model)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
         .ignoresSafeArea(.container, edges: .top)
         .background(StudioStyle.chrome)
-        .background(WindowConfigurator())
+        .background(WindowConfigurator(showsProjects: showsProjects) { window in
+            if let terminal = model.activeController?.terminalView,
+               !terminal.isHidden, terminal.window === window {
+                model.focusActiveTerminal()
+            } else {
+                window.makeFirstResponder(nil)
+            }
+        })
     }
 
     private var topStrip: some View {
         HStack(spacing: 12) {
-            Text(model.selectedProject?.name ?? "Copilot Projects")
+            Text("Copilot Projects")
                 .font(.callout.weight(.semibold))
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -50,17 +80,37 @@ struct RootView: View {
         .background(StudioStyle.chrome)
     }
 
-    private var tabRow: some View {
-        HStack(spacing: 0) {
-            if let project = model.selectedProject {
-                SessionTabBar(model: model, project: project)
-            } else {
-                Spacer(minLength: 0)
+}
+
+private struct WorkspaceHeading: View {
+    @ObservedObject var model: AppModel
+
+    private var session: Session? {
+        guard let project = model.selectedProject else { return nil }
+        return project.sessions.first { $0.id == project.selectedSessionId }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(session?.title ?? model.selectedProject?.name ?? "Workspace")
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(session?.title ?? model.selectedProject?.name ?? "Workspace")
+                Text(model.selectedProject?.name ?? "Choose a project to get started")
+                    .font(.caption)
+                    .foregroundStyle(StudioStyle.secondaryText)
+                    .lineLimit(1)
             }
+            Spacer(minLength: 0)
+            Image(systemName: "terminal")
+                .foregroundStyle(StudioStyle.secondaryText)
+                .accessibilityHidden(true)
         }
-        .frame(height: 38)
-        .frame(maxWidth: .infinity)
-        .background(StudioStyle.chrome)
+        .padding(.horizontal, 18)
+        .frame(height: 56)
+        .background(StudioStyle.raised)
     }
 }
 
@@ -68,6 +118,16 @@ struct RootView: View {
 /// accent color under the strip) and keeps chrome minimal. Retries until the
 /// window is attached (it's nil at first).
 struct WindowConfigurator: NSViewRepresentable {
+    let showsProjects: Bool
+    let onProjectsHidden: (NSWindow) -> Void
+
+    final class Coordinator {
+        var showsProjects: Bool
+        init(showsProjects: Bool) { self.showsProjects = showsProjects }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(showsProjects: showsProjects) }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         func apply(_ attempt: Int) {
@@ -81,7 +141,13 @@ struct WindowConfigurator: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        let wasVisible = context.coordinator.showsProjects
+        context.coordinator.showsProjects = showsProjects
+        if wasVisible && !showsProjects, let window = nsView.window {
+            onProjectsHidden(window)
+        }
+    }
 }
 
 /// Roll-up of what every agent is doing, drawn as a trailing title-bar accessory:
@@ -182,7 +248,7 @@ struct SidebarView: View {
         .scrollContentBackground(.hidden)
         .background(StudioStyle.sidebar)
         .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 Button {
                     model.addProjectInteractive()
                 } label: {
@@ -191,7 +257,6 @@ struct SidebarView: View {
                         .padding(.horizontal, 6)
                         .padding(.vertical, 4)
                 }
-                .controlSize(.large)
                 .buttonStyle(.borderless)
                 .hoverHighlight()
 
@@ -217,6 +282,7 @@ struct ProjectRow: View {
                 Text(project.name)
                     .font(.body.weight(.medium))
                     .lineLimit(1)
+                    .help(project.name)
                 Text("\(project.sessions.count) session\(project.sessions.count == 1 ? "" : "s")")
                     .font(.caption)
                     .lineLimit(1)
@@ -246,30 +312,39 @@ struct ProjectRow: View {
         )
     }
 
-    // Its own line, always present (even when "idle"), so the row height never
-    // changes as agents start/stop. Waiting is the actionable one, so it's orange;
-    // running is muted; idle is fainter still.
+    // Keep one compact status line so changing activity does not move projects.
     @ViewBuilder private var statusLine: some View {
         let running = project.runningCount
         let background = project.backgroundWorkCount
         let scheduled = project.scheduledCount
         let waiting = project.waitingCount
+        let descriptions = [
+            (waiting, "waiting for input"), (running, "running"),
+            (background, "background"), (scheduled, "scheduled"),
+        ].filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }
         if running > 0 || background > 0 || scheduled > 0 || waiting > 0 {
-            HStack(spacing: 4) {
-                if running > 0 { Text("\(running) running").foregroundStyle(.green) }
-                if running > 0, background > 0 || scheduled > 0 || waiting > 0 {
-                    Text("·").foregroundStyle(.tertiary)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 7) {
+                    if running > 0 { activityCount(running, "play.fill", .green) }
+                    if background > 0 { activityCount(background, "person.2.fill", .purple) }
+                    if scheduled > 0 { activityCount(scheduled, "clock", .indigo) }
+                    if waiting > 0 { activityCount(waiting, "exclamationmark.circle", .orange) }
                 }
-                if background > 0 { Text("\(background) background").foregroundStyle(.purple) }
-                if background > 0, scheduled > 0 || waiting > 0 {
-                    Text("·").foregroundStyle(.tertiary)
-                }
-                if scheduled > 0 { Text("\(scheduled) scheduled").foregroundStyle(.indigo) }
-                if scheduled > 0, waiting > 0 { Text("·").foregroundStyle(.tertiary) }
-                if waiting > 0 { Text("\(waiting) waiting").foregroundStyle(.orange) }
+                .fixedSize()
+                Text(descriptions[0]).lineLimit(1)
             }
+            .help(descriptions.joined(separator: ", "))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(descriptions.joined(separator: ", "))
         } else {
             Text("idle")
+        }
+    }
+
+    private func activityCount(_ count: Int, _ symbol: String, _ color: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: symbol).foregroundStyle(color)
+            Text(count, format: .number).monospacedDigit()
         }
     }
 }
@@ -278,8 +353,8 @@ struct ProjectRow: View {
 /// (running); orange means it's waiting on your input; blue means it has finished
 /// and you haven't viewed it yet ("ready for interaction"); idle shows nothing.
 /// The 9pt frame keeps the slot a constant size whether or not a dot is shown.
-/// SessionTab suppresses its separate unread dot while this indicator is blue.
-struct SessionTabIndicator: View {
+/// SessionRow suppresses its separate unread dot while this indicator is blue.
+struct SessionStateIndicator: View {
     let session: Session
 
     var body: some View {
@@ -368,7 +443,7 @@ struct NumberBadge: View {
     }
 }
 
-// MARK: - Detail (horizontal terminal sessions)
+// MARK: - Terminal workspace
 
 struct DetailView: View {
     @ObservedObject var model: AppModel
@@ -412,25 +487,80 @@ struct DetailView: View {
     }
 }
 
-struct SessionTabBar: View {
+struct SessionBrowser: View {
+    @ObservedObject var model: AppModel
+    @Binding var showsProjects: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    showsProjects.toggle()
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.borderless)
+                .help(showsProjects ? "Hide Projects (⌘0)" : "Show Projects (⌘0)")
+                .accessibilityLabel(showsProjects ? "Hide Projects" : "Show Projects")
+                .accessibilityIdentifier("toggle-projects")
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Sessions").font(.headline)
+                    Text(model.selectedProject?.name ?? "No project selected")
+                        .font(.caption)
+                        .foregroundStyle(StudioStyle.secondaryText)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if let project = model.selectedProject {
+                    SessionCreationButtons(model: model, project: project)
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 56)
+            Divider()
+            if let project = model.selectedProject {
+                SessionList(model: model, project: project)
+                    .id(project.id)
+            } else {
+                ContentUnavailableView("Choose a project", systemImage: "folder")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(StudioStyle.chrome)
+    }
+}
+
+private struct SessionList: View {
     @ObservedObject var model: AppModel
     let project: Project
     @State private var draggedSession: Session?
-    @State private var dropTargetId: String?     // a session id, or "" for end-of-row
+    @State private var dropTargetId: String?     // a session id, or "" for end-of-list
 
     var body: some View {
-        HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    if project.sessions.isEmpty {
+                        ContentUnavailableView(
+                            "No sessions yet", systemImage: "terminal",
+                            description: Text("Start Copilot or a terminal for this project.")
+                        )
+                    }
                     ForEach(Array(project.sessions.enumerated()), id: \.element.id) { index, session in
-                        SessionTab(
+                        SessionRow(
                             session: session,
                             isActive: session.id == project.selectedSessionId,
                             number: index < 9 ? index + 1 : nil,
                             showNumber: model.numberHint == .tabs,
-                            onSelect: { model.selectSession(projectId: project.id, sessionId: session.id) },
+                            onSelect: {
+                                model.selectSession(projectId: project.id, sessionId: session.id)
+                                model.focusActiveTerminal()
+                            },
                             onClose: { model.requestCloseSession(projectId: project.id, sessionId: session.id) }
                         )
+                        .id(session.id)
                         .contextMenu {
                             if model.startingPrompt(for: session.id) != nil {
                                 Button("Copy Starting Prompt") { model.copyStartingPrompt(for: session.id) }
@@ -440,75 +570,81 @@ struct SessionTabBar: View {
                                 model.requestCloseSession(projectId: project.id, sessionId: session.id)
                             }
                         }
-                        .overlay(alignment: .leading) {
-                            insertionBar.opacity(dropTargetId == session.id ? 1 : 0).offset(x: -4)
+                        .overlay(alignment: .top) {
+                            insertionBar.opacity(dropTargetId == session.id ? 1 : 0).offset(y: -3)
                         }
                         .onDrag {
                             draggedSession = session
                             dropTargetId = nil
                             return NSItemProvider(object: session.id as NSString)
                         }
-                        .onDrop(of: [.text], delegate: TabDropDelegate(
+                        .onDrop(of: [.text], delegate: SessionDropDelegate(
                             targetId: session.id, dragged: $draggedSession,
                             dropTargetId: $dropTargetId, model: model, projectId: project.id))
                     }
-                    // Trailing drop zone → move to the end of the row.
                     Color.clear
-                        .frame(width: 24)
-                        .frame(maxHeight: .infinity)
-                        .overlay(alignment: .leading) {
+                        .frame(height: 32)
+                        .frame(maxWidth: .infinity)
+                        .overlay(alignment: .top) {
                             insertionBar.opacity(dropTargetId == "" ? 1 : 0)
                         }
-                        .onDrop(of: [.text], delegate: TabDropDelegate(
+                        .onDrop(of: [.text], delegate: SessionDropDelegate(
                             targetId: "", dragged: $draggedSession,
                             dropTargetId: $dropTargetId, model: model, projectId: project.id))
                 }
-                .padding(.leading, 8)
-                .padding(.vertical, 5)
+                .padding(10)
             }
-            .frame(maxWidth: .infinity)
-
-            HStack(spacing: 0) {
-                Button { model.addCopilotSessionInteractive(toProjectId: project.id) } label: {
-                    Image(systemName: "plus")
-                        .font(.caption)
-                        .frame(width: 24, height: 22)
-                }
-                .buttonStyle(.borderless)
-                .help("New Copilot Session (⌘T)")
-                .accessibilityLabel("New Copilot Session")
-
-                Divider().frame(height: 14)
-
-                Menu {
-                    Button("Start with Prompt…") {
-                        model.addCopilotSessionInteractive(toProjectId: project.id, withPrompt: true)
-                    }
-                    Button("New Terminal") { model.addSession(toProjectId: project.id) }
-                    Button("Review Pull Request…", systemImage: "checkmark.shield") {
-                        model.addAdversarialReviewSessionInteractive(toProjectId: project.id)
-                    }
-                } label: {
-                    Image(systemName: "chevron.down")
-                        .font(.caption2)
-                        .frame(width: 22, height: 22)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("More Session Options")
-                .accessibilityLabel("More Session Options")
+            .onChange(of: project.selectedSessionId, initial: true) { _, id in
+                if let id { proxy.scrollTo(id, anchor: nil) }
             }
-            .hoverHighlight()
-            .padding(.trailing, 8)
         }
+        .accessibilityLabel("Sessions in \(project.name)")
     }
 
     private var insertionBar: some View {
         RoundedRectangle(cornerRadius: 1.5)
             .fill(Color.accentColor)
-            .frame(width: 3)
-            .padding(.vertical, 3)
+            .frame(height: 3)
+    }
+}
+
+private struct SessionCreationButtons: View {
+    @ObservedObject var model: AppModel
+    let project: Project
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button { model.addCopilotSessionInteractive(toProjectId: project.id) } label: {
+                Image(systemName: "plus")
+                    .font(.caption)
+                    .frame(width: 24, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .help("New Copilot Session (⌘T)")
+            .accessibilityLabel("New Copilot Session")
+
+            Divider().frame(height: 14)
+
+            Menu {
+                Button("Start with Prompt…") {
+                    model.addCopilotSessionInteractive(toProjectId: project.id, withPrompt: true)
+                }
+                Button("New Terminal") { model.addSession(toProjectId: project.id) }
+                Button("Review Pull Request…", systemImage: "checkmark.shield") {
+                    model.addAdversarialReviewSessionInteractive(toProjectId: project.id)
+                }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.caption2)
+                    .frame(width: 22, height: 22)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("More Session Options")
+            .accessibilityLabel("More Session Options")
+        }
+        .hoverHighlight()
     }
 }
 
@@ -534,9 +670,8 @@ private extension View {
     }
 }
 
-/// Drag-to-reorder for session tabs with an insertion indicator. `targetId` is a
-/// session id (insert before it) or "" (move to the end).
-private struct TabDropDelegate: DropDelegate {
+/// A session id inserts before that row; an empty target appends to the list.
+private struct SessionDropDelegate: DropDelegate {
     let targetId: String
     @Binding var dragged: Session?
     @Binding var dropTargetId: String?
@@ -588,7 +723,7 @@ private struct ProjectDropDelegate: DropDelegate {
     }
 }
 
-struct SessionTab: View {
+struct SessionRow: View {
     let session: Session
     let isActive: Bool
     var number: Int? = nil
@@ -605,39 +740,57 @@ struct SessionTab: View {
     var accessibilityStatus: String {
         var states: [String] = []
         if isActive { states.append("Selected") }
-        switch session.status {
-        case .running: states.append("Running")
-        case .waiting: states.append("Waiting for input")
-        case .idle: states.append(session.finishedUnseen ? "Finished" : "Idle")
-        }
+        states.append(stateLabel)
         if session.hasUnread { states.append("Unread") }
         if session.hasBackgroundWork { states.append("Background work active") }
         if !session.schedules.isEmpty { states.append("Scheduled work") }
         return states.joined(separator: ", ")
     }
 
+    var stateLabel: String {
+        switch session.status {
+        case .running: return "Running"
+        case .waiting: return "Waiting for input"
+        case .idle: return session.finishedUnseen ? "Finished" : "Idle"
+        }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
-            ZStack {
-                SessionTabIndicator(session: session)
-                    .opacity(showNumber ? 0 : 1)
-                if showNumber, let number {
-                    NumberBadge(number: number)
+            HStack(alignment: .top, spacing: 7) {
+                ZStack {
+                    SessionStateIndicator(session: session)
+                        .opacity(showNumber ? 0 : 1)
+                    if showNumber, let number {
+                        NumberBadge(number: number)
+                    }
                 }
+                .frame(width: 18, height: 18)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(session.title)
+                        .font(.body.weight(.medium))
+                        .lineLimit(2)
+                        .help(session.statusText ?? session.title)
+                    HStack(spacing: 6) {
+                        Text(stateLabel)
+                        if session.hasBackgroundWork { BackgroundWorkBadge() }
+                        if !session.schedules.isEmpty { ScheduleBadge(schedules: session.schedules) }
+                        if showsUnreadIndicator {
+                            Image(systemName: "circle.fill")
+                                .font(.system(size: 6))
+                                .foregroundStyle(.blue)
+                                .accessibilityHidden(true)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(StudioStyle.secondaryText)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(width: 18, height: 18)
-            Text(session.title)
-                .font(.callout.weight(.medium))
-                .lineLimit(1)
-                .help(session.statusText ?? session.title)
-            if session.hasBackgroundWork {
-                BackgroundWorkBadge()
-            } else if !session.schedules.isEmpty {
-                ScheduleBadge(schedules: session.schedules)
-            }
-            if showsUnreadIndicator {
-                Circle().fill(Color.blue).frame(width: 6, height: 6)
-            }
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onSelect)
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .semibold))
@@ -645,11 +798,10 @@ struct SessionTab: View {
             }
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
-            .help("End Session")
+            .help("End \(session.title)")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .frame(maxWidth: 210)
+        .frame(maxWidth: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(isActive ? StudioStyle.selection : isHovering ? StudioStyle.raised : .clear)
@@ -660,7 +812,6 @@ struct SessionTab: View {
         )
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .onTapGesture(perform: onSelect)
         .accessibilityRepresentation {
             HStack {
                 Button(session.title, action: onSelect)
