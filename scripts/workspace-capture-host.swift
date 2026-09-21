@@ -7,6 +7,8 @@ final class WorkspaceCaptureHost: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate(ignoringOtherApps: true)
+        // XCTest registers its default observers on first access, on the main thread.
+        _ = XCTestObservationCenter.shared
         // XCTest owns the asynchronous test invocation; AppKit must keep its
         // main thread in the real application event loop throughout that run.
         DispatchQueue.global(qos: .userInitiated).async {
