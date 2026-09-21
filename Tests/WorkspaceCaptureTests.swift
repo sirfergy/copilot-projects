@@ -5,6 +5,8 @@ import ScreenCaptureKit
 import SwiftUI
 import Vision
 import XCTest
+import ImageIO
+import UniformTypeIdentifiers
 import CopilotProjectsCore
 import CopilotProjectsProtocol
 @testable import CopilotProjectsHost
@@ -58,9 +60,18 @@ final class WorkspaceCaptureTests: XCTestCase {
         var emptyProjectCollapseVerified = false
         var focusedTerminalCollapseVerified = false
         var detailsHeaderVerified = false
+        var transcriptImagesVerified = false
         var diagnostics: [String: String] = [:]
         var images: [ImageProof] = []
+        var transcriptImages: [TranscriptImageProof] = []
         var error: String?
+    }
+
+    private struct TranscriptImageProof: Codable {
+        let file: String
+        let pixelWidth: Int
+        let pixelHeight: Int
+        let markerVisible: Bool
     }
 
     @MainActor
@@ -171,9 +182,10 @@ final class WorkspaceCaptureTests: XCTestCase {
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             let navigation = Navigation()
-            window.contentView = NSHostingView(rootView: CaptureRoot(model: model, navigation: navigation))
+            window.contentViewController = NSHostingController(rootView: CaptureRoot(model: model, navigation: navigation))
             defer {
                 window.orderOut(nil)
+                window.contentViewController = nil
                 window.contentView = nil
                 window.close()
             }
@@ -201,7 +213,16 @@ final class WorkspaceCaptureTests: XCTestCase {
             encoder.dateEncodingStrategy = .iso8601
             let snapshot = TranscriptSnapshot(
                 schemaVersion: 3, updatedAt: Date(),
-                copilotSessionId: "capture-conversation", turns: []
+                copilotSessionId: "capture-conversation",
+                turns: [TranscriptTurn(
+                    id: "capture-image-turn", startedAt: Date().addingTimeInterval(-60), endedAt: nil,
+                    kind: "user", userContent: "Show the captured design.",
+                    assistantMessages: [TranscriptAssistantMessage(
+                        id: "capture-image-reply", timestamp: Date(),
+                        content: "The image below belongs to this turn."
+                    )],
+                    tools: [], isAborted: false
+                )]
             )
             try encoder.encode(snapshot).write(
                 to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessions[0].id)),
@@ -413,6 +434,96 @@ final class WorkspaceCaptureTests: XCTestCase {
             report.focusedTerminalCollapseVerified = true
 
             navigation.showsProjects = true
+            window.setContentSize(NSSize(width: 1280, height: 800))
+            window.appearance = NSAppearance(named: .darkAqua)
+            model.openTranscriptDrawer(sessionId: sessions[0].id)
+            try await waitFor("The image fixture drawer did not open.") {
+                rootView.layoutSubtreeIfNeeded()
+                return self.findControl("hide-session-details", in: rootView) != nil
+            }
+            let unchangedTranscript = model.activeTranscriptController?.snapshot
+            let png = try transcriptFixtureImage()
+            terminal.consumeProcessOutput(RemoteKittyReplayEncoding.apcFrame(
+                control: "a=T,q=2,U=1,f=100,t=d,i=42,r=8,c=40",
+                payload: png.base64EncodedString()
+            )[...])
+            let imageRef = try XCTUnwrap(terminal.kittyImageCapture.retainedImageMetadata().first)
+            let imageIdentifier = "transcript-image-42-\(imageRef.version)"
+            try await waitFor("A captured image did not appear in the unchanged transcript.") {
+                rootView.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                return self.findControl(imageIdentifier, in: rootView)?.accessibilityLabel?() == "Open transcript image"
+            }
+            try require(model.activeTranscriptController?.snapshot == unchangedTranscript,
+                        "The fixture rewrote the transcript instead of reacting to image availability.")
+            for (file, appearance): (String, NSAppearance.Name) in [
+                ("macos-transcript-dark.png", .darkAqua),
+                ("macos-transcript-light.png", .aqua),
+            ] {
+                window.appearance = NSAppearance(named: appearance)
+                report.transcriptImages.append(try await captureTranscriptImage(
+                    window: window, file: file, output: output
+                ))
+            }
+            let imageControl = try XCTUnwrap(findControl(imageIdentifier, in: rootView))
+            try require(imageControl.accessibilityPerformPress?() == true, "The image preview action failed.")
+            try await waitFor("The native image preview did not open.") {
+                guard let sheet = window.attachedSheet else { return false }
+                sheet.contentView?.layoutSubtreeIfNeeded()
+                return self.findControl("close-transcript-image", in: sheet) != nil
+                    && self.findControl("transcript-image-preview", in: sheet, role: nil) != nil
+            }
+            let previewWindow = try XCTUnwrap(window.attachedSheet)
+            try require(!AppDelegate.shouldHandleWorkspaceEvent(
+                window: previewWindow, keyWindow: previewWindow, modalWindow: nil
+            ), "Preview shortcuts would reach workspace session actions.")
+            try require(!AppDelegate.shouldHandleWorkspaceEvent(
+                window: window, keyWindow: previewWindow, modalWindow: nil
+            ), "The parent window would still intercept preview shortcuts.")
+            report.transcriptImages.append(try await captureTranscriptImage(
+                window: previewWindow, file: "macos-transcript-preview.png", output: output
+            ))
+            let previewClose = try XCTUnwrap(findControl("close-transcript-image", in: previewWindow))
+            try require(previewClose.accessibilityPerformPress?() == true, "The image preview did not accept Done.")
+            try await waitFor("The image preview did not dismiss.") { window.attachedSheet == nil }
+            let reopen = try XCTUnwrap(findControl(imageIdentifier, in: rootView))
+            try require(reopen.accessibilityPerformPress?() == true, "The image preview could not be reopened.")
+            try await waitFor("The reopened image preview did not open.") { window.attachedSheet != nil }
+            let escapeWindow = try XCTUnwrap(window.attachedSheet)
+            try await waitFor("The reopened image preview did not finish loading.") {
+                escapeWindow.contentView?.layoutSubtreeIfNeeded()
+                return self.findControl("transcript-image-preview", in: escapeWindow, role: nil) != nil
+                    && escapeWindow.firstResponder != nil && escapeWindow.firstResponder !== terminal
+            }
+            let escape = try XCTUnwrap(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: escapeWindow.windowNumber, context: nil,
+                characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                isARepeat: false, keyCode: 53
+            ))
+            let generationBeforeEscape = terminal.remoteContentGeneration
+            escapeWindow.sendEvent(escape)
+            try await waitFor("Escape did not close the image preview.") { window.attachedSheet == nil }
+            try require(terminal.remoteContentGeneration == generationBeforeEscape,
+                        "Escape was echoed into the fixture terminal instead of being contained by the preview.")
+            try require(AppDelegate.shouldHandleWorkspaceEvent(window: window, keyWindow: window, modalWindow: nil),
+                        "Closing the preview did not restore workspace shortcuts.")
+            try require(model.globalSelectedSessionId == sessions[0].id
+                        && model.terminalView(for: sessions[0].id) === terminal
+                        && controller.shellPID == terminalPID,
+                        "The image preview changed the selected terminal or its process.")
+            let openBeforeDelete = try XCTUnwrap(findControl(imageIdentifier, in: rootView))
+            try require(openBeforeDelete.accessibilityPerformPress?() == true,
+                        "The image preview could not be opened before deletion.")
+            try await waitFor("The deletion fixture preview did not open.") { window.attachedSheet != nil }
+            terminal.consumeProcessOutput(RemoteKittyReplayEncoding.apcFrame(control: "a=d,d=I,i=42,q=2")[...])
+            try await waitFor("Deleted image bytes remained in the transcript.") {
+                self.findControl(imageIdentifier, in: rootView) == nil && window.attachedSheet == nil
+            }
+            report.transcriptImagesVerified = true
+            model.closeTranscriptDrawer(sessionId: sessions[0].id)
+
+            navigation.showsProjects = true
             let emptyProject = try XCTUnwrap(model.projects.first { $0.sessions.isEmpty })
             model.selectProject(emptyProject.id)
             try await Task.sleep(for: .milliseconds(500))
@@ -440,6 +551,61 @@ final class WorkspaceCaptureTests: XCTestCase {
     }
 
     @MainActor
+    private func transcriptFixtureImage() throws -> Data {
+        let context = try XCTUnwrap(CGContext(
+            data: nil, width: 640, height: 360, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(red: 0.12, green: 0.28, blue: 0.42, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: 640, height: 360))
+        context.setFillColor(red: 0.5, green: 0.78, blue: 0.9, alpha: 1)
+        context.fill(CGRect(x: 24, y: 250, width: 592, height: 60))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        ("TRANSCRIPT IMAGE" as NSString).draw(at: NSPoint(x: 24, y: 170), withAttributes: [
+            .font: NSFont.boldSystemFont(ofSize: 36), .foregroundColor: NSColor.white,
+        ])
+        ("Synthetic capture fixture" as NSString).draw(at: NSPoint(x: 24, y: 100), withAttributes: [
+            .font: NSFont.systemFont(ofSize: 24), .foregroundColor: NSColor.white,
+        ])
+        NSGraphicsContext.restoreGraphicsState()
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(
+            data, UTType.png.identifier as CFString, 1, nil
+        ))
+        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+        try require(CGImageDestinationFinalize(destination), "The synthetic PNG could not be encoded.")
+        return data as Data
+    }
+
+    @MainActor
+    private func captureTranscriptImage(window: NSWindow, file: String, output: URL) async throws -> TranscriptImageProof {
+        try await Task.sleep(for: .milliseconds(500))
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        let content = try await SCShareableContent.currentProcess
+        let shared = try XCTUnwrap(content.windows.first { $0.windowID == CGWindowID(window.windowNumber) })
+        let configuration = SCStreamConfiguration()
+        configuration.width = Int(window.frame.width * window.backingScaleFactor)
+        configuration.height = Int(window.frame.height * window.backingScaleFactor)
+        configuration.showsCursor = false
+        let image = try await SCScreenshotManager.captureImage(
+            contentFilter: SCContentFilter(desktopIndependentWindow: shared), configuration: configuration
+        )
+        let png = try XCTUnwrap(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
+        try png.write(to: output.appendingPathComponent("images/\(file)"), options: .atomic)
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+            .joined(separator: " ").uppercased()
+        try require(text.contains("TRANSCRIPT IMAGE"), "\(file) did not render the captured image pixels: \(text)")
+        return TranscriptImageProof(file: file, pixelWidth: image.width, pixelHeight: image.height, markerVisible: true)
+    }
+
+    @MainActor
     private func accessibilitySummary(_ element: Any, depth: Int = 0) -> String {
         guard depth < 12 else { return "depth limit\n" }
         let node = element as AnyObject
@@ -452,12 +618,15 @@ final class WorkspaceCaptureTests: XCTestCase {
     }
 
     @MainActor
-    private func findControl(_ identifier: String, in element: Any) -> AnyObject? {
+    private func findControl(
+        _ identifier: String, in element: Any, role: NSAccessibility.Role? = .button
+    ) -> AnyObject? {
         // SwiftUI virtual nodes expose public ObjC getters without full protocol conformance.
         let node = element as AnyObject
-        if node.accessibilityIdentifier?() == identifier, node.accessibilityRole?() == .button { return node }
+        if node.accessibilityIdentifier?() == identifier,
+           role == nil || node.accessibilityRole?() == role { return node }
         for child in node.accessibilityChildren?() ?? [] {
-            if let match = findControl(identifier, in: child) { return match }
+            if let match = findControl(identifier, in: child, role: role) { return match }
         }
         return nil
     }

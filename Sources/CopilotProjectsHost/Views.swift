@@ -480,6 +480,7 @@ struct DetailView: View {
                let transcript = model.activeTranscriptController {
                 TranscriptOverlay(
                     controller: transcript,
+                    imageCapture: { model.terminalView(for: sessionId)?.kittyImageCapture },
                     isOpen: model.isTranscriptDrawerOpen(sessionId: sessionId),
                     onClose: { model.closeTranscriptDrawer(sessionId: sessionId) },
                     workflow: model.sessionWorkflow(sessionId: sessionId),

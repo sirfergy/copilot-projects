@@ -19,6 +19,11 @@ APPEARANCES = {
     "macos-compact-projects-hidden.png": "NSAppearanceNameDarkAqua",
 }
 IMAGE_NAMES = set(APPEARANCES)
+TRANSCRIPT_IMAGE_NAMES = {
+    "macos-transcript-dark.png",
+    "macos-transcript-light.png",
+    "macos-transcript-preview.png",
+}
 
 
 def capture_environment(root, source_sha, original):
@@ -55,6 +60,8 @@ def verify_capture(root, source_sha):
         raise ValueError("The native project-column collapse was not verified.")
     if report.get("focusedTerminalCollapseVerified") is not True:
         raise ValueError("Project collapse did not preserve the already-focused terminal.")
+    if report.get("transcriptImagesVerified") is not True:
+        raise ValueError("Transcript image interaction and ownership were not verified.")
     images = report.get("images", [])
     if len(images) != len(IMAGE_NAMES) or {image.get("file") for image in images} != IMAGE_NAMES:
         raise ValueError("The capture must contain exactly the requested views.")
@@ -73,6 +80,20 @@ def verify_capture(root, source_sha):
         dimensions = struct.unpack(">II", data[16:24])
         if dimensions != (image.get("pixelWidth"), image.get("pixelHeight")) or min(dimensions) <= 0:
             raise ValueError("Screenshot dimensions do not match the capture manifest.")
+    transcript_images = report.get("transcriptImages", [])
+    if len(transcript_images) != len(TRANSCRIPT_IMAGE_NAMES) or {
+        image.get("file") for image in transcript_images
+    } != TRANSCRIPT_IMAGE_NAMES:
+        raise ValueError("The capture must contain the transcript image and preview views.")
+    for image in transcript_images:
+        if image.get("markerVisible") is not True:
+            raise ValueError("A transcript image capture is missing its actual image pixels.")
+        data = (root / "images" / image["file"]).read_bytes()
+        if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+            raise ValueError("A transcript image capture is not a PNG.")
+        dimensions = struct.unpack(">II", data[16:24])
+        if dimensions != (image.get("pixelWidth"), image.get("pixelHeight")) or min(dimensions) <= 0:
+            raise ValueError("Transcript image dimensions do not match the capture manifest.")
 
 
 def main():
@@ -108,7 +129,7 @@ def main():
         raise
     finally:
         shutil.rmtree(root / "sandbox")
-    print(f"Captured {len(IMAGE_NAMES)} native workspace views for {source_sha}.")
+    print(f"Captured {len(IMAGE_NAMES)} workspace and {len(TRANSCRIPT_IMAGE_NAMES)} transcript-image views for {source_sha}.")
 
 
 if __name__ == "__main__":

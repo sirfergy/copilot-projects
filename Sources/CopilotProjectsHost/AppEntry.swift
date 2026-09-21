@@ -191,8 +191,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    static func shouldHandleWorkspaceEvent(
+        window: NSWindow?, keyWindow: NSWindow?, modalWindow: NSWindow?
+    ) -> Bool {
+        modalWindow == nil
+            && window?.sheetParent == nil && window?.attachedSheet == nil
+            && keyWindow?.sheetParent == nil && keyWindow?.attachedSheet == nil
+    }
+
     private func handleKeyEvent(_ event: NSEvent) -> NSEvent? {
-        guard NSApp.modalWindow == nil else {
+        guard Self.shouldHandleWorkspaceEvent(
+            window: event.window, keyWindow: NSApp.keyWindow, modalWindow: NSApp.modalWindow
+        ) else {
             hintWork?.cancel()
             model.setNumberHint(.none)
             return event

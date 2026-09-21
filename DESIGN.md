@@ -237,6 +237,12 @@ button; session creation stays in the Sessions header's trailing split control.
 **Transcript and details:** user text receives the message fill; assistant text
 uses the drawer surface. Turns are separated rather than enclosed in nested
 cards. Native Markdown selection, tool disclosure, and workflow controls remain.
+Retained terminal images follow their associated turn, fit the drawer width
+without changing aspect ratio, and cap inline height at 280pt. Loading reserves
+the PNG's fitted geometry; unavailable images are labeled rather than hidden.
+Image corners reuse the 9pt message shape and native border treatment. Selecting
+an image opens a larger native preview with pan/zoom and explicit dismissal.
+Preview sheets own keyboard input; workspace shortcuts do not act behind them.
 
 The [sidecar](.impeccable/design.json) contains schematic dark-appearance HTML/CSS
 previews of these roles, not replacements for native controls or pixel-certified

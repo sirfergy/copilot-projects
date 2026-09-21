@@ -2,7 +2,7 @@
 version: 1
 slug: "sources-copilotprojectshost-views-swift"
 primary_target: "Sources/CopilotProjectsHost/Views.swift"
-related_targets: ["Sources/CopilotProjectsHost/HostLifetime.swift","Sources/CopilotProjectsHost/AppEntry.swift","Sources/CopilotProjectsHost/TranscriptDrawer.swift"]
+related_targets: ["Sources/CopilotProjectsHost/HostLifetime.swift","Sources/CopilotProjectsHost/AppEntry.swift","Sources/CopilotProjectsHost/TranscriptDrawer.swift","Sources/CopilotProjectsHost/TranscriptImageView.swift"]
 ---
 
 # Two-Level Browser
@@ -33,6 +33,12 @@ The session-details opener sits beside the decorative terminal glyph in the
 active-session heading, not in the native title strip or over terminal output.
 The user explicitly chose this placement. Retain the existing availability and
 per-session open state; the drawer and its close action remain unchanged.
+
+The drawer also renders host-associated retained terminal images below their
+turns. Keep intrinsic aspect ratio and a bounded inline height, reserve loading
+geometry, and make a larger native preview available without forwarding its
+keyboard input to the terminal. Reuse the host's session/version image identity
+and retention rules; do not fetch arbitrary Markdown URLs or paths.
 
 FORM: Two-Level Browser, grounded structural candidate 5, chosen by the user
 from the three structures dealt by surface seed 2bd5ac36. The established visual

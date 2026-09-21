@@ -41,10 +41,20 @@ private state directory, expire after seven days, and are reclaimed on subsequen
 uploads. Storage is capped at 128 MiB/128 entries without evicting unexpired
 uploads. This repository does not add an upload UI to the standalone desktop app.
 
-Remote transcript images keep their original turn when the terminal retransmits
+## Transcript images
+
+The Mac session-details drawer displays retained inline terminal images beneath
+their associated turn. Select an image for a larger, zoomable native preview;
+Done, Command-W, or Escape dismiss the preview without ending the session.
+Loading and unavailable states keep their space, and decoding is bounded and
+off the main actor. No Markdown image URLs or arbitrary file paths are fetched.
+
+Native and remote transcript images keep their original turn when the terminal retransmits
 unchanged, still-advertised image data. A redraw does not move an older image to
 the newest reply. This retains the existing one-image-per-terminal-ID model;
 it does not reconstruct attachment history after image data has been discarded.
+Images restored from disk without a recorded display origin remain available in
+the terminal but are not guessed into a historical transcript turn.
 
 ## A workspace for parallel work
 

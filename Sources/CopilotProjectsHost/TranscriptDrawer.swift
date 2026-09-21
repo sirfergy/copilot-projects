@@ -26,6 +26,7 @@ struct TranscriptButton: View {
 struct TranscriptOverlay: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var controller: TranscriptController
+    let imageCapture: () -> RemoteKittyImageCapture?
     let isOpen: Bool
     let onClose: () -> Void
     let workflow: RemoteSessionWorkflow?
@@ -35,21 +36,53 @@ struct TranscriptOverlay: View {
     var body: some View {
         if controller.snapshot != nil || workflow != nil {
             if isOpen {
-                TranscriptDrawer(
-                    turns: controller.snapshot?.turns ?? [],
-                    workflow: workflow,
-                    operation: operation,
-                    onClose: onClose,
-                    onAction: onAction
-                )
+                Group {
+                    if let capture = imageCapture() {
+                        ImageAssociatedTranscriptDrawer(
+                            capture: capture, snapshot: controller.snapshot,
+                            workflow: workflow, operation: operation,
+                            onClose: onClose, onAction: onAction
+                        )
+                    } else {
+                        TranscriptDrawer(
+                            turns: controller.snapshot.map {
+                                TranscriptImageAssociation.attach(images: [], to: $0).turns
+                            } ?? [],
+                            imageCapture: nil,
+                            workflow: workflow, operation: operation,
+                            onClose: onClose, onAction: onAction
+                        )
+                    }
+                }
                 .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
             }
         }
     }
 }
 
+private struct ImageAssociatedTranscriptDrawer: View {
+    @ObservedObject var capture: RemoteKittyImageCapture
+    let snapshot: TranscriptSnapshot?
+    let workflow: RemoteSessionWorkflow?
+    let operation: AgentOperationProjection
+    let onClose: () -> Void
+    let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
+
+    var body: some View {
+        TranscriptDrawer(
+            turns: snapshot.map {
+                TranscriptImageAssociation.attach(images: capture.retainedImageMetadata(), to: $0).turns
+            } ?? [],
+            imageCapture: capture,
+            workflow: workflow, operation: operation,
+            onClose: onClose, onAction: onAction
+        )
+    }
+}
+
 private struct TranscriptDrawer: View {
     let turns: [TranscriptTurn]
+    let imageCapture: RemoteKittyImageCapture?
     let workflow: RemoteSessionWorkflow?
     let operation: AgentOperationProjection
     let onClose: () -> Void
@@ -88,7 +121,7 @@ private struct TranscriptDrawer: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(turns) { turn in
-                            TranscriptTurnCard(turn: turn)
+                            TranscriptTurnCard(turn: turn, imageCapture: imageCapture)
                         }
                         Color.clear
                             .frame(height: 1)
@@ -118,6 +151,7 @@ private struct TranscriptDrawer: View {
 
 private struct TranscriptTurnCard: View {
     let turn: TranscriptTurn
+    let imageCapture: RemoteKittyImageCapture?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -162,6 +196,18 @@ private struct TranscriptTurnCard: View {
 
             if !turn.tools.isEmpty {
                 TranscriptTools(tools: turn.tools)
+            }
+            if let imageCapture, let images = turn.images {
+                ForEach(images, id: \.imageId) { image in
+                    TranscriptImageView(
+                        identity: TranscriptImageIdentity(
+                            sessionId: imageCapture.sessionId,
+                            imageId: image.imageId,
+                            version: image.contentVersion
+                        ),
+                        data: imageCapture.imageData(imageId: image.imageId, version: image.contentVersion)
+                    )
+                }
             }
         }
         .padding(.vertical, 12)

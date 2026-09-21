@@ -60,9 +60,19 @@ class CaptureDriverTests(unittest.TestCase):
                 })
             report = {
                 "completed": True, "collapseVerified": True, "emptyProjectCollapseVerified": True,
-                "focusedTerminalCollapseVerified": True,
+                "focusedTerminalCollapseVerified": True, "transcriptImagesVerified": True,
                 "sourceSHA": "a" * 40, "images": images,
             }
+            transcript_images = []
+            for name in capture.TRANSCRIPT_IMAGE_NAMES:
+                (root / "images" / name).write_bytes(
+                    b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+                    + struct.pack(">II", 1280, 800) + b"\x08\x06\x00\x00\x00" + b"\x00" * 4
+                )
+                transcript_images.append({
+                    "file": name, "markerVisible": True, "pixelWidth": 1280, "pixelHeight": 800,
+                })
+            report["transcriptImages"] = transcript_images
             manifest = root / "metadata.json"
             manifest.write_text(json.dumps(report))
             capture.verify_capture(root, "a" * 40)
@@ -71,6 +81,10 @@ class CaptureDriverTests(unittest.TestCase):
                 {"collapseVerified": False},
                 {"emptyProjectCollapseVerified": False},
                 {"focusedTerminalCollapseVerified": False},
+                {"transcriptImagesVerified": False},
+                {"transcriptImages": []},
+                {"transcriptImages": [dict(image, markerVisible=False) for image in transcript_images]},
+                {"transcriptImages": [dict(image, pixelWidth=1) for image in transcript_images]},
                 {"images": [dict(image, terminalMarkerVisible=False) for image in images]},
                 {"images": [dict(image, renderer="coretext") for image in images]},
                 {"images": [dict(image, appearance="wrong") for image in images]},
