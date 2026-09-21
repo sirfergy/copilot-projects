@@ -314,7 +314,6 @@ if (validSessionId && socketPath) {
     const OPERATION_RECEIPT_VERSION = 1;
     const MAX_ACCEPTED_OPERATION_RECEIPTS = 64;
     const MAX_TERMINAL_OPERATION_RECEIPTS = 64;
-    const TERMINAL_OPERATION_RECEIPT_TTL_MS = 2 * 60 * 1_000;
     const OPERATION_KINDS = new Set([
         "answer-user-input",
         "answer-elicitation",
@@ -966,17 +965,11 @@ if (validSessionId && socketPath) {
         }
     }
 
-    function pruneOperationReceipts(now = Date.now()) {
-        const terminal = [];
-        for (const [operationId, receipt] of operationReceipts) {
-            if (receipt.state === "accepted") continue;
-            if (now - receipt.updatedAtMilliseconds
-                    >= TERMINAL_OPERATION_RECEIPT_TTL_MS) {
-                operationReceipts.delete(operationId);
-            } else {
-                terminal.push(receipt);
-            }
-        }
+    function pruneOperationReceipts() {
+        // A mobile client may miss the outcome while offline. Retain bounded
+        // confirmation and replay history until eviction or conversation reset.
+        const terminal = [...operationReceipts.values()]
+            .filter((receipt) => receipt.state !== "accepted");
         terminal.sort(
             (left, right) => left.updatedAtMilliseconds - right.updatedAtMilliseconds
         );
