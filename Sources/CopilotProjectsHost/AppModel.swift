@@ -3327,10 +3327,10 @@ final class AppModel: ObservableObject {
                 backgroundAgentsSuppressed.insert(sessionId)
             }
         }
-        // The agent just went active → idle. If you're not currently looking at this
-        // session, flag it as finished-and-unseen (drives the blue sidebar/tab dot).
+        // Completion signals mark ready through postCompletionIfReady, after
+        // background work drains. Preserve immediate attention for legacy idle events.
         if status == .idle, previous == .running || previous == .waiting,
-           !startsScheduledTurn, !endsScheduledTurn,
+           !hasCompletionSignal, !startsScheduledTurn, !endsScheduledTurn,
            !isVisible(projectIndex: loc.p, sessionIndex: loc.s) {
             projects[loc.p].sessions[loc.s].finishedUnseen = true
         }

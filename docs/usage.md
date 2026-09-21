@@ -457,7 +457,8 @@ While the app is running, the first elicitation or permission prompt and each su
 completed turn also post a native macOS banner. The banner includes the project and session name,
 and clicking it focuses the originating session. Repeated waiting events are suppressed, as are
 completion alerts for aborted turns. The owner's `agentStop` signals completion; the app holds
-the banner while background agents remain active. The SDK's root `session.idle` clears the
+both the banner and the Finished/blue-dot indicator while background agents remain active,
+even when the main agent is idle. The SDK's root `session.idle` clears the
 background indication once that work drains. A child's stop never consumes the foreground's
 completion marker or advances its clocks.
 
