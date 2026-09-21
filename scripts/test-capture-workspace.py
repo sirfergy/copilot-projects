@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from unittest import mock
 import subprocess
+import os
+import sys
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -135,7 +137,7 @@ class CaptureDriverTests(unittest.TestCase):
         process = mock.Mock(pid=123)
         process.wait.side_effect = [subprocess.TimeoutExpired("host", 180), 0]
         process.poll.side_effect = [None, 0]
-        children = subprocess.CompletedProcess([], 0, "456\n", "")
+        children = subprocess.CompletedProcess([], 0, "456 234\n789 999\n234 1\n", "")
         with mock.patch.object(capture.subprocess, "Popen", return_value=process), \
              mock.patch.object(capture.subprocess, "run", return_value=children) as run, \
              mock.patch.object(capture, "capture_host_pid", return_value=234), \
@@ -144,12 +146,37 @@ class CaptureDriverTests(unittest.TestCase):
                 capture.run_capture_host(Path("/capture/App.app/Contents/MacOS/host"), Path("/capture"),
                                          {"HOME": "/isolated"}, mock.Mock())
         run.assert_called_once()
-        self.assertEqual(run.call_args.args[0], ["ps", "-o", "pid=", "-P", "234"])
+        self.assertEqual(run.call_args.args[0], ["ps", "-axo", "pid=,ppid="])
         self.assertEqual(kill.call_args_list, [
             mock.call(456, capture.signal.SIGTERM), mock.call(234, capture.signal.SIGTERM),
         ])
         process.terminate.assert_not_called()
         process.kill.assert_not_called()
+
+    def test_cleanup_reports_failed_process_enumeration(self):
+        process = mock.Mock()
+        process.poll.side_effect = [None, 0]
+        failure = subprocess.CompletedProcess([], 1, "", "ps failed")
+        with mock.patch.object(capture, "capture_host_pid", return_value=234), \
+             mock.patch.object(capture.subprocess, "run", return_value=failure), \
+             mock.patch.object(capture.os, "kill") as kill:
+            with self.assertRaisesRegex(RuntimeError, "Could not enumerate capture children: ps failed"):
+                capture.stop_capture_host(process, Path("/capture"), Path("/capture/host"))
+        kill.assert_called_once_with(234, capture.signal.SIGTERM)
+
+    def test_native_process_listing_finds_a_real_child(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        process = mock.Mock()
+        process.poll.side_effect = [None, 0]
+        try:
+            with mock.patch.object(capture, "capture_host_pid", return_value=os.getpid()), \
+                 mock.patch.object(capture.os, "kill") as kill:
+                capture.stop_capture_host(process, Path("/capture"), Path("/capture/host"))
+            self.assertIn(mock.call(child.pid, capture.signal.SIGTERM), kill.call_args_list)
+            self.assertEqual(kill.call_args_list[-1], mock.call(os.getpid(), capture.signal.SIGTERM))
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
 
     def test_host_failure_is_not_a_success_shaped_manifest(self):
         process = mock.Mock()

@@ -163,14 +163,17 @@ def stop_capture_host(process, root, executable):
             # LaunchServices owns the application, not the `open` waiter.
             try:
                 children = subprocess.run(
-                    ["ps", "-o", "pid=", "-P", str(pid)], text=True,
+                    ["ps", "-axo", "pid=,ppid="], text=True,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=5,
                 )
-                if children.returncode not in (0, 1):
+                if children.returncode != 0:
                     raise RuntimeError(f"Could not enumerate capture children: {children.stderr}")
-                for child in children.stdout.split():
+                for row in children.stdout.splitlines():
+                    child, parent = map(int, row.split())
+                    if parent != pid:
+                        continue
                     try:
-                        os.kill(int(child), signal.SIGTERM)
+                        os.kill(child, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
             finally:
