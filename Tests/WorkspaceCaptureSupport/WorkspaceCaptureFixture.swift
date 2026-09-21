@@ -160,6 +160,13 @@ public final class WorkspaceCaptureFixture {
             }
             report.diagnostics["activationPolicy"] = String(NSApp.activationPolicy().rawValue)
             report.diagnostics["screenCount"] = String(NSScreen.screens.count)
+            if let session = CGSessionCopyCurrentDictionary() as? [String: Any] {
+                report.diagnostics["sessionOnConsole"] = String(describing: session[kCGSessionOnConsoleKey as String])
+                report.diagnostics["sessionLoginDone"] = String(describing: session[kCGSessionLoginDoneKey as String])
+                report.diagnostics["sessionUserMatchesHost"] = String(
+                    (session[kCGSessionUserIDKey as String] as? NSNumber)?.uint32Value == geteuid()
+                )
+            }
             try saveReport()
             try require(!NSScreen.screens.isEmpty, "The runner has no graphical display session.")
 
@@ -215,6 +222,10 @@ public final class WorkspaceCaptureFixture {
             try await waitFor("The GUI host did not become active with its fixture window key.") {
                 report.diagnostics["guiHostWindow"] = "running=\(NSApp.isRunning) active=\(NSApp.isActive)"
                     + " key=\(NSApp.keyWindow?.windowNumber ?? -1) expected=\(window.windowNumber)"
+                    + " canBecomeKey=\(window.canBecomeKey) visible=\(window.isVisible)"
+                    + " finishedLaunching=\(NSRunningApplication.current.isFinishedLaunching)"
+                report.diagnostics["frontmostApplication"] = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                    ?? "unavailable"
                 return NSApp.isRunning && NSApp.isActive && NSApp.keyWindow === window
             }
             report.guiHostVerified = true

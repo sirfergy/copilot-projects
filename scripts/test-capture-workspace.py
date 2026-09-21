@@ -67,6 +67,7 @@ class CaptureDriverTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "images").mkdir()
+            (root / "host-exit-status").write_text("0\n")
             images = []
             for name in capture.IMAGE_NAMES:
                 (root / "images" / name).write_bytes(
@@ -120,6 +121,10 @@ class CaptureDriverTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     capture.verify_capture(root, "a" * 40)
             manifest.write_text(json.dumps(report))
+            (root / "host-exit-status").write_text("1\n")
+            with self.assertRaises(ValueError):
+                capture.verify_capture(root, "a" * 40)
+            (root / "host-exit-status").write_text("0\n")
             (root / "images" / images[0]["file"]).unlink()
             with self.assertRaises(FileNotFoundError):
                 capture.verify_capture(root, "a" * 40)

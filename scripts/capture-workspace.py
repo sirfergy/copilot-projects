@@ -58,6 +58,8 @@ def verify_capture(root, source_sha):
     report = json.loads((root / "metadata.json").read_text())
     if report.get("completed") is not True or report.get("sourceSHA") != source_sha:
         raise ValueError("The native capture did not complete for the checked-out commit.")
+    if (root / "host-exit-status").read_text().strip() != "0":
+        raise ValueError("The native GUI host did not shut down successfully.")
     if report.get("collapseVerified") is not True or report.get("emptyProjectCollapseVerified") is not True:
         raise ValueError("The native project-column collapse was not verified.")
     if report.get("focusedTerminalCollapseVerified") is not True:

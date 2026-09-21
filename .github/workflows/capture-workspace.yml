@@ -52,6 +52,7 @@ jobs:
             ${{ env.CAPTURE_ROOT }}/images/*.png
             ${{ env.CAPTURE_ROOT }}/metadata.json
             ${{ env.CAPTURE_ROOT }}/driver-error.txt
+            ${{ env.CAPTURE_ROOT }}/host-exit-status
             ${{ env.CAPTURE_ROOT }}/build.log
             ${{ env.CAPTURE_ROOT }}/test.log
           if-no-files-found: error

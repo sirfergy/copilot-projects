@@ -56,6 +56,14 @@ enum WorkspaceCaptureHost {
         app.delegate = delegate
         app.setActivationPolicy(.regular)
         app.run()
+        do {
+            try "\(delegate.exitStatus)\n".write(
+                to: root.appendingPathComponent("host-exit-status"), atomically: true, encoding: .utf8
+            )
+        } catch {
+            fputs("Could not record GUI host shutdown: \(error)\n", stderr)
+            exit(1)
+        }
         exit(delegate.exitStatus)
         #else
         fputs("Workspace capture host is available only in debug builds.\n", stderr)
