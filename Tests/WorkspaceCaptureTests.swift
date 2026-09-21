@@ -155,6 +155,7 @@ final class WorkspaceCaptureTests: XCTestCase {
                 }
             )
             defer { model.detachAllClients() }
+            model.selectSession(projectId: project.id, sessionId: sessions[0].id)
             let controller = try XCTUnwrap(model.controller(for: sessions[0].id))
             let terminal = controller.terminalView
             let terminalPID = controller.shellPID
@@ -212,6 +213,33 @@ final class WorkspaceCaptureTests: XCTestCase {
             }
             try require(!model.isTranscriptDrawerOpen(sessionId: sessions[1].id),
                         "Opening details changed another session's drawer state.")
+            let otherTranscript = try XCTUnwrap(model.activeTranscriptController)
+            let otherSnapshot = TranscriptSnapshot(
+                schemaVersion: 3, updatedAt: Date(),
+                copilotSessionId: "capture-other-conversation", turns: []
+            )
+            try encoder.encode(otherSnapshot).write(
+                to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessions[1].id)),
+                options: .atomic
+            )
+            otherTranscript.reload()
+            try await waitFor("The second session's transcript did not reveal its opener.") {
+                self.findControl("show-session-details", in: rootView) != nil
+            }
+            let otherOpener = try XCTUnwrap(findControl("show-session-details", in: rootView))
+            try require(otherOpener.accessibilityPerformPress(), "The second session's opener could not be pressed.")
+            try await waitFor("The header control targeted the wrong session after selection changed.") {
+                model.isTranscriptDrawerOpen(sessionId: sessions[0].id)
+                    && model.isTranscriptDrawerOpen(sessionId: sessions[1].id)
+                    && self.findControl("hide-session-details", in: rootView) != nil
+            }
+            let otherCloser = try XCTUnwrap(findControl("hide-session-details", in: rootView))
+            try require(otherCloser.accessibilityPerformPress(), "The second session's close control could not be pressed.")
+            try await waitFor("Closing the second drawer did not restore its opener.") {
+                !model.isTranscriptDrawerOpen(sessionId: sessions[1].id)
+                    && self.findControl("hide-session-details", in: rootView) == nil
+                    && self.findControl("show-session-details", in: rootView) != nil
+            }
             model.selectSession(projectId: project.id, sessionId: sessions[0].id)
             try await waitFor("Switching sessions lost the open drawer.") {
                 self.findControl("hide-session-details", in: rootView) != nil
@@ -268,9 +296,9 @@ final class WorkspaceCaptureTests: XCTestCase {
                                 && controller.shellPID == terminalPID,
                                 "Navigation replaced or restarted the terminal.")
                     try require(terminal.bounds.width >= 420, "Navigation squeezed the terminal below its width contract.")
-                    let detailsButton = try XCTUnwrap(findControl(
-                        "show-session-details", in: try XCTUnwrap(window.contentView)
-                    ))
+                    guard let detailsButton = findControl("show-session-details", in: rootView) else {
+                        throw captureError("\(name) is missing its closed-drawer header control.")
+                    }
                     let detailsFrame = detailsButton.accessibilityFrame()
                     let terminalFrame = window.convertToScreen(terminal.convert(terminal.bounds, to: nil))
                     try require(detailsFrame.width > 0 && detailsFrame.minY >= terminalFrame.maxY
