@@ -33,6 +33,8 @@ The session-details opener sits beside the decorative terminal glyph in the
 active-session heading, not in the native title strip or over terminal output.
 The user explicitly chose this placement. Retain the existing availability and
 per-session open state; the drawer and its close action remain unchanged.
+The current-session heading contains its title and controls only; retain project
+context in the Sessions header instead of repeating it below the active title.
 
 The drawer also renders host-associated retained terminal images below their
 turns. Keep intrinsic aspect ratio and a bounded inline height, reserve loading

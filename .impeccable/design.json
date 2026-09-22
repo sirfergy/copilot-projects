@@ -412,7 +412,7 @@
       },
       "metadata": {
         "displayName": "Secondary metadata",
-        "purpose": "Native caption/caption2 for session states, project context, project-row metadata, footer version, and transcript timestamps. Project-row count/idle labels inherit native List ink; custom-chrome metadata uses secondaryText. Sizes remain semantic."
+        "purpose": "Native caption/caption2 for session states, project context in the Sessions header, project-row metadata, footer version, and transcript timestamps. The active-session heading does not repeat the project subtitle. Project-row count/idle labels inherit native List ink; custom-chrome metadata uses secondaryText. Sizes remain semantic."
       },
       "status": {
         "displayName": "Fleet status",
