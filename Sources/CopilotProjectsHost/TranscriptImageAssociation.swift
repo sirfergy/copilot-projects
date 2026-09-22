@@ -19,6 +19,9 @@ enum TranscriptImageAssociation {
         images: [RemoteKittyImageCapture.RetainedImageInfo],
         to snapshot: TranscriptSnapshot
     ) -> TranscriptSnapshot {
+        if images.isEmpty, snapshot.turns.allSatisfy({ $0.images == nil }) {
+            return snapshot
+        }
         // turnIndex -> imageId -> chosen (newest) info for that turn.
         var byTurn: [Int: [UInt32: RemoteKittyImageCapture.RetainedImageInfo]] = [:]
         if !snapshot.turns.isEmpty {
