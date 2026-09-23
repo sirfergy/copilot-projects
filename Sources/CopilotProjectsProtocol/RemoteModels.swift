@@ -38,6 +38,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     public let id: String
     public let title: String
     public let status: String
+    /// With `session-activity-text`, active sessions carry the CLI's live activity
+    /// description here. Older hosts may use this field for arbitrary status text.
     public let statusText: String?
     public let unread: Bool
     public let ready: Bool

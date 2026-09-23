@@ -1777,7 +1777,14 @@ final class AppModel: ObservableObject {
                             id: session.id,
                             title: session.title,
                             status: status.rawValue,
-                            statusText: session.statusText,
+                            statusText: status != .waiting && (status == .running || session.hasBackgroundWork)
+                                ? session.agentActivity?.remoteActivityText(
+                                    expectedSessionId: resumeMarkerValue(
+                                        sessionId: session.id, suffix: "copilot-session"
+                                    ),
+                                    at: promptNow
+                                )
+                                : session.statusText,
                             unread: session.hasUnread,
                             ready: session.finishedUnseen,
                             background: session.hasBackgroundWork,

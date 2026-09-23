@@ -15,6 +15,7 @@ public struct RemoteProtocolInfo: Codable, Equatable, Sendable {
         capabilities: [
             conversationEpochs, operationReceipts, transcriptWindow,
             nativeWorkflows, configuredSessionCreation, RemoteAttachmentContract.capability,
+            "session-activity-text",
         ]
     )
 
