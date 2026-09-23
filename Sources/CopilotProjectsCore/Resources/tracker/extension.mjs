@@ -240,6 +240,7 @@ if (validSessionId && socketPath) {
     let lastLiveQuestionAt = null;
     let sharedFilesOwnershipInitializedFor = null;
     let allowAllRefreshQueued = false;
+    let allowAllRefreshPending = false;
     let allowAllUpdateGeneration = 0;
     let foregroundSessionActive = false;
     let foregroundObservationStartedAt = 0;
@@ -882,12 +883,21 @@ if (validSessionId && socketPath) {
     }
 
     function refreshAllowAllSoon() {
-        if (allowAllRefreshQueued) return;
+        if (allowAllRefreshQueued) {
+            allowAllRefreshPending = true;
+            return;
+        }
         allowAllRefreshQueued = true;
         Promise.resolve()
             .then(() => refreshAllowAll())
             .catch(() => {})
-            .finally(() => { allowAllRefreshQueued = false; });
+            .finally(() => {
+                allowAllRefreshQueued = false;
+                if (allowAllRefreshPending) {
+                    allowAllRefreshPending = false;
+                    refreshAllowAllSoon();
+                }
+            });
     }
 
     function activateSharedFilesOwnership(force = false) {
@@ -3396,12 +3406,16 @@ if (validSessionId && socketPath) {
         // full permissions to a different session in the same tab.
         removeFile(allowAllPath);
         try {
-            const result = await session.rpc.permissions.getAllowAll();
+            const enabled = typeof session.rpc.permissions.getMode === "function"
+                ? (await session.rpc.permissions.getMode()).mode === "allow-all"
+                : (await session.rpc.permissions.getAllowAll()).enabled === true;
             if (generation === allowAllUpdateGeneration
                     && conversation === conversationGeneration) {
-                applyAllowAllMarker(result.enabled === true);
+                applyAllowAllMarker(enabled);
             }
-        } catch {}
+        } catch (error) {
+            console.error("[copilot-projects] could not read permission mode:", error);
+        }
     }
 
     async function sdkHistoryWithTimeout() {
@@ -4426,12 +4440,17 @@ if (validSessionId && socketPath) {
     session.on("session.model_change", applyModelFromEvent);
 
     session.on("session.permissions_changed", (event) => {
-        if (event.agentId) return;
-        const mode = event.data.allowAllPermissionMode;
+        const data = event.data;
+        if (event.agentId || !data) return;
+        if (data.mode === undefined
+                && data.allowAllPermissionMode === undefined
+                && typeof data.allowAllPermissions !== "boolean") return;
         allowAllUpdateGeneration += 1;
         applyAllowAllMarker(
-            mode === "on"
-                || (mode == null && event.data.allowAllPermissions === true)
+            data.mode !== undefined
+                ? data.mode === "allow-all"
+                : data.allowAllPermissionMode === "on"
+                    || (data.allowAllPermissionMode == null && data.allowAllPermissions === true)
         );
     });
 

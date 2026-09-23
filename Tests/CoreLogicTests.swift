@@ -233,6 +233,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains("session.rpc.schedule.list()"))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("subagent.started""#))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("session.idle""#))
+        XCTAssertTrue(CopilotExtension.script.contains("session.rpc.permissions.getMode()"))
         XCTAssertTrue(CopilotExtension.script.contains("session.rpc.permissions.getAllowAll()"))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("session.permissions_changed""#))
         XCTAssertTrue(CopilotExtension.script.contains("writeMarker(copilotSessionPath, copilotSessionId)"))

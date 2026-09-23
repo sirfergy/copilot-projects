@@ -39,7 +39,9 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   Startup checks retain the draft on failure; after a session opens, **Copy Starting Prompt**
   in its context menu recovers the prompt until that session ends or the app quits.
   Prompts are never retried automatically. All new desktop Copilot sessions use
-  `--allow-all`, with or without a starting prompt.
+  `--allow-all`, with or without a starting prompt. When restoring a session, Projects
+  requests allow-all only when the tracker confirmed that mode for the same conversation.
+  Manual and assisted modes do not grant full permissions; CLI policy remains authoritative.
 - **Local PR reviews:** choose **Review Pull Request…** from the **+** split button's
   dropdown, paste a GitHub pull request URL, and open a new Copilot CLI session with a
   local adversarial-review prompt in the current project.
