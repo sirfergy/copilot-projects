@@ -73,6 +73,16 @@ struct AgentActivitySnapshot: Codable, Equatable {
     var inputCompletions: [String: Int64]? = nil
     var sessionIdleAtMilliseconds: Int64? = nil
     var workflow: RemoteSessionWorkflow? = nil
+    var currentIntent: String? = nil
+
+    func remoteActivityText(expectedSessionId: String?, at now: Date) -> String? {
+        guard let expectedSessionId, !expectedSessionId.isEmpty,
+              copilotSessionId?.lowercased() == expectedSessionId.lowercased(),
+              isFresh(at: now), !reportsTerminalDisconnect, !hasPendingInput,
+              let text = currentIntent?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        return text
+    }
 
     func runtimeForegroundActivity(
         expectedSessionId: String?,

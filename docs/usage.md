@@ -110,6 +110,11 @@ already expired; check the conversation before discarding a stuck queued copy.
 
 The session drawer and native/web conversation views render live response updates
 within their conversation turns. Final messages replace their matching streamed text.
+Remote workspace snapshots also carry the CLI's live `assistant.intent` description
+in `statusText` when `session-activity-text` is advertised. The tracker clears old
+activity on new work, conversation changes, and session idle; while only agents
+remain it reports "Waiting for background agents". Missing or stale activity uses
+the clients' generic fallback. Native Mac status text is unchanged.
 Newly observed empty or whitespace-only assistant messages are omitted from live
 and completed transcripts; their tool activity remains visible.
 

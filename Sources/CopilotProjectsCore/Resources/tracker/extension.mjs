@@ -161,6 +161,7 @@ if (validSessionId && socketPath) {
     const inputCompletions = new Map();
     let terminalDisconnectError = null;
     let foregroundTurnActive = false;
+    let currentIntent = null;
     // Wall-clock time of the most recent `foregroundTurnActive` transition
     // (root turn_start/turn_end/session.idle). Distinct from `updatedAt`,
     // which every publish() rewrites (heartbeats, questions, model/subagent
@@ -1760,6 +1761,7 @@ if (validSessionId && socketPath) {
             schemaVersion: 1,
             updatedAt: new Date().toISOString(),
             foregroundTurnActive,
+            currentIntent,
             foregroundTransitionAt,
             runtimeActivity,
             inputCompletions: Object.fromEntries(inputCompletions),
@@ -3806,6 +3808,7 @@ if (validSessionId && socketPath) {
         invalidateRuntimeActivity();
 
         foregroundTurnActive = false;
+        currentIntent = null;
         scheduledTurnActive = false;
         currentTurnKind = null;
         closeActivityIdleBaseline = idleGeneration;
@@ -4266,6 +4269,7 @@ if (validSessionId && socketPath) {
 
     session.on("user.message", (event) => {
         if (event.agentId) return;
+        currentIntent = null;
         invalidateRuntimeActivity();
         closeActivityState = "ready";
         clearCloseActivityRetry();
@@ -4294,6 +4298,7 @@ if (validSessionId && socketPath) {
             publish();
             return;
         }
+        if (event.data.turnId === "0") currentIntent = null;
         runtimeActivityRevision += 1;
         runtimeIdleAtMilliseconds = null;
         sessionIdleAtMilliseconds = null;
@@ -4311,6 +4316,13 @@ if (validSessionId && socketPath) {
         processCloseSessionRequest();
     });
 
+    session.on("assistant.intent", (event) => {
+        if (event.agentId || runtimeIdleAtMilliseconds !== null
+                || (!foregroundTurnActive && !scheduledTurnActive)) return;
+        currentIntent = boundedMetadataText(event.data.intent).replace(/\s+/g, " ").trim() || null;
+        publish();
+    });
+
     session.on("assistant.idle", (event) => {
         if (event.agentId) {
             activeSubagents.delete(event.agentId);
@@ -4321,6 +4333,8 @@ if (validSessionId && socketPath) {
         if (foregroundTransitionAt && transition < foregroundTransitionAt) return;
         runtimeActivityRevision += 1;
         foregroundTurnActive = false;
+        // The CLI replaces its last action with this label while agents drain.
+        currentIntent = activeSubagents.size > 0 ? "Waiting for background agents" : null;
         foregroundTransitionAt = transition;
         runtimeIdleAtMilliseconds = Date.parse(transition);
         publish();
@@ -4339,6 +4353,7 @@ if (validSessionId && socketPath) {
         lastIdleTurnKind = currentTurnKind;
         currentTurnKind = null;
         foregroundTurnActive = false;
+        currentIntent = null;
         foregroundTransitionAt = transition;
         runtimeIdleAtMilliseconds = Date.parse(foregroundTransitionAt);
         sessionIdleAtMilliseconds = runtimeIdleAtMilliseconds;

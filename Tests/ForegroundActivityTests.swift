@@ -137,6 +137,69 @@ final class ForegroundActivityTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testRemoteActivityTextTracksLiveSnapshotsWithoutChangingNativeStatus() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        var snapshot = fixture.snapshot(processing: true)
+        snapshot.currentIntent = "Running tests"
+        try fixture.publish(snapshot)
+        var remote = fixture.model.remoteWorkspaceSnapshot()
+        XCTAssertTrue(remote.protocolInfo?.supports("session-activity-text") == true)
+        XCTAssertEqual(remote.projects[0].sessions[0].statusText, "Running tests")
+        XCTAssertNil(fixture.model.projects[0].sessions[0].statusText)
+        snapshot.currentIntent = "Reviewing results"
+        try fixture.publish(snapshot)
+        XCTAssertEqual(fixture.model.remoteWorkspaceSnapshot().projects[0].sessions[0].statusText, "Reviewing results")
+
+        snapshot = fixture.snapshot(processing: false)
+        snapshot.currentIntent = "Waiting for background agents"
+        try fixture.publish(snapshot)
+        remote = fixture.model.remoteWorkspaceSnapshot()
+        XCTAssertTrue(remote.projects[0].sessions[0].background)
+        XCTAssertEqual(remote.projects[0].sessions[0].statusText, "Waiting for background agents")
+
+        snapshot = fixture.snapshot(processing: false, background: false)
+        snapshot.currentIntent = "Stale completed work"
+        try fixture.publish(snapshot)
+        XCTAssertNil(fixture.model.remoteWorkspaceSnapshot().projects[0].sessions[0].statusText)
+    }
+
+    @MainActor
+    func testRemoteActivityTextRejectsStaleDisconnectedAndUnrelatedSnapshots() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        for invalid in ["stale", "owner", "disconnect", "missing", "blank"] {
+            var snapshot = fixture.snapshot(processing: true)
+            snapshot.currentIntent = "Running tests"
+            switch invalid {
+            case "stale": snapshot.updatedAt = Date.distantPast.ISO8601Format()
+            case "owner": snapshot.copilotSessionId = UUID().uuidString
+            case "disconnect": snapshot.error = "Connection is closed."
+            case "missing": snapshot.currentIntent = nil
+            default: snapshot.currentIntent = " \n "
+            }
+            try fixture.publish(snapshot)
+            XCTAssertNil(fixture.model.remoteWorkspaceSnapshot().projects[0].sessions[0].statusText, invalid)
+        }
+    }
+
+    @MainActor
+    func testRemoteActivityDoesNotReplacePermissionWaitWithBackgroundBlurb() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        var snapshot = fixture.snapshot(processing: true)
+        snapshot.currentIntent = "Running tests"
+        snapshot.pendingPermissionRequestIds = ["permission"]
+        try fixture.publish(snapshot)
+        XCTAssertNil(fixture.model.remoteWorkspaceSnapshot().projects[0].sessions[0].statusText)
+        try fixture.beginWait(sender: fixture.owner, timestamp: fixture.baseMs + 100)
+        let remote = fixture.model.remoteWorkspaceSnapshot().projects[0].sessions[0]
+        XCTAssertEqual(remote.status, "waiting")
+        XCTAssertTrue(remote.background)
+        XCTAssertNil(remote.statusText)
+    }
+
     func testModalAndForegroundBusyHintsWinOverReadyHints() {
         for footer in [
             "/ commands · ? help · esc cancel",

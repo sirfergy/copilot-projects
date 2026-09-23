@@ -384,6 +384,63 @@ function readSnapshot(runtime) {
   return JSON.parse(realReadFileSync(runtime.snapshotPath, "utf8"));
 }
 
+test("scheduled activity does not accept late intents while its agents drain", async (t) => {
+  const runtime = await createRuntime(t);
+  const emit = (...args) => runtime.session.emit(...args);
+  await emit("user.message", { content: "Scheduled check", source: "schedule-check" });
+  await emit("assistant.turn_start", { turnId: "0" });
+  await emit("assistant.intent", { intent: "Checking the build" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Checking the build");
+  await emit("subagent.started", { agentDisplayName: "Build" }, { agentId: "build" });
+  await emit("assistant.idle");
+  assert.equal(readSnapshot(runtime).scheduledTurnActive, true);
+  await emit("assistant.intent", { intent: "Late stale action" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Waiting for background agents");
+  await emit("assistant.turn_start", { turnId: "0" });
+  await emit("assistant.intent", { intent: "Checking new results" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Checking new results");
+});
+
+test("live activity follows root intents and clears at work boundaries", async (t) => {
+  const runtime = await createRuntime(t);
+  const emit = (...args) => runtime.session.emit(...args);
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+  await emit("assistant.turn_start", { turnId: "0" });
+  await emit("assistant.intent", { intent: "  Running\n tests  " });
+  assert.equal(readSnapshot(runtime).currentIntent, "Running tests");
+  await emit("assistant.intent", { intent: "Child work" }, { agentId: "child" });
+  await emit("assistant.turn_start", { turnId: "0" }, { agentId: "child" });
+  await emit("assistant.idle", {}, { agentId: "child" });
+  await emit("assistant.turn_end", { turnId: "0" });
+  await emit("assistant.turn_start", { turnId: "1" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Running tests");
+  await emit("assistant.intent", { intent: "" });
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+  await emit("assistant.intent", { intent: "x".repeat(2000) });
+  assert.equal(readSnapshot(runtime).currentIntent.length, 512);
+  await emit("assistant.intent", { intent: " \n\t " });
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+  await emit("assistant.intent", { intent: "Reviewing changes" });
+  await emit("assistant.turn_start", { turnId: "0" });
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+  await emit("assistant.intent", { intent: "Checking results" });
+  await emit("subagent.started", { agentDisplayName: "Reviewer" }, { agentId: "reviewer" });
+  await emit("assistant.idle");
+  assert.equal(readSnapshot(runtime).currentIntent, "Waiting for background agents");
+  await emit("assistant.intent", { intent: "Late stale action" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Waiting for background agents");
+  await emit("session.idle");
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+  await emit("assistant.turn_start", { turnId: "0" });
+  await emit("assistant.intent", { intent: "Old work" });
+  await emit("user.message", { content: "New work" });
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+  await emit("assistant.intent", { intent: "Other old work" });
+  runtime.session.sessionId = uuid();
+  await emit("session.start", { sessionId: runtime.session.sessionId });
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+});
+
 function receipt(runtime, operationId) {
   return readSnapshot(runtime).operationReceipts.find(
     (entry) => entry.operationId === operationId
