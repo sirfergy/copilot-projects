@@ -387,7 +387,7 @@ struct SessionStateIndicator: View {
     private enum Kind { case busy, dot(Color), none }
 
     private var kind: Kind {
-        switch session.status {
+        switch session.displayStatus {
         case .running: return .busy
         case .waiting: return .dot(.orange)
         case .idle: return session.finishedUnseen ? .dot(.blue) : .none
@@ -395,7 +395,7 @@ struct SessionStateIndicator: View {
     }
 
     private var help: String {
-        switch session.status {
+        switch session.displayStatus {
         case .running: return "running"
         case .waiting: return "waiting for input"
         case .idle: return session.finishedUnseen ? "finished — ready for you" : "idle"
@@ -740,7 +740,7 @@ struct SessionRow: View {
 
     var showsUnreadIndicator: Bool {
         // Avoid duplicating the idle completion dot unless the tab-number hint hides it.
-        session.hasUnread && (showNumber || session.status != .idle || !session.finishedUnseen)
+        session.hasUnread && (showNumber || session.displayStatus != .idle || !session.finishedUnseen)
     }
 
     var accessibilityStatus: String {
@@ -754,7 +754,7 @@ struct SessionRow: View {
     }
 
     var stateLabel: String {
-        switch session.status {
+        switch session.displayStatus {
         case .running: return "Running"
         case .waiting: return "Waiting for input"
         case .idle: return session.finishedUnseen ? "Finished" : "Idle"

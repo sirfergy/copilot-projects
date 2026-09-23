@@ -4562,7 +4562,7 @@ final class AppModel: ObservableObject {
             for s in p.sessions {
                 let extra = s.statusText.map { " — \($0)" } ?? ""
                 let unread = s.hasUnread ? " [unread]" : ""
-                lines.append("\(p.name)/\(s.title)  \(s.status.rawValue)\(unread)\(extra)  \(s.id)")
+                lines.append("\(p.name)/\(s.title)  \(s.displayStatus.rawValue)\(unread)\(extra)  \(s.id)")
             }
         }
         return lines.isEmpty ? "(no sessions)" : lines.joined(separator: "\n")

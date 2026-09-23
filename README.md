@@ -64,7 +64,8 @@ discards it. Closing the drawer or switching sessions dismisses that preview.
   sessions, and work in the terminal beside them. Hide the project column to
   reclaim space; background sessions keep running.
 - **Attention at a glance.** Running and waiting indicators, unread markers,
-  and native notifications help you find the session that needs you.
+  and native notifications help you find the session that needs you. Pending
+  questions keep the waiting indicator visible even while other activity continues.
 - **Session details.** Read completed turns as Markdown and see usage,
   background agents, and schedules when the
   connected Copilot CLI supports them.
