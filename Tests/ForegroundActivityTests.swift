@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import CopilotProjectsCore
+import CopilotProjectsProtocol
 import Combine
 @testable import CopilotProjectsHost
 
@@ -618,6 +619,171 @@ final class ForegroundActivityTests: XCTestCase {
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .idle)
         XCTAssertEqual(fixture.model.remoteWorkspaceSnapshot().projects[0].sessions[0].promptable, true)
         XCTAssertEqual(try JSONDecoder().decode(SessionStatusRecord.self, from: Data(contentsOf: recordURL)), record)
+    }
+
+    @MainActor
+    func testPendingQuestionSurvivesNewerToolActivity() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        var snapshot = fixture.snapshot(processing: true)
+        snapshot.trackedUserInputs = [
+            TrackedUserInput(
+                requestId: "question", question: "Continue?", choices: ["Yes", "No"],
+                allowFreeform: false, requestedAt: snapshot.updatedAt, agentId: nil)
+        ]
+        try fixture.publish(snapshot)
+        try fixture.beginWait(
+            sender: fixture.owner, timestamp: fixture.baseMs + 100, kind: .elicitation)
+        fixture.model.setStatus(
+            sessionId: fixture.session.id, status: .running, text: nil,
+            timestamp: fixture.baseMs + 200)
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .running)
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].displayStatus, .waiting)
+        fixture.model.refreshAgentActivitySnapshots()
+        fixture.model.reconcileAgentFooters()
+        let waiting = fixture.model.projects[0].sessions[0]
+        XCTAssertEqual(waiting.displayStatus, .waiting)
+        let row = SessionRow(session: waiting, isActive: true, onSelect: {}, onClose: {})
+        XCTAssertEqual(row.stateLabel, "Waiting for input")
+        XCTAssertEqual(row.accessibilityStatus, "Selected, Waiting for input, Unread, Background work active")
+        XCTAssertEqual(fixture.model.totalWaiting, 1)
+        XCTAssertEqual(fixture.model.totalRunning, 0)
+        XCTAssertEqual(fixture.model.projects[0].aggregateStatus, .waiting)
+        XCTAssertEqual(fixture.model.remoteWorkspaceSnapshot().projects[0].sessions[0].status, "waiting")
+        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "next"), .busy)
+
+        snapshot.trackedUserInputs = []
+        snapshot.inputCompletions = [fixture.owner: fixture.baseMs + 300]
+        snapshot.runtimeActivity?.observedAtMilliseconds = fixture.baseMs + 400
+        try fixture.publish(snapshot)
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .running)
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].displayStatus, .running)
+        XCTAssertEqual(fixture.model.totalWaiting, 0)
+        XCTAssertEqual(fixture.model.totalRunning, 1)
+    }
+
+    @MainActor
+    func testPendingQuestionDoesNotRequireRuntimeObservation() throws {
+        for runtimeError in [nil, "unsupported", "unavailable"] as [String?] {
+            let fixture = try Fixture()
+            defer { fixture.cleanup() }
+            fixture.model.setStatus(
+                sessionId: fixture.session.id, status: .running, text: nil,
+                timestamp: fixture.baseMs - 100)
+            var snapshot = fixture.snapshot(processing: true)
+            if let runtimeError {
+                snapshot.runtimeActivity?.error = runtimeError
+                snapshot.runtimeActivity?.processing = nil
+            } else {
+                snapshot.runtimeActivity = nil
+            }
+            snapshot.trackedUserInputs = [
+                TrackedUserInput(
+                    requestId: "question", question: "Continue?", choices: ["Yes", "No"],
+                    allowFreeform: false, requestedAt: snapshot.updatedAt, agentId: nil)
+            ]
+            try fixture.publish(snapshot)
+            XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .running)
+            XCTAssertEqual(fixture.model.projects[0].sessions[0].displayStatus, .waiting, runtimeError ?? "legacy")
+            XCTAssertEqual(fixture.model.totalWaiting, 1)
+            snapshot.trackedUserInputs = []
+            try fixture.publish(snapshot)
+            XCTAssertEqual(fixture.model.projects[0].sessions[0].displayStatus, .running)
+            XCTAssertEqual(fixture.model.totalWaiting, 0)
+        }
+    }
+
+    @MainActor
+    func testPendingQuestionDisplayClearsWhenTrackerExpires() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        fixture.model.setStatus(
+            sessionId: fixture.session.id, status: .running, text: nil,
+            timestamp: fixture.baseMs - 100)
+        var snapshot = fixture.snapshot(processing: true)
+        snapshot.runtimeActivity = nil
+        snapshot.trackedUserInputs = [
+            TrackedUserInput(
+                requestId: "question", question: "Continue?", choices: ["Yes", "No"],
+                allowFreeform: false, requestedAt: snapshot.updatedAt, agentId: nil)
+        ]
+        try fixture.publish(snapshot)
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].displayStatus, .waiting)
+        fixture.model.refreshAgentActivitySnapshots(now: fixture.base.addingTimeInterval(16))
+        XCTAssertNil(fixture.model.projects[0].sessions[0].agentActivity)
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].displayStatus, .running)
+    }
+
+    @MainActor
+    func testAllPendingInputKindsTakePrecedenceInNativeIndicators() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        for kind in ["question", "elicitation", "permission", "budget"] {
+            var snapshot = fixture.snapshot(background: false)
+            switch kind {
+            case "question":
+                snapshot.trackedUserInputs = [
+                    TrackedUserInput(
+                        requestId: "question", question: "Continue?", choices: ["Yes", "No"],
+                        allowFreeform: false, requestedAt: snapshot.updatedAt, agentId: nil)
+                ]
+            case "elicitation":
+                snapshot.trackedElicitations = [
+                    TrackedElicitation(
+                        requestId: "form", message: "Continue?", mode: "form",
+                        url: nil, schema: nil, elicitationSource: nil,
+                        requestedAt: snapshot.updatedAt, agentId: nil)
+                ]
+            case "permission":
+                snapshot.pendingPermissionRequestIds = ["permission"]
+            default:
+                snapshot.workflow = RemoteSessionWorkflow(
+                    observedAtMilliseconds: fixture.baseMs, capabilities: [], sendReady: false,
+                    budgetRequest: RemoteBudgetRequest(
+                        requestId: "budget", maxAiCredits: 30, usedAiCredits: 30))
+            }
+            for status in [SessionStatus.idle, .running, .waiting] {
+                var session = fixture.session
+                session.status = status
+                session.finishedUnseen = true
+                session.hasUnread = true
+                session.agentActivity = snapshot
+                let row = SessionRow(session: session, isActive: false, onSelect: {}, onClose: {})
+                XCTAssertEqual(row.stateLabel, "Waiting for input", kind)
+                XCTAssertEqual(row.accessibilityStatus, "Waiting for input, Unread", kind)
+                XCTAssertTrue(row.showsUnreadIndicator, kind)
+                let project = Project(name: "Test", cwd: fixture.root.path, sessions: [session])
+                XCTAssertEqual(project.aggregateStatus, .waiting, kind)
+                XCTAssertEqual(project.waitingCount, 1, kind)
+                XCTAssertEqual(project.runningCount, 0, kind)
+                XCTAssertEqual(session.status, status, "Display must not rewrite lifecycle state")
+                session.agentActivity = nil
+                XCTAssertEqual(session.displayStatus, status, kind)
+            }
+        }
+    }
+
+    @MainActor
+    func testPendingQuestionDisplayWaitsForLastAnswer() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        fixture.model.setStatus(
+            sessionId: fixture.session.id, status: .running, text: nil,
+            timestamp: fixture.baseMs - 100)
+        var snapshot = fixture.snapshot(processing: true)
+        snapshot.runtimeActivity = nil
+        snapshot.trackedUserInputs = ["first", "second"].map {
+            TrackedUserInput(
+                requestId: $0, question: "Continue?", choices: ["Yes", "No"],
+                allowFreeform: false, requestedAt: snapshot.updatedAt, agentId: nil)
+        }
+        try fixture.publish(snapshot)
+        snapshot.trackedUserInputs?.removeFirst()
+        try fixture.publish(snapshot)
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].displayStatus, .waiting)
+        snapshot.trackedUserInputs = []
+        try fixture.publish(snapshot)
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].displayStatus, .running)
     }
 
     @MainActor

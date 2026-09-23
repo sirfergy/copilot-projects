@@ -39,6 +39,10 @@ struct Session: Identifiable, Codable, Equatable {
     }
     var hasPendingInput: Bool { agentActivity?.hasPendingInput == true }
 
+    /// Activity hooks can report running while a question is still unanswered.
+    /// Keep that lifecycle state separate from the attention shown to the user.
+    var displayStatus: SessionStatus { hasPendingInput ? .waiting : status }
+
     var requiresEndConfirmation: Bool {
         status != .idle || hasBackgroundWork || !schedules.isEmpty || hasPendingInput
     }
@@ -85,13 +89,13 @@ struct Project: Identifiable, Codable, Equatable {
 extension Project {
     /// Project-level rollup for the CLI/status text (idle | running | waiting).
     var aggregateStatus: SessionStatus {
-        if sessions.contains(where: { $0.status == .waiting }) { return .waiting }
-        if sessions.contains(where: { $0.status == .running }) { return .running }
+        if sessions.contains(where: { $0.displayStatus == .waiting }) { return .waiting }
+        if sessions.contains(where: { $0.displayStatus == .running }) { return .running }
         return .idle
     }
 
-    var runningCount: Int { sessions.filter { $0.status == .running }.count }
-    var waitingCount: Int { sessions.filter { $0.status == .waiting }.count }
+    var runningCount: Int { sessions.filter { $0.displayStatus == .running }.count }
+    var waitingCount: Int { sessions.filter { $0.displayStatus == .waiting }.count }
     var backgroundWorkCount: Int { sessions.filter(\.hasBackgroundWork).count }
     var scheduledCount: Int { sessions.filter { !$0.schedules.isEmpty }.count }
     var hasUnread: Bool { sessions.contains { $0.hasUnread } }
