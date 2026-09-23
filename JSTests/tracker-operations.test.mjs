@@ -165,7 +165,7 @@ class FakeSession {
         list: async () => ({ entries: [] }),
       },
       permissions: {
-        getAllowAll: async () => ({ enabled: false }),
+        getMode: async () => ({ mode: "manual" }),
       },
       eventLog: {
         registerInterest: async ({ eventType }) => ({
@@ -315,6 +315,7 @@ async function createRuntime(t, configure = () => {}) {
     durableReadsFinished: 0,
   };
   runtime.session = new FakeSession(runtime.copilotSessionId);
+  runtime.allowAllPath = join(sessions, `${runtime.appSessionId}.copilot-allow-all`);
   configure(runtime.session, runtime);
   runtimes.add(runtime);
 
@@ -383,6 +384,169 @@ async function createRuntime(t, configure = () => {}) {
 function readSnapshot(runtime) {
   return JSON.parse(realReadFileSync(runtime.snapshotPath, "utf8"));
 }
+
+for (const mode of ["allow-all", "manual", "assisted", "unknown", null]) {
+  test(`permission markers follow canonical ${mode} without legacy fallback`, async (t) => {
+    let reads = 0;
+    let legacyReads = 0;
+    const runtime = await createRuntime(t, (session, fixture) => {
+      realWriteFileSync(fixture.allowAllPath, fixture.copilotSessionId);
+      session.rpc.permissions = {
+        getMode: async () => { reads += 1; return { mode }; },
+        getAllowAll: async () => { legacyReads += 1; return { enabled: true }; },
+      };
+    });
+    assert.ok(reads > 0);
+    assert.equal(legacyReads, 0);
+    assert.equal(realExistsSync(runtime.allowAllPath), mode === "allow-all");
+    if (mode === "allow-all") {
+      assert.equal(realReadFileSync(runtime.allowAllPath, "utf8"), runtime.copilotSessionId);
+    }
+  });
+}
+
+for (const enabled of [true, false]) {
+  test(`permission markers retain legacy SDK support with enabled=${enabled}`, async (t) => {
+    let reads = 0;
+    const runtime = await createRuntime(t, (session, fixture) => {
+      realWriteFileSync(fixture.allowAllPath, fixture.copilotSessionId);
+      session.rpc.permissions = {
+        getAllowAll: async () => { reads += 1; return { enabled }; },
+      };
+    });
+    assert.ok(reads > 0);
+    assert.equal(realExistsSync(runtime.allowAllPath), enabled);
+    if (enabled) {
+      assert.equal(realReadFileSync(runtime.allowAllPath, "utf8"), runtime.copilotSessionId);
+    }
+  });
+}
+
+test("permission markers fail closed on a canonical RPC error without legacy fallback", async (t) => {
+  let reads = 0;
+  let legacyReads = 0;
+  const runtime = await createRuntime(t, (session, fixture) => {
+    realWriteFileSync(fixture.allowAllPath, fixture.copilotSessionId);
+    session.rpc.permissions = {
+      getMode: async () => { reads += 1; throw new Error("permission read failed"); },
+      getAllowAll: async () => { legacyReads += 1; return { enabled: true }; },
+    };
+  });
+  assert.ok(reads > 0);
+  assert.equal(legacyReads, 0);
+  assert.equal(realExistsSync(runtime.allowAllPath), false);
+});
+
+test("permission markers follow current and legacy events with canonical precedence", async (t) => {
+  const runtime = await createRuntime(t);
+  const cases = [
+    [{ mode: "allow-all" }, true],
+    [{ mode: "manual", allowAllPermissionMode: "on", allowAllPermissions: true }, false],
+    [{ allowAllPermissionMode: "on" }, true],
+    [{ mode: "assisted", allowAllPermissions: true }, false],
+    [{ allowAllPermissions: true }, true],
+    [{ mode: "unknown", allowAllPermissionMode: "on" }, false],
+    [{ mode: "allow-all", allowAllPermissionMode: "off" }, true],
+    [{ mode: null, allowAllPermissions: true }, false],
+    [{ allowAllPermissionMode: "on" }, true],
+    [{ allowAllPermissionMode: "auto", allowAllPermissions: true }, false],
+    [{ allowAllPermissions: true }, true],
+    [{ allowAllPermissionMode: "off", allowAllPermissions: true }, false],
+    [{ allowAllPermissions: true }, true],
+    [{ allowAllPermissions: false }, false],
+  ];
+  for (const [data, enabled] of cases) {
+    await runtime.session.emit("session.permissions_changed", data);
+    assert.equal(realExistsSync(runtime.allowAllPath), enabled, JSON.stringify(data));
+    if (enabled) {
+      assert.equal(realReadFileSync(runtime.allowAllPath, "utf8"), runtime.copilotSessionId);
+    }
+  }
+});
+
+test("permission events without a mode and subagent events do not revoke root allow-all", async (t) => {
+  const runtime = await createRuntime(t, (session) => {
+    session.rpc.permissions.getMode = async () => ({ mode: "allow-all" });
+  });
+  for (const data of [{}, { previousMode: "manual" }, null]) {
+    await runtime.session.emit("session.permissions_changed", data);
+    assert.equal(realReadFileSync(runtime.allowAllPath, "utf8"), runtime.copilotSessionId);
+  }
+  await runtime.session.emit("session.permissions_changed", { mode: "manual" }, { agentId: "child" });
+  assert.equal(realReadFileSync(runtime.allowAllPath, "utf8"), runtime.copilotSessionId);
+});
+
+test("a newer permission event wins over an in-flight canonical read", async (t) => {
+  const runtime = await createRuntime(t);
+  let resolveRead;
+  runtime.session.rpc.permissions.getMode = () => new Promise((resolve) => { resolveRead = resolve; });
+  runtime.session.sessionId = uuid();
+  await runtime.session.emit("session.start", { sessionId: runtime.session.sessionId });
+  await waitFor(() => resolveRead, "permission refresh did not start");
+  await runtime.session.emit("session.permissions_changed", { mode: "manual" });
+  resolveRead({ mode: "allow-all" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(realExistsSync(runtime.allowAllPath), false);
+});
+
+test("permission refresh follows a rotation even while the old conversation read is pending", async (t) => {
+  const runtime = await createRuntime(t);
+  let resolveOld;
+  let reads = 0;
+  runtime.session.rpc.permissions.getMode = () => {
+    reads += 1;
+    if (reads === 1) return new Promise((resolve) => { resolveOld = resolve; });
+    return Promise.resolve({ mode: "allow-all" });
+  };
+  runtime.session.sessionId = uuid();
+  await runtime.session.emit("session.start", { sessionId: runtime.session.sessionId });
+  await waitFor(() => resolveOld, "first permission refresh did not start");
+  const latest = uuid();
+  runtime.session.sessionId = latest;
+  await runtime.session.emit("session.start", { sessionId: latest });
+  resolveOld({ mode: "manual" });
+  await waitFor(
+    () => realExistsSync(runtime.allowAllPath)
+      && realReadFileSync(runtime.allowAllPath, "utf8") === latest,
+    "latest conversation did not receive its confirmed allow-all marker"
+  );
+  assert.equal(reads, 2);
+});
+
+test("permission reads ignore subagent events while pending and cannot overwrite another owner", async (t) => {
+  const runtime = await createRuntime(t);
+  let resolveRead;
+  runtime.session.rpc.permissions.getMode = () => new Promise((resolve) => { resolveRead = resolve; });
+  runtime.session.sessionId = uuid();
+  await runtime.session.emit("session.start", { sessionId: runtime.session.sessionId });
+  await waitFor(() => resolveRead, "permission refresh did not start");
+  await runtime.session.emit("session.permissions_changed", { mode: "manual" }, { agentId: "child" });
+  resolveRead({ mode: "allow-all" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(realReadFileSync(runtime.allowAllPath, "utf8"), runtime.session.sessionId);
+
+  resolveRead = null;
+  runtime.session.sessionId = uuid();
+  await runtime.session.emit("session.start", { sessionId: runtime.session.sessionId });
+  await waitFor(() => resolveRead, "next permission refresh did not start");
+  const owner = uuid();
+  realWriteFileSync(runtime.ownerPath, JSON.stringify({ copilotSessionId: owner, pid: 1 }));
+  realWriteFileSync(runtime.allowAllPath, owner);
+  resolveRead({ mode: "allow-all" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(realReadFileSync(runtime.allowAllPath, "utf8"), owner);
+});
+
+test("historical permission events cannot override the current permission RPC", async (t) => {
+  const runtime = await createRuntime(t, (session) => {
+    session.history = [{
+      id: uuid(), type: "session.permissions_changed",
+      timestamp: new Date().toISOString(), data: { mode: "allow-all", allowAllPermissions: true },
+    }];
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(realExistsSync(runtime.allowAllPath), false);
+});
 
 test("scheduled activity does not accept late intents while its agents drain", async (t) => {
   const runtime = await createRuntime(t);
