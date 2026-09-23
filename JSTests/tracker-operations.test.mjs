@@ -395,7 +395,7 @@ test("scheduled activity does not accept late intents while its agents drain", a
   await emit("assistant.idle");
   assert.equal(readSnapshot(runtime).scheduledTurnActive, true);
   await emit("assistant.intent", { intent: "Late stale action" });
-  assert.equal(readSnapshot(runtime).currentIntent, "Waiting for background agents");
+  assert.equal(readSnapshot(runtime).currentIntent, "Build");
   await emit("assistant.turn_start", { turnId: "0" });
   await emit("assistant.intent", { intent: "Checking new results" });
   assert.equal(readSnapshot(runtime).currentIntent, "Checking new results");
@@ -426,9 +426,9 @@ test("live activity follows root intents and clears at work boundaries", async (
   await emit("assistant.intent", { intent: "Checking results" });
   await emit("subagent.started", { agentDisplayName: "Reviewer" }, { agentId: "reviewer" });
   await emit("assistant.idle");
-  assert.equal(readSnapshot(runtime).currentIntent, "Waiting for background agents");
+  assert.equal(readSnapshot(runtime).currentIntent, "Reviewer");
   await emit("assistant.intent", { intent: "Late stale action" });
-  assert.equal(readSnapshot(runtime).currentIntent, "Waiting for background agents");
+  assert.equal(readSnapshot(runtime).currentIntent, "Reviewer");
   await emit("session.idle");
   assert.equal(readSnapshot(runtime).currentIntent, null);
   await emit("assistant.turn_start", { turnId: "0" });
@@ -436,6 +436,84 @@ test("live activity follows root intents and clears at work boundaries", async (
   await emit("user.message", { content: "New work" });
   assert.equal(readSnapshot(runtime).currentIntent, null);
   await emit("assistant.intent", { intent: "Other old work" });
+  runtime.session.sessionId = uuid();
+  await emit("session.start", { sessionId: runtime.session.sessionId });
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+});
+
+test("background status uses short task descriptions and follows the remaining agents", async (t) => {
+  const runtime = await createRuntime(t);
+  const emit = (...args) => runtime.session.emit(...args);
+  await emit("assistant.turn_start", { turnId: "0" });
+  await emit("assistant.intent", { intent: "Starting the preview" });
+  await emit("subagent.started", {
+    agentName: "task",
+    agentDisplayName: "UX activity preview",
+    agentDescription: "  Previewing background\nactivity indicator  ",
+    prompt: "This full task prompt must not become the status",
+  }, { agentId: "preview" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Starting the preview");
+  await emit("assistant.idle");
+  assert.equal(readSnapshot(runtime).currentIntent, "Previewing background activity indicator");
+  await emit("assistant.intent", { intent: "Child inner activity" }, { agentId: "preview" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Previewing background activity indicator");
+  await emit("subagent.started", {
+    agentDisplayName: "Review",
+    agentDescription: "Checking test results",
+  }, { agentId: "review" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Previewing background activity indicator (+1 more)");
+  await emit("subagent.completed", {}, { agentId: "preview" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Checking test results");
+  await emit("subagent.failed", {}, { agentId: "review" });
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+});
+
+test("unknown background tasks do not hide useful labels or leak MCP task prompts", async (t) => {
+  const runtime = await createRuntime(t);
+  const emit = (...args) => runtime.session.emit(...args);
+  await emit("assistant.turn_start", {}, { agentId: "unknown" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Waiting for background agents");
+  await emit("subagent.started", {
+    agentDisplayName: " \n ", agentDescription: "\t",
+  }, { agentId: "blank" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Waiting for background agents");
+  await emit("subagent.started", {
+    agentName: "mcp-task",
+    agentDisplayName: "  Looking up documentation ",
+    agentDescription: "Full prompt with private task details",
+  }, { agentId: "mcp" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Looking up documentation (+2 more)");
+  assert.equal(readSnapshot(runtime).workflow.agents.find((agent) => agent.id === "mcp").description, "");
+  await emit("assistant.idle", {}, { agentId: "mcp" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Waiting for background agents");
+  await emit("assistant.idle", {}, { agentId: "unknown" });
+  await emit("assistant.idle", {}, { agentId: "blank" });
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+});
+
+test("background descriptions stay bounded and never become the next root intent", async (t) => {
+  const runtime = await createRuntime(t);
+  const emit = (...args) => runtime.session.emit(...args);
+  await emit("subagent.started", { agentDescription: "x".repeat(600) }, { agentId: "first" });
+  await emit("subagent.started", { agentDisplayName: "Second task" }, { agentId: "second" });
+  assert.equal(readSnapshot(runtime).currentIntent.length, 512);
+  assert.ok(readSnapshot(runtime).currentIntent.endsWith(" (+1 more)"));
+  await emit("assistant.turn_start", { turnId: "1" });
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+  await emit("assistant.intent", { intent: "Coordinating the next step" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Coordinating the next step");
+  await emit("assistant.idle");
+  assert.equal(readSnapshot(runtime).currentIntent.length, 512);
+  await emit("user.message", { content: "Scheduled check", source: "schedule-check" });
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+  await emit("assistant.turn_start", { turnId: "0" });
+  await emit("assistant.idle");
+  await emit("assistant.idle", {}, { agentId: "first" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Second task");
+  await emit("session.idle");
+  assert.equal(readSnapshot(runtime).currentIntent, null);
+  await emit("subagent.started", { agentDescription: "Previous conversation" }, { agentId: "old" });
+  assert.equal(readSnapshot(runtime).currentIntent, "Previous conversation");
   runtime.session.sessionId = uuid();
   await emit("session.start", { sessionId: runtime.session.sessionId });
   assert.equal(readSnapshot(runtime).currentIntent, null);
