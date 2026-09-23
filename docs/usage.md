@@ -112,9 +112,14 @@ The session drawer and native/web conversation views render live response update
 within their conversation turns. Final messages replace their matching streamed text.
 Remote workspace snapshots also carry the CLI's live `assistant.intent` description
 in `statusText` when `session-activity-text` is advertised. The tracker clears old
-activity on new work, conversation changes, and session idle; while only agents
-remain it reports "Waiting for background agents". Missing or stale activity uses
-the clients' generic fallback. Native Mac status text is unchanged.
+activity on new work, conversation changes, and session idle. While only agents
+remain, it shows the first available short task description (or agent name), plus
+a count of other active agents. The text follows the remaining agents as they
+finish. "Waiting for background agents" is used only when their labels are unknown.
+MCP tasks use their short display name rather than their full prompt; agents
+launched directly from a definition may report their configured description.
+Missing or stale activity uses the clients' generic fallback. Native Mac status
+text is unchanged.
 Newly observed empty or whitespace-only assistant messages are omitted from live
 and completed transcripts; their tool activity remains visible.
 

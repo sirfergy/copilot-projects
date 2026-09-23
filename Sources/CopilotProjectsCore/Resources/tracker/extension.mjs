@@ -1751,6 +1751,25 @@ if (validSessionId && socketPath) {
         }
     }
 
+    function isCoordinatorWorking() {
+        return runtimeIdleAtMilliseconds === null
+            && (foregroundTurnActive || currentTurnKind === "scheduled");
+    }
+
+    function currentActivityText() {
+        if (isCoordinatorWorking()) return currentIntent;
+        if (activeSubagents.size === 0) return null;
+        for (const agent of activeSubagents.values()) {
+            const description = boundedMetadataText(agent.description).replace(/\s+/g, " ").trim();
+            const name = boundedMetadataText(agent.name).replace(/\s+/g, " ").trim();
+            const text = description || (name !== "Background agent" ? name : "");
+            if (!text) continue;
+            const suffix = activeSubagents.size > 1 ? ` (+${activeSubagents.size - 1} more)` : "";
+            return truncatedText(text, MAX_TRANSCRIPT_METADATA_TEXT - suffix.length) + suffix;
+        }
+        return "Waiting for background agents";
+    }
+
     function publish(error) {
         if (!ownsSharedFiles()) return false;
         if (isTerminalDisconnect(error)) {
@@ -1761,7 +1780,7 @@ if (validSessionId && socketPath) {
             schemaVersion: 1,
             updatedAt: new Date().toISOString(),
             foregroundTurnActive,
-            currentIntent,
+            currentIntent: currentActivityText(),
             foregroundTransitionAt,
             runtimeActivity,
             inputCompletions: Object.fromEntries(inputCompletions),
@@ -4317,8 +4336,7 @@ if (validSessionId && socketPath) {
     });
 
     session.on("assistant.intent", (event) => {
-        if (event.agentId || runtimeIdleAtMilliseconds !== null
-                || (!foregroundTurnActive && !scheduledTurnActive)) return;
+        if (event.agentId || !isCoordinatorWorking()) return;
         currentIntent = boundedMetadataText(event.data.intent).replace(/\s+/g, " ").trim() || null;
         publish();
     });
@@ -4333,8 +4351,7 @@ if (validSessionId && socketPath) {
         if (foregroundTransitionAt && transition < foregroundTransitionAt) return;
         runtimeActivityRevision += 1;
         foregroundTurnActive = false;
-        // The CLI replaces its last action with this label while agents drain.
-        currentIntent = activeSubagents.size > 0 ? "Waiting for background agents" : null;
+        currentIntent = null;
         foregroundTransitionAt = transition;
         runtimeIdleAtMilliseconds = Date.parse(transition);
         publish();
@@ -4424,7 +4441,9 @@ if (validSessionId && socketPath) {
         activeSubagents.set(id, {
             id,
             name: boundedMetadataText(event.data.agentDisplayName) || "Background agent",
-            description: boundedMetadataText(event.data.agentDescription) || "",
+            // MCP tasks put the full prompt in agentDescription, not the short task label.
+            description: event.data.agentName === "mcp-task"
+                ? "" : boundedMetadataText(event.data.agentDescription) || "",
             model: event.data.model,
         });
         publish();
