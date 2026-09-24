@@ -339,6 +339,21 @@ final class AppModel: ObservableObject {
             }
             return .success(sid)
         },
+        newCopilotSession: { [unowned self] request in
+            guard let projectId = request.projectId,
+                  let rawRequestId = request.requestId,
+                  let requestId = UUID(uuidString: rawRequestId),
+                  let prompt = request.prompt else {
+                return .failure("new-copilot-session requires a project, request id, and prompt",
+                                code: "bad-request")
+            }
+            return Self.controlResponse(for: self.createLocalCopilotSession(
+                requestId: requestId,
+                projectId: projectId,
+                title: request.title ?? "Copilot",
+                prompt: prompt
+            ))
+        },
         renameProject: { [unowned self] name, request in
             guard let pid = self.resolveProject(request) else { return .failure("no project") }
             self.renameProject(pid, name: name)
@@ -1204,6 +1219,72 @@ final class AppModel: ObservableObject {
             initialPrompt: prompt,
             now: now
         )
+    }
+
+    /// Local automation (control socket): a Copilot session with a starting prompt
+    /// and caller-chosen title. Shares the remote creation ledger, so a retried
+    /// request id returns `.existing`, `.conflict`, or `.gone` instead of launching
+    /// a second session.
+    func createLocalCopilotSession(
+        requestId: UUID,
+        projectId: String,
+        title: String,
+        prompt: String,
+        now: Date = Date()
+    ) -> RemoteSessionCreationOutcome {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidSessionTitle(title),
+              SessionInputValidation.isValidPrompt(prompt) else {
+            return .badRequest
+        }
+        let prompt = prompt
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        return createRemoteSession(
+            RemoteCreateSessionRequest(
+                requestId: requestId, projectId: projectId, kind: .copilot, initialPrompt: prompt),
+            isLegacyRequest: false,
+            kind: .copilot,
+            title: title,
+            initialPrompt: prompt,
+            now: now
+        )
+    }
+
+    nonisolated static let maximumSessionTitleLength = 120
+
+    nonisolated static func isValidSessionTitle(_ title: String) -> Bool {
+        guard !title.isEmpty, title.count <= maximumSessionTitleLength else { return false }
+        return !title.unicodeScalars.contains {
+            $0.value < 0x20 || $0.value == 0x7f || (0x80 ... 0x9f).contains($0.value)
+        }
+    }
+
+    nonisolated static func controlResponse(
+        for outcome: RemoteSessionCreationOutcome
+    ) -> ControlResponse {
+        switch outcome {
+        case .created(let response):
+            return .success(response.sessionId, code: "created")
+        case .existing(let response):
+            return .success(response.sessionId, code: "existing")
+        case .unknownProject:
+            return .failure("unknown project", code: "unknown-project")
+        case .invalid:
+            return .failure("the ~/Repos working directory is missing", code: "invalid")
+        case .badRequest:
+            return .failure("invalid title or prompt", code: "bad-request")
+        case .conflict:
+            return .failure("request id is bound to a different session", code: "conflict")
+        case .gone:
+            return .failure("request id already created a session that has since ended",
+                            code: "gone")
+        case .unavailable:
+            return .failure("Copilot or the session backend is unavailable", code: "unavailable")
+        case .persistenceUnavailable:
+            return .failure("could not persist the session; retry with the same request id",
+                            code: "persistence-unavailable")
+        }
     }
 
     func createRemoteAdversarialReviewSession(

@@ -25,6 +25,8 @@ public struct ControlRequest: Codable, Sendable {
     public var cwd: String?
     public var path: String?
     public var action: String?
+    public var requestId: String?
+    public var prompt: String?
 
     public init(command: String) {
         self.command = command
@@ -36,19 +38,22 @@ public struct ControlResponse: Codable, Sendable {
     public var ok: Bool
     public var error: String?
     public var text: String?
+    /// Stable machine-readable outcome for commands whose callers branch on it.
+    public var code: String?
 
-    public init(ok: Bool, error: String? = nil, text: String? = nil) {
+    public init(ok: Bool, error: String? = nil, text: String? = nil, code: String? = nil) {
         self.ok = ok
         self.error = error
         self.text = text
+        self.code = code
     }
 
-    public static func success(_ text: String? = nil) -> ControlResponse {
-        ControlResponse(ok: true, text: text)
+    public static func success(_ text: String? = nil, code: String? = nil) -> ControlResponse {
+        ControlResponse(ok: true, text: text, code: code)
     }
 
-    public static func failure(_ error: String) -> ControlResponse {
-        ControlResponse(ok: false, error: error)
+    public static func failure(_ error: String, code: String? = nil) -> ControlResponse {
+        ControlResponse(ok: false, error: error, code: code)
     }
 }
 
