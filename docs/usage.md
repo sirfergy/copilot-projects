@@ -88,7 +88,9 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 ## Native session workflows
 
 With Copilot CLI 1.0.84 or newer on SDK protocol 3, the tracker offers native
-session controls to the desktop and optional integrations. Separately built iOS and web composers
+session controls to the desktop and optional integrations. This also requires Copilot CLI
+experimental features; see [Copilot CLI integration](#copilot-cli-integration-automatic-status).
+Separately built iOS and web composers
 can **Run after current task** or **Steer current task** without clearing the
 desktop CLI draft. **Stop task** requests cancellation without closing the session,
 shell, or dtach session. Terminal controls remain available for other TUIs and
@@ -465,8 +467,14 @@ for optional integrations; image association always precedes windowing.
 The app also installs a read-only Copilot extension at
 `~/.copilot/extensions/copilot-projects-tracker/extension.mjs`. It uses Copilot's session event
 stream and SDK metadata queries to report queued schedules, coordinator activity, and active
-subagents. Existing CLI sessions must reload the tracker extension or use `/restart` after
-installing/upgrading it. Wait for current work and interactive prompts to finish before restarting.
+subagents. Copilot CLI currently loads extensions only when experimental features are enabled.
+Run `/experimental on` once before starting app-managed sessions, or pass
+`--experimental` when launching Copilot manually. Without it, hook-based status and terminal
+reattach still work, but the completed-turn drawer, tracker-backed session details, native session
+controls, and reboot conversation resume are unavailable. Existing CLI sessions must use
+`/restart` after enabling experimental features. After installing or upgrading the tracker, reload
+the extension or use `/restart`. Wait for current work and interactive prompts to finish before
+restarting.
 Relaunching Copilot Projects only reattaches the terminals; it does not reload their extensions.
 
 While the app is running, the first elicitation or permission prompt and each successfully
