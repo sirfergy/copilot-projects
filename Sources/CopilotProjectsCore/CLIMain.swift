@@ -14,6 +14,7 @@ public enum CLIMain {
         "list-status", "ls",
         "new-project",
         "new-session",
+        "new-copilot-session",
         "rename-project",
         "focus",
         "attach",
@@ -109,6 +110,8 @@ public enum CLIMain {
             return attachSession(rest)
         case "resolve-session":
             return resolveSession(rest)
+        case "new-copilot-session":
+            return newCopilotSession(rest, environment: environment)
         default:
             break
         }
@@ -222,6 +225,78 @@ public enum CLIMain {
         }
         print(sessionId)
         return 0
+    }
+
+    // MARK: - new-copilot-session (automation)
+
+    public static let maximumPromptBytes = 8_192
+
+    /// Exit statuses by response code, so automation can tell a retryable failure
+    /// from a terminal one. An older app answers `unknown command` without a code (1).
+    static func exitStatus(forCode code: String?) -> Int32 {
+        switch code {
+        case "bad-request": return 2
+        case "conflict": return 3
+        case "gone": return 4
+        case "unavailable", "persistence-unavailable": return 5
+        case "unknown-project": return 6
+        case "invalid": return 7
+        default: return 1
+        }
+    }
+
+    private static func newCopilotSession(_ args: [String], environment: [String: String]) -> Int32 {
+        let usage = "usage: copilot-projects new-copilot-session --project ID --request-id UUID "
+            + "--prompt-file PATH [--title TITLE]"
+        let parsed = parseFlags(args)
+        let allowed: Set<String> = ["project", "request-id", "prompt-file", "title"]
+        let unknown = parsed.flags.keys.filter { !allowed.contains($0) }.sorted()
+        guard unknown.isEmpty, parsed.positionals.isEmpty else {
+            let extras = unknown.map { "--\($0)" } + parsed.positionals
+            fail("new-copilot-session: unexpected \(extras.joined(separator: " "))\n\(usage)")
+            return 2
+        }
+        guard let projectId = parsed.flags["project"], !projectId.isEmpty,
+              let rawRequestId = parsed.flags["request-id"],
+              let requestId = UUID(uuidString: rawRequestId),
+              let promptPath = parsed.flags["prompt-file"], !promptPath.isEmpty else {
+            fail(usage)
+            return 2
+        }
+        let promptData: Data
+        do {
+            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: promptPath))
+            defer { try? handle.close() }
+            promptData = try handle.read(upToCount: maximumPromptBytes + 1) ?? Data()
+        } catch {
+            fail("could not read prompt file: \(error.localizedDescription)")
+            return 2
+        }
+        guard promptData.count <= maximumPromptBytes,
+              let prompt = String(data: promptData, encoding: .utf8) else {
+            fail("prompt file must be UTF-8 and at most \(maximumPromptBytes) bytes")
+            return 2
+        }
+
+        var req = ControlRequest(command: "new-copilot-session")
+        req.projectId = projectId
+        req.requestId = requestId.uuidString
+        req.prompt = prompt
+        req.title = parsed.flags["title"]
+        do {
+            let socketPath = Env.socket(environment) ?? Paths.socketPath
+            let resp = try ControlClient(socketPath: socketPath).send(req)
+            if resp.ok, let text = resp.text, !text.isEmpty {
+                print(text)
+            }
+            if !resp.ok {
+                fail(resp.error ?? "unknown error")
+            }
+            return resp.ok ? 0 : exitStatus(forCode: resp.code)
+        } catch {
+            fail("\(error)")
+            return 1
+        }
     }
 
     // MARK: - aliases
@@ -457,6 +532,8 @@ public enum CLIMain {
           copilot-projects attach [session]        Attach/resume a session (also works over SSH)
           copilot-projects new-project [name]      Create a project [--cwd DIR]
           copilot-projects new-session             Add a session to a project [--cwd DIR] [--project ID]
+          copilot-projects new-copilot-session     Start Copilot with a prompt, idempotent by request id
+              --project ID --request-id UUID --prompt-file PATH [--title T]
           copilot-projects rename-project <name>   Rename a project [--project ID]
           copilot-projects focus                   Focus a project/session [--project ID] [--session ID]
           copilot-projects ping                    Check the app is reachable

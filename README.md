@@ -164,7 +164,24 @@ copilot-projects focus --session <id>
 copilot-projects doctor
 ```
 
-The automation command `new-session` still creates a plain shell.
+The automation command `new-session` still creates a plain shell. To start Copilot
+with a prompt from a script, use `new-copilot-session`:
+
+```bash
+copilot-projects new-copilot-session --project <id> \
+  --request-id <uuid> --prompt-file prompt.md --title "Review owner/repo#123"
+```
+
+It launches Copilot in `~/Repos` with `--allow-all` and the file's contents (UTF-8,
+at most 8 KiB) as the starting prompt, then prints the session id. The request id
+is the session id, so retries are idempotent while the app remembers the request
+(about a week): replaying the same id and prompt prints the existing session, a
+different prompt or project exits 3 (conflict), and an id whose session has since
+ended exits 4 (gone, not recreated). Exit 5 means
+Copilot or persistence is temporarily unavailable; retry with the same id. Other
+exits: 2 invalid arguments, 6 unknown project, 7 missing `~/Repos`, 1 anything else
+(including an older app that does not support the command). Unknown flags are
+rejected before anything is sent.
 
 Commands inside an app-managed terminal automatically target its current
 project and session. Hooks for other agents can use:

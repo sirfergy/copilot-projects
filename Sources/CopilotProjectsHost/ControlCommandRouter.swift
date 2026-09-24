@@ -9,6 +9,7 @@ struct ControlCommandRouter {
         let notify: (String, String?, ControlRequest) -> ControlResponse
         let newProject: (ControlRequest) -> ControlResponse
         let newSession: (ControlRequest) -> ControlResponse
+        let newCopilotSession: (ControlRequest) -> ControlResponse
         let renameProject: (String, ControlRequest) -> ControlResponse
         let focus: (ControlRequest) -> ControlResponse
         let screenshot: (String?) -> ControlResponse
@@ -39,6 +40,15 @@ struct ControlCommandRouter {
             return actions.newProject(request)
         case "new-session":
             return actions.newSession(request)
+        case "new-copilot-session":
+            guard let projectId = request.projectId, !projectId.isEmpty,
+                  let requestId = request.requestId, UUID(uuidString: requestId) != nil,
+                  request.prompt != nil else {
+                return .failure(
+                    "new-copilot-session requires a project, a UUID request id, and a prompt",
+                    code: "bad-request")
+            }
+            return actions.newCopilotSession(request)
         case "rename-project":
             guard let name = request.name else {
                 return .failure("rename-project requires a name")

@@ -6181,6 +6181,7 @@ final class AppLogicTests: XCTestCase {
 
     func testControlCommandRouterValidatesBeforeDispatch() {
         var didSetStatus = false
+        var copilotRequests: [ControlRequest] = []
         let router = ControlCommandRouter(actions: .init(
             listProjects: { "" },
             listStatus: { "" },
@@ -6188,6 +6189,7 @@ final class AppLogicTests: XCTestCase {
             notify: { _, _, _ in .success() },
             newProject: { _ in .success() },
             newSession: { _ in .success() },
+            newCopilotSession: { copilotRequests.append($0); return .success("id", code: "created") },
             renameProject: { _, _ in .success() },
             focus: { _ in .success() },
             screenshot: { _ in .success() },
@@ -6197,6 +6199,31 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(router.handle(ControlRequest(command: "set-status")).ok)
         XCTAssertFalse(didSetStatus)
         XCTAssertFalse(router.handle(ControlRequest(command: "unknown")).ok)
+
+        func copilotRequest(project: String?, requestId: String?, prompt: String?) -> ControlRequest {
+            var request = ControlRequest(command: "new-copilot-session")
+            request.projectId = project
+            request.requestId = requestId
+            request.prompt = prompt
+            return request
+        }
+        let uuid = UUID().uuidString
+        for invalid in [
+            copilotRequest(project: nil, requestId: uuid, prompt: "p"),
+            copilotRequest(project: "", requestId: uuid, prompt: "p"),
+            copilotRequest(project: "p1", requestId: nil, prompt: "p"),
+            copilotRequest(project: "p1", requestId: "not-a-uuid", prompt: "p"),
+            copilotRequest(project: "p1", requestId: uuid, prompt: nil),
+        ] {
+            let response = router.handle(invalid)
+            XCTAssertFalse(response.ok)
+            XCTAssertEqual(response.code, "bad-request")
+        }
+        XCTAssertTrue(copilotRequests.isEmpty)
+        let response = router.handle(copilotRequest(project: "p1", requestId: uuid, prompt: "p"))
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.code, "created")
+        XCTAssertEqual(copilotRequests.map(\.requestId), [uuid])
     }
 
     // MARK: - Desktop Copilot session creation
@@ -7319,6 +7346,92 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testLocalCopilotSessionControlCommandIsTitledIdempotentAndValidated() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let repos = root.appendingPathComponent("Repos")
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let existing = Session(id: "existing", title: "shell", cwd: root.path)
+        let project = Project(
+            id: "p1", name: "PR Reviews", cwd: "/tmp",
+            sessions: [existing], selectedSessionId: existing.id)
+        var launches: [(id: String, executable: String?, prompt: String?, allowAll: Bool)] = []
+        let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        let model = try makeRemoteCreateModel(
+            root: root, projects: [project], selectedProjectId: project.id,
+            reposDirectory: { repos.path }, ledger: ledger,
+            onLaunch: { launches.append(($0, $1, $2, $3)) }
+        )
+        let requestId = UUID()
+        let prompt = "Review https://github.com/o/r/pull/1\r\nat head abc; $(touch SHOULD_NOT_EXIST)"
+        func request(
+            id: UUID = requestId,
+            project: String = "p1",
+            title: String? = "  Review o/r#1  ",
+            prompt: String = prompt
+        ) -> ControlRequest {
+            var request = ControlRequest(command: "new-copilot-session")
+            request.projectId = project
+            request.requestId = id.uuidString
+            request.title = title
+            request.prompt = prompt
+            return request
+        }
+
+        let created = model.handle(request())
+        XCTAssertTrue(created.ok)
+        XCTAssertEqual(created.code, "created")
+        XCTAssertEqual(created.text, requestId.uuidString)
+        XCTAssertEqual(launches.count, 1)
+        XCTAssertEqual(launches[0].id, requestId.uuidString)
+        XCTAssertEqual(launches[0].executable, "/opt/copilot/bin/copilot")
+        XCTAssertEqual(launches[0].prompt, prompt.replacingOccurrences(of: "\r\n", with: "\n"))
+        XCTAssertTrue(launches[0].allowAll)
+        let session = try XCTUnwrap(model.project("p1")?.sessions.last)
+        XCTAssertEqual(session.id, requestId.uuidString)
+        XCTAssertEqual(session.title, "Review o/r#1")
+        XCTAssertEqual(session.cwd, repos.path)
+        XCTAssertEqual(model.project("p1")?.selectedSessionId, existing.id)
+        XCTAssertFalse(try String(contentsOf: root.appendingPathComponent("state.json"), encoding: .utf8)
+            .contains("SHOULD_NOT_EXIST"))
+
+        let replay = model.handle(request(title: "A later title"))
+        XCTAssertEqual(replay.code, "existing")
+        XCTAssertEqual(replay.text, requestId.uuidString)
+        XCTAssertEqual(model.handle(request(prompt: "a different prompt")).code, "conflict")
+        XCTAssertEqual(model.handle(request(project: "missing")).code, "conflict")
+        XCTAssertEqual(launches.count, 1)
+
+        let untitled = model.handle(request(id: UUID(), title: nil))
+        XCTAssertEqual(untitled.code, "created")
+        XCTAssertEqual(model.project("p1")?.sessions.last?.title, "Copilot")
+        XCTAssertEqual(launches.count, 2)
+
+        let invalid: [(String?, String)] = [
+            ("", "p"), ("   ", "p"), ("bad\u{1b}title", "p"), ("bad\u{85}title", "p"),
+            (String(repeating: "t", count: AppModel.maximumSessionTitleLength + 1), "p"),
+            ("ok", ""), ("ok", "\u{7}"), ("ok", String(repeating: "x", count: 8_193)),
+        ]
+        for (title, prompt) in invalid {
+            let response = model.handle(request(id: UUID(), title: title, prompt: prompt))
+            XCTAssertFalse(response.ok)
+            XCTAssertEqual(response.code, "bad-request", "title \(title?.count ?? -1), prompt \(prompt.utf8.count)")
+        }
+        XCTAssertEqual(model.handle(request(id: UUID(), project: "missing")).code, "unknown-project")
+        XCTAssertEqual(launches.count, 2)
+
+        // After the session ends, the tombstone prevents a replay from launching again.
+        let restarted = try makeRemoteCreateModel(
+            root: root, projects: [Project(id: "p1", name: "PR Reviews", cwd: "/tmp")],
+            selectedProjectId: "p1", reposDirectory: { repos.path }, ledger: ledger,
+            onLaunch: { launches.append(($0, $1, $2, $3)) }
+        )
+        XCTAssertEqual(restarted.handle(request()).code, "gone")
+        XCTAssertEqual(restarted.handle(request(prompt: "a different prompt")).code, "conflict")
+        XCTAssertEqual(launches.count, 2)
+    }
+
+    @MainActor
     func testCreateRemoteDefaultConfiguredAndReviewRequestsNeverUseLegacyExemptions() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -8217,6 +8330,83 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(received?.notification, .permission)
         XCTAssertEqual(received?.sessionId, "session-1")
         XCTAssertEqual(received?.copilotSessionId, "copilot-session-1")
+    }
+
+    func testCLINewCopilotSessionSendsPromptFileAndMapsResponseCodes() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let socketPath = root.appendingPathComponent("control.sock").path
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var received: [ControlRequest] = []
+        var nextResponse = ControlResponse.success("session-1", code: "created")
+        let server = ControlServer(socketPath: socketPath) { request in
+            received.append(request)
+            return nextResponse
+        }
+        XCTAssertTrue(server.start())
+        defer { server.stop() }
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["COPILOT_PROJECTS_SOCKET"] = socketPath
+        environment["COPILOT_PROJECTS_SESSION"] = "calling-session"
+        let promptFile = root.appendingPathComponent("prompt.md")
+        let prompt = "Review https://github.com/o/r/pull/1\n-- literal --flag text\n"
+        try Data(prompt.utf8).write(to: promptFile)
+        let requestId = UUID()
+        let valid = [
+            "new-copilot-session", "--project", "p1", "--request-id", requestId.uuidString,
+            "--prompt-file", promptFile.path, "--title", "Review o/r#1",
+        ]
+
+        XCTAssertEqual(CLIMain.run(valid, environment: environment), 0)
+        XCTAssertEqual(received.count, 1)
+        XCTAssertEqual(received.last?.command, "new-copilot-session")
+        XCTAssertEqual(received.last?.projectId, "p1")
+        XCTAssertEqual(received.last?.requestId, requestId.uuidString)
+        XCTAssertEqual(received.last?.prompt, prompt)
+        XCTAssertEqual(received.last?.title, "Review o/r#1")
+        XCTAssertNil(received.last?.sessionId)
+
+        let expectedExits: [(String?, Int32)] = [
+            ("bad-request", 2), ("conflict", 3), ("gone", 4), ("unavailable", 5),
+            ("persistence-unavailable", 5), ("unknown-project", 6), ("invalid", 7), (nil, 1),
+        ]
+        for (code, status) in expectedExits {
+            nextResponse = .failure("failed", code: code)
+            XCTAssertEqual(CLIMain.run(valid, environment: environment), status, code ?? "no code")
+        }
+        nextResponse = .success("session-1", code: "existing")
+        XCTAssertEqual(CLIMain.run(valid, environment: environment), 0)
+        let sent = received.count
+
+        let oversized = root.appendingPathComponent("oversized.md")
+        try Data(repeating: 0x78, count: CLIMain.maximumPromptBytes + 1).write(to: oversized)
+        let notUTF8 = root.appendingPathComponent("latin1.md")
+        try Data([0xff, 0xfe, 0x41]).write(to: notUTF8)
+        let rejected: [[String]] = [
+            valid + ["--help"],
+            valid + ["--cwd", "/tmp"],
+            valid + ["positional"],
+            valid.filter { $0 != "--title" && $0 != "Review o/r#1" } + ["--prompt", "inline"],
+            ["new-copilot-session", "--project", "p1", "--prompt-file", promptFile.path],
+            ["new-copilot-session", "--project", "p1", "--request-id", "nope",
+             "--prompt-file", promptFile.path],
+            ["new-copilot-session", "--request-id", requestId.uuidString,
+             "--prompt-file", promptFile.path],
+            ["new-copilot-session", "--project", "p1", "--request-id", requestId.uuidString],
+            ["new-copilot-session", "--project", "p1", "--request-id", requestId.uuidString,
+             "--prompt-file", root.appendingPathComponent("missing.md").path],
+            ["new-copilot-session", "--project", "p1", "--request-id", requestId.uuidString,
+             "--prompt-file", oversized.path],
+            ["new-copilot-session", "--project", "p1", "--request-id", requestId.uuidString,
+             "--prompt-file", notUTF8.path],
+        ]
+        for args in rejected {
+            XCTAssertEqual(CLIMain.run(args, environment: environment), 2, args.joined(separator: " "))
+        }
+        XCTAssertEqual(received.count, sent)
     }
 
     func testControlServerSurvivesClientDisconnectBeforeResponse() throws {
