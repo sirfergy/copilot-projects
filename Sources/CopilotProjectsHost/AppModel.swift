@@ -482,6 +482,10 @@ final class AppModel: ObservableObject {
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.
     private(set) var liveAgentSessions: Set<String> = []
 
+    func setLiveAgentSessionsForTesting(_ sessions: Set<String>) {
+        liveAgentSessions = sessions
+    }
+
     /// Process names treated as a live coding agent for the liveness backstop.
     /// Override with COPILOT_PROJECTS_AGENT_PROCESSES (comma-separated); disable the
     /// whole check with COPILOT_PROJECTS_LIVENESS=0.

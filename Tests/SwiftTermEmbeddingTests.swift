@@ -108,17 +108,21 @@ final class SwiftTermEmbeddingTests: XCTestCase {
     @MainActor
     func testRestoredModifiedReturnUsesLiveProcessInput() async throws {
         let (view, window) = focusedInputTerminal()
+        let capture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("restored-return-\(UUID().uuidString)")
         view.startProcess(
             executable: "/bin/sh",
             args: [
                 "-c",
-                "stty raw -echo; printf READY; exec /bin/cat >/dev/null",
+                "stty raw -echo; printf READY; exec /bin/cat > \"$0\"",
+                capture.path,
             ],
             environment: []
         )
         defer {
             view.terminate()
             window.contentView = nil
+            try? FileManager.default.removeItem(at: capture)
         }
 
         let readyDeadline = ContinuousClock.now + .seconds(5)
@@ -135,18 +139,43 @@ final class SwiftTermEmbeddingTests: XCTestCase {
 
         let sends = view.process.sendCount
         let event = try keyEvent(in: view, modifiers: .command)
+        view.setMarkedText(
+            "か",
+            selectedRange: NSRange(location: 1, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        XCTAssertTrue(view.hasMarkedText())
+        XCTAssertFalse(view.sendRestoredModifiedReturnIfNeeded(
+            for: event,
+            restoredAgentLive: true,
+            copilotFooterVisible: true
+        ))
+        XCTAssertEqual(view.process.sendCount, sends)
+        view.unmarkText()
+
         view.feed(text: "selected")
         view.selectAll()
         XCTAssertTrue(view.selectionActive)
         XCTAssertTrue(view.terminalInputStateSnapshot()?.keyboardEnhancementFlags.isEmpty == true)
         XCTAssertTrue(view.sendRestoredModifiedReturnIfNeeded(
             for: event,
-            agentLive: true,
-            agentActivity: .idle
+            restoredAgentLive: true,
+            copilotFooterVisible: true
         ))
         XCTAssertEqual(view.process.sendCount, sends + 1)
         XCTAssertFalse(view.selectionActive)
         XCTAssertTrue(view.terminalInputStateSnapshot()?.keyboardEnhancementFlags.isEmpty == true)
+
+        let expected = Data("\u{1b}[13;9u".utf8)
+        let deliveredDeadline = ContinuousClock.now + .seconds(5)
+        var delivered = Data()
+        while delivered != expected, ContinuousClock.now < deliveredDeadline {
+            delivered = (try? Data(contentsOf: capture)) ?? Data()
+            if delivered != expected {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        XCTAssertEqual(delivered, expected)
     }
 
     @MainActor
@@ -154,24 +183,24 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         let (view, window) = focusedInputTerminal()
         defer { window.contentView = nil }
 
-        let rejected: [(NSEvent, Bool, FooterActivity)] = [
-            (try keyEvent(in: view, modifiers: []), true, .idle),
-            (try keyEvent(in: view, characters: "w", modifiers: .command, keyCode: 13), true, .idle),
-            (try keyEvent(in: view, modifiers: .command), false, .idle),
-            (try keyEvent(in: view, modifiers: .command), true, .unknown),
+        let rejected: [(NSEvent, Bool, Bool)] = [
+            (try keyEvent(in: view, modifiers: []), true, true),
+            (try keyEvent(in: view, characters: "w", modifiers: .command, keyCode: 13), true, true),
+            (try keyEvent(in: view, modifiers: .command), false, true),
+            (try keyEvent(in: view, modifiers: .command), true, false),
         ]
-        for (event, agentLive, activity) in rejected {
+        for (event, restoredAgentLive, copilotFooterVisible) in rejected {
             XCTAssertFalse(view.sendRestoredModifiedReturnIfNeeded(
                 for: event,
-                agentLive: agentLive,
-                agentActivity: activity
+                restoredAgentLive: restoredAgentLive,
+                copilotFooterVisible: copilotFooterVisible
             ))
         }
         view.feed(text: "\u{1b}[=10;1u")
         XCTAssertFalse(view.sendRestoredModifiedReturnIfNeeded(
             for: try keyEvent(in: view, modifiers: .command),
-            agentLive: true,
-            agentActivity: .idle
+            restoredAgentLive: true,
+            copilotFooterVisible: true
         ))
         XCTAssertEqual(
             view.terminalInputStateSnapshot()?.keyboardEnhancementFlags,
@@ -181,8 +210,8 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         _ = window.makeFirstResponder(nil)
         XCTAssertFalse(view.sendRestoredModifiedReturnIfNeeded(
             for: try keyEvent(in: view, modifiers: .command),
-            agentLive: true,
-            agentActivity: .idle
+            restoredAgentLive: true,
+            copilotFooterVisible: true
         ))
     }
 

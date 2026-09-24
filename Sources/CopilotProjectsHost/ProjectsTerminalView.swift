@@ -810,15 +810,16 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
 
     func sendRestoredModifiedReturnIfNeeded(
         for event: NSEvent,
-        agentLive: Bool,
-        agentActivity: @autoclosure () -> FooterActivity
+        restoredAgentLive: Bool,
+        copilotFooterVisible: @autoclosure () -> Bool
     ) -> Bool {
+        // Leave Return to the input method while it has marked text.
         guard event.type == .keyDown, event.keyCode == 36,
               let bytes = Self.restoredModifiedReturnBytes(for: event.modifierFlags),
-              agentLive, hasActualTerminalFocus,
+              restoredAgentLive, hasActualTerminalFocus, !hasMarkedText(),
               let state = terminalInputStateSnapshot(),
               state.keyboardEnhancementFlags.isEmpty,
-              agentActivity() != .unknown else {
+              copilotFooterVisible() else {
             return false
         }
 
@@ -897,7 +898,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// borders use, so that common box content isn't mistaken for a scrollbar.
     /// (A heavy/block border hugging the last column could still match, but that's
     /// rare and further guarded by the detection threshold + margin rule below.)
-    private static let scrollbarGlyphs: Set<Character> = [
+    nonisolated static let scrollbarGlyphs: Set<Character> = [
         "\u{2503}",                                                    // ┃ heavy vertical (the Copilot scrollbar)
         "\u{2588}", "\u{2589}", "\u{258A}", "\u{258B}", "\u{258C}",    // █ ▉ ▊ ▋ ▌
         "\u{258D}", "\u{258E}", "\u{258F}", "\u{2590}", "\u{2595}",    // ▍ ▎ ▏ ▐ ▕
