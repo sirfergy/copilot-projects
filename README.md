@@ -78,6 +78,10 @@ discards it. Closing the drawer or switching sessions dismisses that preview.
 Copilot CLI hooks and a local tracker supply automatic status and session
 details. Other command-line tools work as ordinary terminal sessions and can
 report status through the CLI.
+Tracker-backed session details and resuming Copilot conversations after a
+reboot require Copilot CLI experimental extensions; enable them with
+`/experimental on` and restart existing Copilot sessions. Terminal
+reattach after an app relaunch remains available without them.
 
 ### Compact project navigation
 
