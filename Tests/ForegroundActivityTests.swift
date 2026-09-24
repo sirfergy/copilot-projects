@@ -261,6 +261,43 @@ final class ForegroundActivityTests: XCTestCase {
             ]), .unknown)
     }
 
+    func testStrictFooterRequiresCopilotLayout() {
+        for shellLine in [
+            "zsh ~/working %",
+            "~/src % echo esc cancel",
+            "% echo press esc to interrupt",
+            "~/src % echo esc stop agents",
+            "% echo tab next tab",
+            "% cat notes # issues and @ files",
+        ] {
+            XCTAssertNotEqual(TerminalController.classifyFooterRows([shellLine]), .unknown, shellLine)
+            XCTAssertEqual(TerminalController.classifyCopilotFooterRows([shellLine]), .unknown, shellLine)
+        }
+        for rows in [
+            ["◎ Working   esc cancel"],
+            ["◎ Working   esc cancel  ┃"],
+            ["/ commands · ? help · tab next tab"],
+            ["/ commands · ? help · tab next tab┃"],
+            ["/ commands · ? help · GPT-6 Astra"],
+            ["autopilot · / commands · GPT-6 Astra"],
+            ["autopilot (limited) · / commands · GPT-6 Astra"],
+            ["ctrl+q enqueue · @ files · # issues · GPT-6 Astra"],
+            ["esc again to stop agents · GPT-6 Astra"],
+            ["/ commands · ? help · esc cancel"],
+            ["autopilot · / commands · esc to interrupt"],
+            ["@ files · # issues · esc again to cancel"],
+            ["esc again to interrupt · GPT-6 Astra"],
+            ["autopilot · / commands", "esc cancel"],
+            ["◎ Working   esc cancel", "ctrl+q enqueue · @ files · # issues"],
+            ["keep working on this", "@ files · # issues"],
+            ["esc cancel", "model picker"],
+        ] {
+            XCTAssertEqual(
+                TerminalController.classifyCopilotFooterRows(rows),
+                TerminalController.classifyFooterRows(rows), "\(rows)")
+        }
+    }
+
     @MainActor
     func testSuppressedPermissionRetainsWaitUntilMatchingCompletion() async throws {
         let fixture = try Fixture(permissionDelayNanoseconds: 5_000_000)

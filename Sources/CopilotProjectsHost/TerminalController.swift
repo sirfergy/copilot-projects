@@ -24,6 +24,10 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
 
     private(set) var exited = false
     private var isDrainingForTermination = false
+    /// True when a dtach master accepted this tab's socket before launch, so the
+    /// view attached to a shell that outlived the previous app process. Its
+    /// programs negotiated terminal modes with a view that no longer exists.
+    private(set) var reattachedToExistingShell = false
 
     /// What the Copilot CLI's own footer says it's doing. While a turn runs the
     /// footer shows "… Working   esc cancel"; back at the prompt it shows
@@ -42,6 +46,18 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     /// this to live `running` agents, so a plain shell is never read.
     @MainActor var agentActivity: FooterActivity {
         guard !exited else { return .idle }
+        return footerActivity(Self.classifyFooterRows)
+    }
+
+    /// Stricter than `agentActivity`, for rewriting keyboard input: only Copilot's
+    /// footer layout counts, so shell text that mentions a hint cannot pass.
+    @MainActor var showsCopilotFooter: Bool {
+        !exited && footerActivity(Self.classifyCopilotFooterRows) != .unknown
+    }
+
+    @MainActor private func footerActivity(
+        _ classify: ([String]) -> FooterActivity
+    ) -> FooterActivity {
         guard let input = terminalView.terminalInputStateSnapshot() else { return .unknown }
         let snapshot = terminalView.terminalStateSnapshot()
         let rows = snapshot.dimensions.rows, cols = snapshot.dimensions.cols
@@ -49,7 +65,7 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         // Only the bottom band is footer chrome; output above it must not
         // promote an old idle footer or agent-authored text to activity evidence.
         let band = snapshot.visibleRows.filter { $0.row >= max(0, rows - 8) }
-        let activity = Self.classifyFooterRows(band.map(\.text))
+        let activity = classify(band.map(\.text))
         if activity != .unknown {
             if let row = band.last(where: { !Self.isEmptyFooterRow($0.text) }) {
                 Self.debugLog("activity sid=\(sessionId.prefix(8)) alt=\(input.isAlternateBuffer) row=\(row.row)/\(rows) -> \(activity)  [\(row.text.trimmingCharacters(in: .whitespaces).suffix(90))]")
@@ -90,18 +106,49 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         guard activity == .idle else { return activity }
         // Modal chrome can sit above the shortcuts. Do not classify arbitrary
         // draft/output rows as busy just because they contain "working".
-        let hasModalHint = rows.contains { row in
-            row.split(separator: "·").contains { part in
-                let hint = part.trimmingCharacters(
-                    in: CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
-                ).lowercased()
-                guard let suffix = modalFooterHints.first(where: { hint.hasSuffix($0) }) else { return false }
-                let prefix = hint.dropLast(suffix.count).trimmingCharacters(in: .whitespaces)
-                return prefix.isEmpty
-                    || prefix.range(of: #"^[^\p{L}\p{N}]*working$"#, options: .regularExpression) != nil
-            }
+        return rows.contains(where: hasModalHint) ? .working : .idle
+    }
+
+    /// Like `classifyFooterRows`, but hints and shortcuts must be whole
+    /// `·`-separated footer parts, ignoring Copilot's scrollbar gutter.
+    nonisolated static func classifyCopilotFooterRows(_ rows: [String]) -> FooterActivity {
+        let rows = rows.map(withoutScrollbarGutter).filter { !isEmptyFooterRow($0) }
+        guard let footer = rows.last else { return .unknown }
+        if hasModalHint(footer) { return .working }
+        guard hasIdleShortcuts(footer) else { return .unknown }
+        return rows.contains(where: hasModalHint) ? .working : .idle
+    }
+
+    /// A `·`-separated footer part that is exactly a modal hint, optionally
+    /// preceded by Copilot's spinner and "Working".
+    nonisolated private static func hasModalHint(_ row: String) -> Bool {
+        row.split(separator: "·").contains { part in
+            let hint = part.trimmingCharacters(
+                in: CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+            ).lowercased()
+            guard let suffix = modalFooterHints.first(where: { hint.hasSuffix($0) }) else { return false }
+            let prefix = hint.dropLast(suffix.count).trimmingCharacters(in: .whitespaces)
+            return prefix.isEmpty
+                || prefix.range(of: #"^[^\p{L}\p{N}]*working$"#, options: .regularExpression) != nil
         }
-        return hasModalHint ? .working : .idle
+    }
+
+    nonisolated private static func hasIdleShortcuts(_ row: String) -> Bool {
+        let parts = Set(row.lowercased().split(separator: "·").map {
+            $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.controlCharacters))
+        })
+        return parts.contains("tab next tab")
+            || (parts.contains("/ commands")
+                && (parts.contains("? help") || parts.contains { $0.hasPrefix("autopilot") }))
+            || parts.isSuperset(of: ["@ files", "# issues"])
+            || parts.contains("esc again to stop agents")
+            || parts.contains("esc stop agents")
+    }
+
+    nonisolated private static func withoutScrollbarGutter(_ row: String) -> String {
+        String(row.reversed().drop {
+            $0.isWhitespace || ProjectsTerminalView.scrollbarGlyphs.contains($0)
+        }.reversed())
     }
 
     nonisolated private static func isEmptyFooterRow(_ row: String) -> Bool {
@@ -180,12 +227,50 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         // ever reach `consumeProcessOutput` before restoration begins buffering it
         // (see `ProjectsTerminalView.configureImagePersistence`).
         terminalView.configureImagePersistence(sessionId: sessionId, diskStore: kittyImageDiskStore)
+        // Before `start`: `dtach -A` makes a fresh master when none accepts.
+        reattachedToExistingShell = Self.attachesToExistingShell(
+            dtachExecutable: dtachExecutable,
+            dtachSocket: dtachSocket
+        )
         start(cwd: cwd, extraEnvironment: extraEnvironment,
               dtachExecutable: dtachExecutable, dtachSocket: dtachSocket,
               copilotSessionId: copilotSessionId,
               copilotSessionAllowAll: copilotSessionAllowAll,
               launchCopilotExecutable: launchCopilotExecutable,
               launchCopilotInitialPrompt: launchCopilotInitialPrompt)
+    }
+
+    /// Mirrors `dtach -A`, which attaches only when a master accepts a connection
+    /// and otherwise starts a fresh shell. A master drops this packetless probe
+    /// without touching the pty.
+    nonisolated static func attachesToExistingShell(
+        dtachExecutable: String?,
+        dtachSocket: String?
+    ) -> Bool {
+        guard dtachExecutable != nil, let dtachSocket else { return false }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let path = Array(dtachSocket.utf8CString)
+        // dtach reaches a longer path by changing directory, which would move this
+        // whole process; settle for the socket still being there.
+        guard path.count <= MemoryLayout.size(ofValue: address.sun_path) else {
+            return FileManager.default.fileExists(atPath: dtachSocket)
+        }
+        withUnsafeMutableBytes(of: &address.sun_path) { destination in
+            path.withUnsafeBytes { destination.copyMemory(from: $0) }
+        }
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+        return withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
+            }
+        }
+    }
+
+    func markReattachedForTesting() {
+        reattachedToExistingShell = true
     }
 
     private func start(cwd: String, extraEnvironment: [String: String],

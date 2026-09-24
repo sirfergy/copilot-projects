@@ -102,4 +102,87 @@ final class WorkspaceInputControllerTests: XCTestCase {
             XCTAssertFalse(model.projects.flatMap(\.sessions).contains { $0.id == sessions[0].id })
         }
     }
+
+    func testRestoredModifiedReturnIsConsumedOnlyInRestoredLiveCopilotTabs() throws {
+        try withWorkspace { model, input, sessions in
+            let terminal = try XCTUnwrap(model.controller(for: sessions[0].id))
+            XCTAssertFalse(terminal.reattachedToExistingShell)
+            let view = terminal.terminalView
+            let window = NSWindow(
+                contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false
+            )
+            window.contentView = view
+            defer { window.contentView = nil }
+            XCTAssertTrue(window.makeFirstResponder(view))
+            let rows = try XCTUnwrap(view.terminalInputStateSnapshot()).dimensions.rows
+            view.feed(text: String(repeating: "\r\n", count: rows) + "/ commands · ? help · tab next tab")
+            let process = try XCTUnwrap(view.process)
+            let shiftReturn = try key("\r", code: 36, modifiers: .shift)
+            let sends = process.sendCount
+
+            model.setLiveAgentSessionsForTesting([sessions[0].id])
+            XCTAssertNotNil(input.handleKeyDown(shiftReturn))
+            terminal.markReattachedForTesting()
+            model.setLiveAgentSessionsForTesting([])
+            XCTAssertNotNil(input.handleKeyDown(shiftReturn))
+            XCTAssertEqual(process.sendCount, sends)
+
+            model.setLiveAgentSessionsForTesting([sessions[0].id])
+            XCTAssertNil(input.handleKeyDown(shiftReturn))
+            XCTAssertEqual(process.sendCount, sends + 1)
+
+            for shellLine in ["zsh ~/working %", "~/src % echo esc stop agents"] {
+                view.feed(text: "\r\n" + shellLine)
+                XCTAssertNotNil(input.handleKeyDown(shiftReturn), shellLine)
+                XCTAssertEqual(process.sendCount, sends + 1, shellLine)
+            }
+        }
+    }
+
+    func testReattachRequiresADtachMasterAcceptingTheSocket() throws {
+        let root = "/tmp/cp-reattach-\(UUID().uuidString.prefix(8))"
+        let deep = root + "/" + String(repeating: "d", count: 80)
+        try FileManager.default.createDirectory(atPath: deep, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let attaches = TerminalController.attachesToExistingShell
+
+        let socket = root + "/s.sock"
+        XCTAssertFalse(attaches("/dtach", socket))
+        let listener = try listeningSocket(socket)
+        XCTAssertTrue(attaches("/dtach", socket))
+        XCTAssertFalse(attaches(nil, socket))
+        XCTAssertFalse(attaches("/dtach", nil))
+        close(listener)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: socket))
+        XCTAssertFalse(attaches("/dtach", socket))
+
+        let file = root + "/file.sock"
+        XCTAssertTrue(FileManager.default.createFile(atPath: file, contents: nil))
+        XCTAssertFalse(attaches("/dtach", file))
+
+        let long = deep + "/\(UUID().uuidString).sock"
+        XCTAssertGreaterThan(long.utf8.count, 104)
+        XCTAssertFalse(attaches("/dtach", long))
+        XCTAssertTrue(FileManager.default.createFile(atPath: long, contents: nil))
+        XCTAssertTrue(attaches("/dtach", long))
+    }
+
+    private func listeningSocket(_ path: String) throws -> Int32 {
+        let listener = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(listener, 0)
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let name = Array(path.utf8CString)
+        withUnsafeMutableBytes(of: &address.sun_path) { destination in
+            name.withUnsafeBytes { destination.copyMemory(from: $0) }
+        }
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        XCTAssertEqual(bound, 0)
+        XCTAssertEqual(listen(listener, 4), 0)
+        return listener
+    }
 }
