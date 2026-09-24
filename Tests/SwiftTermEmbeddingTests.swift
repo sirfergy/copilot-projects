@@ -1,9 +1,9 @@
 import AppKit
-import SwiftTerm
 import XCTest
 import CopilotProjectsCore
 import CopilotProjectsProtocol
 @testable import CopilotProjectsHost
+@testable import SwiftTerm
 
 final class SwiftTermEmbeddingTests: XCTestCase {
     @MainActor
@@ -53,6 +53,137 @@ final class SwiftTermEmbeddingTests: XCTestCase {
             modifierFlags: modifiers, timestamp: 0,
             windowNumber: view.window?.windowNumber ?? 0, context: nil,
             eventNumber: 1, clickCount: 1, pressure: 0))
+    }
+
+    @MainActor
+    private func keyEvent(
+        in view: ProjectsTerminalView,
+        characters: String = "\r",
+        modifiers: NSEvent.ModifierFlags,
+        keyCode: UInt16 = 36
+    ) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+            windowNumber: view.window?.windowNumber ?? 0, context: nil,
+            characters: characters, charactersIgnoringModifiers: characters,
+            isARepeat: false, keyCode: keyCode
+        ))
+    }
+
+    @MainActor
+    private func focusedInputTerminal() -> (
+        view: ProjectsTerminalView,
+        window: NSWindow
+    ) {
+        _ = NSApplication.shared
+        let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let window = NSWindow(
+            contentRect: view.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = view
+        XCTAssertTrue(window.makeFirstResponder(view))
+        return (view, window)
+    }
+
+    @MainActor
+    func testRestoredModifiedReturnBytesPreserveModifiers() {
+        let cases: [(NSEvent.ModifierFlags, String)] = [
+            (.shift, "\u{1b}[13;2u"),
+            (.option, "\u{1b}[13;3u"),
+            (.control, "\u{1b}[13;5u"),
+            (.command, "\u{1b}[13;9u"),
+        ]
+        for (modifiers, expected) in cases {
+            XCTAssertEqual(
+                ProjectsTerminalView.restoredModifiedReturnBytes(for: modifiers),
+                Array(expected.utf8)
+            )
+        }
+        XCTAssertNil(ProjectsTerminalView.restoredModifiedReturnBytes(for: []))
+    }
+
+    @MainActor
+    func testRestoredModifiedReturnUsesLiveProcessInput() async throws {
+        let (view, window) = focusedInputTerminal()
+        view.startProcess(
+            executable: "/bin/sh",
+            args: [
+                "-c",
+                "stty raw -echo; printf READY; exec /bin/cat >/dev/null",
+            ],
+            environment: []
+        )
+        defer {
+            view.terminate()
+            window.contentView = nil
+        }
+
+        let readyDeadline = ContinuousClock.now + .seconds(5)
+        var ready = false
+        while !ready, ContinuousClock.now < readyDeadline {
+            ready = view.terminalStateSnapshot().visibleRows.contains {
+                $0.text.contains("READY")
+            }
+            if !ready {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        XCTAssertTrue(ready)
+
+        let sends = view.process.sendCount
+        let event = try keyEvent(in: view, modifiers: .command)
+        view.feed(text: "selected")
+        view.selectAll()
+        XCTAssertTrue(view.selectionActive)
+        XCTAssertTrue(view.terminalInputStateSnapshot()?.keyboardEnhancementFlags.isEmpty == true)
+        XCTAssertTrue(view.sendRestoredModifiedReturnIfNeeded(
+            for: event,
+            agentLive: true,
+            agentActivity: .idle
+        ))
+        XCTAssertEqual(view.process.sendCount, sends + 1)
+        XCTAssertFalse(view.selectionActive)
+        XCTAssertTrue(view.terminalInputStateSnapshot()?.keyboardEnhancementFlags.isEmpty == true)
+    }
+
+    @MainActor
+    func testRestoredModifiedReturnLeavesOtherInputUnchanged() throws {
+        let (view, window) = focusedInputTerminal()
+        defer { window.contentView = nil }
+
+        let rejected: [(NSEvent, Bool, FooterActivity)] = [
+            (try keyEvent(in: view, modifiers: []), true, .idle),
+            (try keyEvent(in: view, characters: "w", modifiers: .command, keyCode: 13), true, .idle),
+            (try keyEvent(in: view, modifiers: .command), false, .idle),
+            (try keyEvent(in: view, modifiers: .command), true, .unknown),
+        ]
+        for (event, agentLive, activity) in rejected {
+            XCTAssertFalse(view.sendRestoredModifiedReturnIfNeeded(
+                for: event,
+                agentLive: agentLive,
+                agentActivity: activity
+            ))
+        }
+        view.feed(text: "\u{1b}[=10;1u")
+        XCTAssertFalse(view.sendRestoredModifiedReturnIfNeeded(
+            for: try keyEvent(in: view, modifiers: .command),
+            agentLive: true,
+            agentActivity: .idle
+        ))
+        XCTAssertEqual(
+            view.terminalInputStateSnapshot()?.keyboardEnhancementFlags,
+            [.reportEvents, .reportAllKeys]
+        )
+        view.feed(text: "\u{1b}[=0;1u")
+        _ = window.makeFirstResponder(nil)
+        XCTAssertFalse(view.sendRestoredModifiedReturnIfNeeded(
+            for: try keyEvent(in: view, modifiers: .command),
+            agentLive: true,
+            agentActivity: .idle
+        ))
     }
 
     @MainActor

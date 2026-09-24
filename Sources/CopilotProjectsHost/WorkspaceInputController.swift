@@ -72,6 +72,15 @@ final class WorkspaceInputController: ObservableObject {
             }
         }
         clearNumberHint()
+        if let controller = model.activeController {
+            if controller.terminalView.sendRestoredModifiedReturnIfNeeded(
+                for: event,
+                agentLive: model.liveAgentSessions.contains(controller.sessionId),
+                agentActivity: controller.agentActivity
+            ) {
+                return nil
+            }
+        }
         return event
     }
 }

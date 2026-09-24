@@ -808,6 +808,39 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         return true
     }
 
+    func sendRestoredModifiedReturnIfNeeded(
+        for event: NSEvent,
+        agentLive: Bool,
+        agentActivity: @autoclosure () -> FooterActivity
+    ) -> Bool {
+        guard event.type == .keyDown, event.keyCode == 36,
+              let bytes = Self.restoredModifiedReturnBytes(for: event.modifierFlags),
+              agentLive, hasActualTerminalFocus,
+              let state = terminalInputStateSnapshot(),
+              state.keyboardEnhancementFlags.isEmpty,
+              agentActivity() != .unknown else {
+            return false
+        }
+
+        // dtach cannot replay the CLI's keyboard negotiation into a recreated view.
+        // Send this one CSI-u key without latching a mode onto a foreground shell.
+        selectNone()
+        send(bytes)
+        return true
+    }
+
+    static func restoredModifiedReturnBytes(
+        for eventModifiers: NSEvent.ModifierFlags
+    ) -> [UInt8]? {
+        var modifiers: KittyKeyboardModifiers = []
+        if eventModifiers.contains(.shift) { modifiers.insert(.shift) }
+        if eventModifiers.contains(.option) { modifiers.insert(.alt) }
+        if eventModifiers.contains(.control) { modifiers.insert(.ctrl) }
+        if eventModifiers.contains(.command) { modifiers.insert(.super) }
+        guard !modifiers.isEmpty else { return nil }
+        return Array("\u{1b}[13;\(modifiers.rawValue + 1)u".utf8)
+    }
+
     /// Forward a plain click (button-0 press + release) to a mouse-reporting
     /// agent so its own click handling fires. The Copilot CLI tracks markdown-link
     /// rectangles and opens the URL when it receives the click — it does NOT emit
