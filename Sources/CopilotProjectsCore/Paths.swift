@@ -169,6 +169,11 @@ public enum Paths {
     }
 
     public static func transcriptOwnerLockPath(sessionId: String) -> String {
+        sessionsDir.appendingPathComponent("\(sessionId).transcript-owner.json.flock").path
+    }
+
+    /// Exclusive-create lock used by trackers before the kernel lock above.
+    public static func legacyTranscriptOwnerLockPath(sessionId: String) -> String {
         sessionsDir.appendingPathComponent("\(sessionId).transcript-owner.json.lock").path
     }
 

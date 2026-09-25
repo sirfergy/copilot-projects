@@ -4,8 +4,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
-    createReadStream, existsSync as fileExistsSync, lstatSync,
-    mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync
+    closeSync, constants as fsConstants, createReadStream,
+    existsSync as fileExistsSync, fstatSync, lstatSync, mkdirSync, openSync,
+    readFileSync, renameSync, rmSync, watch, writeFileSync
 } from "node:fs";
 import { joinSession } from "@github/copilot-sdk/extension";
 
@@ -107,7 +108,7 @@ if (validSessionId && socketPath) {
     const snapshotPath = join(sessionsDir, `${appSessionId}.agent-activity.json`);
     const transcriptPath = join(sessionsDir, `${appSessionId}.transcript.json`);
     const transcriptOwnerPath = join(sessionsDir, `${appSessionId}.transcript-owner.json`);
-    const transcriptOwnerLockPath = `${transcriptOwnerPath}.lock`;
+    const transcriptOwnerLockPath = `${transcriptOwnerPath}.flock`;
     const scheduledTurnPath = join(sessionsDir, `${appSessionId}.scheduled-turn`);
     const copilotSessionPath = join(sessionsDir, `${appSessionId}.copilot-session`);
     const allowAllPath = join(sessionsDir, `${appSessionId}.copilot-allow-all`);
@@ -642,24 +643,33 @@ if (validSessionId && socketPath) {
         }
     }
 
+    // The kernel holds this lock (O_EXLOCK) and releases it when the
+    // descriptor closes, including when the holder dies, so a crash can never
+    // leave the tab locked. The file stays after release (the host deletes it
+    // only while holding the lock); only the lock matters. It is not the
+    // `.lock` file older trackers create and unlink, so a leftover one of
+    // those, or an older tracker still running, can't block or unlock this one.
+    const exclusiveLockFlag = 0x20; // O_EXLOCK from Darwin <fcntl.h>; Node doesn't export it.
+
     function withTranscriptOwnerLock(action) {
+        let fd;
         try {
-            writeFileSync(
+            fd = openSync(
                 transcriptOwnerLockPath,
-                JSON.stringify({
-                    ...(appSessionResolution.native ? {appSessionId} : {}),
-                    copilotSessionId,
-                    pid: process.pid,
-                }),
-                { flag: "wx", mode: 0o600 }
+                fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_NONBLOCK
+                    | exclusiveLockFlag,
+                0o600
             );
         } catch {
             return false;
         }
         try {
+            // The host deletes this file only while holding its lock, so a file
+            // unlinked before we locked it no longer excludes anyone.
+            if (fstatSync(fd).nlink === 0) return false;
             return action();
         } finally {
-            removeFile(transcriptOwnerLockPath);
+            closeSync(fd);
         }
     }
 

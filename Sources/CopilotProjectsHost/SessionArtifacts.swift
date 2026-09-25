@@ -317,10 +317,22 @@ enum SessionArtifacts {
             Paths.closeSessionRequestPath(sessionId: sessionId),
             Paths.transcriptSnapshotPath(sessionId: sessionId),
             Paths.transcriptOwnerPath(sessionId: sessionId),
-            Paths.transcriptOwnerLockPath(sessionId: sessionId),
+            Paths.legacyTranscriptOwnerLockPath(sessionId: sessionId),
             Paths.transcriptQuarantinePath(sessionId: sessionId),
         ] {
             try? fm.removeItem(atPath: path)
         }
+        removeTranscriptOwnerLock(sessionId: sessionId)
+    }
+
+    /// Trackers exclude each other with a kernel lock on this file, so it is
+    /// removed only while the host holds that lock itself. A tracker still in
+    /// its critical section keeps the file, which can't block a later claim.
+    private static func removeTranscriptOwnerLock(sessionId: String) {
+        let path = Paths.transcriptOwnerLockPath(sessionId: sessionId)
+        let fd = open(path, O_RDONLY | O_NONBLOCK | O_EXLOCK | O_CLOEXEC)
+        guard fd >= 0 else { return }
+        unlink(path)
+        close(fd)
     }
 }

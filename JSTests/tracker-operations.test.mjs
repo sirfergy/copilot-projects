@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs";
 import { registerHooks, syncBuiltinESMExports } from "node:module";
 import { createHash, randomUUID } from "node:crypto";
@@ -20,6 +22,7 @@ const originalClearInterval = globalThis.clearInterval;
 const originalWatch = fs.watch;
 const originalWriteFileSync = fs.writeFileSync;
 const originalCreateReadStream = fs.createReadStream;
+const originalOpenSync = fs.openSync;
 const realMkdirSync = fs.mkdirSync.bind(fs);
 const realReadFileSync = fs.readFileSync.bind(fs);
 const realWriteFileSync = fs.writeFileSync.bind(fs);
@@ -46,6 +49,14 @@ fs.writeFileSync = (path, ...args) => {
     runtime.activityWrites.push(JSON.parse(String(args[0])));
   }
   return result;
+};
+fs.openSync = (path, ...args) => {
+  const fd = originalOpenSync(path, ...args);
+  const runtime = [...runtimes].find((entry) =>
+    String(path).startsWith(entry.root)
+  );
+  runtime?.afterOpen?.(String(path));
+  return fd;
 };
 fs.createReadStream = (path, ...args) => {
   const stream = originalCreateReadStream(path, ...args);
@@ -80,6 +91,7 @@ test.after(() => {
   fs.watch = originalWatch;
   fs.writeFileSync = originalWriteFileSync;
   fs.createReadStream = originalCreateReadStream;
+  fs.openSync = originalOpenSync;
   syncBuiltinESMExports();
   realRmSync(runtimeParent, { recursive: true, force: true });
 });
@@ -299,7 +311,7 @@ async function waitFor(predicate, message, timeoutMs = 2_000) {
   assert.fail(message);
 }
 
-async function createRuntime(t, configure = () => {}) {
+async function createRuntime(t, configure = () => {}, { ready = true } = {}) {
   const root = join(runtimeParent, uuid());
   const sessions = join(root, "sessions");
   realMkdirSync(sessions, { recursive: true });
@@ -316,7 +328,7 @@ async function createRuntime(t, configure = () => {}) {
   };
   runtime.session = new FakeSession(runtime.copilotSessionId);
   runtime.allowAllPath = join(sessions, `${runtime.appSessionId}.copilot-allow-all`);
-  configure(runtime.session, runtime);
+  await configure(runtime.session, runtime);
   runtimes.add(runtime);
 
   const environmentKeys = [
@@ -354,18 +366,22 @@ async function createRuntime(t, configure = () => {}) {
   runtime.ownerPath = join(sessions, `${runtime.appSessionId}.transcript-owner.json`);
   try {
     await import(`${pathToFileURL(extensionPath).href}?runtime=${uuid()}`);
-    await waitFor(
-      () => realExistsSync(runtime.snapshotPath),
-      "tracker did not publish its initial snapshot"
-    );
-    await waitFor(
-      () => readSnapshot(runtime).availableModels?.length === 1,
-      "tracker did not publish the fake SDK model catalog"
-    );
-    await waitFor(
-      () => readSnapshot(runtime).workflow?.observedAtMilliseconds > 0,
-      "tracker did not settle its initial workflow observation"
-    );
+    if (!ready) {
+      await waitFor(() => runtime.intervalCallback, "tracker did not finish starting");
+    } else {
+      await waitFor(
+        () => realExistsSync(runtime.snapshotPath),
+        "tracker did not publish its initial snapshot"
+      );
+      await waitFor(
+        () => readSnapshot(runtime).availableModels?.length === 1,
+        "tracker did not publish the fake SDK model catalog"
+      );
+      await waitFor(
+        () => readSnapshot(runtime).workflow?.observedAtMilliseconds > 0,
+        "tracker did not settle its initial workflow observation"
+      );
+    }
   } finally {
     globalThis.setInterval = savedSetInterval;
     globalThis.clearInterval = savedClearInterval;
@@ -3099,4 +3115,77 @@ test("an accepted operation orphaned by ownership loss is never invoked twice", 
     "execution-ownership-lost"
   );
   assert.equal(realExistsSync(runtime.userInputPath), false);
+});
+
+// A displaceable owner forces the tracker through the owner lock to claim.
+function seedDeadOwner(runtime) {
+  const ownerPath = join(runtime.sessions, `${runtime.appSessionId}.transcript-owner.json`);
+  realWriteFileSync(ownerPath, JSON.stringify({
+    appSessionId: runtime.appSessionId,
+    copilotSessionId: uuid(),
+    pid: 0,
+  }));
+  return ownerPath;
+}
+
+test("an older tracker's leftover lock file does not block the tab from claiming", async (t) => {
+  const runtime = await createRuntime(t, (_session, runtime) => {
+    realWriteFileSync(`${seedDeadOwner(runtime)}.lock`, "");
+  });
+  const owner = JSON.parse(realReadFileSync(runtime.ownerPath, "utf8"));
+  assert.equal(owner.copilotSessionId, runtime.copilotSessionId);
+  assert.equal(owner.pid, process.pid);
+});
+
+test("another process holding the owner lock blocks the claim until it dies", async (t) => {
+  let holder;
+  let lockPath;
+  const runtime = await createRuntime(t, async (_session, runtime) => {
+    lockPath = `${seedDeadOwner(runtime)}.flock`;
+    // O_EXLOCK is 0x20 in Darwin <fcntl.h>; Node doesn't export it.
+    holder = spawn(process.execPath, ["-e", `
+      const { openSync, constants: c } = require("node:fs");
+      openSync(${JSON.stringify(lockPath)}, c.O_RDWR | c.O_CREAT | c.O_NONBLOCK | 0x20, 0o600);
+      process.stdout.write("locked");
+      setInterval(() => {}, 1_000);
+    `]);
+    t.after(() => holder.kill("SIGKILL"));
+    const [output] = await once(holder.stdout, "data");
+    assert.equal(String(output), "locked");
+  }, { ready: false });
+  assert.equal(realExistsSync(runtime.snapshotPath), false);
+  runtime.intervalCallback();
+  assert.equal(realExistsSync(runtime.snapshotPath), false);
+
+  holder.kill("SIGKILL");
+  await once(holder, "exit");
+  assert.equal(realExistsSync(lockPath), true);
+  runtime.intervalCallback();
+  await waitFor(
+    () => realExistsSync(runtime.snapshotPath),
+    "tracker did not claim once the lock holder died"
+  );
+  assert.equal(
+    JSON.parse(realReadFileSync(runtime.ownerPath, "utf8")).copilotSessionId,
+    runtime.copilotSessionId
+  );
+});
+
+test("an owner lock file unlinked before it was locked does not admit a claim", async (t) => {
+  let lockPath;
+  const runtime = await createRuntime(t, (_session, runtime) => {
+    lockPath = `${seedDeadOwner(runtime)}.flock`;
+    // Leaves the tracker locking an unlinked file, as when host cleanup lands
+    // between the tracker's lookup and its lock.
+    runtime.afterOpen = (path) => { if (path === lockPath) realRmSync(path, { force: true }); };
+  }, { ready: false });
+  runtime.intervalCallback();
+  assert.equal(realExistsSync(runtime.snapshotPath), false);
+
+  runtime.afterOpen = null;
+  runtime.intervalCallback();
+  await waitFor(
+    () => realExistsSync(runtime.snapshotPath),
+    "tracker did not claim once its lock file stayed linked"
+  );
 });

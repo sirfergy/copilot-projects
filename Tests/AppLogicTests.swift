@@ -6038,6 +6038,7 @@ final class AppLogicTests: XCTestCase {
             Paths.transcriptSnapshotPath(sessionId: sessionId),
             Paths.transcriptOwnerPath(sessionId: sessionId),
             Paths.transcriptOwnerLockPath(sessionId: sessionId),
+            Paths.legacyTranscriptOwnerLockPath(sessionId: sessionId),
         ]
         for path in paths {
             try Data("{}".utf8).write(to: URL(fileURLWithPath: path))
@@ -6049,6 +6050,21 @@ final class AppLogicTests: XCTestCase {
         for path in paths {
             XCTAssertFalse(FileManager.default.fileExists(atPath: path))
         }
+    }
+
+    func testSessionArtifactCleanupKeepsAnOwnerLockATrackerHolds() throws {
+        let sessionId = UUID().uuidString
+        Paths.ensureStateDir()
+        let lockPath = Paths.transcriptOwnerLockPath(sessionId: sessionId)
+        let holder = open(lockPath, O_RDWR | O_CREAT | O_NONBLOCK | O_EXLOCK | O_CLOEXEC, 0o600)
+        XCTAssertGreaterThanOrEqual(holder, 0)
+
+        SessionArtifacts.removeFiles(sessionId: sessionId)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath))
+
+        close(holder)
+        SessionArtifacts.removeFiles(sessionId: sessionId)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lockPath))
     }
 
     func testSessionArtifactCleanupRemovesResponseArtifacts() throws {
