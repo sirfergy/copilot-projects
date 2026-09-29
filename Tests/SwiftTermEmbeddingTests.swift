@@ -88,6 +88,19 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         return (view, window)
     }
 
+    /// Polls a PTY capture file until it holds `expected` or five seconds pass.
+    private func captured(at url: URL, awaiting expected: Data) async throws -> Data {
+        let deadline = ContinuousClock.now + .seconds(5)
+        var data = Data()
+        while data != expected, ContinuousClock.now < deadline {
+            data = (try? Data(contentsOf: url)) ?? Data()
+            if data != expected {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        return data
+    }
+
     @MainActor
     func testRestoredModifiedReturnBytesPreserveModifiers() {
         let cases: [(NSEvent.ModifierFlags, String)] = [
@@ -167,14 +180,54 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         XCTAssertTrue(view.terminalInputStateSnapshot()?.keyboardEnhancementFlags.isEmpty == true)
 
         let expected = Data("\u{1b}[13;9u".utf8)
-        let deliveredDeadline = ContinuousClock.now + .seconds(5)
-        var delivered = Data()
-        while delivered != expected, ContinuousClock.now < deliveredDeadline {
-            delivered = (try? Data(contentsOf: capture)) ?? Data()
-            if delivered != expected {
+        let delivered = try await captured(at: capture, awaiting: expected)
+        XCTAssertEqual(delivered, expected)
+    }
+
+    @MainActor
+    func testRemoteCommandScopesFocusWhenTheResponderWindowIsNotKey() async throws {
+        let (view, window) = focusedInputTerminal()
+        try XCTSkipIf(window.isKeyWindow, "Requires a first responder in a background window")
+        let capture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("remote-focus-\(UUID().uuidString)")
+        view.startProcess(
+            executable: "/bin/sh",
+            args: [
+                "-c",
+                "stty raw -echo; printf READY; exec /bin/cat > \"$0\"",
+                capture.path,
+            ],
+            environment: []
+        )
+        defer {
+            view.terminate()
+            window.contentView = nil
+            try? FileManager.default.removeItem(at: capture)
+        }
+
+        let readyDeadline = ContinuousClock.now + .seconds(5)
+        var ready = false
+        while !ready, ContinuousClock.now < readyDeadline {
+            ready = view.terminalStateSnapshot().visibleRows.contains {
+                $0.text.contains("READY")
+            }
+            if !ready {
                 try await Task.sleep(for: .milliseconds(5))
             }
         }
+        XCTAssertTrue(ready)
+
+        // DECSET 1004 reports the current state, which is focus-out here. The
+        // report is delivered after the terminal lock is released, so let it
+        // land before the remote command, as it does when the CLI enables it.
+        view.feed(text: "\u{1b}[?1004h")
+        let focusOut = Data("\u{1b}[O".utf8)
+        let reported = try await captured(at: capture, awaiting: focusOut)
+        XCTAssertEqual(reported, focusOut)
+        XCTAssertTrue(view.sendRemoteCommand("hi", forceFocusReporting: true))
+
+        let expected = Data("\u{1b}[O\u{1b}[Ihi\r\u{1b}[O".utf8)
+        let delivered = try await captured(at: capture, awaiting: expected)
         XCTAssertEqual(delivered, expected)
     }
 

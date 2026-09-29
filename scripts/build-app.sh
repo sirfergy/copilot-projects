@@ -161,25 +161,21 @@ if [ -d "$DTACH_SRC" ]; then
   fi
 fi
 
-# Keep the source resource bundle as a fallback, and compile a default Metal
-# library that Bundle.main can load without touching SwiftPM's developer-only
-# absolute Bundle.module fallback path.
-if [ -d "$RESOURCE_BUILD_DIR/SwiftTerm_SwiftTerm.bundle" ]; then
-  cp -R "$RESOURCE_BUILD_DIR/SwiftTerm_SwiftTerm.bundle" "$RES/"
-  SHADER_RESOURCES="$(bundle_resources "$RESOURCE_BUILD_DIR/SwiftTerm_SwiftTerm.bundle")"
-  SHADER_SOURCE="$SHADER_RESOURCES/Shaders.metal"
-  if [ -f "$SHADER_SOURCE" ]; then
-    echo "==> compiling SwiftTerm Metal shaders"
-    SHADER_TMP="$(mktemp -d -t copilot-projects-shaders)"
-    AIR_FILE="$SHADER_TMP/Shaders.air"
-    xcrun -sdk macosx metal -std=metal3.0 -mmacosx-version-min=26.0 \
-      -c "$SHADER_SOURCE" -o "$AIR_FILE"
-    xcrun -sdk macosx metallib "$AIR_FILE" -o "$RES/default.metallib"
-    rm -rf "$SHADER_TMP"
-  elif [ -f "$SHADER_RESOURCES/default.metallib" ]; then
-    cp "$SHADER_RESOURCES/default.metallib" "$RES/default.metallib"
-  fi
+# SwiftTerm embeds its shader source and compiles it at runtime unless
+# Bundle.main already has a default Metal library. Precompile that library from
+# the resolved checkout so terminals skip the runtime compile.
+SHADER_SOURCE="$ROOT/.build/checkouts/SwiftTerm/Sources/SwiftTerm/Apple/Metal/Shaders.metal"
+if [ ! -f "$SHADER_SOURCE" ]; then
+  echo "error: $SHADER_SOURCE is missing; update build-app.sh for SwiftTerm's shader layout." >&2
+  exit 1
 fi
+echo "==> compiling SwiftTerm Metal shaders"
+SHADER_TMP="$(mktemp -d -t copilot-projects-shaders)"
+AIR_FILE="$SHADER_TMP/Shaders.air"
+xcrun -sdk macosx metal -std=metal3.0 -mmacosx-version-min=26.0 \
+  -c "$SHADER_SOURCE" -o "$AIR_FILE"
+xcrun -sdk macosx metallib "$AIR_FILE" -o "$RES/default.metallib"
+rm -rf "$SHADER_TMP"
 
 # SwiftPM resource bundles the standalone host loads at runtime.
 # They are resolved from Contents/Resources only — there is no developer-path

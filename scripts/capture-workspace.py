@@ -117,8 +117,8 @@ def build_capture_host(root):
     shutil.copy2(build / "workspace-capture-host", executable)
     resources = contents / "Resources"
     resources.mkdir()
-    for name in ("SwiftTerm_SwiftTerm.bundle", "copilot-projects_CopilotProjectsCore.bundle"):
-        shutil.copytree(build / name, resources / name)
+    name = "copilot-projects_CopilotProjectsCore.bundle"
+    shutil.copytree(build / name, resources / name)
     with (contents / "Info.plist").open("wb") as plist:
         plistlib.dump({
             "CFBundleName": "Workspace Capture",

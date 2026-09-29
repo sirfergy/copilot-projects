@@ -37,11 +37,11 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// Enter fires, so an overlapping remote prompt can't interleave its paste
     /// bytes into a half-submitted one. Main-actor only.
     private var isSubmittingRemotePrompt = false
-    /// SwiftTerm emits focus events on first-responder transitions. Inspect the
-    /// responder directly instead of its `hasFocus` getter, which also folds in
-    /// whether the window is key and can disagree with the last wire event.
+    /// SwiftTerm reports focus-in only while `hasFocus` (first responder in the
+    /// key window). Remote input scopes its own focus-in/out whenever the PTY
+    /// last saw focus-out, including when the window is merely in the background.
     private var hasActualTerminalFocus: Bool {
-        window?.firstResponder === self
+        hasFocus
     }
     /// Captures this session's Kitty inline images for remote clients. One
     /// instance per terminal view (never shared/global), fed on the main actor.
@@ -816,7 +816,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         // Leave Return to the input method while it has marked text.
         guard event.type == .keyDown, event.keyCode == 36,
               let bytes = Self.restoredModifiedReturnBytes(for: event.modifierFlags),
-              restoredAgentLive, hasActualTerminalFocus, !hasMarkedText(),
+              restoredAgentLive, window?.firstResponder === self, !hasMarkedText(),
               let state = terminalInputStateSnapshot(),
               state.keyboardEnhancementFlags.isEmpty,
               copilotFooterVisible() else {
