@@ -31,6 +31,12 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
     }
 
+    /// Lets a test drive key status without a window server.
+    private final class StubKeyWindow: NSWindow {
+        var stubIsKey = false
+        override var isKeyWindow: Bool { stubIsKey }
+    }
+
     private final class ScrollEvent: NSEvent {
         var point: NSPoint = .zero
         var delta: CGFloat = 0
@@ -185,9 +191,17 @@ final class SwiftTermEmbeddingTests: XCTestCase {
     }
 
     @MainActor
-    func testRemoteCommandScopesFocusWhenTheResponderWindowIsNotKey() async throws {
-        let (view, window) = focusedInputTerminal()
-        try XCTSkipIf(window.isKeyWindow, "Requires a first responder in a background window")
+    func testRemoteInputScopesFocusFromTheLastDeliveredReport() async throws {
+        _ = NSApplication.shared
+        let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let window = StubKeyWindow(
+            contentRect: view.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = view
+        XCTAssertTrue(window.makeFirstResponder(view))
         let capture = FileManager.default.temporaryDirectory
             .appendingPathComponent("remote-focus-\(UUID().uuidString)")
         view.startProcess(
@@ -217,18 +231,51 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         }
         XCTAssertTrue(ready)
 
-        // DECSET 1004 reports the current state, which is focus-out here. The
-        // report is delivered after the terminal lock is released, so let it
-        // land before the remote command, as it does when the CLI enables it.
-        view.feed(text: "\u{1b}[?1004h")
-        let focusOut = Data("\u{1b}[O".utf8)
-        let reported = try await captured(at: capture, awaiting: focusOut)
-        XCTAssertEqual(reported, focusOut)
-        XCTAssertTrue(view.sendRemoteCommand("hi", forceFocusReporting: true))
+        var expected = ""
+        func expect(_ bytes: String) async throws {
+            expected += bytes
+            let wanted = Data(expected.utf8)
+            let delivered = try await captured(at: capture, awaiting: wanted)
+            XCTAssertEqual(
+                String(decoding: delivered, as: UTF8.self).debugDescription,
+                expected.debugDescription
+            )
+        }
 
-        let expected = Data("\u{1b}[O\u{1b}[Ihi\r\u{1b}[O".utf8)
-        let delivered = try await captured(at: capture, awaiting: expected)
-        XCTAssertEqual(delivered, expected)
+        // A first responder in a background window reports focus-out.
+        view.feed(text: "\u{1b}[?1004h")
+        try await expect("\u{1b}[O")
+
+        XCTAssertTrue(view.sendRemoteCommand("a", forceFocusReporting: true))
+        try await expect("\u{1b}[Ia\r\u{1b}[O")
+        XCTAssertTrue(view.sendRemotePrompt("p"))
+        try await expect("\u{1b}[I\u{1b}\u{1b}\u{1b}[200~p\u{1b}[201~\u{1b}[I\r\u{1b}[O")
+
+        // Activation flips hasFocus before SwiftTerm's focus-in reaches the PTY,
+        // so a command handled in between must still be scoped.
+        window.stubIsKey = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        XCTAssertTrue(view.sendRemoteCommand("b", forceFocusReporting: true))
+        try await expect("\u{1b}[Ib\r\u{1b}[O\u{1b}[I")
+
+        XCTAssertTrue(view.sendRemoteCommand("c", forceFocusReporting: true))
+        XCTAssertTrue(view.sendRemoteKey("enter", forceFocusReporting: true))
+        try await expect("c\r\r")
+
+        // The program still believes it is focused until the focus-out lands.
+        window.stubIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        XCTAssertTrue(view.sendRemoteKey("enter", forceFocusReporting: true))
+        try await expect("\r\u{1b}[O")
+
+        // Re-enabling queues a focus-out report and activation queues focus-in
+        // behind it; they reach the PTY in order and the later one decides.
+        view.feed(text: "\u{1b}[?1004l\u{1b}[?1004h")
+        window.stubIsKey = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        try await expect("\u{1b}[O\u{1b}[I")
+        XCTAssertTrue(view.sendRemoteCommand("d", forceFocusReporting: true))
+        try await expect("d\r")
     }
 
     @MainActor

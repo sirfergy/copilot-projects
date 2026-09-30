@@ -37,11 +37,13 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     /// Enter fires, so an overlapping remote prompt can't interleave its paste
     /// bytes into a half-submitted one. Main-actor only.
     private var isSubmittingRemotePrompt = false
-    /// SwiftTerm reports focus-in only while `hasFocus` (first responder in the
-    /// key window). Remote input scopes its own focus-in/out whenever the PTY
-    /// last saw focus-out, including when the window is merely in the background.
-    private var hasActualTerminalFocus: Bool {
-        hasFocus
+    /// The DECSET 1004 report SwiftTerm last wrote to the PTY, if any. SwiftTerm
+    /// updates `hasFocus` before its report reaches the PTY (a main-queue hop),
+    /// so remote input scopes its own focus-in/out from what the program was
+    /// actually told. Without a report, fall back to the view's own focus.
+    private var lastDeliveredFocusReport: Bool?
+    private var programHasFocus: Bool {
+        lastDeliveredFocusReport ?? hasFocus
     }
     /// Captures this session's Kitty inline images for remote clients. One
     /// instance per terminal view (never shared/global), fed on the main actor.
@@ -95,6 +97,17 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         } catch {
             preconditionFailure("Output consumer must be configured before process startup: \(error)")
         }
+    }
+
+    /// Terminal responses reach the PTY here, after SwiftTerm's main-queue hop.
+    /// Focus reports are sent as exactly `CSI I` or `CSI O`.
+    override func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        if data.elementsEqual(Self.remoteFocusInBytes) {
+            lastDeliveredFocusReport = true
+        } else if data.elementsEqual(Self.remoteFocusOutBytes) {
+            lastDeliveredFocusReport = false
+        }
+        super.send(source: source, data: data)
     }
 
     /// SwiftTerm prints launch failures (and TerminalController its retry note)
@@ -405,7 +418,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
               let bytes = Self.remoteCommandBytes(
                 value,
                 keyboardEnhancementFlags: state.keyboardEnhancementFlags,
-                scopedFocus: forceFocusReporting && !hasActualTerminalFocus
+                scopedFocus: forceFocusReporting && !programHasFocus
               ) else {
             return false
         }
@@ -419,7 +432,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
               terminalInputStateSnapshot() != nil else {
             return false
         }
-        let startedWithScopedFocus = !hasActualTerminalFocus
+        let startedWithScopedFocus = !programHasFocus
         guard let paste = Self.remotePromptPasteBytes(
             value,
             scopedFocus: startedWithScopedFocus
@@ -444,7 +457,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                 self.isSubmittingRemotePrompt = false
                 if startedWithScopedFocus,
                    !submitted,
-                   !self.hasActualTerminalFocus,
+                   !self.programHasFocus,
                    self.terminalInputStateSnapshot() != nil {
                     self.send(Self.remoteFocusOutBytes)
                 }
@@ -474,7 +487,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             guard let state = self.terminalInputStateSnapshot() else { return }
             self.send(Self.remoteSubmitBytes(
                 keyboardEnhancementFlags: state.keyboardEnhancementFlags,
-                scopedFocus: !self.hasActualTerminalFocus
+                scopedFocus: !self.programHasFocus
             ))
             submitted = true
         }
@@ -595,7 +608,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             guard let state = terminalInputStateSnapshot() else { return false }
             send(Self.remoteSubmitBytes(
                 keyboardEnhancementFlags: state.keyboardEnhancementFlags,
-                scopedFocus: !hasActualTerminalFocus
+                scopedFocus: !programHasFocus
             ))
             return true
         }
