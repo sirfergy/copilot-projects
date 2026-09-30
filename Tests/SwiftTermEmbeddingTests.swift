@@ -278,6 +278,33 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         try await expect("d\r")
     }
 
+    /// Remote Kitty capture only understands direct (`t=d`) frames. That is
+    /// complete only while the terminal refuses local media, so clients that
+    /// probe for file or shared-memory transfer fall back to direct frames.
+    @MainActor
+    func testKittyLocalMediaQueriesAreRefusedSoClientsSendDirectFrames() async throws {
+        let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let delegate = MouseDelegate()
+        view.terminalDelegate = delegate
+        let path = Data("/tmp/tty-graphics-protocol-probe".utf8).base64EncodedString()
+        let pixel = Data([0xff, 0x00, 0x00, 0xff]).base64EncodedString()
+        for (id, medium) in [(1, "f"), (2, "t"), (3, "s")] {
+            view.feed(text: "\u{1b}_Gi=\(id),a=q,t=\(medium),f=32,s=1,v=1;\(path)\u{1b}\\")
+        }
+        view.feed(text: "\u{1b}_Gi=4,a=q,t=d,f=32,s=1,v=1;\(pixel)\u{1b}\\")
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while delegate.writes.count < 4, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(delegate.writes.map { String(decoding: $0, as: UTF8.self) }, [
+            "\u{1b}_Gi=1;EINVAL: unsupported medium\u{1b}\\",
+            "\u{1b}_Gi=2;EINVAL: unsupported medium\u{1b}\\",
+            "\u{1b}_Gi=3;EINVAL: unsupported medium\u{1b}\\",
+            "\u{1b}_Gi=4;OK\u{1b}\\",
+        ])
+    }
+
     @MainActor
     func testRestoredModifiedReturnLeavesOtherInputUnchanged() throws {
         let (view, window) = focusedInputTerminal()
