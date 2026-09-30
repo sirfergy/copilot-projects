@@ -770,6 +770,10 @@ final class AppModel: ObservableObject {
         c.onTitle = { [weak self] title in self?.updateTitle(sessionId: sessionId, title: title) }
         c.onDirectory = { [weak self] dir in self?.updateCwd(sessionId: sessionId, dir: dir) }
         c.onExit = { [weak self] _ in self?.handleExit(sessionId: sessionId) }
+        c.shouldRetryLaunch = { [weak self, weak c] in
+            guard let self, let c else { return false }
+            return !self.isTerminating && self.controllers[sessionId] === c
+        }
         controllers[sessionId] = c
         return c
     }

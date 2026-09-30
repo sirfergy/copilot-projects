@@ -21,6 +21,10 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     var onTitle: ((String) -> Void)?
     var onDirectory: ((String?) -> Void)?
     var onExit: ((Int32?) -> Void)?
+    /// Consulted before relaunching after a launch failure; the model answers
+    /// false once this controller no longer backs a live tab.
+    var shouldRetryLaunch: (() -> Bool)?
+    var retryDelay: (Int) -> Duration = TerminalController.launchRetryDelay(afterFailures:)
 
     private(set) var exited = false
     private var isDrainingForTermination = false
@@ -28,6 +32,13 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     /// view attached to a shell that outlived the previous app process. Its
     /// programs negotiated terminal modes with a view that no longer exists.
     private(set) var reattachedToExistingShell = false
+    /// Probes for a surviving master, then starts the process with the
+    /// arguments this controller was created with.
+    private var launch: (() -> Void)?
+    private(set) var launchAttempts = 0
+    private var launchFailures = 0
+    private var launchRetry: Task<Void, Never>?
+    private var launchRetired = false
 
     /// What the Copilot CLI's own footer says it's doing. While a turn runs the
     /// footer shows "… Working   esc cancel"; back at the prompt it shows
@@ -193,10 +204,11 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
          dtachExecutable: String?, dtachSocket: String?, copilotSessionId: String? = nil,
          copilotSessionAllowAll: Bool = false, launchCopilotExecutable: String? = nil,
          launchCopilotInitialPrompt: String? = nil,
-         kittyImageDiskStore: RemoteKittyImageDiskStore = .shared) {
+         kittyImageDiskStore: RemoteKittyImageDiskStore = .shared,
+         view: ProjectsTerminalView? = nil) {
         self.sessionId = sessionId
         self.startingPrompt = launchCopilotInitialPrompt
-        self.terminalView = ProjectsTerminalView(
+        self.terminalView = view ?? ProjectsTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         super.init()
         terminalView.processDelegate = self
@@ -227,17 +239,23 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         // ever reach `consumeProcessOutput` before restoration begins buffering it
         // (see `ProjectsTerminalView.configureImagePersistence`).
         terminalView.configureImagePersistence(sessionId: sessionId, diskStore: kittyImageDiskStore)
-        // Before `start`: `dtach -A` makes a fresh master when none accepts.
-        reattachedToExistingShell = Self.attachesToExistingShell(
-            dtachExecutable: dtachExecutable,
-            dtachSocket: dtachSocket
-        )
-        start(cwd: cwd, extraEnvironment: extraEnvironment,
-              dtachExecutable: dtachExecutable, dtachSocket: dtachSocket,
-              copilotSessionId: copilotSessionId,
-              copilotSessionAllowAll: copilotSessionAllowAll,
-              launchCopilotExecutable: launchCopilotExecutable,
-              launchCopilotInitialPrompt: launchCopilotInitialPrompt)
+        launch = { [weak self] in
+            guard let self else { return }
+            // Before `start`: `dtach -A` makes a fresh master when none accepts.
+            // Probe on every attempt: a failed launch can leave a master behind.
+            self.reattachedToExistingShell = Self.attachesToExistingShell(
+                dtachExecutable: dtachExecutable,
+                dtachSocket: dtachSocket
+            )
+            self.launchAttempts += 1
+            self.start(cwd: cwd, extraEnvironment: extraEnvironment,
+                       dtachExecutable: dtachExecutable, dtachSocket: dtachSocket,
+                       copilotSessionId: copilotSessionId,
+                       copilotSessionAllowAll: copilotSessionAllowAll,
+                       launchCopilotExecutable: launchCopilotExecutable,
+                       launchCopilotInitialPrompt: launchCopilotInitialPrompt)
+        }
+        launch?()
     }
 
     /// Mirrors `dtach -A`, which attaches only when a master accepts a connection
@@ -347,6 +365,7 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     }
 
     func terminate() {
+        retireLaunch()
         terminalView.kittyImageCapture.disablePersistence()
         terminalView.cancelImageRestore()
         terminalView.terminate()
@@ -354,8 +373,36 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
 
     @MainActor
     func beginTerminationDrain() {
+        retireLaunch()
         isDrainingForTermination = true
         terminalView.flushImageRestoreBufferForTermination()
+    }
+
+    /// Stops any future relaunch; the current process is left to its caller.
+    private func retireLaunch() {
+        launchRetired = true
+        launchRetry?.cancel()
+        launchRetry = nil
+    }
+
+    private var canRetryLaunch: Bool {
+        !launchRetired && shouldRetryLaunch?() != false
+    }
+
+    /// Resource exhaustion that can clear on its own (process, memory, or
+    /// descriptor limits). Other launch failures would fail the same way again.
+    nonisolated static func isTransientLaunchFailure(_ error: LocalProcessError) -> Bool {
+        switch error {
+        case .forkFailed(let code), .writeChannelFailed(let code):
+            return [EAGAIN, ENOMEM, EMFILE, ENFILE].contains(code)
+        default:
+            return false
+        }
+    }
+
+    /// 1, 2, 4, … seconds, capped at a minute.
+    nonisolated static func launchRetryDelay(afterFailures failures: Int) -> Duration {
+        .seconds(min(60, 1 << min(max(failures - 1, 0), 6)))
     }
 
     @MainActor
@@ -522,5 +569,24 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         }
         exited = true
         onExit?(exitCode)
+    }
+
+    /// No process started, so this is not an exit: keep the tab (and its session
+    /// artifacts) and relaunch into the same view once the resource shortage
+    /// may have cleared. SwiftTerm has already printed the error.
+    func processFailedToStart(source: TerminalView, error: LocalProcessError) {
+        guard Self.isTransientLaunchFailure(error), canRetryLaunch else { return }
+        launchFailures += 1
+        if launchFailures == 1 {
+            terminalView.feed(text: "Retrying automatically.\r\n")
+        }
+        let delay = retryDelay(launchFailures)
+        launchRetry?.cancel()
+        launchRetry = Task { [weak self] in
+            try? await ContinuousClock().sleep(until: .now.advanced(by: delay))
+            guard let self, !Task.isCancelled, self.canRetryLaunch else { return }
+            self.launchRetry = nil
+            self.launch?()
+        }
     }
 }

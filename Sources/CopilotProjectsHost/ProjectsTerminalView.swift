@@ -97,6 +97,14 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         }
     }
 
+    /// SwiftTerm prints launch failures (and TerminalController its retry note)
+    /// straight into the terminal; advance the generation so remote clients
+    /// refresh a screen they already cached.
+    override func processFailedToStart(_ source: LocalProcess, error: LocalProcessError) {
+        super.processFailedToStart(source, error: error)
+        remoteContentGeneration &+= 1
+    }
+
     func consumeProcessOutput(_ slice: ArraySlice<UInt8>) {
         remoteContentGeneration &+= 1
         guard !isRestoringImages else {
