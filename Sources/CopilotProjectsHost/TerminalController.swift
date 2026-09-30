@@ -389,12 +389,13 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         !launchRetired && shouldRetryLaunch?() != false
     }
 
-    /// Resource exhaustion that can clear on its own (process, memory, or
-    /// descriptor limits). Other launch failures would fail the same way again.
+    /// Resource exhaustion that can clear on its own (process, memory,
+    /// descriptor, or pseudo-terminal limits). Other launch failures would fail
+    /// the same way again.
     nonisolated static func isTransientLaunchFailure(_ error: LocalProcessError) -> Bool {
         switch error {
         case .forkFailed(let code), .writeChannelFailed(let code):
-            return [EAGAIN, ENOMEM, EMFILE, ENFILE].contains(code)
+            return [EAGAIN, ENOMEM, EMFILE, ENFILE, ENXIO].contains(code)
         default:
             return false
         }

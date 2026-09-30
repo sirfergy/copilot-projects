@@ -86,7 +86,7 @@ final class TerminalLaunchRetryTests: XCTestCase {
     }
 
     func testTransientLaunchFailuresRelaunchTheSameTabWithoutExiting() async throws {
-        let controller = controller(failing: [EMFILE, EAGAIN], retryDelay: .milliseconds(20))
+        let controller = controller(failing: [EMFILE, ENXIO], retryDelay: .milliseconds(20))
         var exits = 0
         controller.onExit = { _ in exits += 1 }
         XCTAssertFalse(controller.terminalView.process.running)
@@ -100,7 +100,7 @@ final class TerminalLaunchRetryTests: XCTestCase {
         XCTAssertFalse(controller.exited)
         let text = screenText(controller)
         XCTAssertTrue(text.contains("Process launch failed: writeChannelFailed(\(EMFILE))"), text)
-        XCTAssertTrue(text.contains("Process launch failed: writeChannelFailed(\(EAGAIN))"), text)
+        XCTAssertTrue(text.contains("Process launch failed: writeChannelFailed(\(ENXIO))"), text)
         XCTAssertEqual(text.components(separatedBy: "Retrying automatically.").count, 2, text)
         // Remote clients refresh screens by generation; host-printed text counts.
         XCTAssertGreaterThan(controller.terminalView.remoteContentGeneration, generation)
@@ -139,6 +139,15 @@ final class TerminalLaunchRetryTests: XCTestCase {
         XCTAssertEqual(controller.launchAttempts, 1)
         XCTAssertFalse(controller.terminalView.process.running)
         XCTAssertFalse(screenText(controller).contains("Retrying"))
+    }
+
+    func testOnlyResourceExhaustionIsTransient() {
+        let codes = [EAGAIN, ENOMEM, EMFILE, ENFILE, ENXIO, EPERM, EACCES, ENOENT]
+        let transient = [true, true, true, true, true, false, false, false]
+        XCTAssertEqual(codes.map { TerminalController.isTransientLaunchFailure(.forkFailed($0)) }, transient)
+        XCTAssertEqual(
+            codes.map { TerminalController.isTransientLaunchFailure(.writeChannelFailed($0)) }, transient)
+        XCTAssertFalse(TerminalController.isTransientLaunchFailure(.alreadyRunning))
     }
 
     func testBackoffDoublesToAMinute() {
