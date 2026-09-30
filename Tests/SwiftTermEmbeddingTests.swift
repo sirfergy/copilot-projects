@@ -231,15 +231,18 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         }
         XCTAssertTrue(ready)
 
-        var expected = ""
-        func expect(_ bytes: String) async throws {
-            expected += bytes
-            let wanted = Data(expected.utf8)
-            let delivered = try await captured(at: capture, awaiting: wanted)
+        var expected = Data()
+        func expect(_ bytes: [UInt8]) async throws {
+            expected.append(contentsOf: bytes)
+            let delivered = try await captured(at: capture, awaiting: expected)
             XCTAssertEqual(
                 String(decoding: delivered, as: UTF8.self).debugDescription,
-                expected.debugDescription
+                String(decoding: expected, as: UTF8.self).debugDescription
             )
+            XCTAssertEqual(delivered, expected)
+        }
+        func expect(_ text: String) async throws {
+            try await expect(Array(text.utf8))
         }
 
         // A first responder in a background window reports focus-out.
@@ -276,6 +279,46 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         try await expect("\u{1b}[O\u{1b}[I")
         XCTAssertTrue(view.sendRemoteCommand("d", forceFocusReporting: true))
         try await expect("d\r")
+
+        // Once the program turns reporting off, no report tracks later focus
+        // changes, so the view's own focus decides.
+        window.stubIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        try await expect("\u{1b}[O")
+        view.feed(text: "\u{1b}[?1004l")
+        window.stubIsKey = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        XCTAssertTrue(view.sendRemoteCommand("e", forceFocusReporting: true))
+        try await expect("e\r")
+        window.stubIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        XCTAssertTrue(view.sendRemoteCommand("f", forceFocusReporting: true))
+        try await expect("\u{1b}[If\r\u{1b}[O")
+
+        // With 8-bit controls (S8C1T) the reports use a single-byte CSI.
+        view.feed(text: "\u{1b} G\u{1b}[?1004h")
+        try await expect([0x9b, 0x4f])
+        window.stubIsKey = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        try await expect([0x9b, 0x49])
+        XCTAssertTrue(view.sendRemoteCommand("g", forceFocusReporting: true))
+        try await expect("g\r")
+        window.stubIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        try await expect([0x9b, 0x4f])
+        XCTAssertTrue(view.sendRemoteCommand("h", forceFocusReporting: true))
+        try await expect("\u{1b}[Ih\r\u{1b}[O")
+
+        // A focus-in left over from before reporting was turned off must not
+        // keep a later background command unscoped.
+        window.stubIsKey = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        try await expect([0x9b, 0x49])
+        view.feed(text: "\u{1b}[?1004l")
+        window.stubIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        XCTAssertTrue(view.sendRemoteCommand("i", forceFocusReporting: true))
+        try await expect("\u{1b}[Ii\r\u{1b}[O")
     }
 
     /// Remote Kitty capture only understands direct (`t=d`) frames. That is

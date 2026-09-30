@@ -28,7 +28,7 @@ let package = Package(
         // and close-on-exec protection for the private PTY write descriptor.
         .package(
             url: "https://github.com/sirfergy/SwiftTerm",
-            revision: "2c9c51d0350be7f105a03a15212b8a3f38ee0093"
+            revision: "b04f7ada7a7422810b8d4f0ede0da6059191affc"
         ),
     ],
     targets: [

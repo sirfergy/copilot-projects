@@ -39,11 +39,12 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     private var isSubmittingRemotePrompt = false
     /// The DECSET 1004 report SwiftTerm last wrote to the PTY, if any. SwiftTerm
     /// updates `hasFocus` before its report reaches the PTY (a main-queue hop),
-    /// so remote input scopes its own focus-in/out from what the program was
-    /// actually told. Without a report, fall back to the view's own focus.
+    /// so while reporting is on, remote input scopes its own focus-in/out from
+    /// what the program was actually told. Otherwise no report will arrive, so
+    /// use the view's own focus.
     private var lastDeliveredFocusReport: Bool?
-    private var programHasFocus: Bool {
-        lastDeliveredFocusReport ?? hasFocus
+    private func programHasFocus(_ state: TerminalInputStateSnapshot) -> Bool {
+        state.focusReportingEnabled ? lastDeliveredFocusReport ?? hasFocus : hasFocus
     }
     /// Captures this session's Kitty inline images for remote clients. One
     /// instance per terminal view (never shared/global), fed on the main actor.
@@ -100,12 +101,14 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     }
 
     /// Terminal responses reach the PTY here, after SwiftTerm's main-queue hop.
-    /// Focus reports are sent as exactly `CSI I` or `CSI O`.
+    /// A focus report is sent alone as `CSI I` or `CSI O`, with a 7- or 8-bit CSI.
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
-        if data.elementsEqual(Self.remoteFocusInBytes) {
-            lastDeliveredFocusReport = true
-        } else if data.elementsEqual(Self.remoteFocusOutBytes) {
-            lastDeliveredFocusReport = false
+        if data.count <= 3 {
+            switch Array(data) {
+            case Self.remoteFocusInBytes, [0x9b, 0x49]: lastDeliveredFocusReport = true
+            case Self.remoteFocusOutBytes, [0x9b, 0x4f]: lastDeliveredFocusReport = false
+            default: break
+            }
         }
         super.send(source: source, data: data)
     }
@@ -418,7 +421,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
               let bytes = Self.remoteCommandBytes(
                 value,
                 keyboardEnhancementFlags: state.keyboardEnhancementFlags,
-                scopedFocus: forceFocusReporting && !programHasFocus
+                scopedFocus: forceFocusReporting && !programHasFocus(state)
               ) else {
             return false
         }
@@ -429,10 +432,10 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     @discardableResult
     func sendRemotePrompt(_ value: String) -> Bool {
         guard !isSubmittingRemotePrompt,
-              terminalInputStateSnapshot() != nil else {
+              let state = terminalInputStateSnapshot() else {
             return false
         }
-        let startedWithScopedFocus = !programHasFocus
+        let startedWithScopedFocus = !programHasFocus(state)
         guard let paste = Self.remotePromptPasteBytes(
             value,
             scopedFocus: startedWithScopedFocus
@@ -457,8 +460,8 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
                 self.isSubmittingRemotePrompt = false
                 if startedWithScopedFocus,
                    !submitted,
-                   !self.programHasFocus,
-                   self.terminalInputStateSnapshot() != nil {
+                   let state = self.terminalInputStateSnapshot(),
+                   !self.programHasFocus(state) {
                     self.send(Self.remoteFocusOutBytes)
                 }
             }
@@ -487,7 +490,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             guard let state = self.terminalInputStateSnapshot() else { return }
             self.send(Self.remoteSubmitBytes(
                 keyboardEnhancementFlags: state.keyboardEnhancementFlags,
-                scopedFocus: !self.programHasFocus
+                scopedFocus: !self.programHasFocus(state)
             ))
             submitted = true
         }
@@ -608,7 +611,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
             guard let state = terminalInputStateSnapshot() else { return false }
             send(Self.remoteSubmitBytes(
                 keyboardEnhancementFlags: state.keyboardEnhancementFlags,
-                scopedFocus: !programHasFocus
+                scopedFocus: !programHasFocus(state)
             ))
             return true
         }
