@@ -78,7 +78,9 @@ final class SessionCloseIntegrationTests: XCTestCase {
         ]
         for (controller, expectedSelection) in closeOrder {
             let sessionId = controller.sessionId
+            XCTAssertEqual(controller.shouldRetryLaunch?(), true)
             model.closeSelectedSession()
+            XCTAssertEqual(controller.shouldRetryLaunch?(), false, "A closed tab must not relaunch")
             XCTAssertTrue(store.isTombstonedForTesting(sessionId: sessionId))
             XCTAssertTrue(FileManager.default.fileExists(
                 atPath: Paths.closeSessionRequestPath(sessionId: sessionId)))

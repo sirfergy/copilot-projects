@@ -31,6 +31,12 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
     }
 
+    /// Lets a test drive key status without a window server.
+    private final class StubKeyWindow: NSWindow {
+        var stubIsKey = false
+        override var isKeyWindow: Bool { stubIsKey }
+    }
+
     private final class ScrollEvent: NSEvent {
         var point: NSPoint = .zero
         var delta: CGFloat = 0
@@ -86,6 +92,19 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         window.contentView = view
         XCTAssertTrue(window.makeFirstResponder(view))
         return (view, window)
+    }
+
+    /// Polls a PTY capture file until it holds `expected` or five seconds pass.
+    private func captured(at url: URL, awaiting expected: Data) async throws -> Data {
+        let deadline = ContinuousClock.now + .seconds(5)
+        var data = Data()
+        while data != expected, ContinuousClock.now < deadline {
+            data = (try? Data(contentsOf: url)) ?? Data()
+            if data != expected {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        return data
     }
 
     @MainActor
@@ -167,15 +186,166 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         XCTAssertTrue(view.terminalInputStateSnapshot()?.keyboardEnhancementFlags.isEmpty == true)
 
         let expected = Data("\u{1b}[13;9u".utf8)
-        let deliveredDeadline = ContinuousClock.now + .seconds(5)
-        var delivered = Data()
-        while delivered != expected, ContinuousClock.now < deliveredDeadline {
-            delivered = (try? Data(contentsOf: capture)) ?? Data()
-            if delivered != expected {
+        let delivered = try await captured(at: capture, awaiting: expected)
+        XCTAssertEqual(delivered, expected)
+    }
+
+    @MainActor
+    func testRemoteInputScopesFocusFromTheLastDeliveredReport() async throws {
+        _ = NSApplication.shared
+        let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let window = StubKeyWindow(
+            contentRect: view.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = view
+        XCTAssertTrue(window.makeFirstResponder(view))
+        let capture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("remote-focus-\(UUID().uuidString)")
+        view.startProcess(
+            executable: "/bin/sh",
+            args: [
+                "-c",
+                "stty raw -echo; printf READY; exec /bin/cat > \"$0\"",
+                capture.path,
+            ],
+            environment: []
+        )
+        defer {
+            view.terminate()
+            window.contentView = nil
+            try? FileManager.default.removeItem(at: capture)
+        }
+
+        let readyDeadline = ContinuousClock.now + .seconds(5)
+        var ready = false
+        while !ready, ContinuousClock.now < readyDeadline {
+            ready = view.terminalStateSnapshot().visibleRows.contains {
+                $0.text.contains("READY")
+            }
+            if !ready {
                 try await Task.sleep(for: .milliseconds(5))
             }
         }
-        XCTAssertEqual(delivered, expected)
+        XCTAssertTrue(ready)
+
+        var expected = Data()
+        func expect(_ bytes: [UInt8]) async throws {
+            expected.append(contentsOf: bytes)
+            let delivered = try await captured(at: capture, awaiting: expected)
+            XCTAssertEqual(
+                String(decoding: delivered, as: UTF8.self).debugDescription,
+                String(decoding: expected, as: UTF8.self).debugDescription
+            )
+            XCTAssertEqual(delivered, expected)
+        }
+        func expect(_ text: String) async throws {
+            try await expect(Array(text.utf8))
+        }
+
+        // A first responder in a background window reports focus-out.
+        view.feed(text: "\u{1b}[?1004h")
+        try await expect("\u{1b}[O")
+
+        XCTAssertTrue(view.sendRemoteCommand("a", forceFocusReporting: true))
+        try await expect("\u{1b}[Ia\r\u{1b}[O")
+        XCTAssertTrue(view.sendRemotePrompt("p"))
+        try await expect("\u{1b}[I\u{1b}\u{1b}\u{1b}[200~p\u{1b}[201~\u{1b}[I\r\u{1b}[O")
+
+        // Activation flips hasFocus before SwiftTerm's focus-in reaches the PTY,
+        // so a command handled in between must still be scoped.
+        window.stubIsKey = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        XCTAssertTrue(view.sendRemoteCommand("b", forceFocusReporting: true))
+        try await expect("\u{1b}[Ib\r\u{1b}[O\u{1b}[I")
+
+        XCTAssertTrue(view.sendRemoteCommand("c", forceFocusReporting: true))
+        XCTAssertTrue(view.sendRemoteKey("enter", forceFocusReporting: true))
+        try await expect("c\r\r")
+
+        // The program still believes it is focused until the focus-out lands.
+        window.stubIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        XCTAssertTrue(view.sendRemoteKey("enter", forceFocusReporting: true))
+        try await expect("\r\u{1b}[O")
+
+        // Re-enabling queues a focus-out report and activation queues focus-in
+        // behind it; they reach the PTY in order and the later one decides.
+        view.feed(text: "\u{1b}[?1004l\u{1b}[?1004h")
+        window.stubIsKey = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        try await expect("\u{1b}[O\u{1b}[I")
+        XCTAssertTrue(view.sendRemoteCommand("d", forceFocusReporting: true))
+        try await expect("d\r")
+
+        // Once the program turns reporting off, no report tracks later focus
+        // changes, so the view's own focus decides.
+        window.stubIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        try await expect("\u{1b}[O")
+        view.feed(text: "\u{1b}[?1004l")
+        window.stubIsKey = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        XCTAssertTrue(view.sendRemoteCommand("e", forceFocusReporting: true))
+        try await expect("e\r")
+        window.stubIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        XCTAssertTrue(view.sendRemoteCommand("f", forceFocusReporting: true))
+        try await expect("\u{1b}[If\r\u{1b}[O")
+
+        // With 8-bit controls (S8C1T) the reports use a single-byte CSI.
+        view.feed(text: "\u{1b} G\u{1b}[?1004h")
+        try await expect([0x9b, 0x4f])
+        window.stubIsKey = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        try await expect([0x9b, 0x49])
+        XCTAssertTrue(view.sendRemoteCommand("g", forceFocusReporting: true))
+        try await expect("g\r")
+        window.stubIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        try await expect([0x9b, 0x4f])
+        XCTAssertTrue(view.sendRemoteCommand("h", forceFocusReporting: true))
+        try await expect("\u{1b}[Ih\r\u{1b}[O")
+
+        // A focus-in left over from before reporting was turned off must not
+        // keep a later background command unscoped.
+        window.stubIsKey = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        try await expect([0x9b, 0x49])
+        view.feed(text: "\u{1b}[?1004l")
+        window.stubIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        XCTAssertTrue(view.sendRemoteCommand("i", forceFocusReporting: true))
+        try await expect("\u{1b}[Ii\r\u{1b}[O")
+    }
+
+    /// Remote Kitty capture only understands direct (`t=d`) frames. That is
+    /// complete only while the terminal refuses local media, so clients that
+    /// probe for file or shared-memory transfer fall back to direct frames.
+    @MainActor
+    func testKittyLocalMediaQueriesAreRefusedSoClientsSendDirectFrames() async throws {
+        let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let delegate = MouseDelegate()
+        view.terminalDelegate = delegate
+        let path = Data("/tmp/tty-graphics-protocol-probe".utf8).base64EncodedString()
+        let pixel = Data([0xff, 0x00, 0x00, 0xff]).base64EncodedString()
+        for (id, medium) in [(1, "f"), (2, "t"), (3, "s")] {
+            view.feed(text: "\u{1b}_Gi=\(id),a=q,t=\(medium),f=32,s=1,v=1;\(path)\u{1b}\\")
+        }
+        view.feed(text: "\u{1b}_Gi=4,a=q,t=d,f=32,s=1,v=1;\(pixel)\u{1b}\\")
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while delegate.writes.count < 4, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(delegate.writes.map { String(decoding: $0, as: UTF8.self) }, [
+            "\u{1b}_Gi=1;EINVAL: unsupported medium\u{1b}\\",
+            "\u{1b}_Gi=2;EINVAL: unsupported medium\u{1b}\\",
+            "\u{1b}_Gi=3;EINVAL: unsupported medium\u{1b}\\",
+            "\u{1b}_Gi=4;OK\u{1b}\\",
+        ])
     }
 
     @MainActor

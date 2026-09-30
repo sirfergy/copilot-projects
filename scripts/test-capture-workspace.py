@@ -28,8 +28,7 @@ class CaptureDriverTests(unittest.TestCase):
             build = root / "debug"
             build.mkdir()
             (build / "workspace-capture-host").write_bytes(b"debug host")
-            for name in ("SwiftTerm_SwiftTerm.bundle", "copilot-projects_CopilotProjectsCore.bundle"):
-                (build / name).mkdir()
+            (build / "copilot-projects_CopilotProjectsCore.bundle").mkdir()
             with mock.patch.object(capture.subprocess, "check_output", return_value=str(build)), \
                  mock.patch.object(capture.subprocess, "run") as run:
                 executable = capture.build_capture_host(root)

@@ -29,7 +29,7 @@ CORE_BUNDLE="$RES/copilot-projects_CopilotProjectsCore.bundle"
 for bundle in "$CORE_BUNDLE"; do
   if [ ! -d "$bundle" ]; then
     echo "error: missing packaged resource bundle $bundle" >&2
-    echo "       (scripts/build-app.sh copies these next to SwiftTerm_SwiftTerm.bundle)" >&2
+    echo "       (scripts/build-app.sh copies these into Contents/Resources)" >&2
     exit 1
   fi
 done

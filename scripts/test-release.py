@@ -52,6 +52,8 @@ elif command == "clang":
     output = Path(args[args.index("-o") + 1])
     output.write_text("#!/bin/sh\nexit 0\n")
     output.chmod(0o755)
+elif command == "xcrun" and args[2:3] in (["metal"], ["metallib"]):
+    Path(args[args.index("-o") + 1]).write_text(args[2] + " output\n")
 elif command == "hdiutil":
     Path(args[-1]).write_text("test dmg")
 elif command == "ditto":
@@ -230,7 +232,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse((self.project_root / "dist-build.txt").exists())
         self.assertFalse(any(command == "codesign" for _, command, _ in self.calls))
 
-    def run_assembler(self):
+    def run_assembler(self, shader_source=True):
         shutil.copyfile(RELEASE.with_name("build-app.sh"), self.public / "scripts/build-app.sh")
         shutil.copyfile(RELEASE.with_name("bundle-resources.sh"), self.public / "scripts/bundle-resources.sh")
         build = self.public / ".build/products"
@@ -243,6 +245,12 @@ class ReleaseTests(unittest.TestCase):
         dtach = self.public / "vendor/dtach"
         dtach.mkdir(parents=True, exist_ok=True)
         (dtach / "config.h").touch()
+        shaders = self.public / ".build/checkouts/SwiftTerm/Sources/SwiftTerm/Apple/Metal"
+        shaders.mkdir(parents=True, exist_ok=True)
+        if shader_source:
+            (shaders / "Shaders.metal").write_text("// fixture\n")
+        else:
+            (shaders / "Shaders.metal").unlink(missing_ok=True)
         self.env.update(VERSION="1.2.3", MOCK_BUILD_PATH=str(build))
         self.log.unlink(missing_ok=True)
         result = subprocess.run(
@@ -277,6 +285,25 @@ class ReleaseTests(unittest.TestCase):
                 lookups = [args for _, cmd, args in self.calls if cmd == "security"]
                 expected = ["find-identity", "-v", "-p", "codesigning"]
                 self.assertEqual(lookups, [] if identity == "-" else [expected + ([keychain] if keychain else [])])
+
+    def test_actual_assembler_precompiles_swiftterm_shaders_from_checkout(self):
+        result = self.run_assembler()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        compiles = [args for _, cmd, args in self.calls if cmd == "xcrun" and args[2:3] == ["metal"]]
+        links = [args for _, cmd, args in self.calls if cmd == "xcrun" and args[2:3] == ["metallib"]]
+        self.assertEqual((len(compiles), len(links)), (1, 1))
+        self.assertTrue(compiles[0][compiles[0].index("-c") + 1].endswith(
+            "/.build/checkouts/SwiftTerm/Sources/SwiftTerm/Apple/Metal/Shaders.metal"))
+        self.assertEqual(links[0][3], compiles[0][compiles[0].index("-o") + 1])
+        packaged = self.public / "dist/Copilot Projects.app/Contents/Resources/default.metallib"
+        self.assertEqual(links[0][links[0].index("-o") + 1], str(packaged))
+        self.assertEqual(packaged.read_text(), "metallib output\n")
+
+    def test_actual_assembler_fails_when_swiftterm_shader_source_moves(self):
+        result = self.run_assembler(shader_source=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("update build-app.sh for SwiftTerm's shader layout", result.stdout)
+        self.assertFalse(any(cmd == "codesign" for _, cmd, _ in self.calls))
 
     def test_empty_explicit_keychain_never_silently_ad_hoc_signs(self):
         self.env.pop("CODESIGN_IDENTITY")
