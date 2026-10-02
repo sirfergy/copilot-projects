@@ -10,6 +10,7 @@ struct ControlCommandRouter {
         let newProject: (ControlRequest) -> ControlResponse
         let newSession: (ControlRequest) -> ControlResponse
         let newCopilotSession: (ControlRequest) -> ControlResponse
+        let closeSession: (ControlRequest) -> ControlResponse
         let renameProject: (String, ControlRequest) -> ControlResponse
         let focus: (ControlRequest) -> ControlResponse
         let screenshot: (String?) -> ControlResponse
@@ -49,6 +50,12 @@ struct ControlCommandRouter {
                     code: "bad-request")
             }
             return actions.newCopilotSession(request)
+        case "close-session":
+            guard let sessionId = request.sessionId, !sessionId.isEmpty,
+                  request.projectId.map({ !$0.isEmpty }) ?? true else {
+                return .failure("close-session requires a session id", code: "bad-request")
+            }
+            return actions.closeSession(request)
         case "rename-project":
             guard let name = request.name else {
                 return .failure("rename-project requires a name")

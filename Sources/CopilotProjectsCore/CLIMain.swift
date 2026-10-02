@@ -15,6 +15,7 @@ public enum CLIMain {
         "new-project",
         "new-session",
         "new-copilot-session",
+        "close-session",
         "rename-project",
         "focus",
         "attach",
@@ -112,6 +113,8 @@ public enum CLIMain {
             return resolveSession(rest)
         case "new-copilot-session":
             return newCopilotSession(rest, environment: environment)
+        case "close-session":
+            return closeSession(rest, environment: environment)
         default:
             break
         }
@@ -241,6 +244,7 @@ public enum CLIMain {
         case "unavailable", "persistence-unavailable": return 5
         case "unknown-project": return 6
         case "invalid": return 7
+        case "busy": return 8
         default: return 1
         }
     }
@@ -289,6 +293,42 @@ public enum CLIMain {
             if resp.ok, let text = resp.text, !text.isEmpty {
                 print(text)
             }
+            if !resp.ok {
+                fail(resp.error ?? "unknown error")
+            }
+            return resp.ok ? 0 : exitStatus(forCode: resp.code)
+        } catch {
+            fail("\(error)")
+            return 1
+        }
+    }
+
+    // MARK: - close-session (automation)
+
+    /// The target is always explicit: the calling terminal's session is never implied,
+    /// so a script cannot end the session it runs in by omitting `--session`.
+    private static func closeSession(_ args: [String], environment: [String: String]) -> Int32 {
+        let usage = "usage: copilot-projects close-session --session ID [--project ID]"
+        let parsed = parseFlags(args)
+        let allowed: Set<String> = ["session", "project"]
+        let unknown = parsed.flags.keys.filter { !allowed.contains($0) }.sorted()
+        guard unknown.isEmpty, parsed.positionals.isEmpty else {
+            let extras = unknown.map { "--\($0)" } + parsed.positionals
+            fail("close-session: unexpected \(extras.joined(separator: " "))\n\(usage)")
+            return 2
+        }
+        guard let sessionId = parsed.flags["session"], !sessionId.isEmpty,
+              parsed.flags["project"].map({ !$0.isEmpty }) ?? true else {
+            fail(usage)
+            return 2
+        }
+
+        var req = ControlRequest(command: "close-session")
+        req.sessionId = sessionId
+        req.projectId = parsed.flags["project"]
+        do {
+            let socketPath = Env.socket(environment) ?? Paths.socketPath
+            let resp = try ControlClient(socketPath: socketPath).send(req)
             if !resp.ok {
                 fail(resp.error ?? "unknown error")
             }
@@ -534,6 +574,8 @@ public enum CLIMain {
           copilot-projects new-session             Add a session to a project [--cwd DIR] [--project ID]
           copilot-projects new-copilot-session     Start Copilot with a prompt, idempotent by request id
               --project ID --request-id UUID --prompt-file PATH [--title T]
+          copilot-projects close-session           End an idle session that is not the selected tab
+              --session ID [--project ID]
           copilot-projects rename-project <name>   Rename a project [--project ID]
           copilot-projects focus                   Focus a project/session [--project ID] [--session ID]
           copilot-projects ping                    Check the app is reachable

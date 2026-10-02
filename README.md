@@ -183,6 +183,22 @@ exits: 2 invalid arguments, 6 unknown project, 7 missing `~/Repos`, 1 anything e
 (including an older app that does not support the command). Unknown flags are
 rejected before anything is sent.
 
+To end a session from a script, use `close-session`:
+
+```bash
+copilot-projects close-session --session <id> --project <id>
+```
+
+It ends the session the same way **End Session** does, but without a confirmation
+dialog. The session is always named explicitly; the calling terminal's session is
+never implied. Because no one confirms the close, a session that has active or
+pending work (running, waiting for input, background agents, or scheduled turns)
+or is the selected tab of the selected project is left alone and the command
+exits 8 (busy); retry later. `--project` refuses (exit 3) a session that has since
+been moved to another project. Exit 4 means the session no longer exists, 5 means
+the workspace state is unavailable (retry), 2 invalid arguments, and 1 anything
+else. An app too old to support the command exits 2 or 1 with `unknown command`.
+
 Commands inside an app-managed terminal automatically target its current
 project and session. Hooks for other agents can use:
 
