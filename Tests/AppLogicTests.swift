@@ -6198,6 +6198,7 @@ final class AppLogicTests: XCTestCase {
     func testControlCommandRouterValidatesBeforeDispatch() {
         var didSetStatus = false
         var copilotRequests: [ControlRequest] = []
+        var closeRequests: [ControlRequest] = []
         let router = ControlCommandRouter(actions: .init(
             listProjects: { "" },
             listStatus: { "" },
@@ -6206,6 +6207,7 @@ final class AppLogicTests: XCTestCase {
             newProject: { _ in .success() },
             newSession: { _ in .success() },
             newCopilotSession: { copilotRequests.append($0); return .success("id", code: "created") },
+            closeSession: { closeRequests.append($0); return .success(code: "closed") },
             renameProject: { _, _ in .success() },
             focus: { _ in .success() },
             screenshot: { _ in .success() },
@@ -6240,6 +6242,26 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(response.ok)
         XCTAssertEqual(response.code, "created")
         XCTAssertEqual(copilotRequests.map(\.requestId), [uuid])
+
+        func closeRequest(session: String?, project: String?) -> ControlRequest {
+            var request = ControlRequest(command: "close-session")
+            request.sessionId = session
+            request.projectId = project
+            return request
+        }
+        for invalid in [
+            closeRequest(session: nil, project: "p1"),
+            closeRequest(session: "", project: "p1"),
+            closeRequest(session: "s1", project: ""),
+        ] {
+            let response = router.handle(invalid)
+            XCTAssertFalse(response.ok)
+            XCTAssertEqual(response.code, "bad-request")
+        }
+        XCTAssertTrue(closeRequests.isEmpty)
+        XCTAssertTrue(router.handle(closeRequest(session: "s1", project: nil)).ok)
+        XCTAssertTrue(router.handle(closeRequest(session: "s2", project: "p1")).ok)
+        XCTAssertEqual(closeRequests.map(\.sessionId), ["s1", "s2"])
     }
 
     // MARK: - Desktop Copilot session creation
@@ -8423,6 +8445,66 @@ final class AppLogicTests: XCTestCase {
             XCTAssertEqual(CLIMain.run(args, environment: environment), 2, args.joined(separator: " "))
         }
         XCTAssertEqual(received.count, sent)
+    }
+
+    func testCLICloseSessionRequiresExplicitTargetAndMapsResponseCodes() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let socketPath = root.appendingPathComponent("control.sock").path
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var received: [ControlRequest] = []
+        var nextResponse = ControlResponse.success(code: "closed")
+        let server = ControlServer(socketPath: socketPath) { request in
+            received.append(request)
+            return nextResponse
+        }
+        XCTAssertTrue(server.start())
+        defer { server.stop() }
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["COPILOT_PROJECTS_SOCKET"] = socketPath
+        environment["COPILOT_PROJECTS_SESSION"] = "calling-session"
+        environment["COPILOT_PROJECTS_PROJECT"] = "calling-project"
+        XCTAssertTrue(CLIMain.isCommand("close-session"))
+
+        let valid = ["close-session", "--session", "s1", "--project", "p1"]
+        XCTAssertEqual(CLIMain.run(valid, environment: environment), 0)
+        XCTAssertEqual(received.last?.command, "close-session")
+        XCTAssertEqual(received.last?.sessionId, "s1")
+        XCTAssertEqual(received.last?.projectId, "p1")
+        XCTAssertNil(received.last?.force)
+
+        XCTAssertEqual(CLIMain.run(["close-session", "--force", "--session", "s2"], environment: environment), 0)
+        XCTAssertEqual(received.last?.sessionId, "s2")
+        XCTAssertNil(received.last?.projectId)
+        XCTAssertEqual(received.last?.force, true)
+
+        let expectedExits: [(String?, Int32)] = [
+            ("bad-request", 2), ("conflict", 3), ("gone", 4), ("unavailable", 5), ("busy", 8), (nil, 1),
+        ]
+        for (code, status) in expectedExits {
+            nextResponse = .failure("failed", code: code)
+            XCTAssertEqual(CLIMain.run(valid, environment: environment), status, code ?? "no code")
+        }
+        let sent = received.count
+
+        let rejected: [[String]] = [
+            ["close-session"],
+            ["close-session", "--project", "p1"],
+            ["close-session", "--session"],
+            ["close-session", "--session", "s1", "--project"],
+            ["close-session", "--session", "s1", "--force", "extra"],
+            ["close-session", "--session", "s1", "--force=yes"],
+            ["close-session", "s1"],
+            valid + ["--all"],
+            valid + ["positional"],
+        ]
+        for args in rejected {
+            XCTAssertEqual(CLIMain.run(args, environment: environment), 2, args.joined(separator: " "))
+        }
+        XCTAssertEqual(received.count, sent, "an implicit or malformed target is never sent")
     }
 
     func testControlServerSurvivesClientDisconnectBeforeResponse() throws {
