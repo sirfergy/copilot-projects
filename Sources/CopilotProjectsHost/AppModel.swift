@@ -268,6 +268,11 @@ public enum RemoteSessionCloseResult: Equatable, Sendable {
     case closed, missing, failed
 }
 
+/// Outcome of `close-session`, mapped onto the CLI's stable response codes.
+public enum AutomationSessionCloseResult: Equatable, Sendable {
+    case closed, gone, conflict, busy, unavailable
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     private var projectStorage: [Project] = []
@@ -352,6 +357,12 @@ final class AppModel: ObservableObject {
                 projectId: projectId,
                 title: request.title ?? "Copilot",
                 prompt: prompt
+            ))
+        },
+        closeSession: { [unowned self] request in
+            Self.controlResponse(for: self.closeAutomationSession(
+                sessionId: request.sessionId ?? "",
+                projectId: request.projectId
             ))
         },
         renameProject: { [unowned self] name, request in
@@ -1602,6 +1613,47 @@ final class AppModel: ObservableObject {
             projectId: projects[location.p].id,
             sessionId: sessionId
         ) ? .closed : .failed
+    }
+
+    /// Scripted ending (`close-session`). Unlike the remote path, no person confirmed
+    /// the close, so it refuses a session that has reported work or is the selected
+    /// tab of the selected project (what the window shows, even while another app is
+    /// in front). `projectId` refuses a session the user has since moved elsewhere.
+    func closeAutomationSession(
+        sessionId: String,
+        projectId: String?
+    ) -> AutomationSessionCloseResult {
+        // A failed startup load leaves the in-memory workspace empty, so an absent
+        // session is not evidence that it ended.
+        guard !isTerminating, !didFailToLoadWorkspaceState, stateLoadFailure == nil else {
+            return .unavailable
+        }
+        guard let location = locateIndex(sessionId) else { return .gone }
+        let project = projects[location.p]
+        if let projectId, project.id != projectId { return .conflict }
+        if project.sessions[location.s].requiresEndConfirmation
+            || (selectedProjectId == project.id && project.selectedSessionId == sessionId) {
+            return .busy
+        }
+        return destroySession(projectId: project.id, sessionId: sessionId) ? .closed : .unavailable
+    }
+
+    nonisolated static func controlResponse(
+        for outcome: AutomationSessionCloseResult
+    ) -> ControlResponse {
+        switch outcome {
+        case .closed:
+            return .success(code: "closed")
+        case .gone:
+            return .failure("no such session", code: "gone")
+        case .conflict:
+            return .failure("the session belongs to a different project", code: "conflict")
+        case .busy:
+            return .failure("the session is the selected tab or has active or pending work; "
+                + "retry later", code: "busy")
+        case .unavailable:
+            return .failure("the workspace state is unavailable; retry later", code: "unavailable")
+        }
     }
 
     /// User-facing ending uses reported activity; automation retains the raw close path.

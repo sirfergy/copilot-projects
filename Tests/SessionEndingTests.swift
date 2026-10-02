@@ -167,6 +167,72 @@ final class SessionEndingTests: XCTestCase {
         XCTAssertEqual(alerts, 2, "Automation must not display a local confirmation")
         XCTAssertEqual(f.calls.batches, [[id]])
     }
+
+    @MainActor
+    func testScriptedCloseRefusesTheSelectedTabSessionsWithWorkAndMovedSessions() throws {
+        var alerts = 0
+        let f = try EndingFixture { _ in alerts += 1; return .alertSecondButtonReturn }
+        defer { f.clean() }
+        let first = f.project.sessions[0].id
+        let second = f.project.sessions[1].id
+        let moved = f.other.sessions[0].id
+
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: "missing", projectId: nil), .gone)
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: moved, projectId: f.project.id), .conflict)
+        XCTAssertEqual(
+            f.model.closeAutomationSession(sessionId: first, projectId: f.project.id), .busy,
+            "the selected tab of the selected project stays even while the app is in the background")
+        f.model.setStatus(sessionId: second, status: .running, text: nil, timestamp: 100)
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: second, projectId: f.project.id), .busy)
+        XCTAssertTrue(f.calls.batches.isEmpty)
+
+        f.model.setStatus(sessionId: second, status: .idle, text: nil, timestamp: 101)
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: second, projectId: f.project.id), .closed)
+        f.model.selectProject(f.other.id)
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: first, projectId: f.project.id), .closed)
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: first, projectId: nil), .gone)
+        XCTAssertEqual(f.calls.batches, [[second], [first]])
+        XCTAssertEqual(f.model.projects.first { $0.id == f.project.id }?.sessions.count, 0)
+        XCTAssertEqual(f.model.projects.first { $0.id == f.other.id }?.sessions.map(\.id), [moved])
+        XCTAssertEqual(alerts, 0, "Scripted closes never display a confirmation")
+    }
+
+    @MainActor
+    func testScriptedCloseIsUnavailableNotGoneAfterFailedWorkspaceLoad() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = Session(title: "Review", cwd: root.path)
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [Project(name: "Reviews", cwd: root.path, sessions: [session])],
+            selectedProjectId: nil
+        ))
+        try Data("invalid".utf8).write(to: repository.closeIntentPath)
+        var destroyed = false
+        let model = AppModel(
+            stateRepository: repository, isAppActive: { false },
+            agentActivityDirectory: root,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+            gracefulSessionDestroyer: { _, _ in destroyed = true; return Task {} }
+        )
+        XCTAssertTrue(model.projects.isEmpty)
+        XCTAssertEqual(
+            model.closeAutomationSession(sessionId: session.id, projectId: nil), .unavailable)
+        XCTAssertFalse(destroyed)
+    }
+
+    func testScriptedCloseResponseCodes() {
+        let expected: [(AutomationSessionCloseResult, Bool, String)] = [
+            (.closed, true, "closed"), (.gone, false, "gone"), (.conflict, false, "conflict"),
+            (.busy, false, "busy"), (.unavailable, false, "unavailable"),
+        ]
+        for (outcome, ok, code) in expected {
+            let response = AppModel.controlResponse(for: outcome)
+            XCTAssertEqual(response.ok, ok, code)
+            XCTAssertEqual(response.code, code)
+        }
+    }
 }
 
 @MainActor
