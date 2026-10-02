@@ -362,8 +362,7 @@ final class AppModel: ObservableObject {
         closeSession: { [unowned self] request in
             Self.controlResponse(for: self.closeAutomationSession(
                 sessionId: request.sessionId ?? "",
-                projectId: request.projectId,
-                force: request.force == true
+                projectId: request.projectId
             ))
         },
         renameProject: { [unowned self] name, request in
@@ -1616,14 +1615,13 @@ final class AppModel: ObservableObject {
         ) ? .closed : .failed
     }
 
-    /// Scripted ending (`close-session`). Unlike the remote path, it refuses by default
-    /// to end a session that has reported work or that is on screen right now, since
-    /// no person confirmed the close. `projectId` guards against ending a session the
-    /// user has since moved to another project.
+    /// Scripted ending (`close-session`). Unlike the remote path, no person confirmed
+    /// the close, so it refuses a session that has reported work or is the selected
+    /// tab of the selected project (what the window shows, even while another app is
+    /// in front). `projectId` refuses a session the user has since moved elsewhere.
     func closeAutomationSession(
         sessionId: String,
-        projectId: String?,
-        force: Bool
+        projectId: String?
     ) -> AutomationSessionCloseResult {
         // A failed startup load leaves the in-memory workspace empty, so an absent
         // session is not evidence that it ended.
@@ -1633,8 +1631,8 @@ final class AppModel: ObservableObject {
         guard let location = locateIndex(sessionId) else { return .gone }
         let project = projects[location.p]
         if let projectId, project.id != projectId { return .conflict }
-        if !force, project.sessions[location.s].requiresEndConfirmation
-            || isVisible(projectIndex: location.p, sessionIndex: location.s) {
+        if project.sessions[location.s].requiresEndConfirmation
+            || (selectedProjectId == project.id && project.selectedSessionId == sessionId) {
             return .busy
         }
         return destroySession(projectId: project.id, sessionId: sessionId) ? .closed : .unavailable
@@ -1651,8 +1649,8 @@ final class AppModel: ObservableObject {
         case .conflict:
             return .failure("the session belongs to a different project", code: "conflict")
         case .busy:
-            return .failure("the session is on screen or has active or pending work; "
-                + "pass --force to end it anyway", code: "busy")
+            return .failure("the session is the selected tab or has active or pending work; "
+                + "retry later", code: "busy")
         case .unavailable:
             return .failure("the workspace state is unavailable; retry later", code: "unavailable")
         }

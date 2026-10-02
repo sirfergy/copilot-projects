@@ -169,39 +169,29 @@ final class SessionEndingTests: XCTestCase {
     }
 
     @MainActor
-    func testScriptedCloseRefusesSessionsOnScreenWithWorkOrMovedUnlessForced() throws {
-        var active = false
+    func testScriptedCloseRefusesTheSelectedTabSessionsWithWorkAndMovedSessions() throws {
         var alerts = 0
-        let f = try EndingFixture(
-            present: { _ in alerts += 1; return .alertSecondButtonReturn },
-            appIsActive: { active }
-        )
+        let f = try EndingFixture { _ in alerts += 1; return .alertSecondButtonReturn }
         defer { f.clean() }
         let first = f.project.sessions[0].id
         let second = f.project.sessions[1].id
         let moved = f.other.sessions[0].id
 
-        XCTAssertEqual(f.model.closeAutomationSession(sessionId: "missing", projectId: nil, force: false), .gone)
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: "missing", projectId: nil), .gone)
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: moved, projectId: f.project.id), .conflict)
         XCTAssertEqual(
-            f.model.closeAutomationSession(sessionId: moved, projectId: f.project.id, force: true), .conflict)
-
-        active = true
-        XCTAssertEqual(
-            f.model.closeAutomationSession(sessionId: first, projectId: f.project.id, force: false), .busy,
-            "the selected tab of the selected project is on screen while the app is active")
+            f.model.closeAutomationSession(sessionId: first, projectId: f.project.id), .busy,
+            "the selected tab of the selected project stays even while the app is in the background")
         f.model.setStatus(sessionId: second, status: .running, text: nil, timestamp: 100)
-        XCTAssertEqual(
-            f.model.closeAutomationSession(sessionId: second, projectId: f.project.id, force: false), .busy)
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: second, projectId: f.project.id), .busy)
         XCTAssertTrue(f.calls.batches.isEmpty)
 
-        active = false
-        XCTAssertEqual(
-            f.model.closeAutomationSession(sessionId: first, projectId: f.project.id, force: false), .closed)
-        XCTAssertEqual(
-            f.model.closeAutomationSession(sessionId: second, projectId: f.project.id, force: true), .closed)
-        XCTAssertEqual(
-            f.model.closeAutomationSession(sessionId: first, projectId: f.project.id, force: false), .gone)
-        XCTAssertEqual(f.calls.batches, [[first], [second]])
+        f.model.setStatus(sessionId: second, status: .idle, text: nil, timestamp: 101)
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: second, projectId: f.project.id), .closed)
+        f.model.selectProject(f.other.id)
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: first, projectId: f.project.id), .closed)
+        XCTAssertEqual(f.model.closeAutomationSession(sessionId: first, projectId: nil), .gone)
+        XCTAssertEqual(f.calls.batches, [[second], [first]])
         XCTAssertEqual(f.model.projects.first { $0.id == f.project.id }?.sessions.count, 0)
         XCTAssertEqual(f.model.projects.first { $0.id == f.other.id }?.sessions.map(\.id), [moved])
         XCTAssertEqual(alerts, 0, "Scripted closes never display a confirmation")
@@ -228,7 +218,7 @@ final class SessionEndingTests: XCTestCase {
         )
         XCTAssertTrue(model.projects.isEmpty)
         XCTAssertEqual(
-            model.closeAutomationSession(sessionId: session.id, projectId: nil, force: true), .unavailable)
+            model.closeAutomationSession(sessionId: session.id, projectId: nil), .unavailable)
         XCTAssertFalse(destroyed)
     }
 
@@ -256,10 +246,7 @@ private final class EndingFixture {
     let model: AppModel
     let oldStateDirectory: String?
 
-    init(
-        present: @escaping (NSAlert) -> NSApplication.ModalResponse,
-        appIsActive: @escaping @MainActor () -> Bool = { false }
-    ) throws {
+    init(present: @escaping (NSAlert) -> NSApplication.ModalResponse) throws {
         _ = NSApplication.shared
         root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -273,7 +260,7 @@ private final class EndingFixture {
         try repository.save(PersistedState(projects: [project, other, empty], selectedProjectId: project.id))
         let calls = calls
         model = AppModel(
-            stateRepository: repository, isAppActive: appIsActive,
+            stateRepository: repository, isAppActive: { false },
             agentActivityDirectory: root, resumeMarkerDirectory: root,
             kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
             gracefulSessionDestroyer: { ids, _ in calls.batches.append(ids); return Task {} },

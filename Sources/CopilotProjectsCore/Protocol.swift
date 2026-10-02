@@ -27,7 +27,6 @@ public struct ControlRequest: Codable, Sendable {
     public var action: String?
     public var requestId: String?
     public var prompt: String?
-    public var force: Bool?
 
     public init(command: String) {
         self.command = command

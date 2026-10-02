@@ -8474,12 +8474,10 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(received.last?.command, "close-session")
         XCTAssertEqual(received.last?.sessionId, "s1")
         XCTAssertEqual(received.last?.projectId, "p1")
-        XCTAssertNil(received.last?.force)
 
-        XCTAssertEqual(CLIMain.run(["close-session", "--force", "--session", "s2"], environment: environment), 0)
+        XCTAssertEqual(CLIMain.run(["close-session", "--session", "s2"], environment: environment), 0)
         XCTAssertEqual(received.last?.sessionId, "s2")
         XCTAssertNil(received.last?.projectId)
-        XCTAssertEqual(received.last?.force, true)
 
         let expectedExits: [(String?, Int32)] = [
             ("bad-request", 2), ("conflict", 3), ("gone", 4), ("unavailable", 5), ("busy", 8), (nil, 1),
@@ -8495,8 +8493,7 @@ final class AppLogicTests: XCTestCase {
             ["close-session", "--project", "p1"],
             ["close-session", "--session"],
             ["close-session", "--session", "s1", "--project"],
-            ["close-session", "--session", "s1", "--force", "extra"],
-            ["close-session", "--session", "s1", "--force=yes"],
+            ["close-session", "--session", "s1", "--force"],
             ["close-session", "s1"],
             valid + ["--all"],
             valid + ["positional"],

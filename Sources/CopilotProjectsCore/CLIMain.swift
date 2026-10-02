@@ -308,9 +308,9 @@ public enum CLIMain {
     /// The target is always explicit: the calling terminal's session is never implied,
     /// so a script cannot end the session it runs in by omitting `--session`.
     private static func closeSession(_ args: [String], environment: [String: String]) -> Int32 {
-        let usage = "usage: copilot-projects close-session --session ID [--project ID] [--force]"
+        let usage = "usage: copilot-projects close-session --session ID [--project ID]"
         let parsed = parseFlags(args)
-        let allowed: Set<String> = ["session", "project", "force"]
+        let allowed: Set<String> = ["session", "project"]
         let unknown = parsed.flags.keys.filter { !allowed.contains($0) }.sorted()
         guard unknown.isEmpty, parsed.positionals.isEmpty else {
             let extras = unknown.map { "--\($0)" } + parsed.positionals
@@ -318,8 +318,7 @@ public enum CLIMain {
             return 2
         }
         guard let sessionId = parsed.flags["session"], !sessionId.isEmpty,
-              parsed.flags["project"].map({ !$0.isEmpty }) ?? true,
-              parsed.flags["force"].map({ $0.isEmpty }) ?? true else {
+              parsed.flags["project"].map({ !$0.isEmpty }) ?? true else {
             fail(usage)
             return 2
         }
@@ -327,7 +326,6 @@ public enum CLIMain {
         var req = ControlRequest(command: "close-session")
         req.sessionId = sessionId
         req.projectId = parsed.flags["project"]
-        req.force = parsed.flags["force"] != nil ? true : nil
         do {
             let socketPath = Env.socket(environment) ?? Paths.socketPath
             let resp = try ControlClient(socketPath: socketPath).send(req)
@@ -576,8 +574,8 @@ public enum CLIMain {
           copilot-projects new-session             Add a session to a project [--cwd DIR] [--project ID]
           copilot-projects new-copilot-session     Start Copilot with a prompt, idempotent by request id
               --project ID --request-id UUID --prompt-file PATH [--title T]
-          copilot-projects close-session           End a session and remove its tab, without confirmation
-              --session ID [--project ID] [--force]
+          copilot-projects close-session           End an idle session that is not the selected tab
+              --session ID [--project ID]
           copilot-projects rename-project <name>   Rename a project [--project ID]
           copilot-projects focus                   Focus a project/session [--project ID] [--session ID]
           copilot-projects ping                    Check the app is reachable
