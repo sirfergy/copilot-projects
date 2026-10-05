@@ -23,6 +23,8 @@ public struct NotificationEvent: Codable, Equatable, Sendable {
     public let sessionId: String?
     public let isTargetVisible: Bool
     public let sentAt: Date
+    /// How remote clients can answer from the notification's actions.
+    public let reply: RemoteNotificationReply?
 
     public init(
         id: UUID = UUID(),
@@ -33,7 +35,8 @@ public struct NotificationEvent: Codable, Equatable, Sendable {
         projectId: String?,
         sessionId: String?,
         isTargetVisible: Bool = false,
-        sentAt: Date = Date()
+        sentAt: Date = Date(),
+        reply: RemoteNotificationReply? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -44,6 +47,7 @@ public struct NotificationEvent: Codable, Equatable, Sendable {
         self.sessionId = sessionId
         self.isTargetVisible = isTargetVisible
         self.sentAt = sentAt
+        self.reply = reply
     }
 
     var displayedBody: String {
