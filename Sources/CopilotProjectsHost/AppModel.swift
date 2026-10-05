@@ -3724,7 +3724,7 @@ final class AppModel: ObservableObject {
             sessionId: sessionId,
             kind: .elicitation,
             title: StatusNotificationKind.elicitation.title,
-            body: question.flatMap { NotificationSummary.preview($0.text) },
+            body: question?.notificationBody,
             reply: question?.reply
         )
         return true

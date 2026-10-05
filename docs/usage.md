@@ -69,7 +69,8 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   on Mac. Optional integrations receive the same event. Previews are derived locally (no extra model call),
   omit code blocks, and fall back to the generic alert when the matching transcript
   is unavailable. Response previews can appear on your devices' lock screens.
-  Question alerts show the pending question as a plain-text preview. When the session's
+  Question alerts show the pending question as a plain-text preview, followed by its
+  numbered choices when it can be answered from the notification. When the session's
   tracker supports receipt-backed operations, a question alert waits briefly (under four
   seconds) for the tracker to publish the question. If a remote client could answer it
   natively, the event carries reply metadata for that question; the same applies to

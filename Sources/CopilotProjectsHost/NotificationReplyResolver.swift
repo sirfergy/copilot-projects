@@ -13,6 +13,15 @@ enum NotificationReplyResolver {
         /// What the agent asked, for the notification body.
         let text: String
         let reply: RemoteNotificationReply?
+
+        /// The question preview followed by numbered choices. iPhone action
+        /// buttons can only say "Option N", so the body names what each means.
+        var notificationBody: String? {
+            let preview = NotificationSummary.preview(text)
+            guard let choices = reply?.choices, !choices.isEmpty else { return preview }
+            let numbered = choices.enumerated().map { "\($0.offset + 1). \($0.element.title)" }
+            return ([preview].compactMap { $0 } + numbered).joined(separator: "\n")
+        }
     }
 
     /// A follow-up prompt reply when a native `session-send` would be accepted now.

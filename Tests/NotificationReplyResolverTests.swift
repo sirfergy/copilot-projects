@@ -135,6 +135,20 @@ final class NotificationReplyResolverTests: XCTestCase {
             allowFreeform: true
         ))
         XCTAssertEqual(reply.categoryIdentifier, "copilot-projects.question.2.freeform")
+        XCTAssertEqual(question.notificationBody, "Which database?\n1. Postgres\n2. SQLite")
+    }
+
+    func testBodyOmitsChoicesWhenTheyCannotBeTapped() {
+        let unanswerable = NotificationReplyResolver.PendingQuestion(text: "Which **database**?", reply: nil)
+        XCTAssertEqual(unanswerable.notificationBody, "Which database?")
+        let freeText = NotificationReplyResolver.PendingQuestion(
+            text: "Anything else?",
+            reply: RemoteNotificationReply(
+                kind: .userInput, conversationEpoch: "e", requestId: "r",
+                question: "Anything else?", allowFreeform: true
+            )
+        )
+        XCTAssertEqual(freeText.notificationBody, "Anything else?")
     }
 
     func testAskUserWithTooManyChoicesFallsBackToFreeTextOnly() throws {
@@ -502,7 +516,7 @@ final class NotificationReplyWiringTests: XCTestCase {
         XCTAssertEqual(harness.spy.events.count, 1)
         XCTAssertEqual(event.kind, .elicitation)
         XCTAssertEqual(event.title, StatusNotificationKind.elicitation.title)
-        XCTAssertEqual(event.body, "Use Postgres or SQLite?")
+        XCTAssertEqual(event.body, "Use Postgres or SQLite?\n1. Postgres\n2. SQLite")
         XCTAssertEqual(event.reply?.kind, .userInput)
         XCTAssertEqual(event.reply?.requestId, "ask-1")
         XCTAssertEqual(event.reply?.conversationEpoch, epoch)
