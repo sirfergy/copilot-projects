@@ -212,13 +212,48 @@ struct CLIOperationAdapter {
         }
     }
 
+    /// The fresh snapshot a receipt-correlated operation would bind to right
+    /// now, or nil when one would be refused before its payload is validated.
+    func loadReceiptBoundSnapshot(
+        sessionId: String,
+        now: Date
+    ) -> AgentActivitySnapshot? {
+        guard let snapshot = loadFreshSnapshot(sessionId: sessionId, now: now),
+              let epoch = snapshot.remoteOperationProjection(at: now).conversationEpoch,
+              case .ready(let bound) = bind(
+                snapshot,
+                sessionId: sessionId,
+                correlatedEpoch: epoch,
+                now: now
+              ) else {
+            return nil
+        }
+        return bound.snapshot
+    }
+
     private func loadBoundSnapshot(
         sessionId: String,
         operation: CLIOperationRequest?,
         now: Date
     ) -> BoundSnapshotResult {
-        guard let snapshot = loadFreshSnapshot(sessionId: sessionId, now: now),
-              !snapshot.reportsTerminalDisconnect,
+        guard let snapshot = loadFreshSnapshot(sessionId: sessionId, now: now) else {
+            return .invalid
+        }
+        return bind(
+            snapshot,
+            sessionId: sessionId,
+            correlatedEpoch: operation?.conversationEpoch,
+            now: now
+        )
+    }
+
+    private func bind(
+        _ snapshot: AgentActivitySnapshot,
+        sessionId: String,
+        correlatedEpoch: String?,
+        now: Date
+    ) -> BoundSnapshotResult {
+        guard !snapshot.reportsTerminalDisconnect,
               TranscriptController.transcriptOwnerAllowsRead(
                 sessionId: sessionId,
                 directory: resumeMarkerDirectory
@@ -235,9 +270,9 @@ struct CLIOperationAdapter {
         }
 
         let projection = snapshot.remoteOperationProjection(at: now)
-        if let operation {
+        if let correlatedEpoch {
             guard projection.support == .receipts else { return .invalid }
-            guard projection.conversationEpoch == operation.conversationEpoch,
+            guard projection.conversationEpoch == correlatedEpoch,
                   snapshot.copilotSessionId == copilotSessionId else {
                 return .conflict
             }

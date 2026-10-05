@@ -69,6 +69,12 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   on Mac. Optional integrations receive the same event. Previews are derived locally (no extra model call),
   omit code blocks, and fall back to the generic alert when the matching transcript
   is unavailable. Response previews can appear on your devices' lock screens.
+  Question alerts show the pending question as a plain-text preview. When the session's
+  tracker supports receipt-backed operations, a question alert waits briefly (under four
+  seconds) for the tracker to publish the question. If a remote client could answer it
+  natively, the event carries reply metadata for that question; the same applies to
+  completion events when the session can accept a follow-up prompt. Remote clients can then
+  answer from the notification. Mac banners otherwise remain tap-to-open.
   Clicking one focuses that session. Unread sessions get a bell
   badge + a Dock badge count. Completed sessions show one blue attention dot, not two.
   Returning to the Mac app marks the selected session read without
