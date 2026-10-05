@@ -118,14 +118,19 @@ public struct APNsRegistration: Codable, Equatable, Sendable {
     public let token: String
     public let environment: APNsEnvironment
     public let label: String?
+    /// Features this device's app understands. Absent on older apps, so the
+    /// gateway keeps sending them only what they registered for.
+    public let capabilities: [String]?
 
     public init(
         token: String,
         environment: APNsEnvironment,
-        label: String?
+        label: String?,
+        capabilities: [String]? = nil
     ) {
         self.token = token
         self.environment = environment
         self.label = label
+        self.capabilities = capabilities
     }
 }

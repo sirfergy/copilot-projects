@@ -172,6 +172,10 @@ public struct RemoteNotificationReply: Codable, Equatable, Sendable {
 /// category and the button count always matches the choices on offer.
 public enum NotificationReplyContract {
     public static let replyKey = "reply"
+    /// Advertised in `APNsRegistration.capabilities` by apps that register the
+    /// reply categories. Other devices must keep the synced category, or their
+    /// dismissals would stop syncing.
+    public static let deviceCapability = "notification-replies"
     /// Free text only (follow-up prompts and open-ended questions).
     public static let textCategoryIdentifier = "copilot-projects.reply"
     public static let questionCategoryPrefix = "copilot-projects.question."

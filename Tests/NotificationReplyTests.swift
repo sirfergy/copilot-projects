@@ -59,6 +59,21 @@ final class NotificationReplyTests: XCTestCase {
         XCTAssertEqual(payload.title, "t")
     }
 
+    func testRegistrationCapabilitiesAreOptional() throws {
+        let legacy = try JSONDecoder().decode(APNsRegistration.self, from: Data(
+            #"{"token":"ab","environment":"sandbox","label":"iPhone"}"#.utf8
+        ))
+        XCTAssertNil(legacy.capabilities)
+        let capable = APNsRegistration(
+            token: "ab", environment: .sandbox, label: nil,
+            capabilities: [NotificationReplyContract.deviceCapability]
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(APNsRegistration.self, from: JSONEncoder().encode(capable)),
+            capable
+        )
+    }
+
     func testCategoryMatchesAnswerShape() {
         XCTAssertEqual(
             RemoteNotificationReply.prompt(conversationEpoch: "e").categoryIdentifier,
