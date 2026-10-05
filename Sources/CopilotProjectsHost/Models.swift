@@ -47,6 +47,15 @@ struct Session: Identifiable, Codable, Equatable {
         status != .idle || hasBackgroundWork || !schedules.isEmpty || hasPendingInput
     }
 
+    /// The attention state shown beside a session's name.
+    var attentionLabel: String {
+        switch displayStatus {
+        case .running: return "Running"
+        case .waiting: return "Waiting for input"
+        case .idle: return finishedUnseen ? "Finished" : "Idle"
+        }
+    }
+
     private enum CodingKeys: String, CodingKey { case id, title, cwd, creationFingerprint }
 
     init(

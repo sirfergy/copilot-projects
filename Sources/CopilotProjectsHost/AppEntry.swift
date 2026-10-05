@@ -35,7 +35,7 @@ private struct WorkspaceCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Project…") { model.addProjectInteractive() }
                 .keyboardShortcut("n", modifiers: .command)
-                .disabled(input.imagePreview != nil)
+                .disabled(input.hasWorkspaceSheet)
         }
         CommandGroup(after: .appSettings) {
             Toggle("Keep Running When Window Closes", isOn: $keepRunning)
@@ -43,7 +43,7 @@ private struct WorkspaceCommands: Commands {
         CommandGroup(before: .sidebar) {
             Toggle("Show Projects", isOn: $showsProjects)
                 .keyboardShortcut("0", modifiers: .command)
-                .disabled(input.imagePreview != nil)
+                .disabled(input.hasWorkspaceSheet)
         }
         CommandMenu("Session") {
             Group {
@@ -56,12 +56,14 @@ private struct WorkspaceCommands: Commands {
                 Button("End Session") { model.closeSelectedSession() }
                     .keyboardShortcut("w", modifiers: .command)
                 Divider()
+                Button("Find Session…") { input.presentSessionFinder() }
+                    .keyboardShortcut("k", modifiers: .command)
                 Button("Next Session") { model.selectAdjacentSession(1) }
                     .keyboardShortcut("]", modifiers: [.command, .shift])
                 Button("Previous Session") { model.selectAdjacentSession(-1) }
                     .keyboardShortcut("[", modifiers: [.command, .shift])
             }
-            .disabled(input.imagePreview != nil)
+            .disabled(input.hasWorkspaceSheet)
         }
     }
 }
@@ -172,7 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.model.markActiveSessionSeen()
-                if self?.input.imagePreview == nil {
+                if self?.input.hasWorkspaceSheet == false {
                     self?.model.focusActiveTerminal()
                 }
             }

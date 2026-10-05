@@ -90,6 +90,71 @@ final class WorkspaceInputControllerTests: XCTestCase {
         }
     }
 
+    func testSessionFinderOwnsTheKeyboardUntilItClosesOrOpensASession() throws {
+        try withWorkspace { model, input, sessions in
+            let terminal = try XCTUnwrap(model.controller(for: sessions[0].id))
+            let process = try XCTUnwrap(terminal.terminalView.process)
+            let sends = process.sendCount
+            let original = model.projects.flatMap(\.sessions).map(\.id)
+            @MainActor func assertWorkspaceUntouched(selected: String, file: StaticString = #filePath, line: UInt = #line) {
+                XCTAssertEqual(model.projects.flatMap(\.sessions).map(\.id), original, file: file, line: line)
+                XCTAssertEqual(model.globalSelectedSessionId, selected, file: file, line: line)
+                XCTAssertEqual(process.sendCount, sends, file: file, line: line)
+                XCTAssertFalse(terminal.exited, file: file, line: line)
+            }
+
+            XCTAssertNil(input.handleKeyDown(try key("k", code: 40, modifiers: .command)))
+            XCTAssertNotNil(input.sessionFinder)
+            XCTAssertTrue(input.hasWorkspaceSheet)
+            input.presentImage(image(sessions[0]))
+            XCTAssertNil(input.imagePreview, "Only one workspace sheet may own the keyboard")
+            for event in [
+                try key("2", code: 19, modifiers: .control),
+                try key("2", code: 19, modifiers: .command),
+                try key("\t", code: 48, modifiers: .control),
+                try key("k", code: 40, modifiers: .command),
+                try key("x", code: 7),
+            ] {
+                XCTAssertNil(input.handleKeyDown(event))
+                XCTAssertNotNil(input.sessionFinder)
+            }
+            assertWorkspaceUntouched(selected: sessions[0].id)
+
+            for dismissal in [try key("w", code: 13, modifiers: .command), try key("\u{1b}", code: 53)] {
+                input.presentSessionFinder()
+                XCTAssertNil(input.handleKeyDown(dismissal))
+                XCTAssertNil(input.sessionFinder)
+                assertWorkspaceUntouched(selected: sessions[0].id)
+            }
+
+            input.presentSessionFinder()
+            let finder = try XCTUnwrap(input.sessionFinder)
+            finder.query = "fi"
+            XCTAssertNil(input.handleKeyDown(try key("\u{1b}", code: 53)))
+            XCTAssertEqual(finder.query, "", "Escape clears a search before it closes")
+            XCTAssertNotNil(input.sessionFinder)
+
+            // Browsing starts past the current session, like ⌘Tab.
+            XCTAssertEqual(finder.highlightedId, sessions[1].id)
+            let up = String(Character(try XCTUnwrap(UnicodeScalar(NSUpArrowFunctionKey))))
+            let down = String(Character(try XCTUnwrap(UnicodeScalar(NSDownArrowFunctionKey))))
+            XCTAssertNil(input.handleKeyDown(try key(up, code: 126)))
+            XCTAssertEqual(finder.highlightedId, sessions[0].id)
+            XCTAssertNil(input.handleKeyDown(try key("n", code: 45, modifiers: .control)))
+            XCTAssertEqual(finder.highlightedId, sessions[1].id)
+            XCTAssertNil(input.handleKeyDown(try key("p", code: 35, modifiers: .control)))
+            XCTAssertEqual(finder.highlightedId, sessions[0].id)
+            XCTAssertNil(input.handleKeyDown(try key(down, code: 125)))
+            XCTAssertEqual(finder.highlightedId, sessions[1].id)
+
+            input.openFromSessionFinder("ended-session")
+            XCTAssertNotNil(input.sessionFinder, "An ended session leaves the finder open")
+            XCTAssertNil(input.handleKeyDown(try key("\r", code: 36)))
+            XCTAssertNil(input.sessionFinder)
+            assertWorkspaceUntouched(selected: sessions[1].id)
+        }
+    }
+
     func testStalePreviewIsRejectedAndBusinessCloseIsNotGatedByUIState() throws {
         try withWorkspace { model, input, sessions in
             input.presentImage(image(sessions[1]))

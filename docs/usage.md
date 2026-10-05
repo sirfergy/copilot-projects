@@ -33,6 +33,11 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   Drag a row to reorder it or onto another project to move it (show Projects first
   if that column is hidden). Background sessions keep
   running. Hold **⌘** (projects) or **⌃** (sessions) to see numbered hints.
+- **Find Session (`⌘K`):** search every project's sessions by name, project, folder, or
+  conversation text; matches update as you type. After a pause, Luna (`gpt-6-luna`) adds
+  meaning-based suggestions through a tool-less `copilot -p` run in a throwaway
+  `COPILOT_HOME` seeded only with your signed-in account, so it never adds sessions to your
+  Copilot history. `↑`/`↓` or `⌃N`/`⌃P` move, Return opens, Escape clears then closes.
 - **Prompt-first sessions:** the **+** split button's dropdown, Session menu, and project context
   menu offer **Start with Prompt…**. Compose multiple lines, then use `⌘Return` to launch
   an interactive session (not a one-shot/headless command). Cancel creates no session.

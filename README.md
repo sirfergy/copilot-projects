@@ -69,6 +69,8 @@ discards it. Closing the drawer or switching sessions dismisses that preview.
 - **Session details.** Read completed turns as Markdown and see usage,
   background agents, and schedules when the
   connected Copilot CLI supports them.
+- **Find any session.** Press `⌘K` to search every project's sessions by name,
+  project, folder, or what you worked on. Luna suggests matches by meaning.
 - **Local pull-request reviews.** Choose **Review Pull Request…** from the split
   button's dropdown to open a Copilot CLI session with a local adversarial-review
   prompt for a GitHub pull request.
@@ -100,12 +102,31 @@ accessibility labels.
 | New plain terminal | `⌥⌘T` |
 | End the current session | `⌘W` |
 | Next / previous session | `⌃Tab` / `⌃⇧Tab` |
+| Find a session | `⌘K` |
 | Jump to a project | `⌘1`–`⌘9` |
 | Jump to a session | `⌃1`–`⌃9` |
 | Show / hide Projects | `⌘0` |
 
 Hold `⌘` or `⌃` to reveal numbered navigation hints. Use the session-details
 button to open the completed-turn drawer.
+
+### Find a session
+
+**Find Session…** (`⌘K`, also in the Session menu) lists every session across
+your projects, most recently active first. Type to filter instantly by session
+name, project, folder, or the text of its conversation. Use `↑`/`↓` (or
+`⌃N`/`⌃P`) to move, Return to switch to that session, and Escape to clear the
+search or close the finder.
+
+When you pause typing, Luna (`gpt-6-luna`, always) also suggests sessions that
+match what you described rather than the exact words, with a short reason.
+Its picks never reorder the instant matches; extra picks appear below them.
+Luna runs through the Copilot CLI you're signed in to, with no tools, in a
+temporary Copilot home that is deleted afterwards, so these lookups don't add
+sessions to your Copilot history or load your MCP servers. It sees each
+session's name, project, folder, and short excerpts of its first and recent
+requests and latest reply. If the Copilot CLI is missing or signed out, the
+instant results still work and the finder says why Luna couldn't help.
 
 VoiceOver exposes each session's selection and attention state, with separate
 select and end actions. The session-details drawer uses a fade instead of
