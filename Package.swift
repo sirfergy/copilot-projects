@@ -6,6 +6,7 @@ let package = Package(
     platforms: [
         .macOS("26.0"),
         .iOS("17.0"),
+        .watchOS("10.0"),
     ],
     products: [
         .library(name: "CopilotProjectsHost", targets: ["CopilotProjectsHost"]),
