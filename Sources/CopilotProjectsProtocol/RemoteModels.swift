@@ -4,15 +4,28 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
     public let projects: [RemoteProjectSnapshot]
     public let selectedProjectId: String?
     public let protocolInfo: RemoteProtocolInfo?
+    /// When the gateway served this snapshot, in Unix milliseconds on the Mac's
+    /// clock: the same clock as each session's `workflow.observedAtMilliseconds`.
+    /// Clients pass it with their own monotonic receipt time to
+    /// `RemoteSessionWorkflow.isFresh(servedAtMilliseconds:receivedAt:now:at:)`,
+    /// so a Mac/phone clock skew cannot change a workflow's age.
+    ///
+    /// Optional and omitted when absent: the host leaves it `nil` and older
+    /// gateways never send it, so clients fall back to wall-clock freshness. Code
+    /// that rebuilds a served snapshot must carry it forward. It is part of `==`,
+    /// so a producer that diffs snapshots should compare them before stamping.
+    public var servedAtMilliseconds: Int64?
 
     public init(
         projects: [RemoteProjectSnapshot],
         selectedProjectId: String?,
-        protocolInfo: RemoteProtocolInfo? = nil
+        protocolInfo: RemoteProtocolInfo? = nil,
+        servedAtMilliseconds: Int64? = nil
     ) {
         self.projects = projects
         self.selectedProjectId = selectedProjectId
         self.protocolInfo = protocolInfo
+        self.servedAtMilliseconds = servedAtMilliseconds
     }
 }
 public struct RemoteProjectSnapshot: Codable, Equatable, Sendable {

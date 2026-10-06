@@ -91,7 +91,9 @@ final class ExtensionOptimizationTests: XCTestCase {
         let steadyWrites = try XCTUnwrap(summary["steadyWrites"] as? Int)
         XCTAssertGreaterThanOrEqual(steadyTicks, 2)
         // Exactly one heartbeat per tick, plus at most one write straddling the
-        // sampling window. Before the change this was two per tick.
+        // sampling window. Before the change this was two per tick. (This fake
+        // session has no runtime connection; a native session's successful
+        // runtime observation adds one write per tick, covered in JSTests.)
         XCTAssertLessThanOrEqual(steadyWrites, steadyTicks + 1)
         XCTAssertGreaterThanOrEqual(steadyWrites, steadyTicks)
         XCTAssertEqual(summary["heartbeatAdvanced"] as? Bool, true)

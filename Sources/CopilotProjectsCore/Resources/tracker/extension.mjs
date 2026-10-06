@@ -1218,11 +1218,15 @@ if (validSessionId && socketPath) {
         }
     }
 
-    async function refreshRuntimeActivity(forcePublish = false) {
+    // `heartbeat` marks the poll's own query: even an unchanged result then
+    // publishes once when it advances the workflow observation, so remote
+    // clients see an observation from this tick rather than the previous one.
+    async function refreshRuntimeActivity(forcePublish = false, { heartbeat = false } = {}) {
         if (shuttingDown || runtimeActivityUnsupported
             || !validCopilotSessionId || !ownsSharedFiles()) return;
         if (runtimeActivityRefresh?.generation === conversationGeneration) {
             runtimeActivityRefresh.forcePublish ||= forcePublish;
+            runtimeActivityRefresh.heartbeat ||= heartbeat;
             return;
         }
         const token = {
@@ -1231,6 +1235,7 @@ if (validSessionId && socketPath) {
             sessionId: copilotSessionId,
             epoch: conversationEpoch,
             forcePublish,
+            heartbeat,
         };
         runtimeActivityRefresh = token;
         const observedAtMilliseconds = Date.now();
@@ -1284,16 +1289,26 @@ if (validSessionId && socketPath) {
                 idleAtMilliseconds: runtimeIdleAtMilliseconds,
                 error: null,
             };
+            let observationAdvanced = false;
             if (workflowObservation && workflowRuntime) {
-                workflowObservation.observedAtMilliseconds = observedAtMilliseconds;
-                workflowObservation.limitsKnown = Object.hasOwn(metadata, "sessionLimits")
-                    && (metadata.sessionLimits === null || finiteNonnegative(metadata.sessionLimits?.maxAiCredits));
-                workflowObservation.maxAiCredits = workflowObservation.limitsKnown
-                    ? metadata.sessionLimits?.maxAiCredits ?? null : null;
+                // A workflow refresh that settled first can already hold a
+                // newer observation; never replace it with this older read.
+                observationAdvanced = observedAtMilliseconds
+                    > workflowObservation.observedAtMilliseconds;
+                if (observationAdvanced) {
+                    workflowObservation.observedAtMilliseconds = observedAtMilliseconds;
+                    workflowObservation.limitsKnown = Object.hasOwn(metadata, "sessionLimits")
+                        && (metadata.sessionLimits === null || finiteNonnegative(metadata.sessionLimits?.maxAiCredits));
+                    workflowObservation.maxAiCredits = workflowObservation.limitsKnown
+                        ? metadata.sessionLimits?.maxAiCredits ?? null : null;
+                }
             }
-            // Unchanged observations ride the next heartbeat; actual transitions
-            // and input completions publish immediately.
-            if (changed || token.forcePublish) publish();
+            // Transitions and input completions publish immediately. So does the
+            // heartbeat's own observation: remote clients only act on an
+            // observation younger than 15s, and riding the next tick would make
+            // every published one ~5s old before it even left this machine.
+            if (changed || token.forcePublish
+                || (token.heartbeat && observationAdvanced)) publish();
         } catch (error) {
             if (!current()) return;
             if (error?.code === -32601) {
@@ -4709,11 +4724,12 @@ if (validSessionId && socketPath) {
         // refresh can be suppressed outright by its single-flight guard
         // while a previous call is still outstanding. Publishing here and
         // letting the refreshes publish only on an actual change keeps the
-        // heartbeat exact while collapsing the steady-state cost from two
-        // full snapshot writes per tick to one.
+        // heartbeat exact. The one exception is the runtime observation this
+        // tick takes: when it succeeds it publishes once more (at most one
+        // extra write per tick), so the workflow it certifies is current.
         publish();
         reconcileQuestionEvents();
-        refreshRuntimeActivity();
+        refreshRuntimeActivity(false, { heartbeat: true });
         refreshSchedules();
         refreshModels();
         refreshWorkflow();
