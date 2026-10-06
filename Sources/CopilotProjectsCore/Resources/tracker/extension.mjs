@@ -2085,7 +2085,9 @@ if (validSessionId && socketPath) {
     // Build a bounded elicitation record or return null to reject remote
     // exposure (the terminal keeps handling it). The requestedSchema is passed
     // through verbatim within a byte budget so the client renders exactly what
-    // the agent asked; oversized/complex schemas fall back to the terminal.
+    // the agent asked, plus the reserved `x-copilot-projects-property-order`
+    // key (see withElicitationPropertyOrder); oversized/complex schemas fall
+    // back to the terminal.
     function jsonDepth(value, limit = MAX_ELICITATION_SCHEMA_DEPTH + 1) {
         if (limit <= 0) return Infinity;
         if (Array.isArray(value)) {
@@ -2108,18 +2110,21 @@ if (validSessionId && socketPath) {
     }
 
     // The host decodes the schema into an unordered Swift dictionary, so record
-    // the agent's property order for the remote forms. Replaces any value the
-    // agent supplied under the same key.
+    // the agent's property order for the remote forms. The key is reserved:
+    // any value the agent supplied under it is replaced, or dropped when the
+    // schema has no usable `properties` to order.
     function withElicitationPropertyOrder(schema) {
+        if (Array.isArray(schema)) return schema;
+        const {
+            [ELICITATION_PROPERTY_ORDER_KEY]: _agentSupplied,
+            ...published
+        } = schema;
         const properties = schema.properties;
-        if (!properties || typeof properties !== "object"
-                || Array.isArray(properties)) {
-            return schema;
+        if (properties && typeof properties === "object"
+                && !Array.isArray(properties)) {
+            published[ELICITATION_PROPERTY_ORDER_KEY] = Object.keys(properties);
         }
-        return {
-            ...schema,
-            [ELICITATION_PROPERTY_ORDER_KEY]: Object.keys(properties),
-        };
+        return published;
     }
 
     function elicitationEntry(event) {

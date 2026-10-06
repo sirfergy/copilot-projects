@@ -1300,7 +1300,7 @@ test("late attach recovers a free-text form and answers its real request exactly
   assert.deepEqual(snapshot.trackedElicitations, []);
 });
 
-test("published form schemas record the agent's property order", {
+test("published form schemas record the agent's property order and drop forged orders", {
   concurrency: false,
 }, async (t) => {
   const question = {
@@ -1316,16 +1316,34 @@ test("published form schemas record the agent's property order", {
       "x-copilot-projects-property-order": ["example"],
     },
   };
+  const unorderable = (requestId, extra) => ({
+    requestId,
+    message: "Anything else?",
+    requestedSchema: {
+      type: "object",
+      ...extra,
+      "x-copilot-projects-property-order": ["forged"],
+    },
+  });
   const runtime = await createRuntime(t, (session) => {
     session.pendingQuestionsHandler = async () => ({
-      userInputRequests: [], elicitationRequests: [question],
+      userInputRequests: [],
+      elicitationRequests: [
+        question,
+        unorderable("no-properties", {}),
+        unorderable("array-properties", { properties: [] }),
+      ],
     });
   });
-  const [entry] = readSnapshot(runtime).trackedElicitations;
-  assert.deepEqual(entry.schema["x-copilot-projects-property-order"], [
+  const entries = readSnapshot(runtime).trackedElicitations;
+  const schemaFor = (requestId) =>
+    entries.find((entry) => entry.requestId === requestId)?.schema;
+  assert.deepEqual(schemaFor("ordered")["x-copilot-projects-property-order"], [
     "where", "symptom", "example",
   ]);
-  assert.deepEqual(entry.schema.properties, question.requestedSchema.properties);
+  assert.deepEqual(schemaFor("ordered").properties, question.requestedSchema.properties);
+  assert.deepEqual(schemaFor("no-properties"), { type: "object" });
+  assert.deepEqual(schemaFor("array-properties"), { type: "object", properties: [] });
 });
 
 test("recovery excludes racing completions and preserves live and subagent requests", {
