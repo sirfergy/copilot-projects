@@ -55,6 +55,9 @@ public protocol SessionHost: AnyObject, Sendable {
     func setModel(sessionId: String, selection: RemoteModelSelection, operation: CLIOperationRequest?) -> RemoteUserInputResult
     func performSessionAction(sessionId: String, action: RemoteSessionAction, operation: CLIOperationRequest) -> RemoteUserInputResult
     var supportsSessionSearch: Bool { get }
+    /// The `RemoteSessionSearchContract` capabilities `searchSessions` implements,
+    /// such as `recentCapability`. A gateway advertises only those it also serves.
+    var sessionSearchCapabilities: [String] { get }
     /// Cancelling the calling task stops the search, including a running Luna process.
     func searchSessions(_ request: RemoteSessionSearchRequest) async -> RemoteSessionSearchOutcome
 }
@@ -65,6 +68,8 @@ public extension SessionHost {
     }
 
     var supportsSessionSearch: Bool { false }
+
+    var sessionSearchCapabilities: [String] { [] }
 
     func searchSessions(_ request: RemoteSessionSearchRequest) async -> RemoteSessionSearchOutcome {
         .unsupported

@@ -33,6 +33,14 @@ private final class FakeTranscripts: @unchecked Sendable {
         }
     }
 
+    /// Changes when the transcript file was written without changing its conversation.
+    func touch(_ sessionId: String, at date: Date) {
+        lock.withLock {
+            versions[sessionId, default: 0] += 1
+            dates[sessionId] = date
+        }
+    }
+
     func stamp(_ sessionId: String) -> SessionSearchIndex.Stamp {
         let (version, date) = lock.withLock { (versions[sessionId], dates[sessionId]) }
         return SessionSearchIndex.Stamp(
@@ -196,9 +204,12 @@ final class RemoteSessionSearchTests: XCTestCase {
         let outcome = await search.search(.init(query: "  WEBHOOK  ", mode: .instant)) { sources }
 
         XCTAssertEqual(matches(outcome, mode: .instant), [
-            RemoteSessionSearchMatch(sessionId: "named", projectId: "p2"),
             RemoteSessionSearchMatch(
-                sessionId: "talked", projectId: "p1", snippet: "the billing webhook keeps timing out"
+                sessionId: "named", projectId: "p2", lastActivityAt: now.addingTimeInterval(-3_600)
+            ),
+            RemoteSessionSearchMatch(
+                sessionId: "talked", projectId: "p1", snippet: "the billing webhook keeps timing out",
+                lastActivityAt: now
             ),
         ])
     }
@@ -223,6 +234,123 @@ final class RemoteSessionSearchTests: XCTestCase {
             return reads == 1 ? before : after
         }
         XCTAssertEqual(matches(outcome, mode: .instant), [RemoteSessionSearchMatch(sessionId: "stays", projectId: "p9")])
+    }
+
+    // MARK: - Recent
+
+    func testRecentListsEveryLiveSessionByTranscriptTimeWithoutReadingOrAskingLuna() async {
+        let transcripts = FakeTranscripts()
+        let base = Date(timeIntervalSince1970: 1_791_297_000)
+        for id in ["a", "c", "e"] {
+            transcripts.set(id, requests: ["about \(id)"], at: base.addingTimeInterval(-86_400))
+        }
+        transcripts.touch("a", at: base.addingTimeInterval(-60))
+        transcripts.touch("c", at: base)
+        transcripts.touch("e", at: base.addingTimeInterval(-60))
+        let ranker = GatedRanker()
+        let index = transcripts.index()
+        let search = RemoteSessionSearch(index: index, ranker: ranker)
+        let sources = [
+            source("a", "Alpha"), source("b", "Plain terminal"), source("c", "Gamma", project: "p2"),
+            source("d", "Another terminal"), source("e", "Epsilon"), source("a", "Alpha again"),
+        ]
+        let expected = [
+            RemoteSessionSearchMatch(sessionId: "c", projectId: "p2", lastActivityAt: base),
+            RemoteSessionSearchMatch(sessionId: "a", projectId: "p1", lastActivityAt: base.addingTimeInterval(-60)),
+            RemoteSessionSearchMatch(sessionId: "e", projectId: "p1", lastActivityAt: base.addingTimeInterval(-60)),
+            RemoteSessionSearchMatch(sessionId: "b", projectId: "p1"),
+            RemoteSessionSearchMatch(sessionId: "d", projectId: "p1"),
+        ]
+
+        // The query is ignored, and may be empty.
+        for query in ["", " \n\t ", "gamma"] {
+            let outcome = await search.search(.init(query: query, mode: .recent)) { sources }
+            XCTAssertEqual(matches(outcome, mode: .recent), expected)
+        }
+        XCTAssertEqual(transcripts.totalLoads, 0)
+        XCTAssertEqual(ranker.queries, [])
+        XCTAssertEqual(search.activeLunaRuns, 0)
+
+        // A newer write moves the session up without its transcript being read.
+        transcripts.touch("e", at: base.addingTimeInterval(1))
+        let moved = await search.search(.init(query: "", mode: .recent)) { sources }
+        XCTAssertEqual(matches(moved, mode: .recent)?.map(\.sessionId), ["e", "c", "a", "b", "d"])
+        XCTAssertEqual(transcripts.totalLoads, 0)
+        let cached = await index.cachedSessionIds
+        XCTAssertEqual(cached, [])
+    }
+
+    func testRecentRejectsOnlyOversizedQueries() async {
+        let search = RemoteSessionSearch(index: FakeTranscripts().index(), ranker: GatedRanker())
+        let oversized = String(repeating: "x", count: RemoteSessionSearchContract.maximumQueryLength + 1)
+        let outcome = await search.search(.init(query: oversized, mode: .recent)) { [source("a", "A")] }
+        XCTAssertEqual(outcome, .invalid("Searches can be at most 300 characters."))
+    }
+
+    func testRecentIsCappedAfterLeavingOutSessionsThatEndDuringTheSearch() async {
+        let transcripts = FakeTranscripts()
+        let base = Date(timeIntervalSince1970: 1_791_297_000)
+        let count = RemoteSessionSearchContract.maximumMatches + 10
+        let before = (0..<count).map { index in
+            transcripts.touch("s\(index)", at: base.addingTimeInterval(TimeInterval(index)))
+            return source("s\(index)", "Session \(index)")
+        }
+        // The newest session ends, and the next newest moves, while the search runs.
+        let newest = "s\(count - 1)", moving = "s\(count - 2)"
+        let after = before.compactMap { listed -> SessionFinderSource? in
+            listed.sessionId == newest ? nil
+                : listed.sessionId == moving ? source(moving, "Moved", project: "p9") : listed
+        }
+        let search = RemoteSessionSearch(index: transcripts.index(), ranker: GatedRanker())
+        var reads = 0
+        let outcome = await search.search(.init(query: "", mode: .recent)) {
+            reads += 1
+            return reads == 1 ? before : after
+        }
+        let found = matches(outcome, mode: .recent) ?? []
+        XCTAssertEqual(found.count, RemoteSessionSearchContract.maximumMatches)
+        XCTAssertEqual(found.first, RemoteSessionSearchMatch(
+            sessionId: moving, projectId: "p9", lastActivityAt: base.addingTimeInterval(TimeInterval(count - 2))
+        ))
+        XCTAssertEqual(
+            found.map(\.sessionId),
+            (0..<(count - 1)).reversed().prefix(RemoteSessionSearchContract.maximumMatches).map { "s\($0)" }
+        )
+    }
+
+    func testCancelledRecentSearchReportsCancellation() async {
+        let search = RemoteSessionSearch(index: FakeTranscripts().index(), ranker: GatedRanker())
+        let sources = [source("a", "A")]
+        let outcome = await Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await search.search(.init(query: "", mode: .recent)) { sources }
+        }.value
+        XCTAssertEqual(outcome, .failed(RemoteSessionSearch.cancelledMessage))
+    }
+
+    func testEveryModeDatesSessionsByTheirTranscriptFileNotTheirLastTurn() async throws {
+        let transcripts = FakeTranscripts()
+        let turnTime = Date(timeIntervalSince1970: 1_791_200_000)
+        let written = Date(timeIntervalSince1970: 1_791_297_000.5)
+        transcripts.set("a", requests: ["billing webhook"], at: turnTime)
+        transcripts.touch("a", at: written)
+        let ranker = GatedRanker(.success([
+            LunaMatch(sessionId: "a", reason: "webhooks"), LunaMatch(sessionId: "terminal", reason: "shell"),
+        ]))
+        ranker.ungated = ["webhook"]
+        let search = RemoteSessionSearch(index: transcripts.index(), ranker: ranker)
+        let sources = [source("terminal", "Webhook shell"), source("a", "Alpha")]
+
+        let instant = await search.search(.init(query: "webhook", mode: .instant)) { sources }
+        let luna = await search.search(.init(query: "webhook", mode: .luna)) { sources }
+        let recent = await search.search(.init(query: "", mode: .recent)) { sources }
+        for (outcome, mode) in [(instant, RemoteSessionSearchMode.instant), (luna, .luna), (recent, .recent)] {
+            let found = try XCTUnwrap(matches(outcome, mode: mode))
+            let times = Dictionary(uniqueKeysWithValues: found.map { ($0.sessionId, $0.lastActivityAt) })
+            XCTAssertEqual(times.count, 2, "\(mode)")
+            XCTAssertEqual(times["a"], written, "\(mode)")
+            XCTAssertEqual(times["terminal"], .some(nil), "\(mode)")
+        }
     }
 
     // MARK: - Index cache
@@ -264,7 +392,9 @@ final class RemoteSessionSearchTests: XCTestCase {
 
         let renamed = [source("a", "Ledger cleanup", project: "p2", cwd: "/r/ledger")]
         let byName = await search.search(.init(query: "ledger", mode: .instant)) { renamed }
-        XCTAssertEqual(matches(byName, mode: .instant), [RemoteSessionSearchMatch(sessionId: "a", projectId: "p2")])
+        XCTAssertEqual(matches(byName, mode: .instant), [
+            RemoteSessionSearchMatch(sessionId: "a", projectId: "p2", lastActivityAt: transcripts.stamp("a").lastActivity),
+        ])
         let stale = await search.search(.init(query: "old", mode: .instant)) { renamed }
         XCTAssertEqual(matches(stale, mode: .instant), [])
         let conversation = await search.search(.init(query: "webhook", mode: .instant)) { renamed }
@@ -363,7 +493,7 @@ final class RemoteSessionSearchTests: XCTestCase {
         XCTAssertEqual(ranker.entryCounts, [3])
         XCTAssertEqual(matches(outcome, mode: .luna), [
             RemoteSessionSearchMatch(sessionId: "b", projectId: "p2", reason: "ledger work"),
-            RemoteSessionSearchMatch(sessionId: "a", projectId: "p1"),
+            RemoteSessionSearchMatch(sessionId: "a", projectId: "p1", lastActivityAt: transcripts.stamp("a").lastActivity),
         ])
         XCTAssertEqual(search.activeLunaRuns, 0)
     }
@@ -486,8 +616,11 @@ final class RemoteSessionSearchTests: XCTestCase {
     func testOtherHostsDoNotSupportSearch() async {
         let host: any SessionHost = MinimalSessionHost()
         XCTAssertFalse(host.supportsSessionSearch)
-        let outcome = await host.searchSessions(.init(query: "anything", mode: .instant))
-        XCTAssertEqual(outcome, .unsupported)
+        XCTAssertEqual(host.sessionSearchCapabilities, [])
+        for mode in [RemoteSessionSearchMode.instant, .luna, .recent] {
+            let outcome = await host.searchSessions(.init(query: "anything", mode: mode))
+            XCTAssertEqual(outcome, .unsupported)
+        }
     }
 
     func testBridgeSearchesTheModelsLiveSessions() async throws {
@@ -513,6 +646,10 @@ final class RemoteSessionSearchTests: XCTestCase {
         model?.remoteSessionSearch = RemoteSessionSearch(index: transcripts.index(), ranker: ranker)
         let bridge: any SessionHost = RemoteModelBridge(model: try XCTUnwrap(model))
         XCTAssertTrue(bridge.supportsSessionSearch)
+        XCTAssertEqual(
+            bridge.sessionSearchCapabilities,
+            [RemoteSessionSearchContract.capability, RemoteSessionSearchContract.recentCapability]
+        )
 
         let instant = await bridge.searchSessions(.init(query: "payments", mode: .instant))
         XCTAssertEqual(matches(instant, mode: .instant), [RemoteSessionSearchMatch(sessionId: "webhook", projectId: "p1")])
@@ -525,6 +662,15 @@ final class RemoteSessionSearchTests: XCTestCase {
             RemoteSessionSearchMatch(sessionId: "docs", projectId: "p2", reason: "release work"),
         ])
         XCTAssertEqual(ranker.entryCounts, [2])
+
+        transcripts.touch("docs", at: Date(timeIntervalSince1970: 1_791_297_000))
+        let recent = await bridge.searchSessions(.init(query: "", mode: .recent))
+        XCTAssertEqual(matches(recent, mode: .recent), [
+            RemoteSessionSearchMatch(
+                sessionId: "docs", projectId: "p2", lastActivityAt: Date(timeIntervalSince1970: 1_791_297_000)
+            ),
+            RemoteSessionSearchMatch(sessionId: "webhook", projectId: "p1"),
+        ])
 
         model = nil
         let released = await bridge.searchSessions(.init(query: "payments", mode: .instant))

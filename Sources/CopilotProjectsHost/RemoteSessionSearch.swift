@@ -110,6 +110,21 @@ actor SessionSearchIndex {
         return entries
     }
 
+    /// The sessions as the finder lists recent ones, dated by their transcript
+    /// files alone: no transcript is read and the cache is left as it is. Nil
+    /// once the calling task is cancelled.
+    func recent(_ sources: [SessionFinderSource]) -> [SessionFinderEntry]? {
+        var seen = Set<String>()
+        var entries: [SessionFinderEntry] = []
+        for source in sources where seen.insert(source.sessionId).inserted {
+            if Task.isCancelled { return nil }
+            var dated = source
+            dated.lastActivity = stamp(source.sessionId).lastActivity
+            entries.append(SessionFinderEntry(source: dated))
+        }
+        return SessionFinderSearch.recent(entries)
+    }
+
     /// `SessionFinderSearch.localMatches` over the live sessions, or nil once cancelled.
     func instantMatches(
         for query: String,
@@ -146,8 +161,8 @@ actor SessionSearchIndex {
     }
 }
 
-/// Answers remote session searches with the Mac finder's instant ranking and
-/// Luna. One per host, so its Luna limit is host-wide.
+/// Answers remote session searches with the Mac finder's instant ranking, Luna,
+/// and recent order. One per host, so its Luna limit is host-wide.
 @MainActor
 final class RemoteSessionSearch {
     static let maximumConcurrentLunaRuns = 2
@@ -169,12 +184,13 @@ final class RemoteSessionSearch {
         _ request: RemoteSessionSearchRequest,
         liveSources: () -> [SessionFinderSource]
     ) async -> RemoteSessionSearchOutcome {
-        guard let query = RemoteSessionSearchContract.normalizedQuery(request.query) else {
+        guard let query = RemoteSessionSearchContract.normalizedQuery(request.query, mode: request.mode) else {
             return .invalid(Self.invalidMessage(for: request.query))
         }
         switch request.mode {
         case .instant: return await instant(query, liveSources: liveSources)
         case .luna: return await luna(query, liveSources: liveSources)
+        case .recent: return await recent(liveSources: liveSources)
         }
     }
 
@@ -196,7 +212,10 @@ final class RemoteSessionSearch {
         let projects = Self.projectIds(liveSources())
         let matches = found.compactMap { match in
             projects[match.entry.id].map {
-                RemoteSessionSearchMatch(sessionId: match.entry.id, projectId: $0, snippet: match.snippet)
+                RemoteSessionSearchMatch(
+                    sessionId: match.entry.id, projectId: $0, snippet: match.snippet,
+                    lastActivityAt: match.entry.lastActivity
+                )
             }
         }
         return .results(RemoteSessionSearchResponse(mode: .instant, matches: matches))
@@ -226,6 +245,10 @@ final class RemoteSessionSearch {
         }
         guard !Task.isCancelled else { return .failed(Self.cancelledMessage) }
         let projects = Self.projectIds(liveSources())
+        let activity = Dictionary(
+            entries.compactMap { entry in entry.lastActivity.map { (entry.id, $0) } },
+            uniquingKeysWith: { first, _ in first }
+        )
         var seen = Set<String>()
         let matches = picks.compactMap { pick -> RemoteSessionSearchMatch? in
             guard let projectId = projects[pick.sessionId], seen.insert(pick.sessionId).inserted else {
@@ -233,12 +256,26 @@ final class RemoteSessionSearch {
             }
             return RemoteSessionSearchMatch(
                 sessionId: pick.sessionId, projectId: projectId,
-                reason: pick.reason.isEmpty ? nil : pick.reason
+                reason: pick.reason.isEmpty ? nil : pick.reason,
+                lastActivityAt: activity[pick.sessionId]
             )
         }
         return .results(RemoteSessionSearchResponse(
             mode: .luna, matches: Array(matches.prefix(RemoteSessionSearchContract.maximumMatches))
         ))
+    }
+
+    private func recent(liveSources: () -> [SessionFinderSource]) async -> RemoteSessionSearchOutcome {
+        guard let ordered = await index.recent(liveSources()), !Task.isCancelled else {
+            return .failed(Self.cancelledMessage)
+        }
+        let projects = Self.projectIds(liveSources())
+        let matches = ordered.lazy.compactMap { entry in
+            projects[entry.id].map {
+                RemoteSessionSearchMatch(sessionId: entry.id, projectId: $0, lastActivityAt: entry.lastActivity)
+            }
+        }.prefix(RemoteSessionSearchContract.maximumMatches)
+        return .results(RemoteSessionSearchResponse(mode: .recent, matches: Array(matches)))
     }
 
     private static func projectIds(_ sources: [SessionFinderSource]) -> [String: String] {

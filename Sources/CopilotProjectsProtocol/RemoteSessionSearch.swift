@@ -1,10 +1,12 @@
 import Foundation
 
 /// Searches the host's live sessions: instant name, project, folder, and
-/// conversation matches, or Luna's meaning-based picks. Hosts advertise the
-/// capability only through the gateway that serves `path`.
+/// conversation matches, Luna's meaning-based picks, or the most recently active
+/// sessions. Hosts advertise the capabilities only through the gateway that serves `path`.
 public enum RemoteSessionSearchContract {
     public static let capability = "session-search-v1"
+    /// The `recent` mode and `RemoteSessionSearchMatch.lastActivityAt`.
+    public static let recentCapability = "session-search-recent-v1"
     /// Gateway route, POST JSON.
     public static let path = "/search"
     /// Swift `Character`s (grapheme clusters) after trimming. A client that keeps
@@ -15,14 +17,22 @@ public enum RemoteSessionSearchContract {
     /// The query trimmed of surrounding whitespace, or nil when that leaves it
     /// empty or longer than `maximumQueryLength`.
     public static func normalizedQuery(_ value: String) -> String? {
+        normalizedQuery(value, mode: .instant)
+    }
+
+    /// As `normalizedQuery(_:)`, except that `recent`, which ignores its query,
+    /// also accepts an empty one.
+    public static func normalizedQuery(_ value: String, mode: RemoteSessionSearchMode) -> String? {
         let query = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty, query.count <= maximumQueryLength else { return nil }
+        guard query.count <= maximumQueryLength, !query.isEmpty || mode == .recent else { return nil }
         return query
     }
 }
 
 public enum RemoteSessionSearchMode: String, Codable, Sendable {
     case instant, luna
+    /// Every live session, most recently active first. Needs `recentCapability`.
+    case recent
 }
 
 public struct RemoteSessionSearchRequest: Codable, Equatable, Sendable {
@@ -42,18 +52,32 @@ public struct RemoteSessionSearchMatch: Codable, Equatable, Sendable {
     public let snippet: String?
     /// Luna: short reason.
     public let reason: String?
+    /// When the session's transcript last changed, in milliseconds since 1970.
+    /// Absent when unknown, such as for a plain terminal, or from an older host.
+    public let lastActivityAtMilliseconds: Int64?
 
-    public init(sessionId: String, projectId: String, snippet: String? = nil, reason: String? = nil) {
+    public var lastActivityAt: Date? {
+        lastActivityAtMilliseconds.map { Date(timeIntervalSince1970: Double($0) / 1_000) }
+    }
+
+    public init(
+        sessionId: String,
+        projectId: String,
+        snippet: String? = nil,
+        reason: String? = nil,
+        lastActivityAt: Date? = nil
+    ) {
         self.sessionId = sessionId
         self.projectId = projectId
         self.snippet = snippet
         self.reason = reason
+        lastActivityAtMilliseconds = lastActivityAt.map { Int64(($0.timeIntervalSince1970 * 1_000).rounded()) }
     }
 }
 
 public struct RemoteSessionSearchResponse: Codable, Equatable, Sendable {
     public let mode: RemoteSessionSearchMode
-    /// Ranked, best first.
+    /// Ranked, best first; for `recent`, most recently active first.
     public let matches: [RemoteSessionSearchMatch]
 
     public init(mode: RemoteSessionSearchMode, matches: [RemoteSessionSearchMatch]) {
@@ -64,7 +88,7 @@ public struct RemoteSessionSearchResponse: Codable, Equatable, Sendable {
 
 public enum RemoteSessionSearchOutcome: Equatable, Sendable {
     case results(RemoteSessionSearchResponse)
-    /// Empty or oversized query → HTTP 400.
+    /// Oversized query, or an empty one outside `recent` → HTTP 400.
     case invalid(String)
     /// The host can't search → HTTP 404.
     case unsupported
