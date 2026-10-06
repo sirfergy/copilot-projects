@@ -148,7 +148,13 @@ Limits are checked by Copilot after model calls and can be exceeded by the last
 call. A new budget request sends a Mac notification and an event to any installed integration.
 
 Capabilities require fresh runtime evidence; unsupported or unavailable operations
-stay disabled. A host advertising native workflows treats missing session workflow
+stay disabled. Evidence is fresh for 15 seconds after the tracker observes it, and
+the tracker publishes each heartbeat's observation as soon as it is taken. When a
+workspace snapshot carries `servedAtMilliseconds` (the Mac's clock when it was
+served), clients age the evidence from that time plus their own monotonic time
+since receipt, so Mac and phone clocks never need to agree; without it, they
+compare wall clocks.
+A host advertising native workflows treats missing session workflow
 state as unknown, not permission to use the legacy composer. Legacy composer sends
 require an older host or explicit fallback from a currently available tracker.
 Unsupported-runtime proof can remain valid without a recent native-action

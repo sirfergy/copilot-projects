@@ -2223,18 +2223,85 @@ test("mismatched runtime response ownership fails closed", {
   assert.equal(readSnapshot(runtime).runtimeActivity.processing, null);
 });
 
-test("idle heartbeats issue one bounded scalar observation without extra snapshot churn", {
+test("idle heartbeats publish liveness at once and then the observation taken that tick", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
   await waitForActivity(runtime, (activity) => activity?.processing === false);
   const calls = runtime.session.runtimeCalls.length;
   const writes = runtime.activityWrites.length;
+  const previous = readSnapshot(runtime).workflow.observedAtMilliseconds;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const tickStart = Date.now();
+  runtime.intervalCallback();
+  // Liveness is written before the tick's query can answer.
+  assert.equal(runtime.activityWrites.length - writes, 1);
+  assert.equal(runtime.activityWrites.at(-1).workflow.observedAtMilliseconds, previous);
+  await waitFor(() => runtime.activityWrites.length - writes >= 2, "observation was not published");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runtime.session.runtimeCalls.length - calls, 2);
+  assert.equal(runtime.activityWrites.length - writes, 2);
+  const published = runtime.activityWrites.at(-1);
+  assert.ok(published.workflow.observedAtMilliseconds >= tickStart);
+  assert.equal(published.runtimeActivity.observedAtMilliseconds, published.workflow.observedAtMilliseconds);
+  assert.ok(Date.parse(published.updatedAt) - published.workflow.observedAtMilliseconds < 2_000);
+  assert.ok(published.workflow.capabilities.includes("session-send"));
+  assert.equal(published.workflow.sendReady, true);
+});
+
+test("a hung runtime query never delays a heartbeat's liveness publish", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await waitForActivity(runtime, (activity) => activity?.processing === false);
+  let release;
+  runtime.session.processingHandler = () => new Promise((resolve) => { release = resolve; });
+  const writes = runtime.activityWrites.length;
+  const previous = readSnapshot(runtime).workflow.observedAtMilliseconds;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const firstTick = Date.now();
+  runtime.intervalCallback();
+  assert.equal(runtime.activityWrites.length - writes, 1);
+  assert.equal(typeof release, "function", "the tick did not start its query");
+  const calls = runtime.session.runtimeCalls.length;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const secondTick = Date.now();
+  runtime.intervalCallback();
+  assert.equal(runtime.activityWrites.length - writes, 2);
+  for (const [index, tick] of [firstTick, secondTick].entries()) {
+    const liveness = runtime.activityWrites[writes + index];
+    assert.ok(Date.parse(liveness.updatedAt) >= tick);
+    assert.equal(liveness.workflow.observedAtMilliseconds, previous);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runtime.session.runtimeCalls.length, calls, "the hung query was not single-flight");
+  assert.equal(runtime.activityWrites.length - writes, 2);
+
+  release({ processing: false });
+  await waitFor(() => runtime.activityWrites.length - writes >= 3, "observation was not published");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Both ticks joined one query, so it adds one write, not one per tick.
+  assert.equal(runtime.activityWrites.length - writes, 3);
+  const published = runtime.activityWrites.at(-1);
+  assert.ok(published.workflow.observedAtMilliseconds >= firstTick);
+  assert.ok(published.workflow.observedAtMilliseconds < secondTick);
+});
+
+test("a heartbeat observation that is not newer adds no write", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await waitForActivity(runtime, (activity) => activity?.processing === false);
+  const calls = runtime.session.runtimeCalls.length;
+  const writes = runtime.activityWrites.length;
+  const previous = readSnapshot(runtime).workflow.observedAtMilliseconds;
+  Date.now = () => previous;
+  t.after(() => { Date.now = originalDateNow; });
   runtime.intervalCallback();
   await waitFor(() => runtime.session.runtimeCalls.length >= calls + 2, "poll did not run");
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(runtime.session.runtimeCalls.length - calls, 2);
   assert.equal(runtime.activityWrites.length - writes, 1);
+  assert.equal(readSnapshot(runtime).workflow.observedAtMilliseconds, previous);
 });
 
 test("only observed input completions certify the matching sender", {
