@@ -6,7 +6,7 @@ import CopilotProjectsCore
 /// process-delegate callbacks as plain closures. Deliberately NOT an
 /// ObservableObject: the live NSView is kept out of the SwiftUI observation graph.
 @MainActor
-final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
+final class TerminalController: NSObject, ProcessTerminalViewDelegate {
     let sessionId: String
     let terminalView: ProjectsTerminalView
     /// In-memory recovery only; never resubmitted or written to workspace state.
@@ -551,19 +551,17 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    // MARK: - LocalProcessTerminalViewDelegate
+    // MARK: - ProcessTerminalViewDelegate
 
-    func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
-
-    func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
+    func setTerminalTitle(source: ProcessTerminalView, title: String) {
         onTitle?(title)
     }
 
-    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
+    func hostCurrentDirectoryUpdate(source: ProcessTerminalView, directory: String?) {
         onDirectory?(directory)
     }
 
-    func processTerminated(source: TerminalView, exitCode: Int32?) {
+    func processTerminated(source: ProcessTerminalView, exitCode: Int32?) {
         if !isDrainingForTermination {
             terminalView.kittyImageCapture.disablePersistence()
             terminalView.cancelImageRestore()
@@ -574,8 +572,8 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
 
     /// No process started, so this is not an exit: keep the tab (and its session
     /// artifacts) and relaunch into the same view once the resource shortage
-    /// may have cleared. SwiftTerm has already printed the error.
-    func processFailedToStart(source: TerminalView, error: LocalProcessError) {
+    /// may have cleared. The view has already printed the error.
+    func processFailedToStart(source: ProcessTerminalView, error: LocalProcessError) {
         guard Self.isTransientLaunchFailure(error), canRetryLaunch else { return }
         launchFailures += 1
         if launchFailures == 1 {

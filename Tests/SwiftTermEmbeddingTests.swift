@@ -7,16 +7,16 @@ import CopilotProjectsProtocol
 
 final class SwiftTermEmbeddingTests: XCTestCase {
     @MainActor
-    private final class ProcessDelegate: LocalProcessTerminalViewDelegate {
+    private final class ProcessDelegate: ProcessTerminalViewDelegate {
         var exited = false
-        func processTerminated(source: TerminalView, exitCode: Int32?) {
+        func processTerminated(source: ProcessTerminalView, exitCode: Int32?) {
             XCTAssertTrue(Thread.isMainThread)
             XCTAssertEqual(exitCode, 0)
             exited = true
         }
-        func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
-        func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+        func setTerminalTitle(source: ProcessTerminalView, title: String) {}
+        func hostCurrentDirectoryUpdate(source: ProcessTerminalView, directory: String?) {}
+        func processFailedToStart(source: ProcessTerminalView, error: LocalProcessError) {}
     }
 
     @MainActor
@@ -548,6 +548,29 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         event.delta = 100
         XCTAssertTrue(view.forwardScroll(event, agentLive: true))
         XCTAssertEqual(delegate.writes, Array(repeating: up, count: 8))
+    }
+
+    @MainActor
+    func testChildSeesTheCellGridInPixelsAtLaunchAndAfterResize() async throws {
+        let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let cell = try XCTUnwrap(view.cellDimension)
+        let scale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        func expected(cols: Int, rows: Int) -> [Int] {
+            [rows, cols, Int(cell.width * CGFloat(cols) * scale), Int(cell.height * CGFloat(rows) * scale)]
+        }
+        func childSize() -> [Int] {
+            var size = winsize()
+            guard ioctl(view.process.childfd, TIOCGWINSZ, &size) == 0 else { return [] }
+            return [Int(size.ws_row), Int(size.ws_col), Int(size.ws_xpixel), Int(size.ws_ypixel)]
+        }
+        let launch = view.terminalDimensions
+        XCTAssertEqual(childSize(), [])
+        view.startProcess(executable: "/bin/cat", args: [], environment: [])
+        defer { view.terminate() }
+        XCTAssertEqual(childSize(), expected(cols: launch.cols, rows: launch.rows))
+
+        view.resize(cols: 50, rows: 10)
+        XCTAssertEqual(childSize(), expected(cols: 50, rows: 10))
     }
 
     @MainActor

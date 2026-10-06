@@ -1,7 +1,7 @@
 import AppKit
 import SwiftTerm
 
-/// A `LocalProcessTerminalView` that makes the scroll wheel work inside
+/// A `ProcessTerminalView` that makes the scroll wheel work inside
 /// full-screen TUIs.
 ///
 /// SwiftTerm's stock `scrollWheel` only ever scrolls its *own* scrollback
@@ -16,7 +16,7 @@ import SwiftTerm
 ///  2. App is on the alternate screen without mouse reporting → "alternate
 ///     scroll": send cursor up/down keys so pagers/TUIs scroll.
 ///  3. Otherwise (normal shell) → let SwiftTerm scroll its own scrollback.
-final class ProjectsTerminalView: LocalProcessTerminalView {
+final class ProjectsTerminalView: ProcessTerminalView {
     private enum RendererMode {
         case metal
         case coreGraphicsForced
@@ -75,33 +75,9 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
     private var restoredPlacementReplayGeneration = 0
     private var restoredPlacementBufferWasAlternate: Bool?
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        configureCallbacks()
-    }
-
-    override init(frame: CGRect, font: NSFont? = nil, options: TerminalOptions) {
-        super.init(frame: frame, font: font, options: options)
-        configureCallbacks()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        configureCallbacks()
-    }
-
-    private func configureCallbacks() {
-        do {
-            try setProcessOutputConsumer { [weak self] bytes in
-                self?.consumeProcessOutput(bytes[...])
-            }
-        } catch {
-            preconditionFailure("Output consumer must be configured before process startup: \(error)")
-        }
-    }
-
-    /// Terminal responses reach the PTY here, after SwiftTerm's main-queue hop.
-    /// A focus report is sent alone as `CSI I` or `CSI O`, with a 7- or 8-bit CSI.
+    /// Every PTY write passes here on main: typed input, and terminal responses
+    /// after SwiftTerm's main-queue hop. A focus report is sent alone as
+    /// `CSI I` or `CSI O`, with a 7- or 8-bit CSI.
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
         if data.count <= 3 {
             switch Array(data) {
@@ -113,7 +89,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         super.send(source: source, data: data)
     }
 
-    /// SwiftTerm prints launch failures (and TerminalController its retry note)
+    /// Launch failures (and TerminalController's retry note) are printed
     /// straight into the terminal; advance the generation so remote clients
     /// refresh a screen they already cached.
     override func processFailedToStart(_ source: LocalProcess, error: LocalProcessError) {
@@ -121,7 +97,7 @@ final class ProjectsTerminalView: LocalProcessTerminalView {
         remoteContentGeneration &+= 1
     }
 
-    func consumeProcessOutput(_ slice: ArraySlice<UInt8>) {
+    override func consumeProcessOutput(_ slice: ArraySlice<UInt8>) {
         remoteContentGeneration &+= 1
         guard !isRestoringImages else {
             bufferDuringImageRestore(slice)
