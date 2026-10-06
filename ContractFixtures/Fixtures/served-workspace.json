@@ -1,0 +1,23 @@
+{
+  "protocolInfo": {
+    "revision": 1,
+    "capabilities": ["conversation-epochs", "sdk-operation-receipts", "native-session-workflows"]
+  },
+  "projects": [{
+    "id": "project", "name": "Example", "selectedSessionId": "tab",
+    "sessions": [{
+      "id": "tab", "title": "Example", "status": "idle",
+      "unread": false, "ready": false, "background": false, "scheduled": false,
+      "promptable": true, "conversationEpoch": "tracker-instance:3",
+      "operationSupport": "receipts", "operationReceipts": [],
+      "workflow": {
+        "version": 1, "observedAtMilliseconds": 1787788800000,
+        "capabilities": ["session-send", "session-abort", "answer-session-budget", "image-attachments-v1"],
+        "sendReady": true, "legacyPromptFallback": false, "limitsKnown": true,
+        "agents": [], "schedules": []
+      }
+    }]
+  }],
+  "selectedProjectId": "project",
+  "servedAtMilliseconds": 1787788802500
+}

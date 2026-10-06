@@ -162,12 +162,110 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
         self.imageAttachments = imageAttachments
     }
 
+    /// Wall-clock freshness, for code running on the Mac that observed the workflow.
+    /// Remote clients should use `isFresh(servedAtMilliseconds:receivedAt:now:at:)`.
     public func isFresh(at date: Date = Date()) -> Bool {
         let age = date.timeIntervalSince1970 * 1_000 - Double(observedAtMilliseconds)
-        return version == 1 && age >= 0 && age <= 15_000
+        return version == 1 && age >= 0 && age <= Double(Self.freshnessLimitMilliseconds)
     }
 
     public func supports(_ kind: RemoteSessionActionKind, at date: Date = Date()) -> Bool {
         isFresh(at: date) && capabilities.contains(kind.rawValue)
+    }
+}
+
+// MARK: - Remote client freshness
+
+extension RemoteSessionWorkflow {
+    /// The oldest a workflow observation may be, in milliseconds, and still be fresh.
+    public static let freshnessLimitMilliseconds: Int64 = 15_000
+
+    /// How far a snapshot's `servedAtMilliseconds` may precede the workflow's
+    /// `observedAtMilliseconds` and still count as zero age. Both come from the
+    /// Mac's clock, so only a clock step can order them that way; anything larger
+    /// is rejected rather than trusted.
+    public static let servedClockToleranceMilliseconds: Int64 = 1_000
+
+    /// The observation's age in milliseconds as seen by a remote client, or `nil`
+    /// when it cannot be trusted at all.
+    ///
+    /// With the `servedAtMilliseconds` of the `RemoteWorkspaceSnapshot` that carried
+    /// this workflow, the age never compares the two devices' wall clocks:
+    ///
+    ///     age = max(0, servedAt - observedAt)   // Mac clock
+    ///         + (now - receivedAt)              // client monotonic clock
+    ///
+    /// `receivedAt` is when the client received that snapshot. It must come from a
+    /// clock that keeps counting while the device sleeps, like `ContinuousClock`;
+    /// otherwise a snapshot cached across sleep would look younger than it is.
+    /// The result is `nil` when `observedAtMilliseconds` is not a real observation
+    /// (`<= 0`), servedAt precedes observedAt by more than
+    /// `servedClockToleranceMilliseconds`, or `now` precedes `receivedAt`.
+    ///
+    /// Without `servedAtMilliseconds` (older gateways) this is the wall-clock rule
+    /// of `isFresh(at:)`: `date - observedAt`, `nil` when negative.
+    ///
+    /// The arithmetic is in `Double` so arbitrary wire values cannot trap; every
+    /// real timestamp is an exact integer below 2^53. JavaScript clients get the
+    /// same results from `Number` and share the cases in the
+    /// `workflow-freshness-cases` contract fixture.
+    public func ageMilliseconds(
+        servedAtMilliseconds: Int64?,
+        receivedAt: ContinuousClock.Instant,
+        now: ContinuousClock.Instant = .now,
+        at date: Date = Date()
+    ) -> Double? {
+        guard let servedAtMilliseconds else {
+            let age = date.timeIntervalSince1970 * 1_000 - Double(observedAtMilliseconds)
+            return age >= 0 ? age : nil
+        }
+        guard observedAtMilliseconds > 0 else { return nil }
+        let servedAfterObservation = Double(servedAtMilliseconds) - Double(observedAtMilliseconds)
+        guard servedAfterObservation >= -Double(Self.servedClockToleranceMilliseconds) else {
+            return nil
+        }
+        let sinceReceipt = receivedAt.duration(to: now).milliseconds
+        guard sinceReceipt >= 0 else { return nil }
+        return max(0, servedAfterObservation) + sinceReceipt
+    }
+
+    /// Whether a remote client may act on this observation; see
+    /// `ageMilliseconds(servedAtMilliseconds:receivedAt:now:at:)`. Exactly
+    /// `freshnessLimitMilliseconds` old is still fresh.
+    public func isFresh(
+        servedAtMilliseconds: Int64?,
+        receivedAt: ContinuousClock.Instant,
+        now: ContinuousClock.Instant = .now,
+        at date: Date = Date()
+    ) -> Bool {
+        guard version == 1, let age = ageMilliseconds(
+            servedAtMilliseconds: servedAtMilliseconds,
+            receivedAt: receivedAt,
+            now: now,
+            at: date
+        ) else { return false }
+        return age <= Double(Self.freshnessLimitMilliseconds)
+    }
+
+    public func supports(
+        _ kind: RemoteSessionActionKind,
+        servedAtMilliseconds: Int64?,
+        receivedAt: ContinuousClock.Instant,
+        now: ContinuousClock.Instant = .now,
+        at date: Date = Date()
+    ) -> Bool {
+        isFresh(
+            servedAtMilliseconds: servedAtMilliseconds,
+            receivedAt: receivedAt,
+            now: now,
+            at: date
+        ) && capabilities.contains(kind.rawValue)
+    }
+}
+
+private extension Duration {
+    var milliseconds: Double {
+        let (seconds, attoseconds) = components
+        return Double(seconds) * 1_000 + Double(attoseconds) / 1e15
     }
 }
