@@ -42,6 +42,17 @@ VERSION="${VERSION#v}"   # accept either 0.1.0 or v0.1.0
   exit 1
 }
 TAG="v$VERSION"
+# How long to keep waiting on one notary submission, and the pause between status
+# checks. Apple's queue can sit far past a single `notarytool --wait`.
+NOTARY_WAIT_MINUTES="${NOTARY_WAIT_MINUTES:-40}"
+NOTARY_POLL_SECONDS="${NOTARY_POLL_SECONDS:-15}"
+[[ "$NOTARY_WAIT_MINUTES" =~ ^[0-9]+$ && "$NOTARY_POLL_SECONDS" =~ ^[0-9]+$ ]] || {
+  echo "error: NOTARY_WAIT_MINUTES and NOTARY_POLL_SECONDS must be whole numbers" >&2
+  exit 1
+}
+# Force base 10 so a leading zero (e.g. 08) is not parsed as octal mid-release.
+NOTARY_WAIT_MINUTES=$((10#$NOTARY_WAIT_MINUTES))
+NOTARY_POLL_SECONDS=$((10#$NOTARY_POLL_SECONDS))
 
 ROOT="$(cd "${PROJECT_ROOT:-$SCRIPT_ROOT}" && pwd -P)"
 cd "$ROOT"
@@ -199,13 +210,54 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# Upload once, then keep waiting on that same submission until it settles or the
+# budget runs out. Failing at the first timeout only makes the next attempt queue
+# a fresh build behind the one Apple is still processing.
+notarize() {
+  local artifact="$1" submission id info status deadline slice
+  submission="$(xcrun notarytool submit "$artifact" "${NOTARY_ARGS[@]}" --output-format json)"
+  id="$(jq -er '.id | strings | select(length > 0)' <<< "$submission")" || {
+    echo "error: notarytool submit returned no submission id for $artifact" >&2
+    return 1
+  }
+  echo "  notary submission $id"
+  deadline=$((SECONDS + NOTARY_WAIT_MINUTES * 60))
+  while :; do
+    # `wait` gives up at its own timeout while Apple keeps processing, so its exit
+    # status is advisory; the submission's recorded status decides. Each wait is
+    # capped at 5m and at whatever remains of the budget.
+    slice=$((deadline - SECONDS))
+    slice=$((slice > 300 ? 300 : slice < 1 ? 1 : slice))
+    xcrun notarytool wait "$id" "${NOTARY_ARGS[@]}" --timeout "${slice}s" >/dev/null 2>&1 || true
+    info="$(xcrun notarytool info "$id" "${NOTARY_ARGS[@]}" --output-format json)"
+    status="$(jq -r '.status // empty' <<< "$info")"
+    case "$status" in
+      Accepted)
+        echo "  notary submission $id accepted"
+        return 0
+        ;;
+      "In Progress")
+        if [ "$SECONDS" -ge "$deadline" ]; then
+          echo "error: notary submission $id still in progress after ${NOTARY_WAIT_MINUTES}m" >&2
+          return 1
+        fi
+        echo "  notary submission $id still in progress"
+        sleep "$NOTARY_POLL_SECONDS"
+        ;;
+      *)
+        xcrun notarytool log "$id" "${NOTARY_ARGS[@]}" >&2 || true
+        echo "error: notary submission $id finished as ${status:-unknown}" >&2
+        return 1
+        ;;
+    esac
+  done
+}
 if [ "$CODESIGN_IDENTITY" != "-" ] && [ "${#NOTARY_ARGS[@]}" -gt 0 ]; then
   echo "==> notarizing app"
   APP_ZIP="$ROOT/dist/Copilot-Projects-$VERSION.zip"
   rm -f "$APP_ZIP"
   ditto -c -k --keepParent "$APP" "$APP_ZIP"
-  xcrun notarytool submit "$APP_ZIP" \
-    "${NOTARY_ARGS[@]}" --wait --timeout 20m
+  notarize "$APP_ZIP"
   xcrun stapler staple "$APP"
   xcrun stapler validate "$APP"
   spctl --assess --type execute --verbose=4 "$APP"
@@ -222,8 +274,7 @@ if [ "$CODESIGN_IDENTITY" != "-" ] && [ "${#NOTARY_ARGS[@]}" -gt 0 ]; then
     SIGN_ARGS+=(--keychain "$CODESIGN_KEYCHAIN")
   fi
   codesign "${SIGN_ARGS[@]}" "$DMG"
-  xcrun notarytool submit "$DMG" \
-    "${NOTARY_ARGS[@]}" --wait --timeout 20m
+  notarize "$DMG"
   xcrun stapler staple "$DMG"
   xcrun stapler validate "$DMG"
   spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"

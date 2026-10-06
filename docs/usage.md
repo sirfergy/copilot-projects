@@ -304,7 +304,10 @@ closed. No override keeps the standalone public release behavior, including
 dirty/offline local builds without `--publish`.
 
 `--publish` refuses ad-hoc artifacts, notarizes and staples both the app and DMG, runs
-Gatekeeper checks, then uses the active `gh` account to publish. The Actions workflow
+Gatekeeper checks, then uses the active `gh` account to publish. Each artifact is uploaded
+to the notary service once; the script then keeps polling that same submission for up to
+`NOTARY_WAIT_MINUTES` (default 40) every `NOTARY_POLL_SECONDS` (default 15) instead of
+failing at the first `notarytool` timeout. The Actions workflow
 uses a protected `release` environment and fails closed unless these environment secrets
 are configured:
 
