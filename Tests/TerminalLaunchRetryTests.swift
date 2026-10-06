@@ -4,31 +4,10 @@ import CopilotProjectsCore
 @testable import CopilotProjectsHost
 @testable import SwiftTerm
 
-/// Launch failures reach TerminalController through SwiftTerm's real process,
-/// view, and delegate callbacks; only the write-descriptor duplicate is scripted.
+/// Launch failures reach TerminalController through a real LocalProcess and
+/// the view's own process delegate; only the write-descriptor duplicate is scripted.
 @MainActor
 final class TerminalLaunchRetryTests: XCTestCase {
-    /// Routes a replacement process's callbacks to its view, like SwiftTerm's
-    /// own adapter. Output is not needed by these tests.
-    private final class ProcessForwarder: LocalProcessDelegate {
-        weak var view: ProjectsTerminalView?
-
-        func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
-            MainActor.assumeIsolated { view?.processTerminated(source, exitCode: exitCode) }
-        }
-
-        func processFailedToStart(_ source: LocalProcess, error: LocalProcessError) {
-            MainActor.assumeIsolated { view?.processFailedToStart(source, error: error) }
-        }
-
-        func dataReceived(slice: ArraySlice<UInt8>) {}
-
-        func getWindowSize() -> winsize {
-            winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
-        }
-    }
-
-    private var forwarders: [ProcessForwarder] = []
     private var controllers: [TerminalController] = []
     private var root: URL!
 
@@ -41,22 +20,21 @@ final class TerminalLaunchRetryTests: XCTestCase {
     override func tearDown() async throws {
         controllers.forEach { $0.terminate() }
         controllers.removeAll()
-        forwarders.removeAll()
         try? FileManager.default.removeItem(at: root)
     }
 
     /// Starts a controller whose first duplicates fail with `failures`, in order.
     private func controller(failing failures: [Int32], retryDelay: Duration) -> TerminalController {
         let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
-        let forwarder = ProcessForwarder()
-        forwarder.view = view
         let remaining = Locked(failures)
-        view.process = LocalProcess(delegate: forwarder, dispatchQueue: .main) { descriptor in
-            if let code = remaining.withLock({ $0.isEmpty ? nil : $0.removeFirst() }) {
-                errno = code
-                return -1
+        view.replaceProcess { delegate in
+            LocalProcess(delegate: delegate, dispatchQueue: .main) { descriptor in
+                if let code = remaining.withLock({ $0.isEmpty ? nil : $0.removeFirst() }) {
+                    errno = code
+                    return -1
+                }
+                return fcntl(descriptor, F_DUPFD_CLOEXEC, 0)
             }
-            return fcntl(descriptor, F_DUPFD_CLOEXEC, 0)
         }
         let controller = TerminalController(
             sessionId: UUID().uuidString,
@@ -69,7 +47,6 @@ final class TerminalLaunchRetryTests: XCTestCase {
         )
         // The failure callback is delivered on a later main-queue turn.
         controller.retryDelay = { _ in retryDelay }
-        forwarders.append(forwarder)
         controllers.append(controller)
         return controller
     }

@@ -7,16 +7,43 @@ import CopilotProjectsProtocol
 
 final class SwiftTermEmbeddingTests: XCTestCase {
     @MainActor
-    private final class ProcessDelegate: LocalProcessTerminalViewDelegate {
+    private final class ProcessDelegate: ProcessTerminalViewDelegate {
         var exited = false
-        func processTerminated(source: TerminalView, exitCode: Int32?) {
+        var titles: [String] = []
+        var directories: [String?] = []
+        func processTerminated(source: ProcessTerminalView, exitCode: Int32?) {
             XCTAssertTrue(Thread.isMainThread)
             XCTAssertEqual(exitCode, 0)
             exited = true
         }
-        func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
-        func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+        func setTerminalTitle(source: ProcessTerminalView, title: String) { titles.append(title) }
+        func hostCurrentDirectoryUpdate(source: ProcessTerminalView, directory: String?) {
+            directories.append(directory)
+        }
+        func processFailedToStart(source: ProcessTerminalView, error: LocalProcessError) {}
+    }
+
+    /// Records every batch the process view hands over before parsing.
+    private final class RecordingProcessView: ProcessTerminalView {
+        var received: [UInt8] = []
+        var batches = 0
+        var deliveredOffMain = false
+        override func consumeProcessOutput(_ slice: ArraySlice<UInt8>) {
+            if !Thread.isMainThread { deliveredOffMain = true }
+            received += slice
+            batches += 1
+            super.consumeProcessOutput(slice)
+        }
+    }
+
+    @MainActor
+    private func waitUntil(
+        _ timeout: Duration = .seconds(5), _ condition: () -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
     }
 
     @MainActor
@@ -548,6 +575,68 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         event.delta = 100
         XCTAssertTrue(view.forwardScroll(event, agentLive: true))
         XCTAssertEqual(delegate.writes, Array(repeating: up, count: 8))
+    }
+
+    @MainActor
+    func testLargeOutputReachesTheViewOnMainInOrderExactlyOnce() async throws {
+        let view = RecordingProcessView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let delegate = ProcessDelegate()
+        view.processDelegate = delegate
+        // Match the wait below, so a slow runner cannot drop batches at exit.
+        view.process.drainTimeout = 10
+        let count = 32_768
+        view.startProcess(
+            executable: "/usr/bin/awk",
+            args: ["BEGIN { for (i = 0; i < \(count); i++) printf \"%08x\", i }"],
+            environment: [])
+        defer { view.terminate() }
+        try await waitUntil(.seconds(10)) { delegate.exited }
+        XCTAssertTrue(delegate.exited)
+        let expected = Array((0..<count).map { String(format: "%08x", $0) }.joined().utf8)
+        XCTAssertEqual(view.received.count, expected.count)
+        XCTAssertTrue(view.received == expected, "Batches must arrive in order, each once")
+        XCTAssertGreaterThan(view.batches, 1)
+        XCTAssertFalse(view.deliveredOffMain)
+        XCTAssertEqual(view.diagnostics.bytesFed, expected.count)
+    }
+
+    @MainActor
+    func testProcessTitleAndDirectoryReachTheDelegate() async throws {
+        let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let delegate = ProcessDelegate()
+        view.processDelegate = delegate
+        view.startProcess(
+            executable: "/bin/sh",
+            args: ["-c", "printf '\\033]0;fixture-title\\007\\033]7;file://localhost/tmp/fixture-cwd\\007'"],
+            environment: [])
+        defer { view.terminate() }
+        try await waitUntil { delegate.exited && !delegate.titles.isEmpty && !delegate.directories.isEmpty }
+        XCTAssertEqual(delegate.titles.last, "fixture-title")
+        XCTAssertTrue(delegate.directories.last??.hasSuffix("/tmp/fixture-cwd") == true,
+                      String(describing: delegate.directories))
+    }
+
+    @MainActor
+    func testChildSeesTheCellGridInPixelsAtLaunchAndAfterResize() async throws {
+        let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let cell = try XCTUnwrap(view.cellDimension)
+        let scale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        func expected(cols: Int, rows: Int) -> [Int] {
+            [rows, cols, Int(cell.width * CGFloat(cols) * scale), Int(cell.height * CGFloat(rows) * scale)]
+        }
+        func childSize() -> [Int] {
+            var size = winsize()
+            guard ioctl(view.process.childfd, TIOCGWINSZ, &size) == 0 else { return [] }
+            return [Int(size.ws_row), Int(size.ws_col), Int(size.ws_xpixel), Int(size.ws_ypixel)]
+        }
+        let launch = view.terminalDimensions
+        XCTAssertEqual(childSize(), [])
+        view.startProcess(executable: "/bin/cat", args: [], environment: [])
+        defer { view.terminate() }
+        XCTAssertEqual(childSize(), expected(cols: launch.cols, rows: launch.rows))
+
+        view.resize(cols: 50, rows: 10)
+        XCTAssertEqual(childSize(), expected(cols: 50, rows: 10))
     }
 
     @MainActor
