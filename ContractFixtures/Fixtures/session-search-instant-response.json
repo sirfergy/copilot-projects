@@ -1,0 +1,10 @@
+{
+  "mode": "instant",
+  "matches": [
+    {"sessionId": "tab-named", "projectId": "project"},
+    {
+      "sessionId": "tab-conversation", "projectId": "project",
+      "snippet": "…why the billing webhook keeps timing out…"
+    }
+  ]
+}

@@ -54,10 +54,19 @@ public protocol SessionHost: AnyObject, Sendable {
     func answerElicitation(sessionId: String, answer: RemoteElicitationAnswer, operation: CLIOperationRequest?) -> RemoteUserInputResult
     func setModel(sessionId: String, selection: RemoteModelSelection, operation: CLIOperationRequest?) -> RemoteUserInputResult
     func performSessionAction(sessionId: String, action: RemoteSessionAction, operation: CLIOperationRequest) -> RemoteUserInputResult
+    var supportsSessionSearch: Bool { get }
+    /// Cancelling the calling task stops the search, including a running Luna process.
+    func searchSessions(_ request: RemoteSessionSearchRequest) async -> RemoteSessionSearchOutcome
 }
 
 public extension SessionHost {
     func createProject(_ request: RemoteCreateProjectRequest) -> RemoteProjectCreationOutcome {
+        .unsupported
+    }
+
+    var supportsSessionSearch: Bool { false }
+
+    func searchSessions(_ request: RemoteSessionSearchRequest) async -> RemoteSessionSearchOutcome {
         .unsupported
     }
 
