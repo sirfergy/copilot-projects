@@ -313,6 +313,7 @@ if (validSessionId && socketPath) {
     const MAX_ELICITATION_URL_BYTES = 4_096;
     const MAX_ELICITATION_CONTENT_BYTES = 32_768;
     const MAX_ELICITATIONS = 50;
+    const ELICITATION_PROPERTY_ORDER_KEY = "x-copilot-projects-property-order";
     const DURABLE_ASK_USER_PREFIX = "synthetic::durable-ask-user::";
     const OPERATION_RECEIPT_VERSION = 1;
     const MAX_ACCEPTED_OPERATION_RECEIPTS = 64;
@@ -2106,6 +2107,21 @@ if (validSessionId && socketPath) {
         return 0;
     }
 
+    // The host decodes the schema into an unordered Swift dictionary, so record
+    // the agent's property order for the remote forms. Replaces any value the
+    // agent supplied under the same key.
+    function withElicitationPropertyOrder(schema) {
+        const properties = schema.properties;
+        if (!properties || typeof properties !== "object"
+                || Array.isArray(properties)) {
+            return schema;
+        }
+        return {
+            ...schema,
+            [ELICITATION_PROPERTY_ORDER_KEY]: Object.keys(properties),
+        };
+    }
+
     function elicitationEntry(event) {
         const data = event?.data;
         if (!data || typeof data !== "object") return null;
@@ -2139,11 +2155,13 @@ if (validSessionId && socketPath) {
             // would fail the whole heartbeat decode and drop every pending
             // question. The remote form only renders a flat schema anyway.
             if (jsonDepth(data.requestedSchema) > MAX_ELICITATION_SCHEMA_DEPTH) return null;
-            schema = data.requestedSchema;
             if (Object.prototype.hasOwnProperty.call(
-                schema,
+                data.requestedSchema,
                 "x-copilot-projects-terminal-default"
             )) return null;
+            schema = withElicitationPropertyOrder(data.requestedSchema);
+            if (Buffer.byteLength(JSON.stringify(schema))
+                    > MAX_ELICITATION_SCHEMA_BYTES) return null;
         }
         // A form-mode elicitation with neither a schema nor a url isn't
         // remotely answerable; leave it to the terminal.
