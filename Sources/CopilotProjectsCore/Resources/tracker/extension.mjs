@@ -1292,16 +1292,16 @@ if (validSessionId && socketPath) {
             let observationAdvanced = false;
             if (workflowObservation && workflowRuntime) {
                 // A workflow refresh that settled first can already hold a
-                // newer observation; never move it backwards.
+                // newer observation; never replace it with this older read.
                 observationAdvanced = observedAtMilliseconds
                     > workflowObservation.observedAtMilliseconds;
                 if (observationAdvanced) {
                     workflowObservation.observedAtMilliseconds = observedAtMilliseconds;
+                    workflowObservation.limitsKnown = Object.hasOwn(metadata, "sessionLimits")
+                        && (metadata.sessionLimits === null || finiteNonnegative(metadata.sessionLimits?.maxAiCredits));
+                    workflowObservation.maxAiCredits = workflowObservation.limitsKnown
+                        ? metadata.sessionLimits?.maxAiCredits ?? null : null;
                 }
-                workflowObservation.limitsKnown = Object.hasOwn(metadata, "sessionLimits")
-                    && (metadata.sessionLimits === null || finiteNonnegative(metadata.sessionLimits?.maxAiCredits));
-                workflowObservation.maxAiCredits = workflowObservation.limitsKnown
-                    ? metadata.sessionLimits?.maxAiCredits ?? null : null;
             }
             // Transitions and input completions publish immediately. So does the
             // heartbeat's own observation: remote clients only act on an

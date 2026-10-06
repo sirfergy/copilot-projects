@@ -2304,6 +2304,35 @@ test("a heartbeat observation that is not newer adds no write", {
   assert.equal(readSnapshot(runtime).workflow.observedAtMilliseconds, previous);
 });
 
+test("an older runtime read never overwrites a newer workflow observation", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await workflowReady(runtime);
+  await waitForActivity(runtime, (activity) => activity?.processing === false);
+  let release;
+  runtime.session.sessionLimits = { maxAiCredits: 30 };
+  runtime.session.processingHandler = () => new Promise((resolve) => { release = resolve; });
+  runtime.intervalCallback();
+  assert.equal(typeof release, "function", "the tick did not start its query");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  runtime.session.sessionLimits = { maxAiCredits: 60 };
+  await runtime.session.emit("session.session_limits_changed", {});
+  const newer = await waitFor(() => {
+    const workflow = readSnapshot(runtime).workflow;
+    return workflow.maxAiCredits === 60 && workflow;
+  }, "the workflow refresh was not published");
+  const writes = runtime.activityWrites.length;
+  release({ processing: false });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runtime.activityWrites.length, writes, "an older read published");
+  runtime.session.processingHandler = async () => ({ processing: false });
+  runtime.intervalCallback();
+  const liveness = runtime.activityWrites[writes];
+  assert.equal(liveness.workflow.observedAtMilliseconds, newer.observedAtMilliseconds);
+  assert.equal(liveness.workflow.maxAiCredits, 60);
+});
+
 test("only observed input completions certify the matching sender", {
   concurrency: false,
 }, async (t) => {
