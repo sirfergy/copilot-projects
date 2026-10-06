@@ -108,11 +108,13 @@ final class ProtocolContractTests: XCTestCase {
 
     func testSessionSearchContractIsNotAdvertisedByTheHostProtocol() {
         XCTAssertEqual(RemoteSessionSearchContract.capability, "session-search-v1")
+        XCTAssertEqual(RemoteSessionSearchContract.recentCapability, "session-search-recent-v1")
         XCTAssertEqual(RemoteSessionSearchContract.path, "/search")
         XCTAssertEqual(RemoteSessionSearchContract.maximumQueryLength, 300)
         XCTAssertEqual(RemoteSessionSearchContract.maximumMatches, 50)
         // Only a gateway that serves the route advertises it.
         XCTAssertFalse(RemoteProtocolInfo.current.supports(RemoteSessionSearchContract.capability))
+        XCTAssertFalse(RemoteProtocolInfo.current.supports(RemoteSessionSearchContract.recentCapability))
     }
 
     func testSessionSearchRequestWireShape() throws {
@@ -171,6 +173,58 @@ final class ProtocolContractTests: XCTestCase {
             from: Data(#"{"sessionId":"s","projectId":"p","snippet":null,"reason":null}"#.utf8)
         )
         XCTAssertEqual(explicitNulls, RemoteSessionSearchMatch(sessionId: "s", projectId: "p"))
+        // Responses from hosts that predate activity times decode without them.
+        XCTAssertEqual((instant.matches + luna.matches).map(\.lastActivityAt), [nil, nil, nil, nil])
+    }
+
+    func testRecentSearchRequestWireShape() throws {
+        let request = try JSONDecoder().decode(
+            RemoteSessionSearchRequest.self,
+            from: ProtocolFixtures.data(named: "session-search-recent-request")
+        )
+        XCTAssertEqual(request, RemoteSessionSearchRequest(query: "", mode: .recent))
+        XCTAssertEqual(try jsonObject(request)["mode"] as? String, "recent")
+    }
+
+    func testRecentResponseCarriesActivityTimesAsUnixMilliseconds() throws {
+        let recent = try JSONDecoder().decode(
+            RemoteSessionSearchResponse.self,
+            from: ProtocolFixtures.data(named: "session-search-recent-response")
+        )
+        XCTAssertEqual(recent.mode, .recent)
+        XCTAssertEqual(recent.matches.map(\.sessionId), ["tab-conversation", "tab-named", "tab-terminal"])
+        XCTAssertEqual(recent.matches.map(\.lastActivityAtMilliseconds), [1_791_297_000_123, 1_791_293_400_000, nil])
+        XCTAssertEqual(
+            recent.matches[0],
+            RemoteSessionSearchMatch(
+                sessionId: "tab-conversation", projectId: "project",
+                lastActivityAt: Date(timeIntervalSince1970: 1_791_297_000.123)
+            )
+        )
+        XCTAssertEqual(recent.matches[1].lastActivityAt, Date(timeIntervalSince1970: 1_791_293_400))
+        XCTAssertNil(recent.matches[2].lastActivityAt)
+
+        // The wire form doesn't depend on the encoder's date strategy.
+        let iso = JSONEncoder()
+        iso.dateEncodingStrategy = .iso8601
+        for encoder in [JSONEncoder(), iso] {
+            XCTAssertEqual(try JSONDecoder().decode(RemoteSessionSearchResponse.self, from: encoder.encode(recent)), recent)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(recent)) as? [String: Any])
+            let matches = try XCTUnwrap(object["matches"] as? [[String: Any]])
+            XCTAssertEqual(Set(matches[0].keys), ["sessionId", "projectId", "lastActivityAtMilliseconds"])
+            XCTAssertEqual((matches[0]["lastActivityAtMilliseconds"] as? NSNumber)?.int64Value, 1_791_297_000_123)
+            XCTAssertEqual(Set(matches[2].keys), ["sessionId", "projectId"])
+        }
+
+        let explicitNull = try JSONDecoder().decode(
+            RemoteSessionSearchMatch.self,
+            from: Data(#"{"sessionId":"s","projectId":"p","lastActivityAtMilliseconds":null}"#.utf8)
+        )
+        XCTAssertEqual(explicitNull, RemoteSessionSearchMatch(sessionId: "s", projectId: "p"))
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            RemoteSessionSearchMatch.self,
+            from: Data(#"{"sessionId":"s","projectId":"p","lastActivityAtMilliseconds":"soon"}"#.utf8)
+        ))
     }
 
     func testSessionSearchQueriesAreTrimmedAndBoundedInCharacters() {
@@ -187,5 +241,20 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertEqual(emoji.utf16.count, limit * 4)
         XCTAssertEqual(RemoteSessionSearchContract.normalizedQuery(emoji), emoji)
         XCTAssertNil(RemoteSessionSearchContract.normalizedQuery(emoji + "👍🏽"))
+    }
+
+    func testOnlyRecentSearchesAcceptAnEmptyQuery() {
+        let limit = RemoteSessionSearchContract.maximumQueryLength
+        let oversized = String(repeating: "a", count: limit + 1)
+        for mode in [RemoteSessionSearchMode.instant, .luna] {
+            XCTAssertNil(RemoteSessionSearchContract.normalizedQuery("", mode: mode))
+            XCTAssertNil(RemoteSessionSearchContract.normalizedQuery(" \n\t ", mode: mode))
+            XCTAssertEqual(RemoteSessionSearchContract.normalizedQuery(" webhook ", mode: mode), "webhook")
+            XCTAssertNil(RemoteSessionSearchContract.normalizedQuery(oversized, mode: mode))
+        }
+        XCTAssertEqual(RemoteSessionSearchContract.normalizedQuery("", mode: .recent), "")
+        XCTAssertEqual(RemoteSessionSearchContract.normalizedQuery(" \n\t ", mode: .recent), "")
+        XCTAssertEqual(RemoteSessionSearchContract.normalizedQuery(" webhook ", mode: .recent), "webhook")
+        XCTAssertNil(RemoteSessionSearchContract.normalizedQuery(oversized, mode: .recent))
     }
 }

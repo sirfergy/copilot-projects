@@ -422,16 +422,20 @@ loses all creation evidence and the terminal master.
 
 `SessionHost.searchSessions` answers a `RemoteSessionSearchRequest` with the Find
 Session ranking: `instant` matches names, projects, folders, and conversation text,
-and `luna` asks Luna (`gpt-6-luna`). Results cover live sessions only and carry each
-session's current project. Queries are trimmed and limited to
-`RemoteSessionSearchContract.maximumQueryLength` characters. At most two remote Luna
+`luna` asks Luna (`gpt-6-luna`), and `recent` lists every live session, most recently
+active first, as Find Session does before you type. Results cover live sessions only
+and carry each session's current project and, when known, `lastActivityAt`: when its
+transcript last changed, sent as `lastActivityAtMilliseconds` since 1970. Queries are
+trimmed and limited to `RemoteSessionSearchContract.maximumQueryLength` characters;
+only `recent`, which ignores its query, accepts an empty one. At most two remote Luna
 searches run at once; another returns `busy`. Cancelling the calling task stops the
 search and its Luna process. The host keeps the index between searches and rereads
-only transcripts that changed.
+only transcripts that changed; `recent` reads only file times.
 
-Hosts report `supportsSessionSearch`; other conformers default to `unsupported`.
-`RemoteProtocolInfo.current` omits `session-search-v1`: a gateway advertises it only
-when it serves `RemoteSessionSearchContract.path` for a host that supports search.
+Hosts report `supportsSessionSearch` and the `sessionSearchCapabilities` they
+implement; other conformers default to `unsupported` and none. `RemoteProtocolInfo.current`
+omits `session-search-v1` and `session-search-recent-v1`: a gateway advertises each
+only when it serves `RemoteSessionSearchContract.path` for a host that declares it.
 
 ### Notification deep links
 

@@ -246,6 +246,10 @@ final class RemoteModelBridge: SessionHost {
 
     var supportsSessionSearch: Bool { true }
 
+    var sessionSearchCapabilities: [String] {
+        [RemoteSessionSearchContract.capability, RemoteSessionSearchContract.recentCapability]
+    }
+
     func searchSessions(_ request: RemoteSessionSearchRequest) async -> RemoteSessionSearchOutcome {
         guard let model else { return .failed("Copilot Projects is closing.") }
         return await model.searchRemoteSessions(request)
