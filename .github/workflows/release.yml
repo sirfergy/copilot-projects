@@ -148,7 +148,8 @@ jobs:
     needs: validate
     if: needs.validate.outputs.should_release == 'true'
     runs-on: [self-hosted, macOS, ARM64]
-    timeout-minutes: 60
+    # Build (~10m) plus up to NOTARY_WAIT_MINUTES (40m) for each of two notary submissions.
+    timeout-minutes: 100
     environment: release
     permissions:
       contents: write
