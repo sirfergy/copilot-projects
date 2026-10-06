@@ -4465,6 +4465,10 @@ final class AppModel: ObservableObject {
             return
         }
         let completionClock = sessionSemantics.statusClock.timestamp(for: sessionId)
+        // The status clock can't see a conversation rotating, so the reply
+        // read after the load must still belong to the finished turn's epoch.
+        let completionEpoch = receiptBoundSnapshot(sessionId: sessionId, now: Date())?
+            .conversationEpoch
         let loadSnapshot = completionTranscriptLoader
         Task { @MainActor [weak self] in
             let summary = await Task.detached {
@@ -4479,6 +4483,7 @@ final class AppModel: ObservableObject {
             // Keep the original alert, but never attach that turn's content to it.
             let stillCurrent = sessionSemantics.statusClock.timestamp(for: sessionId)
                 == completionClock
+            let reply = stillCurrent ? completionReply(sessionId: sessionId) : nil
             notifications?.post(NotificationEvent(
                 id: event.id,
                 kind: event.kind,
@@ -4489,7 +4494,7 @@ final class AppModel: ObservableObject {
                 sessionId: event.sessionId,
                 isTargetVisible: event.isTargetVisible,
                 sentAt: event.sentAt,
-                reply: stillCurrent ? completionReply(sessionId: sessionId) : nil
+                reply: reply?.conversationEpoch == completionEpoch ? reply : nil
             ))
         }
     }
@@ -4498,17 +4503,17 @@ final class AppModel: ObservableObject {
     /// just finished by a heartbeat.
     private func completionReply(sessionId: String) -> RemoteNotificationReply? {
         let now = Date()
-        let adapter = CLIOperationAdapter(
-            activityDirectory: agentActivityDirectory,
-            resumeMarkerDirectory: resumeMarkerDirectory
-        )
-        guard let snapshot = adapter.loadReceiptBoundSnapshot(
-            sessionId: sessionId,
-            now: now
-        ) else {
+        guard let snapshot = receiptBoundSnapshot(sessionId: sessionId, now: now) else {
             return nil
         }
         return NotificationReplyResolver.completionReply(snapshot: snapshot, now: now)
+    }
+
+    private func receiptBoundSnapshot(sessionId: String, now: Date) -> AgentActivitySnapshot? {
+        CLIOperationAdapter(
+            activityDirectory: agentActivityDirectory,
+            resumeMarkerDirectory: resumeMarkerDirectory
+        ).loadReceiptBoundSnapshot(sessionId: sessionId, now: now)
     }
 
     private func postCompletionIfReady(sessionId: String) {

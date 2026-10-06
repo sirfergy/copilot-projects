@@ -601,6 +601,7 @@ final class NotificationReplyWiringTests: XCTestCase {
         ask(legacy)
         XCTAssertEqual(legacy.spy.events.count, 1)
         XCTAssertNil(legacy.spy.events.first?.reply)
+        XCTAssertNil(legacy.spy.events.first?.body)
     }
 
     @MainActor
@@ -817,6 +818,31 @@ final class NotificationReplyWiringTests: XCTestCase {
             sessionId: harness.session.id, status: .running, text: nil, timestamp: 5_000
         )
         // The summary loader retries; release every attempt.
+        for _ in 0..<3 { gate.signal() }
+        await fulfillment(of: [posted], timeout: 3)
+        XCTAssertEqual(harness.spy.events.count, 1)
+        XCTAssertNil(harness.spy.events[0].reply)
+    }
+
+    @MainActor
+    func testConversationRotatedDuringSummaryLoadHasNoReply() async throws {
+        let entered = expectation(description: "summary loading")
+        entered.assertForOverFulfill = false
+        let gate = DispatchSemaphore(value: 0)
+        let harness = try makeHarness(loader: { _ in
+            entered.fulfill()
+            _ = gate.wait(timeout: .now() + 3)
+            return TranscriptSnapshot(
+                schemaVersion: 3, updatedAt: Date(), copilotSessionId: "other", turns: []
+            )
+        })
+        try write(harness, workflow: readyWorkflow())
+        let posted = expectation(description: "completion posted")
+        harness.spy.onPost = { _ in posted.fulfill() }
+        complete(harness, summaryContext: true)
+        await fulfillment(of: [entered], timeout: 3)
+        // No status event: only the tracker shows the new conversation.
+        try write(harness, epoch: "\(copilotSessionId):2", workflow: readyWorkflow())
         for _ in 0..<3 { gate.signal() }
         await fulfillment(of: [posted], timeout: 3)
         XCTAssertEqual(harness.spy.events.count, 1)
