@@ -582,6 +582,8 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         let view = RecordingProcessView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         let delegate = ProcessDelegate()
         view.processDelegate = delegate
+        // Match the wait below, so a slow runner cannot drop batches at exit.
+        view.process.drainTimeout = 10
         let count = 32_768
         view.startProcess(
             executable: "/usr/bin/awk",
