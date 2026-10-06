@@ -20,7 +20,8 @@ struct SessionFinderSource: Equatable, Sendable {
 struct SessionFinderEntry: Identifiable, Equatable, Sendable {
     let source: SessionFinderSource
     let lastActivity: Date?
-    /// Every user request, oldest first.
+    /// The first user request and the newest ones that fit the search budget,
+    /// oldest first. Earlier requests are dropped once the budget is spent.
     let requests: [String]
     /// The most recent assistant replies, oldest first.
     let replies: [String]
@@ -29,19 +30,25 @@ struct SessionFinderEntry: Identifiable, Equatable, Sendable {
     let foldedProject: String
     let foldedFolder: String
     let foldedPath: String
-    let foldedRequests: String
-    let foldedReplies: String
+    /// Folded copies of `requests` and `replies`, index for index.
+    let foldedRequests: [String]
+    let foldedReplies: [String]
 
     var id: String { source.sessionId }
     var folderName: String { (source.cwd as NSString).lastPathComponent }
 
     static let maximumSearchCharacters = 200_000
+    /// How much of the first request is kept once the rest no longer fits.
+    static let maximumOpeningCharacters = 2_000
 
     init(source: SessionFinderSource, transcript: TranscriptSnapshot? = nil) {
         self.source = source
         let turns = transcript?.turns ?? []
         lastActivity = source.lastActivity ?? turns.last.map { $0.endedAt ?? $0.startedAt }
-        requests = turns.map(\.userContent).filter { !$0.isEmpty }
+        requests = Self.boundedRequests(
+            turns.map(\.userContent).filter { !$0.isEmpty },
+            characters: Self.maximumSearchCharacters
+        )
         replies = Self.suffix(
             turns.flatMap { $0.assistantMessages.map(\.content) }.filter { !$0.isEmpty },
             characters: Self.maximumSearchCharacters
@@ -50,10 +57,24 @@ struct SessionFinderEntry: Identifiable, Equatable, Sendable {
         foldedProject = SessionFinderSearch.fold(source.projectName)
         foldedFolder = SessionFinderSearch.fold((source.cwd as NSString).lastPathComponent)
         foldedPath = SessionFinderSearch.fold(source.cwd)
-        foldedRequests = SessionFinderSearch.fold(
-            Self.suffix(requests, characters: Self.maximumSearchCharacters).joined(separator: "\n")
-        )
-        foldedReplies = SessionFinderSearch.fold(replies.joined(separator: "\n"))
+        foldedRequests = requests.map(Self.foldedForScanning)
+        foldedReplies = replies.map(Self.foldedForScanning)
+    }
+
+    /// Every request when they fit the budget; otherwise the start of the first
+    /// one, which says what the session was for, and the newest that fit.
+    private static func boundedRequests(_ values: [String], characters: Int) -> [String] {
+        let kept = suffix(values, characters: characters)
+        guard kept.count < values.count, let first = values.first else { return kept }
+        let opening = String(first.prefix(maximumOpeningCharacters))
+        return [opening] + suffix(Array(values.dropFirst()), characters: characters - opening.count)
+    }
+
+    /// Folded into native UTF-8 storage, so matching can scan the bytes in place.
+    private static func foldedForScanning(_ text: String) -> String {
+        var folded = SessionFinderSearch.fold(text)
+        folded.makeContiguousUTF8()
+        return folded
     }
 
     /// The newest strings whose combined length fits the budget.
@@ -107,7 +128,8 @@ enum SessionFinderSearch {
     }
 
     /// Every query word must appear somewhere in the session. Names outrank
-    /// projects and folders, which outrank conversation text.
+    /// projects and folders, which outrank conversation text. Snippets are cut
+    /// only for the matches returned, from the one message that matched.
     static func localMatches(
         for query: String,
         in entries: [SessionFinderEntry],
@@ -116,45 +138,65 @@ enum SessionFinderSearch {
         let words = tokens(query)
         guard !words.isEmpty else { return [] }
         let ordered = recent(entries)
-        var matches: [LocalMatch] = []
+        var matches: [(entry: SessionFinderEntry, score: Int, conversation: (word: String, text: String)?)] = []
         for entry in ordered {
             var total = 0
-            var conversationOnly: [String] = []
+            var conversation: (word: String, text: String)?
             var matchedAll = true
             for word in words {
-                let (score, inConversation) = score(word, in: entry)
+                let (score, message) = score(word, in: entry)
                 guard score > 0 else { matchedAll = false; break }
                 total += score
-                if inConversation { conversationOnly.append(word) }
+                if conversation == nil, let message { conversation = (word, message) }
             }
             guard matchedAll else { continue }
-            let snippet = conversationOnly.first.flatMap {
-                Self.snippet(for: $0, in: entry.requests.reversed() + entry.replies.reversed())
-            }
-            matches.append(LocalMatch(entry: entry, score: total, snippet: snippet))
+            matches.append((entry, total, conversation))
         }
         // `ordered` is already by recency, and the sort is stable.
         let ranked = matches.enumerated().sorted { lhs, rhs in
             lhs.element.score != rhs.element.score
                 ? lhs.element.score > rhs.element.score
                 : lhs.offset < rhs.offset
-        }.map(\.element)
-        return Array(ranked.prefix(limit))
+        }.prefix(limit).map(\.element)
+        return ranked.map { match in
+            let snippet = match.conversation.flatMap { Self.snippet(for: $0.word, in: [$0.text]) }
+            return LocalMatch(entry: match.entry, score: match.score, snippet: snippet)
+        }
     }
 
-    private static func score(_ word: String, in entry: SessionFinderEntry) -> (Int, Bool) {
-        if entry.foldedTitle.hasPrefix(word) { return (120, false) }
-        if startsWord(word, in: entry.foldedTitle) { return (90, false) }
-        if entry.foldedTitle.contains(word) { return (70, false) }
-        if startsWord(word, in: entry.foldedProject) { return (55, false) }
-        if entry.foldedFolder.hasPrefix(word) { return (50, false) }
-        if entry.foldedProject.contains(word) { return (40, false) }
-        if entry.foldedFolder.contains(word) { return (35, false) }
-        if entry.foldedPath.contains(word) { return (15, false) }
-        if entry.foldedRequests.contains(word) { return (12, true) }
-        if entry.foldedReplies.contains(word) { return (6, true) }
-        if word.count >= 2, isSubsequence(word, of: entry.foldedTitle) { return (8, false) }
-        return (0, false)
+    /// The word's score and, for a conversation match, the newest message holding it.
+    private static func score(_ word: String, in entry: SessionFinderEntry) -> (Int, String?) {
+        if entry.foldedTitle.hasPrefix(word) { return (120, nil) }
+        if startsWord(word, in: entry.foldedTitle) { return (90, nil) }
+        if entry.foldedTitle.contains(word) { return (70, nil) }
+        if startsWord(word, in: entry.foldedProject) { return (55, nil) }
+        if entry.foldedFolder.hasPrefix(word) { return (50, nil) }
+        if entry.foldedProject.contains(word) { return (40, nil) }
+        if entry.foldedFolder.contains(word) { return (35, nil) }
+        if entry.foldedPath.contains(word) { return (15, nil) }
+        if let index = entry.foldedRequests.lastIndex(where: { containsBytes(word, in: $0) }) {
+            return (12, entry.requests[index])
+        }
+        if let index = entry.foldedReplies.lastIndex(where: { containsBytes(word, in: $0) }) {
+            return (6, entry.replies[index])
+        }
+        if word.count >= 2, isSubsequence(word, of: entry.foldedTitle) { return (8, nil) }
+        return (0, nil)
+    }
+
+    /// Substring search over UTF-8 bytes. Conversation text runs to hundreds of
+    /// thousands of characters per session and is scanned on every keystroke;
+    /// both sides are folded alike, and this is many times faster than
+    /// `String.contains`, which compares by `Character`.
+    static func containsBytes(_ word: String, in text: String) -> Bool {
+        guard !word.isEmpty, !text.isEmpty else { return false }
+        var text = text
+        var word = word
+        return text.withUTF8 { haystack in
+            word.withUTF8 { needle in
+                memmem(haystack.baseAddress, haystack.count, needle.baseAddress, needle.count) != nil
+            }
+        }
     }
 
     private static func startsWord(_ word: String, in text: String) -> Bool {

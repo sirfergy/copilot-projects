@@ -76,6 +76,47 @@ final class SessionFinderTests: XCTestCase {
         )
     }
 
+    func testConversationMatchingIgnoresCaseAndDiacriticsAndCutsSnippetsForReturnedMatches() {
+        let now = Date()
+        let older = entry("Older", requests: ["Rebuilt the CAFÉ façade"], endedAt: now.addingTimeInterval(-60))
+        let newer = entry("Newer", replies: ["x"], endedAt: now)
+        let newest = entry(
+            "Newest", requests: ["unrelated"], replies: ["the café Façade is done"], endedAt: now
+        )
+
+        let matches = SessionFinderSearch.localMatches(for: "cafe facade", in: [older, newer, newest])
+        XCTAssertEqual(matches.map(\.entry.id), [older.id, newest.id])
+        XCTAssertEqual(matches.map(\.snippet), ["Rebuilt the CAFÉ façade", "the café Façade is done"])
+
+        let first = SessionFinderSearch.localMatches(for: "cafe", in: [older, newer, newest], limit: 1)
+        XCTAssertEqual(first.map(\.entry.id), [older.id])
+        XCTAssertEqual(first.first?.snippet, "Rebuilt the CAFÉ façade")
+        XCTAssertFalse(SessionFinderSearch.containsBytes("cafe", in: ""))
+    }
+
+    func testLongConversationsKeepTheOpeningAndNewestRequestsWithinTheBudget() {
+        let budget = SessionFinderEntry.maximumSearchCharacters
+        let opening = "opening goal " + String(repeating: "o", count: SessionFinderEntry.maximumOpeningCharacters)
+        let middle = (0..<4).map { "middle\($0) " + String(repeating: "m", count: budget / 3) }
+        let long = entry(
+            "Long", requests: [opening] + middle + ["latest ask"], endedAt: Date()
+        )
+
+        XCTAssertEqual(long.requests.first, String(opening.prefix(SessionFinderEntry.maximumOpeningCharacters)))
+        XCTAssertEqual(long.requests.last, "latest ask")
+        XCTAssertLessThan(long.requests.count, middle.count + 2)
+        XCTAssertLessThanOrEqual(long.requests.reduce(0) { $0 + $1.count }, budget)
+        XCTAssertEqual(SessionFinderSearch.localMatches(for: "opening goal", in: [long]).count, 1)
+        XCTAssertEqual(SessionFinderSearch.localMatches(for: "latest", in: [long]).count, 1)
+        XCTAssertTrue(SessionFinderSearch.localMatches(for: "middle0", in: [long]).isEmpty)
+        XCTAssertTrue(
+            LunaSessionPrompt.build(query: "goal", entries: [long]).prompt.contains("first asked: opening goal")
+        )
+
+        let short = entry("Short", requests: ["first", "second"], endedAt: Date())
+        XCTAssertEqual(short.requests, ["first", "second"])
+    }
+
     func testSnippetIsSingleLineAndMarksTrimmedEnds() {
         let text = String(repeating: "lead ", count: 20) + "needle\nin a\thaystack" + String(repeating: " tail", count: 20)
         let snippet = SessionFinderSearch.snippet(for: "needle", in: [text], radius: 10)
