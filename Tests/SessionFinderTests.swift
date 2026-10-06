@@ -137,6 +137,21 @@ final class SessionFinderTests: XCTestCase {
         XCTAssertTrue(SessionFinderSearch.localMatches(for: "   ", in: [plainA]).isEmpty)
     }
 
+    func testIndexingStopsBetweenSessionsOnceCancelled() async {
+        let sources = (0..<5).map { source("Session \($0)") }
+        let (indexed, loads) = await Task.detached { () -> (Int, Int) in
+            var loads = 0
+            let entries = SessionFinderSearch.index(sources) { _ in
+                loads += 1
+                withUnsafeCurrentTask { $0?.cancel() }
+                return nil
+            }
+            return (entries.count, loads)
+        }.value
+        XCTAssertEqual(indexed, 1)
+        XCTAssertEqual(loads, 1)
+    }
+
     // MARK: - Luna prompt and answer
 
     func testPromptListsSessionsByAliasWithinBudget() {
@@ -353,6 +368,38 @@ final class SessionFinderTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("runs").path), [])
     }
 
+    func testRankKillsARunAndItsSubprocessesWhenTheyIgnoreTermination() async throws {
+        // The ignored SIGTERM is inherited, and both sleeps hold the output pipes open.
+        var (stubborn, root) = try fakeCopilot("trap '' TERM\n/bin/sleep 30 &\n/bin/sleep 30\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runs = root.appendingPathComponent("runs").path
+        stubborn.timeout = 0.3
+        stubborn.terminationGrace = 0.3
+        let started = Date()
+        do {
+            _ = try await stubborn.rank(query: "anything", entries: [entry("A")])
+            XCTFail("Expected a timeout")
+        } catch {
+            XCTAssertEqual(error as? LunaSearchError, .timedOut)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: runs), [])
+
+        stubborn.timeout = 30
+        let task = Task { try await stubborn.rank(query: "anything", entries: [entry("A")]) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let cancelled = Date()
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(cancelled), 5)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: runs), [])
+    }
+
     func testMissingCopilotIsReported() async {
         let ranker = LunaSessionRanker(copilotExecutable: { nil })
         do {
@@ -365,6 +412,15 @@ final class SessionFinderTests: XCTestCase {
 }
 
 // MARK: - Finder model
+
+private final class LoadCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int { lock.withLock { count } }
+
+    func increment() -> Int { lock.withLock { count += 1; return count } }
+}
 
 private final class FakeRanker: SessionRanking, @unchecked Sendable {
     private let lock = NSLock()
@@ -500,6 +556,28 @@ final class SessionFinderModelTests: XCTestCase {
         XCTAssertEqual(finder.highlightedId, "alpha")
         finder.query = "ledger"
         XCTAssertEqual(finder.rows.map(\.id), [])
+    }
+
+    func testClosingTheFinderStopsReadingTranscripts() async throws {
+        let gate = DispatchSemaphore(value: 0)
+        let loads = LoadCounter()
+        let sources = (0..<20).map {
+            SessionFinderSource(sessionId: "s\($0)", projectId: "p", projectName: "P", title: "S \($0)", cwd: "/r")
+        }
+        let finder = SessionFinderModel(
+            sources: sources, ranker: FakeRanker(.success([])), lunaDelay: 0,
+            loadTranscript: { _ in
+                if loads.increment() == 1 { gate.wait() }
+                return nil
+            },
+            onOpen: { _ in }
+        )
+        try await waitUntil { loads.value == 1 }
+        finder.cancel()
+        gate.signal()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(loads.value, 1)
+        XCTAssertTrue(finder.isIndexing)
     }
 
     func testLunaLeadsWhenNothingMatchesInstantlyAndFailuresAreReported() async throws {

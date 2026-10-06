@@ -80,9 +80,14 @@ final class SessionFinderModel: ObservableObject, Identifiable {
         liveSessionIds = Set(sources.map(\.sessionId))
         rebuildRows()
         indexTask = Task { [weak self] in
-            let indexed = await Task.detached(priority: .userInitiated) {
+            let scan = Task.detached(priority: .userInitiated) {
                 SessionFinderSearch.index(sources, loadTranscript: loadTranscript)
-            }.value
+            }
+            let indexed = await withTaskCancellationHandler {
+                await scan.value
+            } onCancel: {
+                scan.cancel()
+            }
             guard !Task.isCancelled, let self else { return }
             self.entries = indexed
             self.isIndexing = false

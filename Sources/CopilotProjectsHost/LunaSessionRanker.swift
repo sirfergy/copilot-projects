@@ -40,6 +40,8 @@ struct LunaSessionRanker: SessionRanking {
     var workRoot: URL = Paths.stateDir.appendingPathComponent("session-finder", isDirectory: true)
     var environment: [String: String] = ProcessInfo.processInfo.environment
     var timeout: TimeInterval = 45
+    /// How long a stopped run gets to exit before it and its subprocesses are killed.
+    var terminationGrace: TimeInterval = 2
 
     func rank(query: String, entries: [SessionFinderEntry]) async throws -> [LunaMatch] {
         guard let executable = copilotExecutable() else { throw LunaSearchError.copilotUnavailable }
@@ -52,7 +54,8 @@ struct LunaSessionRanker: SessionRanking {
             arguments: Self.arguments(prompt: built.prompt),
             environment: Self.childEnvironment(from: environment, copilotHome: home.path),
             directory: home,
-            timeout: timeout
+            timeout: timeout,
+            terminationGrace: terminationGrace
         )
         guard result.status == 0 else { throw Self.failure(from: result) }
         let reply = Self.assistantReply(fromJSONL: result.output) ?? result.output
@@ -174,7 +177,7 @@ struct LunaSessionRanker: SessionRanking {
     }
 }
 
-/// Runs one process to completion, terminating it on cancellation or timeout.
+/// Runs one process to completion, stopping it on cancellation or timeout.
 enum LunaProcess {
     struct Result: Equatable, Sendable {
         let status: Int32
@@ -187,7 +190,8 @@ enum LunaProcess {
         arguments: [String],
         environment: [String: String],
         directory: URL,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        terminationGrace: TimeInterval = 2
     ) async throws -> Result {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -199,7 +203,7 @@ enum LunaProcess {
         let errorOutput = Pipe()
         process.standardOutput = output
         process.standardError = errorOutput
-        let run = RunState(process)
+        let run = RunState(process, terminationGrace: terminationGrace)
         process.terminationHandler = { run.finish($0.terminationStatus) }
         try process.run()
         let outputReader = PipeReader(output)
@@ -255,10 +259,15 @@ enum LunaProcess {
     private final class RunState: @unchecked Sendable {
         private let lock = NSLock()
         private let process: Process
+        private let terminationGrace: TimeInterval
         private let exit = OneShot<Int32>()
         private var didTimeOut = false
+        private var isStopping = false
 
-        init(_ process: Process) { self.process = process }
+        init(_ process: Process, terminationGrace: TimeInterval) {
+            self.process = process
+            self.terminationGrace = terminationGrace
+        }
 
         var timedOut: Bool { lock.withLock { didTimeOut } }
 
@@ -266,10 +275,44 @@ enum LunaProcess {
 
         func exitStatus() async -> Int32 { await exit.wait() }
 
+        /// Asks the run and everything it started to stop, then kills whatever is
+        /// left after the grace period: a run that ignores SIGTERM would otherwise
+        /// never exit, and a subprocess holding the output pipes open would keep
+        /// the reads from finishing.
         func terminate(timedOut: Bool) {
-            lock.withLock { if timedOut { didTimeOut = true } }
-            if process.isRunning { process.terminate() }
+            let first: Bool = lock.withLock {
+                if timedOut { didTimeOut = true }
+                defer { isStopping = true }
+                return !isStopping
+            }
+            guard first, process.isRunning else { return }
+            let pid = process.processIdentifier
+            let started = LunaProcess.descendants(of: pid)
+            process.terminate()
+            started.forEach { kill($0, SIGTERM) }
+            let process = self.process
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + terminationGrace) {
+                let rootRunning = process.isRunning
+                var survivors = Set(started)
+                if rootRunning { survivors.formUnion(LunaProcess.descendants(of: pid)) }
+                for child in survivors where kill(child, 0) == 0 { kill(child, SIGKILL) }
+                if rootRunning { kill(pid, SIGKILL) }
+            }
         }
+    }
+
+    /// Every process descended from `root`, read before it is signalled because
+    /// orphans are re-parented and can no longer be traced back to it.
+    static func descendants(of root: pid_t) -> [pid_t] {
+        let tree = ProcessTree.snapshot()
+        var found: [pid_t] = []
+        var pending = tree.childrenOf[root] ?? []
+        while let pid = pending.popLast() {
+            guard !found.contains(pid) else { continue }
+            found.append(pid)
+            pending.append(contentsOf: tree.childrenOf[pid] ?? [])
+        }
+        return found
     }
 
     /// Drains a pipe on a dispatch thread so the blocking read never occupies the

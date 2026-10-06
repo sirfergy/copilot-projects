@@ -108,11 +108,17 @@ enum SessionFinderSearch {
 
     /// Indexes the given sessions, reading each transcript through `loadTranscript`.
     /// Plain terminals and unreadable transcripts index by name, project, and folder.
+    /// Stops between sessions once the calling task is cancelled.
     static func index(
         _ sources: [SessionFinderSource],
         loadTranscript: (String) -> TranscriptSnapshot?
     ) -> [SessionFinderEntry] {
-        sources.map { SessionFinderEntry(source: $0, transcript: loadTranscript($0.sessionId)) }
+        var entries: [SessionFinderEntry] = []
+        for source in sources {
+            if Task.isCancelled { break }
+            entries.append(SessionFinderEntry(source: source, transcript: loadTranscript(source.sessionId)))
+        }
+        return entries
     }
 
     /// Most recently active first; sessions without a transcript keep their workspace order.
