@@ -149,6 +149,7 @@ enum SessionFinderSearch {
     /// Every query word must appear somewhere in the session. Names outrank
     /// projects and folders, which outrank conversation text. Snippets are cut
     /// only for the matches returned, from the one message that matched.
+    /// Returns nothing once the calling task is cancelled, stopping between sessions.
     static func localMatches(
         for query: String,
         in entries: [SessionFinderEntry],
@@ -159,6 +160,7 @@ enum SessionFinderSearch {
         let ordered = recent(entries)
         var matches: [(entry: SessionFinderEntry, score: Int, conversation: (word: String, text: String)?)] = []
         for entry in ordered {
+            if Task.isCancelled { return [] }
             var total = 0
             var conversation: (word: String, text: String)?
             var matchedAll = true

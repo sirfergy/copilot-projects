@@ -152,6 +152,16 @@ final class SessionFinderTests: XCTestCase {
         XCTAssertEqual(loads, 1)
     }
 
+    func testMatchingReturnsNothingOnceCancelled() async {
+        let entries = (0..<5).map { entry("Webhook \($0)") }
+        let cancelled = await Task.detached { () -> Int in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return SessionFinderSearch.localMatches(for: "webhook", in: entries).count
+        }.value
+        XCTAssertEqual(cancelled, 0)
+        XCTAssertEqual(SessionFinderSearch.localMatches(for: "webhook", in: entries).count, 5)
+    }
+
     // MARK: - Luna prompt and answer
 
     func testPromptListsSessionsByAliasWithinBudget() {
