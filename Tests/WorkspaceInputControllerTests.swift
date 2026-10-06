@@ -4,6 +4,11 @@ import CopilotProjectsCore
 @testable import CopilotProjectsHost
 @testable import SwiftTerm
 
+/// Any finder query can reach Luna, so input tests must never start a real copilot run.
+private struct OfflineRanker: SessionRanking {
+    func rank(query: String, entries: [SessionFinderEntry]) async throws -> [LunaMatch] { [] }
+}
+
 @MainActor
 final class WorkspaceInputControllerTests: XCTestCase {
     private func withWorkspace(
@@ -45,7 +50,7 @@ final class WorkspaceInputControllerTests: XCTestCase {
             model.detachAllClients()
         }
         model.openTranscriptDrawer(sessionId: sessions[0].id)
-        try body(model, WorkspaceInputController(model: model), sessions)
+        try body(model, WorkspaceInputController(model: model, sessionRanker: OfflineRanker()), sessions)
     }
 
     private func image(_ session: Session) -> TranscriptImagePreviewItem {

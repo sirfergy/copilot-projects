@@ -51,8 +51,6 @@ final class SessionFinderModel: ObservableObject, Identifiable {
         }
     }
 
-    static let minimumLunaQueryLength = 3
-
     nonisolated let id = UUID()
     @Published var query = "" {
         didSet { if query != oldValue { queryDidChange() } }
@@ -163,9 +161,10 @@ final class SessionFinderModel: ObservableObject, Identifiable {
         rebuildRows()
     }
 
+    /// Any query with a non-space character goes to Luna once typing pauses.
     private func scheduleLuna() {
         let text = SessionFinderSearch.collapseWhitespace(query)
-        guard !isIndexing, text.count >= Self.minimumLunaQueryLength, !entries.isEmpty else {
+        guard !isIndexing, !text.isEmpty, !entries.isEmpty else {
             luna = .idle
             rebuildRows()
             return

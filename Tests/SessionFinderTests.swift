@@ -535,18 +535,26 @@ final class SessionFinderModelTests: XCTestCase {
         XCTAssertTrue(condition())
     }
 
-    func testEmptyQueryListsEverySessionAndShortQueriesSkipLuna() async throws {
+    func testEmptyQueryListsEverySessionAndAnyOtherQueryReachesLuna() async throws {
         let ranker = FakeRanker(.success([]))
         let finder = try await makeFinder(ranker)
         XCTAssertEqual(finder.rows.map(\.id), ["alpha", "beta", "gamma"])
         XCTAssertEqual(Set(finder.rows.map(\.section)), [.recent])
         XCTAssertEqual(finder.highlightedId, "alpha")
 
-        finder.query = "le"
+        finder.query = "   "
         try await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(finder.rows.map(\.id), ["beta", "gamma"])
+        XCTAssertEqual(finder.rows.map(\.id), ["alpha", "beta", "gamma"])
         XCTAssertEqual(finder.luna, .idle)
         XCTAssertEqual(ranker.queries, [])
+
+        // Short searches such as "CI" or "PR" are worth asking about too.
+        finder.query = "le"
+        XCTAssertEqual(finder.rows.map(\.id), ["beta", "gamma"])
+        XCTAssertEqual(finder.luna, .pending)
+        try await waitUntil { if case .finished = finder.luna { return true } else { return false } }
+        XCTAssertEqual(ranker.queries, ["le"])
+        XCTAssertEqual(finder.rows.map(\.id), ["beta", "gamma"])
     }
 
     func testLunaPicksAnnotateMatchesAndAppendBelowWithoutMovingTheHighlight() async throws {
