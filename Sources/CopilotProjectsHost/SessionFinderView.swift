@@ -39,6 +39,18 @@ final class SessionFinderModel: ObservableObject, Identifiable {
         var id: String { entry.id }
     }
 
+    /// What VoiceOver hears about the highlighted row.
+    struct Highlight: Equatable {
+        let sessionId: String?
+        let lunaReason: String?
+
+        /// A new row is always worth hearing; the same row only when Luna adds or
+        /// changes its reason, not when a reason drops away mid-typing.
+        func isWorthAnnouncing(after previous: Highlight) -> Bool {
+            sessionId != previous.sessionId || (lunaReason != nil && lunaReason != previous.lunaReason)
+        }
+    }
+
     static let minimumLunaQueryLength = 3
 
     nonisolated let id = UUID()
@@ -49,6 +61,16 @@ final class SessionFinderModel: ObservableObject, Identifiable {
     @Published private(set) var luna: LunaPhase = .idle
     @Published private(set) var highlightedId: String?
     @Published private(set) var isIndexing = true
+
+    var highlight: Highlight {
+        Highlight(sessionId: highlightedId, lunaReason: rows.first { $0.id == highlightedId }?.lunaReason)
+    }
+
+    /// Luna's picks that are still listed. Picks for sessions that ended since are
+    /// left out, including ones from a cached or late answer.
+    var lunaSuggestionCount: Int {
+        rows.reduce(0) { $0 + ($1.lunaReason == nil ? 0 : 1) }
+    }
 
     private(set) var entries: [SessionFinderEntry]
     private var liveSessionIds: Set<String>
@@ -255,10 +277,15 @@ struct SessionFinderView: View {
         .frame(width: 640, height: 460)
         .background(StudioStyle.chrome)
         .defaultFocus($searchFocused, true)
-        .onAppear { searchFocused = true }
+        .onAppear {
+            searchFocused = true
+            announce(finder.highlightedId, live: live)
+        }
         .onDisappear { finder.cancel() }
         .onChange(of: liveSessionIds) { _, ids in finder.retainSessions(Set(ids)) }
-        .onChange(of: finder.highlightedId) { _, id in announce(id, live: live) }
+        .onChange(of: finder.highlight) { previous, highlight in
+            if highlight.isWorthAnnouncing(after: previous) { announce(highlight.sessionId, live: live) }
+        }
     }
 
     private var liveSessionIds: [String] {
@@ -436,10 +463,11 @@ struct SessionFinderView: View {
                 .help("Meaning-based suggestions use \(LunaSessionRanker.model) through the Copilot CLI, with no tools.")
         case .searching:
             EmptyView()
-        case .finished(let matches):
-            Text(matches.isEmpty
+        case .finished:
+            let count = finder.lunaSuggestionCount
+            Text(count == 0
                  ? "Luna found nothing more"
-                 : "Luna suggested \(matches.count) \(matches.count == 1 ? "session" : "sessions")")
+                 : "Luna suggested \(count) \(count == 1 ? "session" : "sessions")")
                 .lineLimit(1)
         case .failed(let message):
             Label {

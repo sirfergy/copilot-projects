@@ -558,6 +558,50 @@ final class SessionFinderModelTests: XCTestCase {
         XCTAssertEqual(finder.rows.map(\.id), [])
     }
 
+    func testLunaSuggestionsLeaveOutSessionsThatEndAfterLunaAnswers() async throws {
+        let ranker = FakeRanker(.success([
+            LunaMatch(sessionId: "gamma", reason: "shipped the changelog"),
+            LunaMatch(sessionId: "beta", reason: "reconciled ledger entries"),
+        ]))
+        let finder = try await makeFinder(ranker)
+        finder.query = "ledger"
+        try await waitUntil { if case .finished = finder.luna { return true } else { return false } }
+        XCTAssertEqual(finder.lunaSuggestionCount, 2)
+
+        finder.retainSessions(["alpha", "beta"])
+        XCTAssertEqual(finder.rows.map(\.id), ["beta"])
+        XCTAssertEqual(finder.lunaSuggestionCount, 1)
+
+        // The cached answer still names gamma, but it no longer counts.
+        finder.query = "ledger "
+        finder.query = "ledger"
+        XCTAssertEqual(ranker.queries, ["ledger"])
+        XCTAssertEqual(finder.lunaSuggestionCount, 1)
+
+        finder.retainSessions(["alpha"])
+        XCTAssertEqual(finder.rows.map(\.id), [])
+        XCTAssertEqual(finder.lunaSuggestionCount, 0)
+    }
+
+    func testHighlightIsAnnouncedWhenItMovesOrLunaExplainsIt() async throws {
+        let ranker = FakeRanker(.success([LunaMatch(sessionId: "beta", reason: "reconciled ledger entries")]))
+        let finder = try await makeFinder(ranker)
+        XCTAssertEqual(finder.highlight, .init(sessionId: "alpha", lunaReason: nil))
+
+        let browsing = finder.highlight
+        finder.query = "ledger"
+        let instant = finder.highlight
+        XCTAssertEqual(instant, .init(sessionId: "beta", lunaReason: nil))
+        XCTAssertTrue(instant.isWorthAnnouncing(after: browsing))
+
+        try await waitUntil { if case .finished = finder.luna { return true } else { return false } }
+        let explained = finder.highlight
+        XCTAssertEqual(explained, .init(sessionId: "beta", lunaReason: "reconciled ledger entries"))
+        XCTAssertTrue(explained.isWorthAnnouncing(after: instant))
+        XCTAssertFalse(instant.isWorthAnnouncing(after: explained), "A reason dropping away mid-typing stays quiet")
+        XCTAssertFalse(explained.isWorthAnnouncing(after: explained))
+    }
+
     func testClosingTheFinderStopsReadingTranscripts() async throws {
         let gate = DispatchSemaphore(value: 0)
         let loads = LoadCounter()

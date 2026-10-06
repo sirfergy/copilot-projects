@@ -204,7 +204,8 @@ enum LunaProcess {
         process.standardOutput = output
         process.standardError = errorOutput
         let run = RunState(process, terminationGrace: terminationGrace)
-        process.terminationHandler = { run.finish($0.terminationStatus) }
+        // Weak, so a launch that throws can't strand the handler and state in a cycle.
+        process.terminationHandler = { [weak run] in run?.finish($0.terminationStatus) }
         try process.run()
         let outputReader = PipeReader(output)
         let errorReader = PipeReader(errorOutput)
