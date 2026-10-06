@@ -202,7 +202,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
 
     init(sessionId: String, cwd: String, extraEnvironment: [String: String],
          dtachExecutable: String?, dtachSocket: String?, copilotSessionId: String? = nil,
-         copilotSessionAllowAll: Bool = false, launchCopilotExecutable: String? = nil,
+         launchCopilotExecutable: String? = nil,
          launchCopilotInitialPrompt: String? = nil,
          kittyImageDiskStore: RemoteKittyImageDiskStore = .shared,
          view: ProjectsTerminalView? = nil) {
@@ -251,7 +251,6 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
             self.start(cwd: cwd, extraEnvironment: extraEnvironment,
                        dtachExecutable: dtachExecutable, dtachSocket: dtachSocket,
                        copilotSessionId: copilotSessionId,
-                       copilotSessionAllowAll: copilotSessionAllowAll,
                        launchCopilotExecutable: launchCopilotExecutable,
                        launchCopilotInitialPrompt: launchCopilotInitialPrompt)
         }
@@ -294,7 +293,6 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
     private func start(cwd: String, extraEnvironment: [String: String],
                        dtachExecutable: String?, dtachSocket: String?,
                        copilotSessionId: String? = nil,
-                       copilotSessionAllowAll: Bool = false,
                        launchCopilotExecutable: String? = nil,
                        launchCopilotInitialPrompt: String? = nil) {
         let processEnv = ProcessInfo.processInfo.environment
@@ -332,7 +330,6 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
             let program = Self.startupProgram(
                 shell: shell,
                 copilotSessionId: copilotSessionId,
-                copilotSessionAllowAll: copilotSessionAllowAll,
                 resumeCopilotExecutable: resumeCopilotExecutable,
                 launchCopilotExecutable: launchCopilotExecutable,
                 launchCopilotInitialPrompt: launchCopilotInitialPrompt
@@ -443,15 +440,14 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
 
     nonisolated static func resumeCommand(
         sessionId: String,
-        allowAll: Bool,
         executable: String = "copilot"
     ) -> String {
         // Pass both flags because the CLI can otherwise inherit persisted remote
         // steering on resume even when event export was explicitly disabled.
-        var arguments = ["--no-remote", "--no-remote-export"]
-        if allowAll { arguments.append("--allow-all") }
-        arguments.append("--resume=\(sessionId)")
-        return profiledCopilotCommand(executable, arguments: arguments)
+        profiledCopilotCommand(
+            executable,
+            arguments: ["--no-remote", "--no-remote-export", "--resume=\(sessionId)"]
+        )
     }
 
     /// Copilot loader/supervisor env vars that leak in when this app was itself
@@ -497,7 +493,6 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
     nonisolated static func startupProgram(
         shell: String,
         copilotSessionId: String?,
-        copilotSessionAllowAll: Bool,
         resumeCopilotExecutable: String? = nil,
         launchCopilotExecutable: String?,
         launchCopilotInitialPrompt: String? = nil
@@ -507,7 +502,6 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
             // the shell fallback — if the session can't be resumed (e.g. deleted).
             let resume = resumeCommand(
                 sessionId: cid,
-                allowAll: copilotSessionAllowAll,
                 executable: resumeCopilotExecutable ?? "copilot"
             )
                 + " || printf '\\n[Copilot Projects] could not resume Copilot session \(cid)\\n'"
@@ -517,7 +511,6 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
             return [shell, "-l", "-c", launchCommand(
                 executable: executable,
                 shell: shell,
-                allowAll: copilotSessionAllowAll,
                 initialPrompt: launchCopilotInitialPrompt
             )]
         }
@@ -531,11 +524,9 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
     nonisolated static func launchCommand(
         executable: String,
         shell: String,
-        allowAll: Bool = false,
         initialPrompt: String? = nil
     ) -> String {
         var arguments = ["--no-remote", "--no-remote-export"]
-        if allowAll { arguments.append("--allow-all") }
         if let initialPrompt, !initialPrompt.isEmpty {
             arguments.append(contentsOf: ["--interactive", initialPrompt])
         }

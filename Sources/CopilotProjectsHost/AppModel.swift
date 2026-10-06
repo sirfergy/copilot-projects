@@ -505,7 +505,7 @@ final class AppModel: ObservableObject {
     /// real cached terminal controller is created with a one-shot Copilot launch.
     private let remoteSessionLauncher:
         ((_ sessionId: String, _ copilotExecutable: String?,
-          _ initialPrompt: String?, _ allowAll: Bool) -> Void)?
+          _ initialPrompt: String?) -> Void)?
     /// Persistent idempotency/tombstone store behind remote session creation.
     private let sessionCreationLedger: SessionCreationLedger
     private let projectCreationLedger: ProjectCreationLedger
@@ -565,7 +565,7 @@ final class AppModel: ObservableObject {
         remoteSessionBackendAvailable: @escaping () -> Bool = {
             Paths.dtachExecutable != nil
         },
-        remoteSessionLauncher: ((String, String?, String?, Bool) -> Void)? = nil,
+        remoteSessionLauncher: ((String, String?, String?) -> Void)? = nil,
         sessionCreationLedger: SessionCreationLedger = SessionCreationLedger(),
         projectCreationLedger: ProjectCreationLedger = ProjectCreationLedger(),
         agentActivityRefreshThrottle: TimeInterval = 0.5,
@@ -734,7 +734,6 @@ final class AppModel: ObservableObject {
         for sessionId: String,
         resumeRecordedSession: Bool = true,
         copilotExecutable: String? = nil,
-        launchWithAllowAll: Bool = false,
         launchCopilotInitialPrompt: String? = nil
     ) -> TerminalController? {
         if let c = controllers[sessionId] { return c }
@@ -770,14 +769,6 @@ final class AppModel: ObservableObject {
                 directory: resumeMarkerDirectory
             ) ? nil : candidate
         }
-        let allowAllCopilot = (try? String(contentsOf:
-            resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-allow-all"),
-            encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let resumeWithAllowAll = Self.shouldResumeWithAllowAll(
-            copilotSessionId: recordedCopilot,
-            allowAllSessionId: allowAllCopilot
-        )
         let c = TerminalController(
             sessionId: sessionId,
             cwd: session.cwd,
@@ -785,7 +776,6 @@ final class AppModel: ObservableObject {
             dtachExecutable: dtach,
             dtachSocket: socket,
             copilotSessionId: (recordedCopilot?.isEmpty == false) ? recordedCopilot : nil,
-            copilotSessionAllowAll: resumeWithAllowAll || launchWithAllowAll,
             launchCopilotExecutable: copilotExecutable,
             launchCopilotInitialPrompt: launchCopilotInitialPrompt,
             kittyImageDiskStore: kittyImageDiskStore
@@ -1041,7 +1031,7 @@ final class AppModel: ObservableObject {
         projects[pi].selectedSessionId = session.id
         // No modal or suspension between appending and creating the launch controller:
         // a view update must not lazily create a plain shell for this tab.
-        launchSession(session.id, executable: executable, initialPrompt: prompt, allowAll: true)
+        launchSession(session.id, executable: executable, initialPrompt: prompt)
         if remoteSessionLauncher == nil, controllers[session.id]?.terminalView.process?.running != true {
             controllers[session.id] = nil
             projects[pi].sessions.removeAll { $0.id == session.id }
@@ -1113,8 +1103,7 @@ final class AppModel: ObservableObject {
         launchSession(
             session.id,
             executable: copilotExecutable,
-            initialPrompt: prompt,
-            allowAll: true
+            initialPrompt: prompt
         )
         refreshSelectedTranscriptController()
         save()
@@ -1125,17 +1114,15 @@ final class AppModel: ObservableObject {
         _ sessionId: String,
         executable: String?,
         initialPrompt: String?,
-        allowAll: Bool,
         resumeRecordedSession: Bool = true
     ) {
         if let remoteSessionLauncher {
-            remoteSessionLauncher(sessionId, executable, initialPrompt, allowAll)
+            remoteSessionLauncher(sessionId, executable, initialPrompt)
         } else {
             controller(
                 for: sessionId,
                 resumeRecordedSession: resumeRecordedSession,
                 copilotExecutable: executable,
-                launchWithAllowAll: allowAll,
                 launchCopilotInitialPrompt: initialPrompt
             )
         }
@@ -1439,13 +1426,12 @@ final class AppModel: ObservableObject {
         guard let cwd = remoteReposDirectory() else { return .invalid }
 
         if !isLegacyRequest {
-            for suffix in ["copilot-session", "copilot-allow-all"] {
-                let marker = resumeMarkerDirectory.appendingPathComponent("\(sessionId).\(suffix)")
-                if unlink(marker.path) == 0 { continue }
+            let marker = resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session")
+            if unlink(marker.path) != 0 {
                 let code = errno
                 guard code == ENOENT else {
                     NSLog("copilot-projects: could not clear stale resume marker for remote session "
-                        + "\(sessionId) (\(suffix), errno \(code))")
+                        + "\(sessionId) (errno \(code))")
                     return .persistenceUnavailable
                 }
             }
@@ -1460,13 +1446,10 @@ final class AppModel: ObservableObject {
             projects[pi].selectedSessionId = sessionId
         }
 
-        // Remote Copilot sessions start in allow-all so they run unattended
-        // without tool-approval prompts nobody is at the Mac to answer.
         launchSession(
             sessionId,
             executable: copilotExecutable,
             initialPrompt: initialPrompt,
-            allowAll: kind == .copilot,
             resumeRecordedSession: isLegacyRequest
         )
         refreshSelectedTranscriptController()
@@ -3359,11 +3342,9 @@ final class AppModel: ObservableObject {
         // non-terminating app can treat it as an explicit user exit.
         if source == "session-end", !isTerminating, !isPoweringOff,
            shouldClearResumeMarkers(sessionId: sessionId, copilotSessionId: copilotSessionId) {
-            for suffix in ["copilot-session", "copilot-allow-all"] {
-                try? FileManager.default.removeItem(
-                    at: resumeMarkerDirectory.appendingPathComponent("\(sessionId).\(suffix)")
-                )
-            }
+            try? FileManager.default.removeItem(
+                at: resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session")
+            )
         }
         let previous = projects[loc.p].sessions[loc.s].status
         if status == .waiting, previous == .waiting, notification == nil {
@@ -3851,10 +3832,7 @@ final class AppModel: ObservableObject {
         copilotSessionId: String?
     ) -> Bool {
         guard let copilotSessionId, !copilotSessionId.isEmpty else { return false }
-        let recorded = resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session")
-        let allowAll = resumeMarkerValue(sessionId: sessionId, suffix: "copilot-allow-all")
-        return recorded == copilotSessionId
-            || (recorded == nil && allowAll == copilotSessionId)
+        return resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session") == copilotSessionId
     }
 
     private func resumeMarkerValue(sessionId: String, suffix: String) -> String? {
@@ -4743,14 +4721,6 @@ final class AppModel: ObservableObject {
         isPoweringOff: Bool
     ) -> Bool {
         isTerminating || isPoweringOff
-    }
-
-    nonisolated static func shouldResumeWithAllowAll(
-        copilotSessionId: String?,
-        allowAllSessionId: String?
-    ) -> Bool {
-        guard let copilotSessionId, !copilotSessionId.isEmpty else { return false }
-        return allowAllSessionId == copilotSessionId
     }
 
     // MARK: - control socket handler

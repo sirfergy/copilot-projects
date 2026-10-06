@@ -22,7 +22,7 @@ final class RemoteProjectCreationTests: XCTestCase {
             remoteCopilotExecutable: { nil },
             remoteReposDirectory: { nil },
             remoteSessionBackendAvailable: { false },
-            remoteSessionLauncher: { _, _, _, _ in XCTFail("Creating a project must not launch a session") },
+            remoteSessionLauncher: { _, _, _ in XCTFail("Creating a project must not launch a session") },
             projectCreationLedger: ProjectCreationLedger(
                 url: ledgerURL ?? root.appendingPathComponent("projects.json")
             )

@@ -111,7 +111,6 @@ if (validSessionId && socketPath) {
     const transcriptOwnerLockPath = `${transcriptOwnerPath}.flock`;
     const scheduledTurnPath = join(sessionsDir, `${appSessionId}.scheduled-turn`);
     const copilotSessionPath = join(sessionsDir, `${appSessionId}.copilot-session`);
-    const allowAllPath = join(sessionsDir, `${appSessionId}.copilot-allow-all`);
     const userInputResponsePath = join(
         sessionsDir, `${appSessionId}.user-input-response.json`
     );
@@ -240,9 +239,6 @@ if (validSessionId && socketPath) {
     let durableAskUserScan = null;
     let lastLiveQuestionAt = null;
     let sharedFilesOwnershipInitializedFor = null;
-    let allowAllRefreshQueued = false;
-    let allowAllRefreshPending = false;
-    let allowAllUpdateGeneration = 0;
     let foregroundSessionActive = false;
     let foregroundObservationStartedAt = 0;
     let foregroundRefreshQueued = false;
@@ -251,7 +247,7 @@ if (validSessionId && socketPath) {
     // Monotonic id for the conversation currently loaded into the state
     // above. Bumped by every `/new` / `/resume` identity rotation so async
     // work started for a previous conversation (durable replay, SDK history
-    // bootstrap, schedule/model/allow-all refreshes) can detect that it is
+    // bootstrap, schedule/model refreshes) can detect that it is
     // stale and abort before mutating the new conversation's state.
     let conversationGeneration = 0;
     const trackerInstanceId = randomUUID();
@@ -893,39 +889,12 @@ if (validSessionId && socketPath) {
         }
     }
 
-    function refreshAllowAllSoon() {
-        if (allowAllRefreshQueued) {
-            allowAllRefreshPending = true;
-            return;
-        }
-        allowAllRefreshQueued = true;
-        Promise.resolve()
-            .then(() => refreshAllowAll())
-            .catch(() => {})
-            .finally(() => {
-                allowAllRefreshQueued = false;
-                if (allowAllRefreshPending) {
-                    allowAllRefreshPending = false;
-                    refreshAllowAllSoon();
-                }
-            });
-    }
-
     function activateSharedFilesOwnership(force = false) {
         const ownershipKey = `${copilotSessionId}:${process.pid}`;
         if (!force && sharedFilesOwnershipInitializedFor === ownershipKey) return;
         sharedFilesOwnershipInitializedFor = ownershipKey;
         if (validCopilotSessionId) {
             writeMarker(copilotSessionPath, copilotSessionId);
-        }
-        refreshAllowAllSoon();
-    }
-
-    function applyAllowAllMarker(enabled) {
-        if (!ownsSharedFiles()) return;
-        removeFile(allowAllPath);
-        if (enabled && validCopilotSessionId) {
-            writeMarker(allowAllPath, copilotSessionId);
         }
     }
 
@@ -3446,26 +3415,6 @@ if (validSessionId && socketPath) {
         }
     }
 
-    async function refreshAllowAll() {
-        if (!ownsSharedFiles()) return;
-        const generation = ++allowAllUpdateGeneration;
-        const conversation = conversationGeneration;
-        // Fail closed if the RPC is unavailable: a stale marker must never grant
-        // full permissions to a different session in the same tab.
-        removeFile(allowAllPath);
-        try {
-            const enabled = typeof session.rpc.permissions.getMode === "function"
-                ? (await session.rpc.permissions.getMode()).mode === "allow-all"
-                : (await session.rpc.permissions.getAllowAll()).enabled === true;
-            if (generation === allowAllUpdateGeneration
-                    && conversation === conversationGeneration) {
-                applyAllowAllMarker(enabled);
-            }
-        } catch (error) {
-            console.error("[copilot-projects] could not read permission mode:", error);
-        }
-    }
-
     async function sdkHistoryWithTimeout() {
         let timeout;
         const historyPromise = Promise.resolve().then(() => session.getEvents());
@@ -3930,10 +3879,6 @@ if (validSessionId && socketPath) {
         durableFallbackModel = null;
         durableAskUser = null;
         durableAskUserScan = null;
-
-        // Any allow-all answer still in flight belongs to the previous
-        // conversation and must not be applied to the new one.
-        allowAllUpdateGeneration += 1;
     }
 
     // The current Copilot conversation id according to a root
@@ -4487,21 +4432,6 @@ if (validSessionId && socketPath) {
     session.on("session.resume", handleSessionLifecycleEvent);
     session.on("session.model_change", applyModelFromEvent);
 
-    session.on("session.permissions_changed", (event) => {
-        const data = event.data;
-        if (event.agentId || !data) return;
-        if (data.mode === undefined
-                && data.allowAllPermissionMode === undefined
-                && typeof data.allowAllPermissions !== "boolean") return;
-        allowAllUpdateGeneration += 1;
-        applyAllowAllMarker(
-            data.mode !== undefined
-                ? data.mode === "allow-all"
-                : data.allowAllPermissionMode === "on"
-                    || (data.allowAllPermissionMode == null && data.allowAllPermissions === true)
-        );
-    });
-
     session.on("subagent.started", (event) => {
         sessionIdleAtMilliseconds = null;
         const id = event.agentId || event.data.toolCallId;
@@ -4682,24 +4612,15 @@ if (validSessionId && socketPath) {
         await registerEventInterest(eventType);
     }
 
-    const startupGeneration = conversationGeneration;
-    await refreshAllowAll();
-    // A lifecycle event can already have rotated the conversation while we
-    // awaited above; that rotation owns the bootstrap from here on, and
-    // restoring the previous snapshot into `transcriptTurns` would pollute
-    // the conversation it just cleared.
-    if (startupGeneration === conversationGeneration) {
-        // Keep this Copilot session's last good drawer visible while history
-        // is fetched, but clear a snapshot left by a different Copilot
-        // session.
-        const preservedTranscriptTurns = restoreMatchingTranscript()
-            ? [...transcriptTurns]
-            : [];
-        await bootstrapConversation(startupGeneration, {
-            preservedTurns: preservedTranscriptTurns,
-            publishEmptyPlaceholder: true,
-        });
-    }
+    // Keep this Copilot session's last good drawer visible while history
+    // is fetched, but clear a snapshot left by a different Copilot session.
+    const preservedTranscriptTurns = restoreMatchingTranscript()
+        ? [...transcriptTurns]
+        : [];
+    await bootstrapConversation(conversationGeneration, {
+        preservedTurns: preservedTranscriptTurns,
+        publishEmptyPlaceholder: true,
+    });
 
     refreshSchedules();
     refreshModels();

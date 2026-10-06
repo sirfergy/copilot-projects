@@ -43,10 +43,8 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   an interactive session (not a one-shot/headless command). Cancel creates no session.
   Startup checks retain the draft on failure; after a session opens, **Copy Starting Prompt**
   in its context menu recovers the prompt until that session ends or the app quits.
-  Prompts are never retried automatically. All new desktop Copilot sessions use
-  `--allow-all`, with or without a starting prompt. When restoring a session, Projects
-  requests allow-all only when the tracker confirmed that mode for the same conversation.
-  Manual and assisted modes do not grant full permissions; CLI policy remains authoritative.
+  Prompts are never retried automatically. New and restored Copilot sessions never pass
+  `--allow-all`; tool approvals follow your normal Copilot CLI permission settings.
 - **Local PR reviews:** choose **Review Pull Request…** from the **+** split button's
   dropdown, paste a GitHub pull request URL, and open a new Copilot CLI session with a
   local adversarial-review prompt in the current project.
@@ -379,7 +377,8 @@ An integrating gateway can expose `RemoteSessionContract.configuredCreatePath`
 to `SessionHost.createConfiguredSession`. In addition to `requestId` and
 `projectId`, the request accepts optional `kind` (`copilot` or `terminal`) and `initialPrompt`.
 Omitted kind means Copilot; omitted prompt means an unprompted session. Copilot
-uses `--allow-all`; a terminal opens a plain shell without requiring Copilot.
+launches without `--allow-all`, so tool approvals appear in the session's terminal;
+a terminal opens a plain shell without requiring Copilot.
 Both retain the remote `~/Repos` working-directory and desktop-selection policy.
 
 A supplied prompt must be nonempty after whitespace trimming, at most 8,192
