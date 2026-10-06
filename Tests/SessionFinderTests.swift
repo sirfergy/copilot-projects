@@ -225,7 +225,8 @@ final class SessionFinderTests: XCTestCase {
         XCTAssertEqual(model.map { arguments[$0 + 1] }, "gpt-6-luna")
         let format = try? XCTUnwrap(arguments.firstIndex(of: "--output-format"))
         XCTAssertEqual(format.map { arguments[$0 + 1] }, "json")
-        XCTAssertTrue(arguments.contains("--available-tools="))
+        XCTAssertTrue(arguments.contains("--available-tools=none"))
+        XCTAssertFalse(arguments.contains("--available-tools="), "An empty allowlist leaves every tool available")
         XCTAssertTrue(arguments.contains("--no-custom-instructions"))
         XCTAssertTrue(arguments.contains("--disable-builtin-mcps"))
         XCTAssertTrue(arguments.contains("--no-ask-user"))
@@ -339,6 +340,28 @@ final class SessionFinderTests: XCTestCase {
         }
     }
 
+    func testSignInIsDetectedFromDiagnosticsNotTheEchoedPrompt() {
+        let echoed = #"{"type":"user.message","data":{"content":"how do I /login and authenticate?"}}"#
+        let reasoning = #"{"type":"assistant.reasoning","data":{"content":"they asked to authenticate"}}"#
+        XCTAssertEqual(
+            LunaSessionRanker.failure(from: .init(
+                status: 2, output: echoed + "\n" + reasoning, errorOutput: "Model gpt-6-luna is not available\n"
+            )),
+            .failed("Model gpt-6-luna is not available")
+        )
+        XCTAssertEqual(
+            LunaSessionRanker.failure(from: .init(
+                status: 1, output: echoed + "\n" + #"{"type":"session.error","data":{"message":"Not authenticated"}}"#,
+                errorOutput: ""
+            )),
+            .notSignedIn
+        )
+        XCTAssertEqual(
+            LunaSessionRanker.failure(from: .init(status: 1, output: "Run copilot and use /login\n", errorOutput: "")),
+            .notSignedIn
+        )
+    }
+
     func testRankTimesOutAndCancelsByTerminatingTheProcess() async throws {
         // `exec` keeps the shell's pid, so terminating it stops the sleep too.
         var (slow, root) = try fakeCopilot("exec /bin/sleep 30\n")
@@ -387,6 +410,38 @@ final class SessionFinderTests: XCTestCase {
 
         stubborn.timeout = 30
         let task = Task { try await stubborn.rank(query: "anything", entries: [entry("A")]) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let cancelled = Date()
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(cancelled), 5)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: runs), [])
+    }
+
+    func testRankStopsALeftoverSubprocessHoldingThePipesAfterCopilotExits() async throws {
+        // copilot exits at once; the backgrounded sleep keeps stdout open and ignores SIGTERM.
+        var (leaky, root) = try fakeCopilot("trap '' TERM\n/bin/sleep 30 &\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runs = root.appendingPathComponent("runs").path
+        leaky.timeout = 0.3
+        leaky.terminationGrace = 0.3
+        let started = Date()
+        do {
+            _ = try await leaky.rank(query: "anything", entries: [entry("A")])
+            XCTFail("Expected a timeout")
+        } catch {
+            XCTAssertEqual(error as? LunaSearchError, .timedOut)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: runs), [])
+
+        leaky.timeout = 30
+        let task = Task { try await leaky.rank(query: "anything", entries: [entry("A")]) }
         try await Task.sleep(nanoseconds: 300_000_000)
         let cancelled = Date()
         task.cancel()

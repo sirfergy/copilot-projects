@@ -76,7 +76,9 @@ struct LunaSessionRanker: SessionRanking {
             "--no-custom-instructions",
             "--disable-builtin-mcps",
             "--no-ask-user",
-            "--available-tools=",
+            // An allowlist naming no real tool. An empty `--available-tools=` is
+            // ignored by Copilot CLI 1.0.92, which then still offers its shell tool.
+            "--available-tools=none",
             "--stream", "off",
             "--no-auto-update",
             "--reasoning-effort", "low",
@@ -165,7 +167,7 @@ struct LunaSessionRanker: SessionRanking {
     }
 
     static func failure(from result: LunaProcess.Result) -> LunaSearchError {
-        let text = result.errorOutput + "\n" + result.output
+        let text = diagnostics(from: result)
         if text.contains("/login") || text.localizedCaseInsensitiveContains("not authenticated")
             || text.localizedCaseInsensitiveContains("authenticate") {
             return .notSignedIn
@@ -174,6 +176,20 @@ struct LunaSessionRanker: SessionRanking {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty }
         return .failed(LunaSessionPrompt.clip(line ?? "exit status \(result.status)", 120))
+    }
+
+    private struct EventType: Decodable { let type: String }
+
+    /// What the CLI itself said: stderr, plain stdout lines, and error events. The
+    /// other JSONL events carry conversation text (`user.message` echoes the whole
+    /// prompt), which can mention signing in without the run having failed for it.
+    static func diagnostics(from result: LunaProcess.Result) -> String {
+        let decoder = JSONDecoder()
+        let lines = result.output.split(whereSeparator: \.isNewline).filter { line in
+            guard let event = try? decoder.decode(EventType.self, from: Data(line.utf8)) else { return true }
+            return event.type.localizedCaseInsensitiveContains("error")
+        }
+        return ([result.errorOutput] + lines.map(String.init)).joined(separator: "\n")
     }
 }
 
@@ -216,13 +232,14 @@ enum LunaProcess {
             run.terminate(timedOut: true)
         }
         defer { watchdog.cancel() }
-        let status = await withTaskCancellationHandler {
-            await run.exitStatus()
+        // Draining stays cancellable: a subprocess that outlives copilot can hold
+        // the pipes open after copilot itself has exited.
+        let (status, stdout, stderr) = await withTaskCancellationHandler {
+            let status = await run.exitStatus()
+            return (status, await outputReader.text(), await errorReader.text())
         } onCancel: {
             run.terminate(timedOut: false)
         }
-        let stdout = await outputReader.text()
-        let stderr = await errorReader.text()
         // A terminated copilot can still exit 0, so our own reasons win.
         try Task.checkCancellation()
         if run.timedOut { throw LunaSearchError.timedOut }
@@ -279,25 +296,30 @@ enum LunaProcess {
         /// Asks the run and everything it started to stop, then kills whatever is
         /// left after the grace period: a run that ignores SIGTERM would otherwise
         /// never exit, and a subprocess holding the output pipes open would keep
-        /// the reads from finishing.
+        /// the reads from finishing. `Process` starts copilot as the leader of its
+        /// own process group, and the group still reaches subprocesses that copilot
+        /// left behind when it exited.
         func terminate(timedOut: Bool) {
             let first: Bool = lock.withLock {
                 if timedOut { didTimeOut = true }
                 defer { isStopping = true }
                 return !isStopping
             }
-            guard first, process.isRunning else { return }
             let pid = process.processIdentifier
-            let started = LunaProcess.descendants(of: pid)
-            process.terminate()
+            guard first, pid > 0 else { return }
+            let rootRunning = process.isRunning
+            let started = rootRunning ? LunaProcess.descendants(of: pid) : []
+            if rootRunning { process.terminate() }
+            kill(-pid, SIGTERM)
             started.forEach { kill($0, SIGTERM) }
             let process = self.process
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + terminationGrace) {
-                let rootRunning = process.isRunning
+                let stillRunning = process.isRunning
                 var survivors = Set(started)
-                if rootRunning { survivors.formUnion(LunaProcess.descendants(of: pid)) }
+                if stillRunning { survivors.formUnion(LunaProcess.descendants(of: pid)) }
                 for child in survivors where kill(child, 0) == 0 { kill(child, SIGKILL) }
-                if rootRunning { kill(pid, SIGKILL) }
+                kill(-pid, SIGKILL)
+                if stillRunning { kill(pid, SIGKILL) }
             }
         }
     }
