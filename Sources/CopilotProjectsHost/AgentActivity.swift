@@ -294,7 +294,9 @@ struct TrackedUserInput: Codable, Equatable, Identifiable {
 }
 
 /// One outstanding elicitation, mirrored from the extension's heartbeat. `schema`
-/// is carried verbatim so the client renders the exact form the agent requested.
+/// is the agent's requested schema as the tracker published it, including the
+/// reserved `x-copilot-projects-property-order` metadata key, so the client
+/// renders the exact form the agent requested in the agent's field order.
 struct TrackedElicitation: Codable, Equatable, Identifiable {
     var requestId: String
     var message: String

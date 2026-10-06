@@ -269,8 +269,11 @@ public enum RemoteElicitationAction: String, Codable, Equatable, Sendable {
 }
 
 /// A schema-form (or url-mode) question surfaced by the agent's
-/// `elicitation.requested` event. `schema` is the verbatim `requestedSchema` the
-/// client renders as a form; `url` is set for url-mode requests instead.
+/// `elicitation.requested` event. `schema` is the agent's `requestedSchema` the
+/// client renders as a form; `url` is set for url-mode requests instead. The
+/// tracker adds a reserved `x-copilot-projects-property-order` key (the
+/// `properties` names in the agent's authored order) and replaces or drops any
+/// agent-supplied value under it, so it is metadata, not agent-authored schema.
 public struct RemoteElicitationRequest: Codable, Equatable, Sendable, Identifiable {
     public let requestId: String
     public let message: String
