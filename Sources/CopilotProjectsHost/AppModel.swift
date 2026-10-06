@@ -432,12 +432,17 @@ final class AppModel: ObservableObject {
     private var foregroundIdleGenerationBaselines: [String: Int] = [:]
     private let completionNotificationDelayNanoseconds: UInt64
     private let permissionNotificationDelayNanoseconds: UInt64
+    private let elicitationReplyRetryDelaysNanoseconds: [UInt64]
     private let persistPermissionStatus:
         (_ sessionId: String, _ status: SessionStatus, _ timestamp: Int64,
          _ promptStatusTimestamp: Int64) -> Void
     private struct InputWaitState {
         let context: InputWaitContext
         let timestamp: Int64
+    }
+    private struct ElicitationConversation: Equatable {
+        let rootSessionId: String
+        let conversationEpoch: String
     }
     private struct RemotePromptFence: Equatable {
         let submittedAt: Int64
@@ -467,6 +472,7 @@ final class AppModel: ObservableObject {
         let controller: TerminalController?
     }
     private var permissionNotificationTokens: [String: UUID] = [:]
+    private var elicitationNotificationTokens: [String: UUID] = [:]
     private var budgetNotificationKeys: [String: String] = [:]
     private var permissionStatusRestores: [String: PermissionStatusRestore] = [:]
     private let isAppActive: @MainActor () -> Bool
@@ -531,6 +537,9 @@ final class AppModel: ObservableObject {
             TranscriptController.loadRemoteSnapshot(sessionId: $0)
         },
         permissionNotificationDelayNanoseconds: UInt64 = 1_000_000_000,
+        elicitationReplyRetryDelaysNanoseconds: [UInt64] = [
+            250_000_000, 500_000_000, 1_000_000_000, 2_000_000_000,
+        ],
         persistPermissionStatus: @escaping (
             _ sessionId: String, _ status: SessionStatus, _ timestamp: Int64,
             _ promptStatusTimestamp: Int64
@@ -586,6 +595,7 @@ final class AppModel: ObservableObject {
         self.completionNotificationDelayNanoseconds = completionNotificationDelayNanoseconds
         self.completionTranscriptLoader = completionTranscriptLoader
         self.permissionNotificationDelayNanoseconds = permissionNotificationDelayNanoseconds
+        self.elicitationReplyRetryDelaysNanoseconds = elicitationReplyRetryDelaysNanoseconds
         self.persistPermissionStatus = persistPermissionStatus
         self.isAppActive = isAppActive
         self.agentActivityDirectory = agentActivityDirectory
@@ -1573,6 +1583,7 @@ final class AppModel: ObservableObject {
         completionPending.remove(sid)
         completionSummaryContexts[sid] = nil
         permissionNotificationTokens[sid] = nil
+        elicitationNotificationTokens[sid] = nil
         permissionStatusRestores[sid] = nil
         inputWaits[sid] = nil
         remotePromptFences[sid] = nil
@@ -2332,8 +2343,11 @@ final class AppModel: ObservableObject {
                         completionPending.remove(session.id)
                         completionSummaryContexts[session.id] = nil
                     }
-                    if status != .waiting, permissionStatusRestores[session.id] == nil {
-                        cancelPermissionNotification(sessionId: session.id)
+                    if status != .waiting {
+                        elicitationNotificationTokens[session.id] = nil
+                        if permissionStatusRestores[session.id] == nil {
+                            cancelWaitingNotifications(sessionId: session.id)
+                        }
                     }
                     changed = true
                 }
@@ -2847,7 +2861,7 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private static func isValidElicitationContent(_ content: [String: RemoteJSONValue]) -> Bool {
+    nonisolated static func isValidElicitationContent(_ content: [String: RemoteJSONValue]) -> Bool {
         content.values.allSatisfy { value in
             switch value {
             case .bool, .string:
@@ -2865,7 +2879,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private static func elicitationContent(
+    nonisolated static func elicitationContent(
         _ content: [String: RemoteJSONValue],
         satisfies schema: RemoteJSONValue?,
         allowFreeformStringChoices: Bool
@@ -2890,7 +2904,7 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    private static func elicitationValue(
+    private nonisolated static func elicitationValue(
         _ value: RemoteJSONValue,
         satisfies schema: RemoteJSONValue,
         allowFreeformStringChoice: Bool = false
@@ -2988,7 +3002,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private static func numberSatisfiesBounds(
+    private nonisolated static func numberSatisfiesBounds(
         _ number: Double,
         schema: [String: RemoteJSONValue]
     ) -> Bool {
@@ -2997,7 +3011,7 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    private static func stringMatchesFormat(_ string: String, format: String) -> Bool {
+    private nonisolated static func stringMatchesFormat(_ string: String, format: String) -> Bool {
         switch format {
         case "email":
             return string.range(
@@ -3027,25 +3041,25 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private static func jsonString(_ value: RemoteJSONValue?) -> String? {
+    private nonisolated static func jsonString(_ value: RemoteJSONValue?) -> String? {
         guard let value else { return nil }
         if case .string(let string) = value { return string }
         return nil
     }
 
-    private static func jsonNumber(_ value: RemoteJSONValue?) -> Double? {
+    private nonisolated static func jsonNumber(_ value: RemoteJSONValue?) -> Double? {
         guard let value else { return nil }
         if case .number(let number) = value { return number }
         return nil
     }
 
-    private static func jsonArray(_ value: RemoteJSONValue?) -> [RemoteJSONValue]? {
+    private nonisolated static func jsonArray(_ value: RemoteJSONValue?) -> [RemoteJSONValue]? {
         guard let value else { return nil }
         if case .array(let values) = value { return values }
         return nil
     }
 
-    private static func jsonStringArray(_ value: RemoteJSONValue?) -> [String]? {
+    private nonisolated static func jsonStringArray(_ value: RemoteJSONValue?) -> [String]? {
         guard let value, case .array(let values) = value else { return nil }
         var strings: [String] = []
         for value in values {
@@ -3420,7 +3434,9 @@ final class AppModel: ObservableObject {
                 || scheduledStateChanges
         else { return }
         if status != .waiting {
-            cancelPermissionNotification(sessionId: sessionId)
+            cancelWaitingNotifications(sessionId: sessionId)
+        } else if let notification, notification != .elicitation {
+            elicitationNotificationTokens[sessionId] = nil
         }
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
@@ -3521,14 +3537,8 @@ final class AppModel: ObservableObject {
                     )
                 )
             }
-        } else if let notification, notification != .completed {
-            postNotification(
-                projectId: projects[loc.p].id,
-                sessionId: sessionId,
-                kind: notification,
-                title: notification.title,
-                body: nil
-            )
+        } else if notification == .elicitation {
+            scheduleElicitationNotification(sessionId: sessionId)
         }
     }
 
@@ -3571,9 +3581,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func cancelPermissionNotification(sessionId: String) {
+    /// The session stopped waiting, so neither a permission nor a question
+    /// alert scheduled for that wait may still post.
+    private func cancelWaitingNotifications(sessionId: String) {
         permissionNotificationTokens[sessionId] = nil
         permissionStatusRestores[sessionId] = nil
+        elicitationNotificationTokens[sessionId] = nil
     }
 
     private func resolvePermissionNotification(sessionId: String, token: UUID) {
@@ -3638,6 +3651,92 @@ final class AppModel: ObservableObject {
                 now: Date()
             )
         }
+    }
+
+    /// Posts a question notification for one elicitation hook. The hook can
+    /// beat the tracker's snapshot of the question, so a session whose tracker
+    /// could accept a reply is re-read with backoff before posting without one.
+    private func scheduleElicitationNotification(sessionId: String) {
+        let token = UUID()
+        elicitationNotificationTokens[sessionId] = token
+        let delays = elicitationReplyRetryDelaysNanoseconds
+        var conversation = inputWaits[sessionId].map {
+            ElicitationConversation(
+                rootSessionId: $0.context.rootSessionId,
+                conversationEpoch: $0.context.conversationEpoch
+            )
+        }
+        guard !resolveElicitationNotification(
+            sessionId: sessionId,
+            token: token,
+            conversation: &conversation,
+            isFinalAttempt: delays.isEmpty
+        ) else { return }
+        let observed = conversation
+        Task { @MainActor [weak self] in
+            var conversation = observed
+            for (index, delay) in delays.enumerated() {
+                try? await Task.sleep(nanoseconds: delay)
+                guard let self else { return }
+                if self.resolveElicitationNotification(
+                    sessionId: sessionId,
+                    token: token,
+                    conversation: &conversation,
+                    isFinalAttempt: index == delays.count - 1
+                ) {
+                    return
+                }
+            }
+        }
+    }
+
+    /// Returns false only while a retry could still find a replyable question.
+    private func resolveElicitationNotification(
+        sessionId: String,
+        token: UUID,
+        conversation: inout ElicitationConversation?,
+        isFinalAttempt: Bool,
+        now: Date = Date()
+    ) -> Bool {
+        guard elicitationNotificationTokens[sessionId] == token else { return true }
+        guard let loc = locateIndex(sessionId),
+              projects[loc.p].sessions[loc.s].status == .waiting else {
+            elicitationNotificationTokens[sessionId] = nil
+            return true
+        }
+        let adapter = CLIOperationAdapter(
+            activityDirectory: agentActivityDirectory,
+            resumeMarkerDirectory: resumeMarkerDirectory
+        )
+        var question: NotificationReplyResolver.PendingQuestion?
+        if let snapshot = adapter.loadReceiptBoundSnapshot(sessionId: sessionId, now: now),
+           let root = snapshot.copilotSessionId,
+           let epoch = snapshot.conversationEpoch {
+            let observed = conversation ?? ElicitationConversation(
+                rootSessionId: root,
+                conversationEpoch: epoch
+            )
+            conversation = observed
+            // A different conversation can't own this hook's question; post
+            // without a reply rather than keep waiting for it.
+            if observed.rootSessionId.lowercased() == root.lowercased(),
+               observed.conversationEpoch == epoch {
+                question = NotificationReplyResolver.pendingQuestion(in: snapshot, now: now)
+                // Only an empty snapshot can still be missing this hook's
+                // question; one that can't be answered here won't improve.
+                if question == nil, !isFinalAttempt { return false }
+            }
+        }
+        elicitationNotificationTokens[sessionId] = nil
+        postNotification(
+            projectId: projects[loc.p].id,
+            sessionId: sessionId,
+            kind: .elicitation,
+            title: StatusNotificationKind.elicitation.title,
+            body: question?.notificationBody,
+            reply: question?.reply
+        )
+        return true
     }
 
     private func restoreCompletedPermissionWaits(now: Date) {
@@ -3731,7 +3830,7 @@ final class AppModel: ObservableObject {
             restore.statusTimestamp,
             restore.promptStatusTimestamp
         )
-        cancelPermissionNotification(sessionId: sessionId)
+        cancelWaitingNotifications(sessionId: sessionId)
         updateDockBadge()
         if restore.completionPending {
             postCompletionIfReady(sessionId: sessionId)
@@ -4251,7 +4350,7 @@ final class AppModel: ObservableObject {
     private func clearStatusToIdle(pi: Int, si: Int, markFinished: Bool, effectiveTime: Int64? = nil) {
         let sid = projects[pi].sessions[si].id
         sessionSemantics.activityTracker.reset(sessionId: sid)
-        cancelPermissionNotification(sessionId: sid)
+        cancelWaitingNotifications(sessionId: sid)
         projects[pi].sessions[si].status = .idle
         projects[pi].sessions[si].statusText = nil
         if markFinished, !isVisible(projectIndex: pi, sessionIndex: si) {
@@ -4332,6 +4431,7 @@ final class AppModel: ObservableObject {
         kind: StatusNotificationKind? = nil,
         title: String,
         body: String?,
+        reply: RemoteNotificationReply? = nil,
         completionSummaryContext: CompletionSummaryContext? = nil
     ) {
         var subtitle: String?
@@ -4354,7 +4454,10 @@ final class AppModel: ObservableObject {
             body: body,
             projectId: projectId,
             sessionId: sessionId,
-            isTargetVisible: isTargetVisible
+            isTargetVisible: isTargetVisible,
+            reply: kind == .completed && completionSummaryContext == nil
+                ? completionReply(sessionId: sessionId)
+                : reply
         )
         updateDockBadge()
         guard let context = completionSummaryContext else {
@@ -4362,6 +4465,10 @@ final class AppModel: ObservableObject {
             return
         }
         let completionClock = sessionSemantics.statusClock.timestamp(for: sessionId)
+        // The status clock can't see a conversation rotating, so the reply
+        // read after the load must still belong to the finished turn's epoch.
+        let completionEpoch = receiptBoundSnapshot(sessionId: sessionId, now: Date())?
+            .conversationEpoch
         let loadSnapshot = completionTranscriptLoader
         Task { @MainActor [weak self] in
             let summary = await Task.detached {
@@ -4376,6 +4483,7 @@ final class AppModel: ObservableObject {
             // Keep the original alert, but never attach that turn's content to it.
             let stillCurrent = sessionSemantics.statusClock.timestamp(for: sessionId)
                 == completionClock
+            let reply = stillCurrent ? completionReply(sessionId: sessionId) : nil
             notifications?.post(NotificationEvent(
                 id: event.id,
                 kind: event.kind,
@@ -4385,9 +4493,27 @@ final class AppModel: ObservableObject {
                 projectId: event.projectId,
                 sessionId: event.sessionId,
                 isTargetVisible: event.isTargetVisible,
-                sentAt: event.sentAt
+                sentAt: event.sentAt,
+                reply: reply?.conversationEpoch == completionEpoch ? reply : nil
             ))
         }
+    }
+
+    /// Read from disk at post time: the cached snapshot can lag the turn that
+    /// just finished by a heartbeat.
+    private func completionReply(sessionId: String) -> RemoteNotificationReply? {
+        let now = Date()
+        guard let snapshot = receiptBoundSnapshot(sessionId: sessionId, now: now) else {
+            return nil
+        }
+        return NotificationReplyResolver.completionReply(snapshot: snapshot, now: now)
+    }
+
+    private func receiptBoundSnapshot(sessionId: String, now: Date) -> AgentActivitySnapshot? {
+        CLIOperationAdapter(
+            activityDirectory: agentActivityDirectory,
+            resumeMarkerDirectory: resumeMarkerDirectory
+        ).loadReceiptBoundSnapshot(sessionId: sessionId, now: now)
     }
 
     private func postCompletionIfReady(sessionId: String) {

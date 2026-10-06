@@ -28,6 +28,9 @@ public struct RemoteNotificationPayload: Codable, Equatable, Sendable {
     public let projectId: String?
     public let sessionId: String?
     public let sentAt: Date
+    /// How to answer this notification from its actions. Nil keeps the
+    /// tap-to-open behavior every older client already has.
+    public let reply: RemoteNotificationReply?
 
     public init(
         action: RemoteNotificationAction = .show,
@@ -37,7 +40,8 @@ public struct RemoteNotificationPayload: Codable, Equatable, Sendable {
         body: String,
         projectId: String?,
         sessionId: String?,
-        sentAt: Date
+        sentAt: Date,
+        reply: RemoteNotificationReply? = nil
     ) {
         self.action = action
         self.id = id
@@ -47,6 +51,7 @@ public struct RemoteNotificationPayload: Codable, Equatable, Sendable {
         self.projectId = projectId
         self.sessionId = sessionId
         self.sentAt = sentAt
+        self.reply = reply
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -58,6 +63,7 @@ public struct RemoteNotificationPayload: Codable, Equatable, Sendable {
         case projectId
         case sessionId
         case sentAt
+        case reply
     }
 
     public init(from decoder: Decoder) throws {
@@ -71,6 +77,11 @@ public struct RemoteNotificationPayload: Codable, Equatable, Sendable {
         projectId = try container.decodeIfPresent(String.self, forKey: .projectId)
         sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
         sentAt = try container.decode(Date.self, forKey: .sentAt)
+        // A reply this client can't use is dropped rather than failing the
+        // whole notification.
+        reply = (try? container.decodeIfPresent(
+            RemoteNotificationReply.self, forKey: .reply
+        )).flatMap { $0 }
     }
 }
 
@@ -107,14 +118,19 @@ public struct APNsRegistration: Codable, Equatable, Sendable {
     public let token: String
     public let environment: APNsEnvironment
     public let label: String?
+    /// Features this device's app understands. Absent on older apps, so the
+    /// gateway keeps sending them only what they registered for.
+    public let capabilities: [String]?
 
     public init(
         token: String,
         environment: APNsEnvironment,
-        label: String?
+        label: String?,
+        capabilities: [String]? = nil
     ) {
         self.token = token
         self.environment = environment
         self.label = label
+        self.capabilities = capabilities
     }
 }
