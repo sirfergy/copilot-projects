@@ -198,6 +198,12 @@ extension RemoteSessionWorkflow {
     /// `receivedAt` is when the client received that snapshot. It must come from a
     /// clock that keeps counting while the device sleeps, like `ContinuousClock`;
     /// otherwise a snapshot cached across sleep would look younger than it is.
+    /// Time spent between the gateway serving the snapshot and the client
+    /// receiving it is not counted: no shared clock can measure it, and a
+    /// streamed snapshot has no request of its own to start from. That is
+    /// normally well under a second, and the Mac re-checks freshness on its own
+    /// clock before it acts on any request, so this only decides what a client
+    /// offers.
     /// The result is `nil` when `observedAtMilliseconds` is not a real observation
     /// (`<= 0`), servedAt precedes observedAt by more than
     /// `servedClockToleranceMilliseconds`, or `now` precedes `receivedAt`.
