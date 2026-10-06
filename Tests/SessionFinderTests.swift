@@ -455,6 +455,19 @@ final class SessionFinderTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: runs), [])
     }
 
+    func testProcessIdentityStopsMatchingOnceTheProcessExits() throws {
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        sleeper.arguments = ["30"]
+        try sleeper.run()
+        let identity = try XCTUnwrap(LunaProcess.ProcessIdentity(sleeper.processIdentifier))
+        XCTAssertTrue(identity.isCurrent)
+        XCTAssertEqual(LunaProcess.ProcessIdentity(sleeper.processIdentifier), identity)
+        sleeper.terminate()
+        sleeper.waitUntilExit()
+        XCTAssertFalse(identity.isCurrent)
+    }
+
     func testMissingCopilotIsReported() async {
         let ranker = LunaSessionRanker(copilotExecutable: { nil })
         do {

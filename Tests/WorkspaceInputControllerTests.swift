@@ -7,6 +7,7 @@ import CopilotProjectsCore
 @MainActor
 final class WorkspaceInputControllerTests: XCTestCase {
     private func withWorkspace(
+        otherSessions: [Session] = [],
         _ body: (AppModel, WorkspaceInputController, [Session]) throws -> Void
     ) throws {
         _ = NSApplication.shared
@@ -27,8 +28,13 @@ final class WorkspaceInputControllerTests: XCTestCase {
         let sessions = [Session(title: "first", cwd: root.path), Session(title: "second", cwd: root.path)]
         let project = Project(name: "Input fixture", cwd: root.path,
                               sessions: sessions, selectedSessionId: sessions[0].id)
+        var projects = [project]
+        if let first = otherSessions.first {
+            projects.append(Project(name: "Other fixture", cwd: root.path,
+                                    sessions: otherSessions, selectedSessionId: first.id))
+        }
         let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        try repository.save(PersistedState(projects: projects, selectedProjectId: project.id))
         let model = AppModel(
             stateRepository: repository, isAppActive: { false },
             agentActivityDirectory: root, resumeMarkerDirectory: root,
@@ -152,6 +158,27 @@ final class WorkspaceInputControllerTests: XCTestCase {
             XCTAssertNil(input.handleKeyDown(try key("\r", code: 36)))
             XCTAssertNil(input.sessionFinder)
             assertWorkspaceUntouched(selected: sessions[1].id)
+        }
+    }
+
+    func testOpeningASessionInAnotherProjectLeavesThatProjectsShownTabUnread() throws {
+        let other = [Session(title: "shown", cwd: "/tmp"), Session(title: "target", cwd: "/tmp")]
+        try withWorkspace(otherSessions: other) { model, input, _ in
+            for session in other {
+                model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 1, source: "test")
+                model.setStatus(sessionId: session.id, status: .idle, text: nil, timestamp: 2, source: "test")
+            }
+            @MainActor func finishedUnseen(_ session: Session) -> Bool? {
+                model.projects.flatMap(\.sessions).first { $0.id == session.id }?.finishedUnseen
+            }
+            XCTAssertEqual(other.map(finishedUnseen), [true, true])
+
+            input.openFromSessionFinder(other[1].id)
+
+            XCTAssertEqual(model.selectedProjectId, model.projects[1].id)
+            XCTAssertEqual(model.projects[1].selectedSessionId, other[1].id)
+            XCTAssertEqual(finishedUnseen(other[1]), false)
+            XCTAssertEqual(finishedUnseen(other[0]), true, "The tab that was shown before was never seen")
         }
     }
 

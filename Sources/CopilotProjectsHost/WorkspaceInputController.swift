@@ -49,8 +49,10 @@ final class WorkspaceInputController: ObservableObject {
             project.sessions.contains { $0.id == sessionId }
         }) else { return }
         dismissSessionFinder()
-        if model.selectedProjectId != project.id { model.selectProject(project.id) }
+        // Select the session first: switching projects marks the project's
+        // selected tab as seen, and that should be the tab being opened.
         model.selectSession(projectId: project.id, sessionId: sessionId)
+        if model.selectedProjectId != project.id { model.selectProject(project.id) }
         DispatchQueue.main.async { [model] in model.focusActiveTerminal() }
     }
 

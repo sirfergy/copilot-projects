@@ -161,8 +161,13 @@ struct LunaSessionRanker: SessionRanking {
         }
         let home = workRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try fileManager.createDirectory(at: home, withIntermediateDirectories: true)
-        try Self.loginSeed(fromConfig: try? Data(contentsOf: userConfigURL))
-            .write(to: home.appendingPathComponent("config.json"), options: .atomic)
+        do {
+            try Self.loginSeed(fromConfig: try? Data(contentsOf: userConfigURL))
+                .write(to: home.appendingPathComponent("config.json"), options: .atomic)
+        } catch {
+            try? fileManager.removeItem(at: home)
+            throw error
+        }
         return home
     }
 
@@ -223,6 +228,7 @@ enum LunaProcess {
         // Weak, so a launch that throws can't strand the handler and state in a cycle.
         process.terminationHandler = { [weak run] in run?.finish($0.terminationStatus) }
         try process.run()
+        run.recordLaunch()
         let outputReader = PipeReader(output)
         let errorReader = PipeReader(errorOutput)
 
@@ -240,6 +246,7 @@ enum LunaProcess {
         } onCancel: {
             run.terminate(timedOut: false)
         }
+        run.markDrained()
         // A terminated copilot can still exit 0, so our own reasons win.
         try Task.checkCancellation()
         if run.timedOut { throw LunaSearchError.timedOut }
@@ -281,6 +288,8 @@ enum LunaProcess {
         private let exit = OneShot<Int32>()
         private var didTimeOut = false
         private var isStopping = false
+        private var isDrained = false
+        private var root: ProcessIdentity?
 
         init(_ process: Process, terminationGrace: TimeInterval) {
             self.process = process
@@ -292,6 +301,22 @@ enum LunaProcess {
         func finish(_ status: Int32) { exit.deliver(status) }
 
         func exitStatus() async -> Int32 { await exit.wait() }
+
+        func recordLaunch() {
+            let identity = ProcessIdentity(process.processIdentifier)
+            lock.withLock { root = identity }
+        }
+
+        /// The run has exited and closed its output, so there is nothing left to kill.
+        func markDrained() { lock.withLock { isDrained = true } }
+
+        /// The group's id is copilot's pid, so the group is only signalled while that
+        /// pid is still copilot's or belongs to no process at all.
+        private func signalGroup(_ pid: pid_t, _ signal: Int32) {
+            let root = lock.withLock { self.root }
+            if let current = ProcessIdentity(pid), current != root { return }
+            kill(-pid, signal)
+        }
 
         /// Asks the run and everything it started to stop, then kills whatever is
         /// left after the grace period: a run that ignores SIGTERM would otherwise
@@ -310,29 +335,58 @@ enum LunaProcess {
             let rootRunning = process.isRunning
             let started = rootRunning ? LunaProcess.descendants(of: pid) : []
             if rootRunning { process.terminate() }
-            kill(-pid, SIGTERM)
-            started.forEach { kill($0, SIGTERM) }
+            signalGroup(pid, SIGTERM)
+            started.forEach { $0.signal(SIGTERM) }
             let process = self.process
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + terminationGrace) {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + terminationGrace) { [self] in
+                // A drained run is over, and its ids may belong to other processes by now.
+                guard !lock.withLock({ isDrained }) else { return }
                 let stillRunning = process.isRunning
                 var survivors = Set(started)
                 if stillRunning { survivors.formUnion(LunaProcess.descendants(of: pid)) }
-                for child in survivors where kill(child, 0) == 0 { kill(child, SIGKILL) }
-                kill(-pid, SIGKILL)
+                survivors.forEach { $0.signal(SIGKILL) }
+                signalGroup(pid, SIGKILL)
                 if stillRunning { kill(pid, SIGKILL) }
             }
         }
     }
 
+    /// A process as it was when seen. The start time tells it apart from a later
+    /// process that reuses its pid, so a delayed signal never reaches the wrong one.
+    struct ProcessIdentity: Hashable, Sendable {
+        let pid: pid_t
+        let started: UInt64
+
+        init?(_ pid: pid_t) {
+            guard let started = Self.startTime(of: pid) else { return nil }
+            self.pid = pid
+            self.started = started
+        }
+
+        var isCurrent: Bool { Self.startTime(of: pid) == started }
+
+        func signal(_ signal: Int32) {
+            if isCurrent { kill(pid, signal) }
+        }
+
+        private static func startTime(of pid: pid_t) -> UInt64? {
+            var info = proc_bsdinfo()
+            let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+            guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+            return info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec
+        }
+    }
+
     /// Every process descended from `root`, read before it is signalled because
     /// orphans are re-parented and can no longer be traced back to it.
-    static func descendants(of root: pid_t) -> [pid_t] {
+    static func descendants(of root: pid_t) -> [ProcessIdentity] {
         let tree = ProcessTree.snapshot()
-        var found: [pid_t] = []
+        var seen = Set<pid_t>()
+        var found: [ProcessIdentity] = []
         var pending = tree.childrenOf[root] ?? []
         while let pid = pending.popLast() {
-            guard !found.contains(pid) else { continue }
-            found.append(pid)
+            guard seen.insert(pid).inserted else { continue }
+            if let identity = ProcessIdentity(pid) { found.append(identity) }
             pending.append(contentsOf: tree.childrenOf[pid] ?? [])
         }
         return found
