@@ -186,6 +186,10 @@ extension RemoteSessionWorkflow {
     /// is rejected rather than trusted.
     public static let servedClockToleranceMilliseconds: Int64 = 1_000
 
+    /// The largest timestamp every client can represent exactly: JavaScript's
+    /// `Number.MAX_SAFE_INTEGER`. Real Unix-millisecond timestamps are far below it.
+    private static let exactMillisecondRange: ClosedRange<Int64> = 1...9_007_199_254_740_991
+
     /// The observation's age in milliseconds as seen by a remote client, or `nil`
     /// when it cannot be trusted at all.
     ///
@@ -204,17 +208,17 @@ extension RemoteSessionWorkflow {
     /// normally well under a second, and the Mac re-checks freshness on its own
     /// clock before it acts on any request, so this only decides what a client
     /// offers.
-    /// The result is `nil` when `observedAtMilliseconds` is not a real observation
-    /// (`<= 0`), servedAt precedes observedAt by more than
+    /// The result is `nil` when either timestamp is outside
+    /// `1...Number.MAX_SAFE_INTEGER` (so `0`, "never observed", is untrusted),
+    /// servedAt precedes observedAt by more than
     /// `servedClockToleranceMilliseconds`, or `now` precedes `receivedAt`.
     ///
     /// Without `servedAtMilliseconds` (older gateways) this is the wall-clock rule
     /// of `isFresh(at:)`: `date - observedAt`, `nil` when negative.
     ///
-    /// The arithmetic is in `Double` so arbitrary wire values cannot trap; every
-    /// real timestamp is an exact integer below 2^53. JavaScript clients get the
-    /// same results from `Number` and share the cases in the
-    /// `workflow-freshness-cases` contract fixture.
+    /// Inside that range both timestamps and their difference are exact in
+    /// `Double`, so JavaScript clients get identical results from `Number`; the
+    /// `workflow-freshness-cases` contract fixture pins them for both.
     public func ageMilliseconds(
         servedAtMilliseconds: Int64?,
         receivedAt: ContinuousClock.Instant,
@@ -225,7 +229,8 @@ extension RemoteSessionWorkflow {
             let age = date.timeIntervalSince1970 * 1_000 - Double(observedAtMilliseconds)
             return age >= 0 ? age : nil
         }
-        guard observedAtMilliseconds > 0 else { return nil }
+        guard Self.exactMillisecondRange.contains(observedAtMilliseconds),
+              Self.exactMillisecondRange.contains(servedAtMilliseconds) else { return nil }
         let servedAfterObservation = Double(servedAtMilliseconds) - Double(observedAtMilliseconds)
         guard servedAfterObservation >= -Double(Self.servedClockToleranceMilliseconds) else {
             return nil
