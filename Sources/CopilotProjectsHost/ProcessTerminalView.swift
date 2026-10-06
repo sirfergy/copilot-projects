@@ -43,7 +43,6 @@ class ProcessTerminalView: TerminalView, TerminalViewDelegate {
         terminalDelegate = self
         events.view = self
         process = LocalProcess(delegate: events, dispatchQueue: .main)
-        events.setWindowSize(getWindowSize())
     }
 
     /// Replaces the process with one built on this view's own delegate, so
@@ -65,7 +64,6 @@ class ProcessTerminalView: TerminalView, TerminalViewDelegate {
         execName: String? = nil,
         currentDirectory: String? = nil
     ) {
-        events.setWindowSize(getWindowSize())
         process.startProcess(
             executable: executable, args: args, environment: environment,
             execName: execName, currentDirectory: currentDirectory)
@@ -102,7 +100,6 @@ class ProcessTerminalView: TerminalView, TerminalViewDelegate {
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
         var size = getWindowSize()
-        events.setWindowSize(size)
         _ = process.updateWindowSize(&size)
     }
 
@@ -137,16 +134,10 @@ class ProcessTerminalView: TerminalView, TerminalViewDelegate {
 /// Forwards `LocalProcess` callbacks, which it delivers on the main queue.
 private final class ProcessEvents: LocalProcessDelegate {
     weak var view: ProcessTerminalView?
-    private let lock = NSLock()
-    private var windowSize = winsize()
 
-    func setWindowSize(_ size: winsize) {
-        lock.withLock { windowSize = size }
-    }
-
-    /// Called by `LocalProcess` on whichever thread starts the process.
+    /// Called on the thread that starts the process, which is always main here.
     func getWindowSize() -> winsize {
-        lock.withLock { windowSize }
+        MainActor.assumeIsolated { view?.getWindowSize() ?? winsize() }
     }
 
     func dataReceived(slice: ArraySlice<UInt8>) {
