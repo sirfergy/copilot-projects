@@ -1,0 +1,7 @@
+{
+  "mode": "luna",
+  "matches": [
+    {"sessionId": "tab-conversation", "projectId": "project", "reason": "Debugged webhook retry timeouts"},
+    {"sessionId": "tab-other", "projectId": "other-project"}
+  ]
+}

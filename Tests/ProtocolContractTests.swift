@@ -99,4 +99,93 @@ final class ProtocolContractTests: XCTestCase {
             modern
         )
     }
+
+    // MARK: - Session search
+
+    private func jsonObject<T: Encodable>(_ value: T) throws -> [String: Any] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any])
+    }
+
+    func testSessionSearchContractIsNotAdvertisedByTheHostProtocol() {
+        XCTAssertEqual(RemoteSessionSearchContract.capability, "session-search-v1")
+        XCTAssertEqual(RemoteSessionSearchContract.path, "/search")
+        XCTAssertEqual(RemoteSessionSearchContract.maximumQueryLength, 300)
+        XCTAssertEqual(RemoteSessionSearchContract.maximumMatches, 50)
+        // Only a gateway that serves the route advertises it.
+        XCTAssertFalse(RemoteProtocolInfo.current.supports(RemoteSessionSearchContract.capability))
+    }
+
+    func testSessionSearchRequestWireShape() throws {
+        let request = try JSONDecoder().decode(
+            RemoteSessionSearchRequest.self,
+            from: ProtocolFixtures.data(named: "session-search-request")
+        )
+        XCTAssertEqual(request, RemoteSessionSearchRequest(query: "billing webhook", mode: .instant))
+        let luna = try jsonObject(RemoteSessionSearchRequest(query: "q", mode: .luna))
+        XCTAssertEqual(Set(luna.keys), ["query", "mode"])
+        XCTAssertEqual(luna["mode"] as? String, "luna")
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            RemoteSessionSearchRequest.self, from: Data(#"{"query":"q","mode":"semantic"}"#.utf8)
+        ))
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            RemoteSessionSearchRequest.self, from: Data(#"{"query":"q"}"#.utf8)
+        ))
+    }
+
+    func testSessionSearchResponsesOmitAbsentSnippetsAndReasons() throws {
+        let instant = try JSONDecoder().decode(
+            RemoteSessionSearchResponse.self,
+            from: ProtocolFixtures.data(named: "session-search-instant-response")
+        )
+        XCTAssertEqual(instant, RemoteSessionSearchResponse(mode: .instant, matches: [
+            RemoteSessionSearchMatch(sessionId: "tab-named", projectId: "project"),
+            RemoteSessionSearchMatch(
+                sessionId: "tab-conversation", projectId: "project",
+                snippet: "…why the billing webhook keeps timing out…"
+            ),
+        ]))
+        let luna = try JSONDecoder().decode(
+            RemoteSessionSearchResponse.self,
+            from: ProtocolFixtures.data(named: "session-search-luna-response")
+        )
+        XCTAssertEqual(luna.mode, .luna)
+        XCTAssertEqual(luna.matches.map(\.reason), ["Debugged webhook retry timeouts", nil])
+        XCTAssertEqual(luna.matches.map(\.projectId), ["project", "other-project"])
+
+        for response in [instant, luna] {
+            XCTAssertEqual(
+                try JSONDecoder().decode(RemoteSessionSearchResponse.self, from: JSONEncoder().encode(response)),
+                response
+            )
+        }
+        let encoded = try jsonObject(instant)
+        XCTAssertEqual(Set(encoded.keys), ["mode", "matches"])
+        let matches = try XCTUnwrap(encoded["matches"] as? [[String: Any]])
+        XCTAssertEqual(Set(matches[0].keys), ["sessionId", "projectId"])
+        XCTAssertEqual(Set(matches[1].keys), ["sessionId", "projectId", "snippet"])
+        let reasoned = try jsonObject(RemoteSessionSearchMatch(sessionId: "s", projectId: "p", reason: "r"))
+        XCTAssertEqual(Set(reasoned.keys), ["sessionId", "projectId", "reason"])
+
+        let explicitNulls = try JSONDecoder().decode(
+            RemoteSessionSearchMatch.self,
+            from: Data(#"{"sessionId":"s","projectId":"p","snippet":null,"reason":null}"#.utf8)
+        )
+        XCTAssertEqual(explicitNulls, RemoteSessionSearchMatch(sessionId: "s", projectId: "p"))
+    }
+
+    func testSessionSearchQueriesAreTrimmedAndBoundedInCharacters() {
+        let limit = RemoteSessionSearchContract.maximumQueryLength
+        XCTAssertEqual(RemoteSessionSearchContract.normalizedQuery("  \n billing\twebhook \r\n"), "billing\twebhook")
+        XCTAssertNil(RemoteSessionSearchContract.normalizedQuery(""))
+        XCTAssertNil(RemoteSessionSearchContract.normalizedQuery(" \n\t "))
+        let longest = String(repeating: "a", count: limit)
+        XCTAssertEqual(RemoteSessionSearchContract.normalizedQuery("  \(longest)  "), longest)
+        XCTAssertNil(RemoteSessionSearchContract.normalizedQuery(longest + "a"))
+        // Each is one character but several UTF-16 code units, so a client
+        // bounding UTF-16 length never sends more than the host accepts.
+        let emoji = String(repeating: "👍🏽", count: limit)
+        XCTAssertEqual(emoji.utf16.count, limit * 4)
+        XCTAssertEqual(RemoteSessionSearchContract.normalizedQuery(emoji), emoji)
+        XCTAssertNil(RemoteSessionSearchContract.normalizedQuery(emoji + "👍🏽"))
+    }
 }

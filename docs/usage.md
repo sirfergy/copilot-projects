@@ -418,6 +418,21 @@ expiry or eviction a UUID can create again. Launch still precedes workspace and
 ledger persistence, so this is not an exactly-once guarantee across a crash that
 loses all creation evidence and the terminal master.
 
+#### Remote session search
+
+`SessionHost.searchSessions` answers a `RemoteSessionSearchRequest` with the Find
+Session ranking: `instant` matches names, projects, folders, and conversation text,
+and `luna` asks Luna (`gpt-6-luna`). Results cover live sessions only and carry each
+session's current project. Queries are trimmed and limited to
+`RemoteSessionSearchContract.maximumQueryLength` characters. At most two remote Luna
+searches run at once; another returns `busy`. Cancelling the calling task stops the
+search and its Luna process. The host keeps the index between searches and rereads
+only transcripts that changed.
+
+Hosts report `supportsSessionSearch`; other conformers default to `unsupported`.
+`RemoteProtocolInfo.current` omits `session-search-v1`: a gateway advertises it only
+when it serves `RemoteSessionSearchContract.path` for a host that supports search.
+
 ### Notification deep links
 
 External notifications can focus an existing project or session through the

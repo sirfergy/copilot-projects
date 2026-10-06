@@ -244,6 +244,13 @@ final class RemoteModelBridge: SessionHost {
         ) ?? .invalid
     }
 
+    var supportsSessionSearch: Bool { true }
+
+    func searchSessions(_ request: RemoteSessionSearchRequest) async -> RemoteSessionSearchOutcome {
+        guard let model else { return .failed("Copilot Projects is closing.") }
+        return await model.searchRemoteSessions(request)
+    }
+
     /// The exact retained PNG bytes for `(imageId, version)` in `sessionId`'s
     /// terminal, or `nil` if the session, id, or exact version isn't (or is no
     /// longer) available.

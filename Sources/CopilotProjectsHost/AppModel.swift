@@ -509,6 +509,8 @@ final class AppModel: ObservableObject {
     /// Persistent idempotency/tombstone store behind remote session creation.
     private let sessionCreationLedger: SessionCreationLedger
     private let projectCreationLedger: ProjectCreationLedger
+    /// Remote session search; tests swap in a fake ranker or transcript reader.
+    var remoteSessionSearch = RemoteSessionSearch()
 
     /// Sessions hosting a live agent (refreshed by the liveness reconciler). Used
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.

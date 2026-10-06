@@ -18,18 +18,18 @@ struct SessionFinderSource: Equatable, Sendable {
 /// One searchable session. Folded fields are lowercased and diacritic-insensitive
 /// so per-keystroke matching is plain substring work.
 struct SessionFinderEntry: Identifiable, Equatable, Sendable {
-    let source: SessionFinderSource
-    let lastActivity: Date?
+    private(set) var source: SessionFinderSource
+    private(set) var lastActivity: Date?
     /// The first user request and the newest ones that fit the search budget,
     /// oldest first. Earlier requests are dropped once the budget is spent.
     let requests: [String]
     /// The most recent assistant replies, oldest first.
     let replies: [String]
 
-    let foldedTitle: String
-    let foldedProject: String
-    let foldedFolder: String
-    let foldedPath: String
+    private(set) var foldedTitle: String
+    private(set) var foldedProject: String
+    private(set) var foldedFolder: String
+    private(set) var foldedPath: String
     /// Folded copies of `requests` and `replies`, index for index.
     let foldedRequests: [String]
     let foldedReplies: [String]
@@ -59,6 +59,19 @@ struct SessionFinderEntry: Identifiable, Equatable, Sendable {
         foldedPath = SessionFinderSearch.fold(source.cwd)
         foldedRequests = requests.map(Self.foldedForScanning)
         foldedReplies = replies.map(Self.foldedForScanning)
+    }
+
+    /// The same conversation under a renamed or moved session, without reading
+    /// its transcript again.
+    func rebound(to source: SessionFinderSource) -> SessionFinderEntry {
+        var entry = self
+        entry.source = source
+        entry.lastActivity = source.lastActivity ?? lastActivity
+        entry.foldedTitle = SessionFinderSearch.fold(source.title)
+        entry.foldedProject = SessionFinderSearch.fold(source.projectName)
+        entry.foldedFolder = SessionFinderSearch.fold((source.cwd as NSString).lastPathComponent)
+        entry.foldedPath = SessionFinderSearch.fold(source.cwd)
+        return entry
     }
 
     /// Every request when they fit the budget; otherwise the start of the first
