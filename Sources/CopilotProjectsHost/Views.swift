@@ -49,6 +49,9 @@ struct RootView: View {
         .ignoresSafeArea(.container, edges: .top)
         .background(StudioStyle.chrome)
         .background(WindowConfigurator())
+        .sheet(item: sessionFinderBinding) { finder in
+            SessionFinderView(finder: finder, model: model, onDismiss: input.dismissSessionFinder)
+        }
         .sheet(item: $input.imagePreview) { item in
             TranscriptImagePreview(item: item) { input.imagePreview = nil }
         }
@@ -57,7 +60,17 @@ struct RootView: View {
                 input.imagePreview = nil
             }
         }
-        .onDisappear { input.imagePreview = nil }
+        .onDisappear {
+            input.imagePreview = nil
+            input.dismissSessionFinder()
+        }
+    }
+
+    private var sessionFinderBinding: Binding<SessionFinderModel?> {
+        Binding(
+            get: { input.sessionFinder },
+            set: { if $0 == nil { input.dismissSessionFinder() } }
+        )
     }
 
     private var previewSessionId: String? {
@@ -753,13 +766,7 @@ struct SessionRow: View {
         return states.joined(separator: ", ")
     }
 
-    var stateLabel: String {
-        switch session.displayStatus {
-        case .running: return "Running"
-        case .waiting: return "Waiting for input"
-        case .idle: return session.finishedUnseen ? "Finished" : "Idle"
-        }
-    }
+    var stateLabel: String { session.attentionLabel }
 
     var body: some View {
         HStack(spacing: 6) {

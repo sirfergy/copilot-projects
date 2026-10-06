@@ -4,9 +4,15 @@ import CopilotProjectsCore
 @testable import CopilotProjectsHost
 @testable import SwiftTerm
 
+/// Any finder query can reach Luna, so input tests must never start a real copilot run.
+private struct OfflineRanker: SessionRanking {
+    func rank(query: String, entries: [SessionFinderEntry]) async throws -> [LunaMatch] { [] }
+}
+
 @MainActor
 final class WorkspaceInputControllerTests: XCTestCase {
     private func withWorkspace(
+        otherSessions: [Session] = [],
         _ body: (AppModel, WorkspaceInputController, [Session]) throws -> Void
     ) throws {
         _ = NSApplication.shared
@@ -27,8 +33,13 @@ final class WorkspaceInputControllerTests: XCTestCase {
         let sessions = [Session(title: "first", cwd: root.path), Session(title: "second", cwd: root.path)]
         let project = Project(name: "Input fixture", cwd: root.path,
                               sessions: sessions, selectedSessionId: sessions[0].id)
+        var projects = [project]
+        if let first = otherSessions.first {
+            projects.append(Project(name: "Other fixture", cwd: root.path,
+                                    sessions: otherSessions, selectedSessionId: first.id))
+        }
         let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        try repository.save(PersistedState(projects: projects, selectedProjectId: project.id))
         let model = AppModel(
             stateRepository: repository, isAppActive: { false },
             agentActivityDirectory: root, resumeMarkerDirectory: root,
@@ -39,7 +50,7 @@ final class WorkspaceInputControllerTests: XCTestCase {
             model.detachAllClients()
         }
         model.openTranscriptDrawer(sessionId: sessions[0].id)
-        try body(model, WorkspaceInputController(model: model), sessions)
+        try body(model, WorkspaceInputController(model: model, sessionRanker: OfflineRanker()), sessions)
     }
 
     private func image(_ session: Session) -> TranscriptImagePreviewItem {
@@ -87,6 +98,92 @@ final class WorkspaceInputControllerTests: XCTestCase {
             XCTAssertEqual(model.globalSelectedSessionId, sessions[1].id)
             XCTAssertNil(input.handleKeyDown(try key("w", code: 13, modifiers: .command)))
             XCTAssertFalse(model.projects.flatMap(\.sessions).contains { $0.id == sessions[1].id })
+        }
+    }
+
+    func testSessionFinderOwnsTheKeyboardUntilItClosesOrOpensASession() throws {
+        try withWorkspace { model, input, sessions in
+            let terminal = try XCTUnwrap(model.controller(for: sessions[0].id))
+            let process = try XCTUnwrap(terminal.terminalView.process)
+            let sends = process.sendCount
+            let original = model.projects.flatMap(\.sessions).map(\.id)
+            @MainActor func assertWorkspaceUntouched(selected: String, file: StaticString = #filePath, line: UInt = #line) {
+                XCTAssertEqual(model.projects.flatMap(\.sessions).map(\.id), original, file: file, line: line)
+                XCTAssertEqual(model.globalSelectedSessionId, selected, file: file, line: line)
+                XCTAssertEqual(process.sendCount, sends, file: file, line: line)
+                XCTAssertFalse(terminal.exited, file: file, line: line)
+            }
+
+            XCTAssertNil(input.handleKeyDown(try key("k", code: 40, modifiers: .command)))
+            XCTAssertNotNil(input.sessionFinder)
+            XCTAssertTrue(input.hasWorkspaceSheet)
+            input.presentImage(image(sessions[0]))
+            XCTAssertNil(input.imagePreview, "Only one workspace sheet may own the keyboard")
+            for event in [
+                try key("2", code: 19, modifiers: .control),
+                try key("2", code: 19, modifiers: .command),
+                try key("\t", code: 48, modifiers: .control),
+                try key("k", code: 40, modifiers: .command),
+                try key("x", code: 7),
+            ] {
+                XCTAssertNil(input.handleKeyDown(event))
+                XCTAssertNotNil(input.sessionFinder)
+            }
+            assertWorkspaceUntouched(selected: sessions[0].id)
+
+            for dismissal in [try key("w", code: 13, modifiers: .command), try key("\u{1b}", code: 53)] {
+                input.presentSessionFinder()
+                XCTAssertNil(input.handleKeyDown(dismissal))
+                XCTAssertNil(input.sessionFinder)
+                assertWorkspaceUntouched(selected: sessions[0].id)
+            }
+
+            input.presentSessionFinder()
+            let finder = try XCTUnwrap(input.sessionFinder)
+            finder.query = "fi"
+            XCTAssertNil(input.handleKeyDown(try key("\u{1b}", code: 53)))
+            XCTAssertEqual(finder.query, "", "Escape clears a search before it closes")
+            XCTAssertNotNil(input.sessionFinder)
+
+            // Browsing starts past the current session, like ⌘Tab.
+            XCTAssertEqual(finder.highlightedId, sessions[1].id)
+            let up = String(Character(try XCTUnwrap(UnicodeScalar(NSUpArrowFunctionKey))))
+            let down = String(Character(try XCTUnwrap(UnicodeScalar(NSDownArrowFunctionKey))))
+            XCTAssertNil(input.handleKeyDown(try key(up, code: 126)))
+            XCTAssertEqual(finder.highlightedId, sessions[0].id)
+            XCTAssertNil(input.handleKeyDown(try key("n", code: 45, modifiers: .control)))
+            XCTAssertEqual(finder.highlightedId, sessions[1].id)
+            XCTAssertNil(input.handleKeyDown(try key("p", code: 35, modifiers: .control)))
+            XCTAssertEqual(finder.highlightedId, sessions[0].id)
+            XCTAssertNil(input.handleKeyDown(try key(down, code: 125)))
+            XCTAssertEqual(finder.highlightedId, sessions[1].id)
+
+            input.openFromSessionFinder("ended-session")
+            XCTAssertNotNil(input.sessionFinder, "An ended session leaves the finder open")
+            XCTAssertNil(input.handleKeyDown(try key("\r", code: 36)))
+            XCTAssertNil(input.sessionFinder)
+            assertWorkspaceUntouched(selected: sessions[1].id)
+        }
+    }
+
+    func testOpeningASessionInAnotherProjectLeavesThatProjectsShownTabUnread() throws {
+        let other = [Session(title: "shown", cwd: "/tmp"), Session(title: "target", cwd: "/tmp")]
+        try withWorkspace(otherSessions: other) { model, input, _ in
+            for session in other {
+                model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 1, source: "test")
+                model.setStatus(sessionId: session.id, status: .idle, text: nil, timestamp: 2, source: "test")
+            }
+            @MainActor func finishedUnseen(_ session: Session) -> Bool? {
+                model.projects.flatMap(\.sessions).first { $0.id == session.id }?.finishedUnseen
+            }
+            XCTAssertEqual(other.map(finishedUnseen), [true, true])
+
+            input.openFromSessionFinder(other[1].id)
+
+            XCTAssertEqual(model.selectedProjectId, model.projects[1].id)
+            XCTAssertEqual(model.projects[1].selectedSessionId, other[1].id)
+            XCTAssertEqual(finishedUnseen(other[1]), false)
+            XCTAssertEqual(finishedUnseen(other[0]), true, "The tab that was shown before was never seen")
         }
     }
 

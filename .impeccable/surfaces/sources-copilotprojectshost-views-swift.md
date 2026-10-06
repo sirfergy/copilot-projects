@@ -2,7 +2,7 @@
 version: 1
 slug: "sources-copilotprojectshost-views-swift"
 primary_target: "Sources/CopilotProjectsHost/Views.swift"
-related_targets: ["Sources/CopilotProjectsHost/HostLifetime.swift","Sources/CopilotProjectsHost/AppEntry.swift","Sources/CopilotProjectsHost/TranscriptDrawer.swift","Sources/CopilotProjectsHost/TranscriptImageView.swift"]
+related_targets: ["Sources/CopilotProjectsHost/HostLifetime.swift","Sources/CopilotProjectsHost/AppEntry.swift","Sources/CopilotProjectsHost/TranscriptDrawer.swift","Sources/CopilotProjectsHost/TranscriptImageView.swift","Sources/CopilotProjectsHost/SessionFinderView.swift"]
 ---
 
 # Two-Level Browser
@@ -47,3 +47,17 @@ from the three structures dealt by surface seed 2bd5ac36. The established visual
 world remains Studio Console (direction seed 207346d7). Code-led, no pixel comp.
 
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+
+## Extension: Find Session
+
+An ordinary extension of this surface within Studio Console; no new tokens or
+world. A keyboard-first sheet (Command-K or Session > Find Session…) finds any
+session across projects. Name, project, folder, and conversation matches are
+instant; Luna (gpt-6-luna through a one-shot, tool-less `copilot -p`) adds
+meaning-based picks after a 0.6s pause, without moving rows already listed. The
+sheet owns the keyboard while open; opening a row selects its project and
+session and returns focus to the terminal.
+
+FORM: a single 640x460pt sheet: 56pt search field, sectioned list, and 32pt
+footer with key legend and Luna status. Code-led; reviewed against rendered
+captures of the real views with synthetic data.

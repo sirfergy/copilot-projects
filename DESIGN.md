@@ -252,6 +252,25 @@ terminal actions; this ownership does not depend on OS focus or focused values.
 An open preview retains its captured image while the inline list responds to
 eviction; changing session or closing the drawer dismisses the preview.
 
+**Session finder:** Find Session… (Command-K, Session menu) is a 640x460pt sheet
+on `chrome`: a 56pt search field (title3, magnifying glass in secondary ink), a
+sectioned list, and a 32pt `sidebar` footer. Section headers (Recent Sessions,
+Matches, Suggested by Luna) are caption semibold in secondary ink. Rows reuse the
+session row's language: the existing state indicator, a one-line body-medium
+title with a trailing caption relative time, and a caption context line
+(project · folder · state · Current). The highlighted row takes steel fill, a
+1pt edge, and the session corner; raised hover applies only when not highlighted.
+A conversation match adds a one-line caption excerpt. Luna never moves a listed
+row: a pick on a listed row adds an inline sparkle (selection-edge ink) to its
+context line, with the reason in the tooltip and VoiceOver; extra picks append
+below under Suggested by Luna with a one-line primary-ink reason. Focus stays in
+the field while arrows and Return drive the list; Escape clears a search before
+closing, and the footer legend says which. The footer's trailing note carries
+Luna's status, with failures behind the native orange warning symbol. Reading
+and waiting states are one secondary line under their section header; no-session
+and no-result states use native `ContentUnavailableView`. While open, the sheet
+owns workspace keys and workspace commands are disabled.
+
 The [sidecar](.impeccable/design.json) contains schematic dark-appearance HTML/CSS
 previews of these roles, not replacements for native controls or pixel-certified
 renders. Its generated tonal ramps are swatch previews, not additional app tokens.
