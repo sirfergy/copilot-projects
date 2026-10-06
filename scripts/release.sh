@@ -50,6 +50,9 @@ NOTARY_POLL_SECONDS="${NOTARY_POLL_SECONDS:-15}"
   echo "error: NOTARY_WAIT_MINUTES and NOTARY_POLL_SECONDS must be whole numbers" >&2
   exit 1
 }
+# Force base 10 so a leading zero (e.g. 08) is not parsed as octal mid-release.
+NOTARY_WAIT_MINUTES=$((10#$NOTARY_WAIT_MINUTES))
+NOTARY_POLL_SECONDS=$((10#$NOTARY_POLL_SECONDS))
 
 ROOT="$(cd "${PROJECT_ROOT:-$SCRIPT_ROOT}" && pwd -P)"
 cd "$ROOT"
@@ -211,7 +214,7 @@ trap 'exit 143' TERM
 # budget runs out. Failing at the first timeout only makes the next attempt queue
 # a fresh build behind the one Apple is still processing.
 notarize() {
-  local artifact="$1" submission id info status deadline
+  local artifact="$1" submission id info status deadline slice
   submission="$(xcrun notarytool submit "$artifact" "${NOTARY_ARGS[@]}" --output-format json)"
   id="$(jq -er '.id | strings | select(length > 0)' <<< "$submission")" || {
     echo "error: notarytool submit returned no submission id for $artifact" >&2
@@ -221,8 +224,11 @@ notarize() {
   deadline=$((SECONDS + NOTARY_WAIT_MINUTES * 60))
   while :; do
     # `wait` gives up at its own timeout while Apple keeps processing, so its exit
-    # status is advisory; the submission's recorded status decides.
-    xcrun notarytool wait "$id" "${NOTARY_ARGS[@]}" --timeout 5m >/dev/null 2>&1 || true
+    # status is advisory; the submission's recorded status decides. Each wait is
+    # capped at 5m and at whatever remains of the budget.
+    slice=$((deadline - SECONDS))
+    slice=$((slice > 300 ? 300 : slice < 1 ? 1 : slice))
+    xcrun notarytool wait "$id" "${NOTARY_ARGS[@]}" --timeout "${slice}s" >/dev/null 2>&1 || true
     info="$(xcrun notarytool info "$id" "${NOTARY_ARGS[@]}" --output-format json)"
     status="$(jq -r '.status // empty' <<< "$info")"
     case "$status" in

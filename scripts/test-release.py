@@ -439,6 +439,9 @@ class ReleaseTests(unittest.TestCase):
     def notary_calls(self, subcommand):
         return [args for _, cmd, args in self.calls if cmd == "xcrun" and args[:2] == ["notarytool", subcommand]]
 
+    def notary_wait_timeouts(self):
+        return [args[args.index("--timeout") + 1] for args in self.notary_calls("wait")]
+
     def test_notarization_keeps_waiting_on_the_same_submission(self):
         self.env.update(
             MOCK_NOTARY_STATUSES="In Progress,In Progress,Accepted",
@@ -451,15 +454,31 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(len(self.notary_calls("submit")), 2)
         self.assertEqual(len(self.notary_calls("info")), 4)
         self.assertEqual(result.stdout.count("still in progress"), 2)
+        self.assertEqual(set(self.notary_wait_timeouts()), {"300s"})
         self.assertTrue(any(cmd == "gh" for _, cmd, _ in self.calls))
+
+    def test_notary_wait_settings_with_leading_zeros_are_decimal(self):
+        # 08 and 09 are invalid octal; they must not abort the deadline math after upload.
+        self.env.update(NOTARY_WAIT_MINUTES="08", NOTARY_POLL_SECONDS="09")
+        result = self.run_release()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.notary_wait_timeouts(), ["300s", "300s"])
+
+    def test_each_notary_wait_is_capped_by_the_remaining_budget(self):
+        self.env.update(NOTARY_WAIT_MINUTES="2", MOCK_NOTARY_STATUSES="Accepted")
+        result = self.run_release()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        timeouts = self.notary_wait_timeouts()
+        self.assertEqual(len(timeouts), 2)
+        self.assertTrue(set(timeouts) <= {"119s", "120s"}, timeouts)
 
     def test_notarization_fails_closed_when_rejected_unidentified_or_out_of_time(self):
         cases = (
-            ({"MOCK_NOTARY_STATUSES": "Invalid"}, "finished as Invalid", 1),
-            ({"MOCK_NOTARY_STATUSES": "In Progress", "NOTARY_WAIT_MINUTES": "0"}, "still in progress after 0m", 0),
-            ({"MOCK_NOTARY_SUBMIT": '{"message":"no id"}'}, "returned no submission id", 0),
+            ({"MOCK_NOTARY_STATUSES": "Invalid"}, "finished as Invalid", 1, ["300s"]),
+            ({"MOCK_NOTARY_STATUSES": "In Progress", "NOTARY_WAIT_MINUTES": "0"}, "still in progress after 0m", 0, ["1s"]),
+            ({"MOCK_NOTARY_SUBMIT": '{"message":"no id"}'}, "returned no submission id", 0, []),
         )
-        for overrides, message, logs in cases:
+        for overrides, message, logs, waits in cases:
             with self.subTest(overrides=overrides):
                 self.env.update(overrides)
                 self.log.unlink(missing_ok=True)
@@ -470,6 +489,7 @@ class ReleaseTests(unittest.TestCase):
                 self.assertIn(message, result.stdout)
                 self.assertEqual(len(self.notary_calls("submit")), 1)
                 self.assertEqual(len(self.notary_calls("log")), logs)
+                self.assertEqual(self.notary_wait_timeouts(), waits)
                 self.assertFalse(any(cmd == "xcrun" and args[:1] == ["stapler"] for _, cmd, args in self.calls))
                 self.assertFalse(any(cmd == "gh" for _, cmd, _ in self.calls))
 
