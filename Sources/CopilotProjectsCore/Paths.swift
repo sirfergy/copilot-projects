@@ -129,9 +129,9 @@ public enum Paths {
         sessionsDir.appendingPathComponent("\(sessionId).copilot-session").path
     }
 
-    /// Per-tab marker containing the Copilot session id whose full allow-all
-    /// permission mode should be restored with that session.
-    public static func copilotAllowAllMarkerPath(sessionId: String) -> String {
+    /// Retired per-tab allow-all marker. Nothing writes or reads it any more;
+    /// session cleanup still removes it so files left by older trackers don't linger.
+    public static func legacyCopilotAllowAllMarkerPath(sessionId: String) -> String {
         sessionsDir.appendingPathComponent("\(sessionId).copilot-allow-all").path
     }
 

@@ -233,11 +233,10 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(CopilotExtension.script.contains("session.rpc.schedule.list()"))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("subagent.started""#))
         XCTAssertTrue(CopilotExtension.script.contains(#"session.on("session.idle""#))
-        XCTAssertTrue(CopilotExtension.script.contains("session.rpc.permissions.getMode()"))
-        XCTAssertTrue(CopilotExtension.script.contains("session.rpc.permissions.getAllowAll()"))
-        XCTAssertTrue(CopilotExtension.script.contains(#"session.on("session.permissions_changed""#))
+        XCTAssertFalse(CopilotExtension.script.contains("session.rpc.permissions"))
+        XCTAssertFalse(CopilotExtension.script.contains("session.permissions_changed"))
+        XCTAssertFalse(CopilotExtension.script.contains("copilot-allow-all"))
         XCTAssertTrue(CopilotExtension.script.contains("writeMarker(copilotSessionPath, copilotSessionId)"))
-        XCTAssertTrue(CopilotExtension.script.contains("writeMarker(allowAllPath, copilotSessionId)"))
         XCTAssertTrue(CopilotExtension.script.contains("await sdkHistoryWithTimeout()"))
         XCTAssertTrue(CopilotExtension.script.contains("scheduleDurableReconcile(0)"))
         XCTAssertTrue(CopilotExtension.script.contains(#"case "assistant.message":"#))
@@ -1233,14 +1232,18 @@ final class CoreLogicTests: XCTestCase {
 
         let prelude = #"""
         const namedListeners = new Map();
-        let allowAllChecks = 0;
+        let permissionChecks = 0;
         const fakeSession = {
           sessionId: "__COPILOT_SESSION_ID__",
           rpc: {
             schedule: { list: async () => ({entries:[]}) },
             permissions: {
+              getMode: async () => {
+                permissionChecks += 1;
+                return { mode: "allow-all" };
+              },
               getAllowAll: async () => {
-                allowAllChecks += 1;
+                permissionChecks += 1;
                 return { enabled: true };
               }
             }
@@ -1265,7 +1268,6 @@ final class CoreLogicTests: XCTestCase {
         await new Promise((resolve) => setImmediate(resolve));
 
         writeFileSync(copilotSessionPath, "old-session");
-        writeFileSync(allowAllPath, "old-session");
         writeFileSync(ownerPath, JSON.stringify({
           copilotSessionId: "old-session",
           pid: 0
@@ -1281,22 +1283,21 @@ final class CoreLogicTests: XCTestCase {
         let waited = 0;
         while (waited < 4000) {
           let sessionMarker = "";
-          let allowAllMarker = "";
           try { sessionMarker = readFileSync(copilotSessionPath, "utf8"); } catch {}
-          try { allowAllMarker = readFileSync(allowAllPath, "utf8"); } catch {}
-          if (sessionMarker === "__COPILOT_SESSION_ID__"
-              && allowAllMarker === "__COPILOT_SESSION_ID__") break;
+          if (sessionMarker === "__COPILOT_SESSION_ID__") break;
           await new Promise((resolve) => setTimeout(resolve, 80));
           waited += 80;
         }
+        // Let pending async work settle before checking that no allow-all marker appears.
+        await new Promise((resolve) => setTimeout(resolve, 200));
 
         const owner = JSON.parse(readFileSync(ownerPath, "utf8"));
         console.log(JSON.stringify({
           ownerSessionId: owner.copilotSessionId,
           ownerPidIsCurrent: owner.pid === process.pid,
           copilotSessionMarker: readFileSync(copilotSessionPath, "utf8"),
-          allowAllMarker: readFileSync(allowAllPath, "utf8"),
-          allowAllChecks
+          allowAllMarkerExists: fileExistsSync(allowAllPath),
+          permissionChecks
         }));
         process.exit(0);
         """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
@@ -1336,8 +1337,8 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["ownerSessionId"] as? String, copilotSessionId)
         XCTAssertEqual(summary["ownerPidIsCurrent"] as? Bool, true)
         XCTAssertEqual(summary["copilotSessionMarker"] as? String, copilotSessionId)
-        XCTAssertEqual(summary["allowAllMarker"] as? String, copilotSessionId)
-        XCTAssertGreaterThan(summary["allowAllChecks"] as? Int ?? 0, 0)
+        XCTAssertEqual(summary["allowAllMarkerExists"] as? Bool, false)
+        XCTAssertEqual(summary["permissionChecks"] as? Int, 0)
     }
 
     /// Runs an embedded-extension harness under Node and returns the JSON
@@ -1392,7 +1393,7 @@ final class CoreLogicTests: XCTestCase {
 
     /// `/new` and `/resume` swap the CLI's Copilot conversation underneath a
     /// single long-lived extension process. The stable tab must follow: owner
-    /// marker, `.copilot-session`, allow-all and the published transcript all
+    /// marker, `.copilot-session` and the published transcript all
     /// rotate to the new conversation, the previous conversation's turns never
     /// leak into it (including a durable replay that was still streaming when
     /// the rotation landed), and — crucially — the previous conversation's
@@ -1530,7 +1531,6 @@ final class CoreLogicTests: XCTestCase {
         const activityFile = `${base}.agent-activity.json`;
         const ownerFile = `${base}.transcript-owner.json`;
         const copilotSessionFile = `${base}.copilot-session`;
-        const allowAllFile = `${base}.copilot-allow-all`;
         const quarantineFile = `${base}.transcript-quarantine.json`;
         const durableFile = (id) =>
           join(process.env.COPILOT_HOME, "session-state", id, "events.jsonl");
@@ -1681,12 +1681,6 @@ final class CoreLogicTests: XCTestCase {
             : null,
           "copilot-session marker for session B"
         );
-        const betaAllowAllMarker = await waitFor(
-          () => readFileSync(allowAllFile, "utf8") === SESSION_B
-            ? SESSION_B
-            : null,
-          "allow-all marker for session B"
-        );
         const betaActivity = readJson(activityFile);
         const alphaDurableAfterNew = readFileSync(durableFile(SESSION_A), "utf8");
 
@@ -1814,7 +1808,6 @@ final class CoreLogicTests: XCTestCase {
           betaOwnerSessionId: betaOwner.copilotSessionId,
           betaOwnerPidIsCurrent: betaOwner.pid === process.pid,
           betaSessionMarker,
-          betaAllowAllMarker,
           betaTranscriptSessionId: betaSnapshot.copilotSessionId,
           betaHasBetaAnswer: contains(betaSnapshot, "beta answer"),
           alphaQuestionLeaked: contains(betaSnapshot, "alpha question"),
@@ -1873,7 +1866,6 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["betaOwnerSessionId"] as? String, sessionB)
         XCTAssertEqual(summary["betaOwnerPidIsCurrent"] as? Bool, true)
         XCTAssertEqual(summary["betaSessionMarker"] as? String, sessionB)
-        XCTAssertEqual(summary["betaAllowAllMarker"] as? String, sessionB)
         XCTAssertEqual(summary["betaTranscriptSessionId"] as? String, sessionB)
         XCTAssertEqual(summary["betaHasBetaAnswer"] as? Bool, true)
         // The previous conversation must not be appended to the new one — not
@@ -2314,8 +2306,6 @@ final class CoreLogicTests: XCTestCase {
         """#.utf8).write(to: URL(fileURLWithPath: base.path + ".transcript.json"))
         try Data(interactiveSessionId.utf8)
             .write(to: URL(fileURLWithPath: base.path + ".copilot-session"))
-        try Data(interactiveSessionId.utf8)
-            .write(to: URL(fileURLWithPath: base.path + ".copilot-allow-all"))
 
         // The helper's rotated-to conversation even has durable history, so a
         // takeover would be clearly visible in the published transcript.
@@ -2408,7 +2398,6 @@ final class CoreLogicTests: XCTestCase {
             (turn) => turn.userContent === "HELPER CONTENT"
           ),
           copilotSessionMarker: read(".copilot-session"),
-          allowAllMarker: read(".copilot-allow-all"),
           activityPublished: fileExistsSync(`${base}.agent-activity.json`),
           helperIdentity: copilotSessionId
         }));
@@ -2441,10 +2430,6 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["helperContentLeaked"] as? Bool, false)
         XCTAssertEqual(
             summary["copilotSessionMarker"] as? String,
-            interactiveSessionId
-        )
-        XCTAssertEqual(
-            summary["allowAllMarker"] as? String,
             interactiveSessionId
         )
         XCTAssertEqual(summary["activityPublished"] as? Bool, false)
@@ -2939,104 +2924,6 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["ownerCopilotSessionId"] as? String, copilotSessionId)
         XCTAssertEqual(summary["ownerAppSessionId"] as? String, appSessionId)
         XCTAssertEqual(summary["ownerPidIsCurrent"] as? Bool, true)
-    }
-
-    func testCopilotExtensionDiscardsStaleAllowAllRefreshResult() throws {
-        try requireNodeForJavaScriptTests()
-        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent(".build/copilot-extension-allowall-\(UUID().uuidString)")
-        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
-        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let appSessionId = "12345678-1234-1234-1234-123456789abc"
-        let copilotSessionId = "22222222-2222-4222-8222-222222222222"
-        try Data("old-session".utf8).write(
-            to: sessions.appendingPathComponent("\(appSessionId).copilot-allow-all")
-        )
-
-        let prelude = #"""
-        const namedListeners = new Map();
-        let allowAllChecks = 0;
-        let permissionsEvents = 0;
-        const fakeSession = {
-          sessionId: "__COPILOT_SESSION_ID__",
-          rpc: {
-            schedule: { list: async () => ({entries:[]}) },
-            permissions: {
-              getAllowAll: async () => {
-                allowAllChecks += 1;
-                const listener = namedListeners.get("session.permissions_changed");
-                if (listener) {
-                  permissionsEvents += 1;
-                  listener({
-                    id: `permissions-off-${allowAllChecks}`,
-                    type: "session.permissions_changed",
-                    data: { allowAllPermissionMode: "off" }
-                  });
-                }
-                return { enabled: true };
-              }
-            }
-          },
-          on(name, handler) {
-            if (typeof name !== "function") namedListeners.set(name, handler);
-          },
-          async getEvents() { return []; }
-        };
-        """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
-        let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
-            with: "const joinSession = async () => fakeSession;"
-        )
-        let epilogue = #"""
-
-        const { existsSync } = await import("node:fs");
-        const allowAllPath = `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
-          + `${process.env.COPILOT_PROJECTS_SESSION}.copilot-allow-all`;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        console.log(JSON.stringify({
-          allowAllExists: existsSync(allowAllPath),
-          allowAllChecks,
-          permissionsEvents
-        }));
-        process.exit(0);
-        """#
-        let scriptURL = root.appendingPathComponent("allowall.mjs")
-        try (prelude + extensionScript + epilogue).write(
-            to: scriptURL,
-            atomically: true,
-            encoding: .utf8
-        )
-
-        let process = Process()
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["node", scriptURL.path]
-        process.environment = ProcessInfo.processInfo.environment.merging([
-            "HOME": root.path,
-            "COPILOT_PROJECTS_SESSION": appSessionId,
-            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
-            "COPILOT_PROJECTS_ROOT": root.path,
-        ]) { _, new in new }
-        process.standardOutput = stdout
-        process.standardError = stderr
-        try process.run()
-        process.waitUntilExit()
-
-        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
-        XCTAssertEqual(
-            process.terminationStatus,
-            0,
-            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
-        )
-        let output = stdout.fileHandleForReading.readDataToEndOfFile()
-        let summary = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: output) as? [String: Any]
-        )
-        XCTAssertEqual(summary["allowAllExists"] as? Bool, false)
-        XCTAssertGreaterThan(summary["allowAllChecks"] as? Int ?? 0, 0)
-        XCTAssertGreaterThan(summary["permissionsEvents"] as? Int ?? 0, 0)
     }
 
     func testCopilotExtensionTranscriptByteBudgetPreservesForeground() throws {

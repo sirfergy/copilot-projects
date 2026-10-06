@@ -138,8 +138,8 @@ inheriting the current session's working directory. Its dropdown offers
 **Review Pull Request…** (a GitHub pull request URL dialog).
 The Session menu and project context menus also offer Copilot, starting-prompt,
 and plain-terminal creation. New projects
-created with `⌘N` also start with Copilot. All new desktop Copilot sessions use
-`--allow-all`, with or without a starting prompt.
+created with `⌘N` also start with Copilot. Copilot Projects never adds `--allow-all`;
+tool approvals follow your normal Copilot CLI permission settings.
 
 In the composer, Return adds a line, `⌘Return` starts Copilot, and Cancel creates
 no session. Failed preflight checks keep your draft. If Copilot or its backend becomes
@@ -193,7 +193,7 @@ copilot-projects new-copilot-session --project <id> \
   --request-id <uuid> --prompt-file prompt.md --title "Review owner/repo#123"
 ```
 
-It launches Copilot in `~/Repos` with `--allow-all` and the file's contents (UTF-8,
+It launches Copilot in `~/Repos` with the file's contents (UTF-8,
 at most 8 KiB) as the starting prompt, then prints the session id. The request id
 is the session id, so retries are idempotent while the app remembers the request
 (about a week): replaying the same id and prompt prints the existing session, a
