@@ -151,6 +151,32 @@ final class NotificationReplyResolverTests: XCTestCase {
         XCTAssertEqual(freeText.notificationBody, "Anything else?")
     }
 
+    func testBodyShortensOnlyTheQuestionToKeepEveryChoice() throws {
+        let titles = (1...4).map { String(repeating: "选", count: 82) + String($0) }
+        XCTAssertTrue(titles.allSatisfy { $0.utf8.count == 247 })
+        let question = NotificationReplyResolver.PendingQuestion(
+            text: String(repeating: "数据库迁移是否继续？", count: 60),
+            reply: RemoteNotificationReply(
+                kind: .userInput,
+                conversationEpoch: "e",
+                requestId: "r",
+                choices: titles.map { .init(title: $0, value: .string($0)) },
+                allowFreeform: false
+            )
+        )
+        let numbered = titles.enumerated()
+            .map { "\($0.offset + 1). \($0.element)" }
+            .joined(separator: "\n")
+
+        let body = try XCTUnwrap(question.notificationBody)
+        XCTAssertLessThanOrEqual(
+            body.utf8.count,
+            NotificationReplyResolver.maxNotificationBodyBytes
+        )
+        XCTAssertTrue(body.hasSuffix("\u{2026}\n" + numbered))
+        XCTAssertTrue(body.hasPrefix("数据库迁移是否继续？"))
+    }
+
     func testAskUserWithTooManyChoicesFallsBackToFreeTextOnly() throws {
         let five = ["a", "b", "c", "d", "e"]
         let freeform = try XCTUnwrap(reply(snapshot(userInputs: [
@@ -251,6 +277,43 @@ final class NotificationReplyResolverTests: XCTestCase {
             .init(title: "stage", value: .string("stage")),
             .init(title: "dev", value: .string("dev")),
         ])
+    }
+
+    func testConstrainedChoiceFieldsOfferChoicesWithoutFreeText() throws {
+        let choices: [RemoteJSONValue] = [.string("a"), .string("b")]
+        let constrained: [(String, [String: RemoteJSONValue])] = [
+            ("maxLength", ["type": .string("string"), "enum": .array(choices), "maxLength": .number(3)]),
+            ("minLength", ["type": .string("string"), "enum": .array(choices), "minLength": .number(1)]),
+            ("pattern", ["type": .string("string"), "enum": .array(choices), "pattern": .string("^[ab]$")]),
+            ("unknown", ["type": .string("string"), "enum": .array(choices), "x-hint": .string("?")]),
+            ("oneOf maxLength", [
+                "type": .string("string"),
+                "oneOf": .array([
+                    .object(["const": .string("a")]), .object(["const": .string("b")]),
+                ]),
+                "maxLength": .number(3),
+            ]),
+        ]
+        for (name, schema) in constrained {
+            let reply = try XCTUnwrap(
+                reply(snapshot(elicitations: [elicitation(properties: ["pick": field(schema)])])),
+                name
+            )
+            XCTAssertEqual(reply.choices.map(\.value), choices, name)
+            XCTAssertFalse(reply.allowFreeform, name)
+            XCTAssertEqual(reply.categoryIdentifier, "copilot-projects.question.2", name)
+        }
+
+        let described = try XCTUnwrap(reply(snapshot(elicitations: [
+            elicitation(properties: ["pick": field([
+                "type": .string("string"),
+                "enum": .array(choices),
+                "title": .string("Pick"),
+                "description": .string("One of these"),
+                "default": .string("a"),
+            ])]),
+        ])))
+        XCTAssertTrue(described.allowFreeform)
     }
 
     func testFreeTextFollowsTheHostsElicitationSourceRule() throws {
@@ -432,7 +495,7 @@ final class NotificationReplyWiringTests: XCTestCase {
         _ harness: Harness,
         receipts: Bool = true,
         epoch: String? = nil,
-        userInputs: [TrackedUserInput]? = nil,
+        userInputs: [TrackedUserInput] = [],
         workflow: RemoteSessionWorkflow? = nil
     ) throws {
         var snapshot = AgentActivitySnapshot(
@@ -447,6 +510,7 @@ final class NotificationReplyWiringTests: XCTestCase {
             lastIdleTurnKind: nil,
             error: nil,
             trackedUserInputs: userInputs,
+            trackedElicitations: [],
             pendingPermissionRequestIds: []
         )
         if receipts {
@@ -622,6 +686,64 @@ final class NotificationReplyWiringTests: XCTestCase {
         XCTAssertEqual(harness.spy.events.count, 1)
         XCTAssertNil(harness.spy.events[0].reply)
         XCTAssertNil(harness.spy.events[0].body)
+    }
+
+    @MainActor
+    func testUnanswerableQuestionPostsImmediatelyWithoutRetrying() throws {
+        let harness = try makeHarness(retryDelays: [1_000_000_000])
+        try write(harness, userInputs: [TrackedUserInput(
+            requestId: "ask-many",
+            question: "Which **region**?",
+            choices: ["a", "b", "c", "d", "e"],
+            allowFreeform: false,
+            requestedAt: "2026-10-05T10:00:00.000Z",
+            agentId: nil
+        )])
+        ask(harness)
+        XCTAssertEqual(harness.spy.events.count, 1)
+        let event = try XCTUnwrap(harness.spy.events.first)
+        XCTAssertEqual(event.kind, .elicitation)
+        XCTAssertEqual(event.body, "Which region?")
+        XCTAssertNil(event.reply)
+    }
+
+    @MainActor
+    func testWaitResolvedByReconciliationCancelsThePendingQuestion() async throws {
+        for reentry in [nil, StatusNotificationKind.permission] {
+            let harness = try makeHarness(retryDelays: [50_000_000, 50_000_000])
+            try writeInputWait(harness, epoch: epoch, timestamp: 100)
+            try write(harness)
+            ask(harness)
+            XCTAssertTrue(harness.spy.events.isEmpty)
+
+            // The tracker shows nothing pending, so the wait resolves to idle.
+            harness.model.refreshAgentActivitySnapshots()
+            XCTAssertEqual(harness.model.projects[0].sessions[0].status, .idle)
+            harness.model.setStatus(
+                sessionId: harness.session.id, status: .waiting, text: nil, timestamp: 102,
+                copilotSessionId: copilotSessionId, notification: reentry
+            )
+            try write(harness, userInputs: [question])
+            await settle(200_000_000)
+            XCTAssertFalse(
+                harness.spy.events.contains { $0.kind == .elicitation },
+                "re-entered with \(String(describing: reentry))"
+            )
+        }
+    }
+
+    @MainActor
+    func testPermissionHookCancelsThePendingQuestion() async throws {
+        let harness = try makeHarness(retryDelays: [30_000_000, 30_000_000])
+        try write(harness)
+        ask(harness)
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .waiting, text: nil, timestamp: 101,
+            copilotSessionId: copilotSessionId, notification: .permission
+        )
+        try write(harness, userInputs: [question])
+        await settle(150_000_000)
+        XCTAssertFalse(harness.spy.events.contains { $0.kind == .elicitation })
     }
 
     // MARK: completion

@@ -8,6 +8,14 @@ enum NotificationReplyResolver {
     static let syntheticRequestPrefix = "synthetic::durable-ask-user::"
     /// `answerUserInput`/`answerElicitation` refuse longer request ids.
     static let maxRequestIdBytes = 200
+    /// The gateway cuts APNs alert bodies at 1,500 bytes including its
+    /// "Sent at" suffix; staying under this keeps numbered choices whole.
+    static let maxNotificationBodyBytes = 1_400
+    /// Keys that don't constrain a string, so any typed text the host accepts
+    /// for the choice set also satisfies the field.
+    private static let unconstrainedStringKeys: Set<String> = [
+        "type", "enum", "oneOf", "title", "description", "default",
+    ]
 
     struct PendingQuestion: Equatable {
         /// What the agent asked, for the notification body.
@@ -16,11 +24,34 @@ enum NotificationReplyResolver {
 
         /// The question preview followed by numbered choices. iPhone action
         /// buttons can only say "Option N", so the body names what each means.
+        /// Only the preview is shortened to fit; the choices always stay whole.
         var notificationBody: String? {
             let preview = NotificationSummary.preview(text)
             guard let choices = reply?.choices, !choices.isEmpty else { return preview }
-            let numbered = choices.enumerated().map { "\($0.offset + 1). \($0.element.title)" }
-            return ([preview].compactMap { $0 } + numbered).joined(separator: "\n")
+            let numbered = choices.enumerated()
+                .map { "\($0.offset + 1). \($0.element.title)" }
+                .joined(separator: "\n")
+            let budget = NotificationReplyResolver.maxNotificationBodyBytes
+                - numbered.utf8.count - 1
+            guard let preview, let fitted = Self.truncated(preview, maxBytes: budget) else {
+                return numbered
+            }
+            return fitted + "\n" + numbered
+        }
+
+        private static func truncated(_ value: String, maxBytes: Int) -> String? {
+            guard value.utf8.count > maxBytes else { return value }
+            let ellipsis = "\u{2026}"
+            var prefix = ""
+            var bytes = 0
+            for character in value {
+                let size = String(character).utf8.count
+                guard bytes + size <= maxBytes - ellipsis.utf8.count else { break }
+                prefix.append(character)
+                bytes += size
+            }
+            let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed + ellipsis
         }
     }
 
@@ -111,6 +142,10 @@ enum NotificationReplyResolver {
         // Mirrors answerElicitation, which accepts a typed answer to a string
         // choice set only when the request has no elicitationSource.
         let acceptsFreeformStrings = request.elicitationSource == nil
+        // Typed text must also satisfy length, pattern, or format rules the
+        // host enforces, which a notification text field can't promise.
+        let acceptsUnconstrainedText = acceptsFreeformStrings
+            && Set(fieldSchema.keys).isSubset(of: unconstrainedStringKeys)
         let choices: [RemoteNotificationReplyChoice]
         let allowFreeform: Bool
         switch (fieldSchema["type"], fieldSchema["enum"], fieldSchema["oneOf"]) {
@@ -123,11 +158,11 @@ enum NotificationReplyResolver {
         case (.string("string")?, .array(let values)?, nil):
             guard let strings = stringValues(values) else { return nil }
             choices = strings.map { .init(title: $0, value: .string($0)) }
-            allowFreeform = acceptsFreeformStrings
+            allowFreeform = acceptsUnconstrainedText
         case (.string("string")?, nil, .array(let options)?):
             guard let labeled = labeledConstants(options) else { return nil }
             choices = labeled.map { .init(title: $0.title, value: .string($0.value)) }
-            allowFreeform = acceptsFreeformStrings
+            allowFreeform = acceptsUnconstrainedText
         default:
             return nil
         }

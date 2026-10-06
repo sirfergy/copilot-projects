@@ -2343,8 +2343,11 @@ final class AppModel: ObservableObject {
                         completionPending.remove(session.id)
                         completionSummaryContexts[session.id] = nil
                     }
-                    if status != .waiting, permissionStatusRestores[session.id] == nil {
-                        cancelPermissionNotification(sessionId: session.id)
+                    if status != .waiting {
+                        elicitationNotificationTokens[session.id] = nil
+                        if permissionStatusRestores[session.id] == nil {
+                            cancelWaitingNotifications(sessionId: session.id)
+                        }
                     }
                     changed = true
                 }
@@ -3431,7 +3434,8 @@ final class AppModel: ObservableObject {
                 || scheduledStateChanges
         else { return }
         if status != .waiting {
-            cancelPermissionNotification(sessionId: sessionId)
+            cancelWaitingNotifications(sessionId: sessionId)
+        } else if let notification, notification != .elicitation {
             elicitationNotificationTokens[sessionId] = nil
         }
         projects[loc.p].sessions[loc.s].status = status
@@ -3577,9 +3581,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func cancelPermissionNotification(sessionId: String) {
+    /// The session stopped waiting, so neither a permission nor a question
+    /// alert scheduled for that wait may still post.
+    private func cancelWaitingNotifications(sessionId: String) {
         permissionNotificationTokens[sessionId] = nil
         permissionStatusRestores[sessionId] = nil
+        elicitationNotificationTokens[sessionId] = nil
     }
 
     private func resolvePermissionNotification(sessionId: String, token: UUID) {
@@ -3715,7 +3722,9 @@ final class AppModel: ObservableObject {
             if observed.rootSessionId.lowercased() == root.lowercased(),
                observed.conversationEpoch == epoch {
                 question = NotificationReplyResolver.pendingQuestion(in: snapshot, now: now)
-                if question?.reply == nil, !isFinalAttempt { return false }
+                // Only an empty snapshot can still be missing this hook's
+                // question; one that can't be answered here won't improve.
+                if question == nil, !isFinalAttempt { return false }
             }
         }
         elicitationNotificationTokens[sessionId] = nil
@@ -3821,7 +3830,7 @@ final class AppModel: ObservableObject {
             restore.statusTimestamp,
             restore.promptStatusTimestamp
         )
-        cancelPermissionNotification(sessionId: sessionId)
+        cancelWaitingNotifications(sessionId: sessionId)
         updateDockBadge()
         if restore.completionPending {
             postCompletionIfReady(sessionId: sessionId)
@@ -4341,7 +4350,7 @@ final class AppModel: ObservableObject {
     private func clearStatusToIdle(pi: Int, si: Int, markFinished: Bool, effectiveTime: Int64? = nil) {
         let sid = projects[pi].sessions[si].id
         sessionSemantics.activityTracker.reset(sessionId: sid)
-        cancelPermissionNotification(sessionId: sid)
+        cancelWaitingNotifications(sessionId: sid)
         projects[pi].sessions[si].status = .idle
         projects[pi].sessions[si].statusText = nil
         if markFinished, !isVisible(projectIndex: pi, sessionIndex: si) {

@@ -72,7 +72,7 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   Question alerts show the pending question as a plain-text preview, followed by its
   numbered choices when it can be answered from the notification. When the session's
   tracker supports receipt-backed operations, a question alert waits briefly (under four
-  seconds) for the tracker to publish the question. If a remote client could answer it
+  seconds) for the tracker to publish a pending question. If a remote client could answer it
   natively, the event carries reply metadata for that question; the same applies to
   completion events when the session can accept a follow-up prompt. Remote clients can then
   answer from the notification. Mac banners otherwise remain tap-to-open.
