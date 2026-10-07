@@ -56,13 +56,13 @@ final class WorkspaceInputController: ObservableObject {
         DispatchQueue.main.async { [model] in model.focusActiveTerminal() }
     }
 
-    /// Shortcuts of the Session and View menus that act on the workspace window:
-    /// find, new session, next/previous session, and show projects.
+    /// Shortcuts of the File, Session and View menus that act on the workspace
+    /// window: new project, find, new session, next/previous session, and show projects.
     static func isWorkspaceMenuShortcut(_ event: NSEvent, mods: NSEvent.ModifierFlags) -> Bool {
         let key = event.charactersIgnoringModifiers?.lowercased()
         switch mods {
         case .command:
-            return key == "k" || key == "t" || key == "0"
+            return key == "n" || key == "k" || key == "t" || key == "0"
         case [.command, .option]:
             return key == "t" || key == "†"
         case [.command, .shift]:

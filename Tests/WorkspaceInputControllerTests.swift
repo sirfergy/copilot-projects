@@ -132,6 +132,7 @@ final class WorkspaceInputControllerTests: XCTestCase {
                 XCTAssertNotNil(input.handleKeyDown(event), "the window handles its own keys")
             }
             for event in [
+                try key("n", code: 45, modifiers: .command),
                 try key("k", code: 40, modifiers: .command),
                 try key("t", code: 17, modifiers: .command),
                 try key("0", code: 29, modifiers: .command),
