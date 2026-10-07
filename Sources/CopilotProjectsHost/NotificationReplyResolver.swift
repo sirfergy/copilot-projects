@@ -21,6 +21,10 @@ enum NotificationReplyResolver {
         /// What the agent asked, for the notification body.
         let text: String
         let reply: RemoteNotificationReply?
+        /// The tracked request this question can be followed by until it is
+        /// answered. Nil for synthetic durable `ask_user` entries, which can
+        /// leave the snapshot while the question is still pending.
+        var requestId: String? = nil
 
         /// The question preview followed by numbered choices. iPhone action
         /// buttons can only say "Option N", so the body names what each means.
@@ -85,7 +89,8 @@ enum NotificationReplyResolver {
         if let input = oldest(userInputs, requestedAt: \.requestedAt) {
             return PendingQuestion(
                 text: input.question,
-                reply: epoch.flatMap { userInputReply(input, conversationEpoch: $0) }
+                reply: epoch.flatMap { userInputReply(input, conversationEpoch: $0) },
+                requestId: trackableRequestId(input.requestId)
             )
         }
         let elicitations = snapshot.trackedElicitations ?? []
@@ -96,8 +101,13 @@ enum NotificationReplyResolver {
             text: elicitation.message,
             reply: elicitations.count == 1
                 ? epoch.flatMap { elicitationReply(elicitation, conversationEpoch: $0) }
-                : nil
+                : nil,
+            requestId: trackableRequestId(elicitation.requestId)
         )
+    }
+
+    private static func trackableRequestId(_ requestId: String) -> String? {
+        requestId.isEmpty || requestId.hasPrefix(syntheticRequestPrefix) ? nil : requestId
     }
 
     static func userInputReply(

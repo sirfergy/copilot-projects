@@ -68,6 +68,13 @@ public struct NotificationEvent: Codable, Equatable, Sendable {
 @MainActor
 public protocol NotificationPosting: AnyObject {
     func post(_ event: NotificationEvent)
+    /// Withdraws a posted notification that no longer needs attention.
+    /// Dismissing an unknown or already-dismissed id is harmless.
+    func dismiss(id: UUID)
+}
+
+extension NotificationPosting {
+    public func dismiss(id: UUID) {}
 }
 
 @MainActor
@@ -86,6 +93,13 @@ final class HostNotificationPoster: NotificationPosting {
         }
         integration?.postNotification(event)
     }
+
+    /// Removes the Mac banner directly, so the standalone app needs no
+    /// integration, and lets an integration clear the alert on its devices.
+    func dismiss(id: UUID) {
+        native.dismiss(id: id)
+        integration?.dismissNotification(id)
+    }
 }
 
 @MainActor
@@ -98,6 +112,10 @@ final class CompositeNotificationPoster: NotificationPosting {
 
     func post(_ event: NotificationEvent) {
         for poster in posters { poster.post(event) }
+    }
+
+    func dismiss(id: UUID) {
+        for poster in posters { poster.dismiss(id: id) }
     }
 }
 
@@ -158,6 +176,10 @@ final class NotificationManager: NSObject, NotificationPosting, UNUserNotificati
                 )
             }
         }
+    }
+
+    func dismiss(id: UUID) {
+        remove(id: id)
     }
 
     func remove(id: UUID) {

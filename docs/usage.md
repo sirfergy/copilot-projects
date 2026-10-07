@@ -79,7 +79,14 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   client could answer it natively, the event carries reply metadata for that question; the
   same applies to completion events when the session can accept a follow-up prompt. Remote
   clients can then answer from the notification. Mac banners otherwise remain tap-to-open.
-  Clicking one focuses that session. Unread sessions get a bell
+  Clicking one focuses that session.
+  Once a question is answered anywhere (terminal, Mac, phone, watch, or web), the host
+  withdraws its alert from the Mac and from any installed integration's devices. It waits for
+  positive evidence: a newer tracker snapshot of the same conversation without that request,
+  the tab moving to another Copilot conversation, the session closing, or, when no tracker
+  vouches for the question, the session leaving the wait (an idle turn if a tracker had
+  listed it). A permission prompt during a pending question keeps the alert. Permission and
+  completion alerts are not withdrawn automatically. Unread sessions get a bell
   badge + a Dock badge count. Completed sessions show one blue attention dot, not two.
   Returning to the Mac app marks the selected session read without
   needing to switch sessions.

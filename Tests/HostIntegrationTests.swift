@@ -7,12 +7,15 @@ import CopilotProjectsProtocol
 final class HostIntegrationTests: XCTestCase {
     private final class NativeSpy: NotificationPosting {
         var events: [NotificationEvent] = []
+        var dismissed: [UUID] = []
         func post(_ event: NotificationEvent) { events.append(event) }
+        func dismiss(id: UUID) { dismissed.append(id) }
     }
 
     private final class IntegrationSpy: HostIntegration {
         var clearLocalNotification: ((UUID) -> Void)?
         var events: [NotificationEvent] = []
+        var dismissed: [UUID] = []
         var calls: [String] = []
         func start() { calls.append("start") }
         func stop() { calls.append("stop") }
@@ -21,7 +24,10 @@ final class HostIntegrationTests: XCTestCase {
             return .success("integration response")
         }
         func postNotification(_ event: NotificationEvent) { events.append(event) }
-        func dismissNotification(_ id: UUID) { clearLocalNotification?(id) }
+        func dismissNotification(_ id: UUID) {
+            dismissed.append(id)
+            clearLocalNotification?(id)
+        }
         func shutdown() { calls.append("shutdown") }
         func shutdownAndWait() async { calls.append("drain") }
     }
@@ -51,6 +57,29 @@ final class HostIntegrationTests: XCTestCase {
         XCTAssertEqual(native.events.count, 1)
         XCTAssertEqual(integration.events.count, 2)
         XCTAssertEqual(native.events[0].id, integration.events[1].id)
+    }
+
+    func testDismissRemovesTheMacBannerAndClearsIntegrationDevices() {
+        let standaloneNative = NativeSpy()
+        let standalone = HostNotificationPoster(native: standaloneNative, integration: nil)
+        let first = UUID()
+        standalone.dismiss(id: first)
+        XCTAssertEqual(standaloneNative.dismissed, [first])
+
+        let native = NativeSpy()
+        let integration = IntegrationSpy()
+        let poster = HostNotificationPoster(native: native, integration: integration)
+        let second = UUID()
+        poster.dismiss(id: second)
+        XCTAssertEqual(native.dismissed, [second])
+        XCTAssertEqual(integration.dismissed, [second])
+
+        let composite = CompositeNotificationPoster([standalone, poster])
+        let third = UUID()
+        composite.dismiss(id: third)
+        XCTAssertEqual(standaloneNative.dismissed, [first, third])
+        XCTAssertEqual(native.dismissed, [second, third])
+        XCTAssertEqual(integration.dismissed, [second, third])
     }
 
     func testUnsupportedCommandsPreserveSettingsAndInjectedLifecycleStopsOnce() {
