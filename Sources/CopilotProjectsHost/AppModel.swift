@@ -3702,6 +3702,7 @@ final class AppModel: ObservableObject {
         )
         var question: NotificationReplyResolver.PendingQuestion?
         var questionObservedAt: Int64?
+        var questionListWasFull = false
         if let snapshot = adapter.loadReceiptBoundSnapshot(sessionId: sessionId, now: now),
            let root = snapshot.copilotSessionId,
            let epoch = snapshot.conversationEpoch {
@@ -3716,6 +3717,7 @@ final class AppModel: ObservableObject {
                observed.conversationEpoch == epoch {
                 question = NotificationReplyResolver.pendingQuestion(in: snapshot, now: now)
                 questionObservedAt = snapshot.updatedAtMilliseconds
+                questionListWasFull = AnsweredQuestionNotifications.mayOmitQuestions(snapshot)
                 // Only an empty snapshot can still be missing this hook's
                 // question; one that can't be answered here won't improve.
                 if question == nil, !isFinalAttempt { return false }
@@ -3740,7 +3742,8 @@ final class AppModel: ObservableObject {
                 conversationEpoch: conversation?.conversationEpoch,
                 evidenceAfterMilliseconds: requestId == nil
                     ? postedAt
-                    : questionObservedAt ?? postedAt
+                    : questionObservedAt ?? postedAt,
+                mayBeUnlisted: questionListWasFull
             ),
             sessionId: sessionId
         )

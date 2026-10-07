@@ -196,4 +196,46 @@ final class AnsweredQuestionNotificationTests: XCTestCase {
         XCTAssertEqual(result.answered, [second.id])
         XCTAssertEqual(result.pending, [first, third])
     }
+
+    func testAFullQuestionListNeverProvesAnAnswer() throws {
+        let limit = AnsweredQuestionNotifications.trackerQuestionLimit
+        let others = (1..<limit).map { "other-\($0)" }
+        for (inputs, elicitations) in [
+            (["ask-1"] + others, [String]()),
+            (["ask-1"], ["form-1"] + others),
+        ] {
+            let alert = posted("ask-1")
+            let full = AnsweredQuestionNotifications.partition(
+                [alert],
+                status: .waiting,
+                snapshot: snapshot(at: -5, userInputs: inputs, elicitations: elicitations),
+                ownerSessionId: root,
+                now: now
+            )
+            let remembered = try XCTUnwrap(full.pending.first)
+            XCTAssertTrue(remembered.mayBeUnlisted)
+            // The tracker may have dropped it to fit a newer question, so it
+            // stays even once the list shrinks again.
+            XCTAssertFalse(isAnswered(remembered, snapshot: snapshot(at: -4, userInputs: others)))
+            XCTAssertFalse(isAnswered(remembered, snapshot: snapshot(at: -4)))
+            XCTAssertTrue(isAnswered(remembered, status: .idle, snapshot: nil))
+            XCTAssertTrue(isAnswered(
+                remembered, snapshot: snapshot(at: -4, root: otherRoot), owner: otherRoot
+            ))
+        }
+        var dropped = posted("ask-1")
+        dropped.mayBeUnlisted = AnsweredQuestionNotifications.mayOmitQuestions(
+            snapshot(at: -10, userInputs: ["ask-1"] + others)
+        )
+        XCTAssertFalse(isAnswered(dropped, snapshot: snapshot(at: -5)))
+        XCTAssertTrue(isAnswered(
+            posted("ask-1"), snapshot: snapshot(at: -5, userInputs: Array(others.dropLast()))
+        ))
+    }
+
+    func testQuestionLimitMatchesTheTracker() {
+        let limit = AnsweredQuestionNotifications.trackerQuestionLimit
+        XCTAssertTrue(CopilotExtension.script.contains("const MAX_USER_INPUTS = \(limit);"))
+        XCTAssertTrue(CopilotExtension.script.contains("const MAX_ELICITATIONS = \(limit);"))
+    }
 }

@@ -14,6 +14,10 @@ struct PostedQuestionNotification: Equatable {
     /// Only a snapshot written after this can vouch for the question: the
     /// snapshot that listed `requestId`, otherwise the time the alert was posted.
     var evidenceAfterMilliseconds: Int64
+    /// Set once a snapshot of its conversation had a full question list: the
+    /// tracker may then have dropped this question while it was still
+    /// pending, so the question going missing no longer proves an answer.
+    var mayBeUnlisted = false
 }
 
 /// Decides which posted question alerts can be withdrawn because their
@@ -24,6 +28,16 @@ struct PostedQuestionNotification: Equatable {
 /// restarted tracker re-lists recovered questions under a new epoch, so none
 /// of those alone withdraws an alert.
 enum AnsweredQuestionNotifications {
+    /// The tracker lists at most this many pending questions of each kind and
+    /// silently drops the oldest beyond that (`MAX_USER_INPUTS` and
+    /// `MAX_ELICITATIONS`).
+    static let trackerQuestionLimit = 50
+
+    static func mayOmitQuestions(_ snapshot: AgentActivitySnapshot) -> Bool {
+        (snapshot.trackedUserInputs?.count ?? 0) >= trackerQuestionLimit
+            || (snapshot.trackedElicitations?.count ?? 0) >= trackerQuestionLimit
+    }
+
     static func partition(
         _ posted: [PostedQuestionNotification],
         status: SessionStatus,
@@ -34,6 +48,7 @@ enum AnsweredQuestionNotifications {
         let fresh = snapshot?.isFresh(at: now) == true ? snapshot : nil
         let tracksQuestions = fresh?.trackedUserInputs != nil
             && fresh?.trackedElicitations != nil
+        let full = fresh.map(mayOmitQuestions) ?? false
         let listed = Set(
             (fresh?.trackedUserInputs ?? []).map(\.requestId)
                 + (fresh?.trackedElicitations ?? []).map(\.requestId)
@@ -53,6 +68,7 @@ enum AnsweredQuestionNotifications {
         for var record in posted {
             let newer = updatedAt.map { $0 > record.evidenceAfterMilliseconds } ?? false
             let sameRoot = root != nil && root == record.rootSessionId?.lowercased()
+            if sameRoot, full { record.mayBeUnlisted = true }
             let resolved: Bool
             // Request IDs are only meaningful within their own conversation.
             if let requestId = record.requestId, sameRoot, listed.contains(requestId) {
@@ -76,8 +92,9 @@ enum AnsweredQuestionNotifications {
                 resolved = true
             } else if record.requestId != nil {
                 // Within one tracker epoch a request only leaves the snapshot
-                // once it is answered, cancelled, or completed.
-                resolved = sameRoot && tracksQuestions
+                // once it is answered, cancelled, or completed, unless the
+                // list was ever full enough for the tracker to drop it.
+                resolved = sameRoot && tracksQuestions && !record.mayBeUnlisted
                     && fresh?.conversationEpoch == record.conversationEpoch
             } else {
                 resolved = status != .waiting && listed.isEmpty
