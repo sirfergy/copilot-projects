@@ -101,6 +101,76 @@ final class WorkspaceInputControllerTests: XCTestCase {
         }
     }
 
+    func testAuxiliaryWindowKeysNeverReachTheWorkspace() throws {
+        try withWorkspace { model, input, sessions in
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                styleMask: [.titled, .closable], backing: .buffered, defer: false
+            )
+            window.isReleasedWhenClosed = false
+            AuxiliaryWindows.register(window)
+            XCTAssertGreaterThan(window.windowNumber, 0)
+            let terminal = try XCTUnwrap(model.controller(for: sessions[0].id))
+            let process = try XCTUnwrap(terminal.terminalView.process)
+            let sends = process.sendCount
+            let original = model.projects.flatMap(\.sessions).map(\.id)
+            func key(_ text: String, code: UInt16, modifiers: NSEvent.ModifierFlags = []) throws -> NSEvent {
+                try XCTUnwrap(NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                    windowNumber: window.windowNumber, context: nil, characters: text,
+                    charactersIgnoringModifiers: text, isARepeat: false, keyCode: code
+                ))
+            }
+
+            for event in [
+                try key("2", code: 19, modifiers: .control),
+                try key("2", code: 19, modifiers: .command),
+                try key("\t", code: 48, modifiers: .control),
+                try key("\r", code: 36, modifiers: .shift),
+                try key("r", code: 15, modifiers: .command),
+            ] {
+                XCTAssertNotNil(input.handleKeyDown(event), "the window handles its own keys")
+            }
+            for event in [
+                try key("n", code: 45, modifiers: .command),
+                try key("k", code: 40, modifiers: .command),
+                try key("t", code: 17, modifiers: .command),
+                try key("0", code: 29, modifiers: .command),
+                try key("}", code: 30, modifiers: [.command, .shift]),
+                try key("{", code: 33, modifiers: [.command, .shift]),
+            ] {
+                XCTAssertNil(input.handleKeyDown(event), "workspace menu shortcuts don't reach a window behind")
+            }
+            // A popover or child window belongs to the window that opened it.
+            let popover = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 100, height: 60),
+                styleMask: [.borderless], backing: .buffered, defer: false
+            )
+            popover.isReleasedWhenClosed = false
+            window.addChildWindow(popover, ordered: .above)
+            defer { window.removeChildWindow(popover) }
+            XCTAssertTrue(AuxiliaryWindows.contains(windowNumber: popover.windowNumber))
+            let popoverClose = try XCTUnwrap(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                windowNumber: popover.windowNumber, context: nil, characters: "w",
+                charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13
+            ))
+            XCTAssertNil(input.handleKeyDown(popoverClose))
+            let flags = try XCTUnwrap(NSEvent.keyEvent(
+                with: .flagsChanged, location: .zero, modifierFlags: .command, timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "",
+                isARepeat: false, keyCode: 55
+            ))
+            XCTAssertFalse(input.allowsWorkspaceEvents(flags))
+            XCTAssertNil(input.handleKeyDown(try key("w", code: 13, modifiers: .command)), "⌘W closes the window")
+            XCTAssertEqual(model.projects.flatMap(\.sessions).map(\.id), original)
+            XCTAssertEqual(model.globalSelectedSessionId, sessions[0].id)
+            XCTAssertNil(input.sessionFinder)
+            XCTAssertEqual(process.sendCount, sends)
+            XCTAssertFalse(terminal.exited)
+        }
+    }
+
     func testSessionFinderOwnsTheKeyboardUntilItClosesOrOpensASession() throws {
         try withWorkspace { model, input, sessions in
             let terminal = try XCTUnwrap(model.controller(for: sessions[0].id))

@@ -271,6 +271,58 @@ and waiting states are one secondary line under their section header; no-session
 and no-result states use native `ContentUnavailableView`. While open, the sheet
 owns workspace keys and workspace commands are disabled.
 
+**Pull Requests window:** [Goal Lanes](.impeccable/surfaces/sources-copilotprojectshost-pullrequestsview-swift.md),
+a separate hidden-title-bar window (1200x760pt default, 880x480pt minimum) on
+`chrome`, opened from Window ▸ Pull Requests (Shift-Command-P) or the menu bar
+item. It is registered as auxiliary, so workspace shortcuts and terminal input
+never act on it. It reuses the main window's 38pt drag strip (80pt traffic-light
+inset, callout semibold title) and a 56pt header: a title3 semibold needs-you
+headline over a caption secondary summary (open, goals, nudge-only count, owners),
+then a trailing refresh note (spinner, "Updated" relative time, or a warning
+behind the native orange symbol), the owners filter popover, and Refresh
+(Command-R). A sticky 28pt `chrome` stage row (caption semibold secondary, counts
+in monospaced digits) heads a 240pt Goals column and four equal stage columns
+(Draft, Checks, Review, Ready) split by native dividers; lanes are separated by
+dividers. The goal column sits on `sidebar`: a two-line body-medium goal name, a
+caption context line (the session state indicator with project · state, or "No
+session on this goal" with a terminal symbol), a caption count, and a small
+Go to Session button or Start Session split menu. Stage cells pad 8pt and stack
+chips 6pt apart. Goals with an actionable pull request and a session lead, then
+other actionable goals, then nudge-only and quiet goals, each by urgency.
+
+Chips are `raised` on the 6pt session corner (10x8pt padding): a caption semibold
+secondary `repo#number` with a trailing caption2 narrow age that drops before the
+repository name truncates; up to two callout title lines, omitted when the goal is
+named after that pull request; then a reason line. The inner 1pt status edge is
+native orange (85%) when the chip needs you, green (70%) when ready to merge, and
+a quiet secondary-ink edge (45%, 80% on hover) for no-session or stale nudges;
+a chip with no reason shows that 80% edge only on hover. Hover adds no fill. Selection takes the steel fill and adds a 1pt `selection-edge`
+ring drawn 2pt outside the chip on an 8pt corner (the session corner offset
+outward, not a new radius), so the status edge stays visible inside it. The reason
+line is the most urgent reason's symbol in the status tint, its label in primary
+ink (secondary for nudges), and a "+N" for the rest; it falls back to a short
+label, then drops "+N", and never truncates. A chip with no reason shows its review
+status in secondary ink, up to two lines. Double-click opens the pull request; the
+context menu opens, copies, goes to the session, or moves it to another goal.
+
+The first load shows three redacted placeholder lanes under an unredacted stage
+row; no pull requests and a first-load failure use native
+`ContentUnavailableView`, the failure with Try Again. Later failures keep the
+lanes and surface in the header's warning note. The most urgent chip is
+preselected and the lanes take focus: arrows move and announce, Return goes to the
+chip's session (or GitHub when it has none), Command-Return opens GitHub, and
+Escape clears selection. The footer is the session finder's 32pt `sidebar`
+key-legend footer, listing only keys that can act now, with a trailing
+older-pull-requests note. A refresh that moves a chip animates it to its new stage
+(matched geometry, 0.2s ease-out); the first load never animates, and Reduce
+Motion updates lanes in place.
+
+**Shared patterns:** the 32pt `sidebar` key-legend footer (caption secondary ink,
+semibold key glyphs, 14pt inset and spacing, trailing status note) is now shared
+by the session finder and the Pull Requests window. Both also carry failures in a
+trailing note behind the native orange warning symbol and use
+`ContentUnavailableView` for empty states.
+
 The [sidecar](.impeccable/design.json) contains schematic dark-appearance HTML/CSS
 previews of these roles, not replacements for native controls or pixel-certified
 renders. Its generated tonal ramps are swatch previews, not additional app tokens.

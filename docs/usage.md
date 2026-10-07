@@ -38,6 +38,11 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   meaning-based suggestions through a tool-less `copilot -p` run in a throwaway
   `COPILOT_HOME` seeded only with your signed-in account, so it never adds sessions to your
   Copilot history. `↑`/`↓` or `⌃N`/`⌃P` move, Return opens, Escape clears then closes.
+- **Pull Requests (`⇧⌘P`):** a separate window of your open pull requests, one row per
+  goal and one column per stage (Draft, Checks, Review, Ready), with what needs you
+  called out. Goals are inferred from the live session whose Copilot event log names
+  each pull request's head branch, and can be regrouped by hand. It uses your `gh`
+  accounts and the GitHub GraphQL API; see the README for the rules.
 - **Prompt-first sessions:** the **+** split button's dropdown, Session menu, and project context
   menu offer **Start with Prompt…**. Compose multiple lines, then use `⌘Return` to launch
   an interactive session (not a one-shot/headless command). Cancel creates no session.
