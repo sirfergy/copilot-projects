@@ -494,7 +494,7 @@ final class PullRequestServiceRequestTests: XCTestCase {
          "repository":{"nameWithOwner":"o/r","viewerPermission":"WRITE"},"reviewDecision":null,
          "autoMergeRequest":null,"mergeQueueEntry":null,
          "reviewThreads":{"pageInfo":{"hasPreviousPage":true,"startCursor":"\(cursor)"},
-           "nodes":[\(thread(resolved: true, by: "alice"))]},
+           "nodes":[\(thread(resolved: true, by: "alice")),\(thread(resolved: false, by: "bad"))]},
          "commits":{"nodes":[]}}
         """
     }
@@ -521,7 +521,10 @@ final class PullRequestServiceRequestTests: XCTestCase {
         )
         XCTAssertEqual(fetch.warnings.first, "Couldn’t read bad’s pull requests: GitHub returned HTTP 502.")
         let byNumber = Dictionary(uniqueKeysWithValues: fetch.pullRequests.map { ($0.key.number, $0) })
-        XCTAssertEqual(byNumber[1]?.unresolvedThreads, 1, "an open thread past the first page still counts")
+        XCTAssertEqual(
+            byNumber[1]?.unresolvedThreads, 1,
+            "an open thread past the first page counts; one your other account answered doesn't"
+        )
         XCTAssertEqual(byNumber[1]?.unresolvedCopilotThreads, 1)
         XCTAssertNil(byNumber[1]?.uncountedThreadsCursor)
         XCTAssertEqual(byNumber[2]?.uncountedThreadsCursor, "broken", "threads that couldn't be read stay uncounted")
@@ -535,22 +538,34 @@ final class PullRequestServiceRequestTests: XCTestCase {
          "nodes":[{"name":"build","conclusion":"STALE","isRequired":true},{"name":"lint","conclusion":"FAILURE","isRequired":false}]
         }}}}]}}}}
         """
+        let partial = #"{"data":{"node":{"mergeable":"MERGEABLE","mergeStateStatus":null}},"errors":[{"message":"timeout"}]}"#
         GraphQLStub.respond = { _, body in
             let query = body["query"] as? String ?? ""
             let id = (body["variables"] as? [String: Any])?["id"] as? String
             if query.contains("mergeStateStatus") {
-                return id == "n1" ? (502, "") : (200, #"{"data":{"node":{"mergeable":"MERGEABLE","mergeStateStatus":"UNKNOWN"}}}"#)
+                switch id {
+                case "n1": return (502, "")
+                case "n3": return (200, partial)
+                default: return (200, #"{"data":{"node":{"mergeable":"MERGEABLE","mergeStateStatus":"UNKNOWN"}}}"#)
+                }
             }
-            if query.contains("contexts(") { return (200, contexts) }
+            if query.contains("contexts(") {
+                return id == "n3" ? (200, contexts.replacingOccurrences(of: "}}}}]}}}}", with: #"}}}}]}}},"errors":[{"message":"timeout"}]}"#)) : (200, contexts)
+            }
             return (500, "")
         }
         let unread = makePR(1, mergeState: .unknown, review: .approved)
         let stale = makePR(2, mergeState: .unknown, review: .approved, checks: .failure)
-        let enriched = await service.enrich([unread, stale], tokens: [unread.key: "t", stale.key: "t"])
+        let errored = makePR(3, mergeState: .unknown, review: .approved, checks: .failure)
+        let enriched = await service.enrich(
+            [unread, stale, errored], tokens: [unread.key: "t", stale.key: "t", errored.key: "t"]
+        )
         XCTAssertTrue(enriched[0].mergeStateFailed)
         XCTAssertFalse(PullRequestTriage.isReady(enriched[0]), "a failed merge-state read isn't ready")
         XCTAssertFalse(enriched[1].mergeStateFailed)
         XCTAssertEqual(enriched[1].failingRequiredChecks, ["build"], "a stale required check fails")
         XCTAssertFalse(PullRequestTriage.isReady(enriched[1]))
+        XCTAssertTrue(enriched[2].mergeStateFailed, "field errors are a failed read")
+        XCTAssertNil(enriched[2].failingRequiredChecks, "required checks read with errors stay unknown")
     }
 }

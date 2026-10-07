@@ -316,6 +316,8 @@ struct PullRequestService: Sendable {
         var fetch = PullRequestFetch()
         var failures: [GitHubGraphQLError] = []
         var accountWarnings: [String] = []
+        // A reply from any of your accounts is yours.
+        let signedIn = Set(accounts.map { $0.login.lowercased() }.filter { !$0.isEmpty })
         for account in accounts {
             var cursor: String?
             var found: [PullRequestSnapshot] = []
@@ -333,7 +335,7 @@ struct PullRequestService: Sendable {
                     viewer = data.viewer.login ?? viewer
                     fetch.logins.insert(viewer.lowercased())
                     if let message = response.errors?.first?.message { fetch.warnings.append(message) }
-                    let mine: Set<String> = [viewer.lowercased()]
+                    let mine = signedIn.union([viewer.lowercased()])
                     found += data.search.nodes.compactMap { $0?.snapshot(viewerLogins: mine) }
                     total = data.search.issueCount
                     hasMore = data.search.pageInfo.hasNextPage
@@ -348,7 +350,7 @@ struct PullRequestService: Sendable {
                 continue
             }
             if hasMore { fetch.omitted += max(0, total - found.count) }
-            let mine: Set<String> = [viewer.lowercased()]
+            let mine = signedIn.union([viewer.lowercased()])
             for pr in found where fetch.tokens[pr.key] == nil {
                 let counted = await countingEarlierThreads(pr, token: account.token, viewerLogins: mine)
                 fetch.add(counted, token: account.token)
@@ -446,9 +448,13 @@ struct PullRequestService: Sendable {
         }
         var pr = pr
         let query = "query($id: ID!) { node(id: $id) { ... on PullRequest { mergeable mergeStateStatus } } }"
-        if let node = try? await graphQL.run(query, variables: ["id": pr.nodeId], token: token, as: Payload.self).data?.node {
-            pr.mergeable = node.mergeable.flatMap(PullRequestSnapshot.Mergeable.init(rawValue:)) ?? .unknown
-            pr.mergeState = node.mergeStateStatus.flatMap(PullRequestSnapshot.MergeState.init(rawValue:)) ?? .unknown
+        let response = try? await graphQL.run(query, variables: ["id": pr.nodeId], token: token, as: Payload.self)
+        // Field errors or values this app doesn't know are a failed read, not GitHub still computing.
+        if let response, response.errors?.isEmpty != false, let node = response.data?.node,
+           let mergeable = node.mergeable.flatMap(PullRequestSnapshot.Mergeable.init(rawValue:)),
+           let mergeState = node.mergeStateStatus.flatMap(PullRequestSnapshot.MergeState.init(rawValue:)) {
+            pr.mergeable = mergeable
+            pr.mergeState = mergeState
         } else {
             pr.mergeStateFailed = true
         }
@@ -535,6 +541,7 @@ struct PullRequestService: Sendable {
             var variables: [String: Any] = ["id": pr.nodeId, "n": pr.key.number]
             if let cursor { variables["cursor"] = cursor }
             guard let response = try? await graphQL.run(query, variables: variables, token: token, as: Payload.self),
+                  response.errors?.isEmpty != false,
                   let contexts = response.data?.node?.commits?.nodes.last??.commit.statusCheckRollup?.contexts else {
                 return nil
             }
