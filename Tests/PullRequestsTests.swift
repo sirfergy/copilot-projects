@@ -186,12 +186,15 @@ final class PullRequestTriageTests: XCTestCase {
         XCTAssertEqual(unstable.reasons, [.readyToMerge])
     }
 
-    func testUnreadMergeStateAndUncountedThreadsAreNeverReady() {
+    func testIncompleteReadsAndUncountedThreadsAreNeverReady() {
         var unread = makePR(mergeState: .unknown, review: .approved)
         XCTAssertTrue(PullRequestTriage.isReady(unread), "GitHub still computing: the checks decide")
-        unread.mergeStateFailed = true
+        unread.isIncomplete = true
         XCTAssertFalse(PullRequestTriage.isReady(unread), "a failed read says nothing")
         XCTAssertTrue(PullRequestTriage.assess(unread, session: session, now: now).reasons.isEmpty)
+        var partial = makePR(mergeState: .clean, review: .approved)
+        partial.isIncomplete = true
+        XCTAssertFalse(PullRequestTriage.isReady(partial), "a field GitHub couldn't return could block it")
 
         var truncated = makePR(mergeState: .clean, review: .approved)
         truncated.uncountedThreadsCursor = "older"
@@ -486,14 +489,15 @@ final class PullRequestServiceRequestTests: XCTestCase {
         """
     }
 
-    private func pullRequest(_ number: Int, olderThreads cursor: String) -> String {
-        """
+    private func pullRequest(_ number: Int, olderThreads cursor: String?, author: String = "good") -> String {
+        let page = cursor.map { #"{"hasPreviousPage":true,"startCursor":"\#($0)"}"# } ?? #"{"hasPreviousPage":false,"startCursor":null}"#
+        return """
         {"id":"PR_\(number)","number":\(number),"title":"long review","url":"https://github.com/o/r/pull/\(number)",
          "isDraft":false,"state":"OPEN","createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-06T00:00:00Z",
-         "headRefName":"me/long-review-\(number)","author":{"login":"good"},
+         "headRefName":"me/long-review-\(number)","author":{"login":"\(author)"},
          "repository":{"nameWithOwner":"o/r","viewerPermission":"WRITE"},"reviewDecision":null,
          "autoMergeRequest":null,"mergeQueueEntry":null,
-         "reviewThreads":{"pageInfo":{"hasPreviousPage":true,"startCursor":"\(cursor)"},
+         "reviewThreads":{"pageInfo":\(page),
            "nodes":[\(thread(resolved: true, by: "alice")),\(thread(resolved: false, by: "bad"))]},
          "commits":{"nodes":[]}}
         """
@@ -501,8 +505,13 @@ final class PullRequestServiceRequestTests: XCTestCase {
 
     func testSearchWarnsAboutAFailedAccountAndCountsOlderThreads() async throws {
         let search = """
-        {"data":{"viewer":{"login":"good"},"search":{"issueCount":2,"pageInfo":{"hasNextPage":false,"endCursor":null},
-         "nodes":[\(pullRequest(1, olderThreads: "c1")),\(pullRequest(2, olderThreads: "broken"))]}}}
+        {"data":{"viewer":{"login":"good"},"search":{"issueCount":3,"pageInfo":{"hasNextPage":false,"endCursor":null},
+         "nodes":[\(pullRequest(1, olderThreads: "c1")),\(pullRequest(2, olderThreads: "broken")),\(pullRequest(3, olderThreads: "partial"))]}},
+         "errors":[{"message":"Something went wrong","type":"SERVICE_UNAVAILABLE","path":["search","nodes",0,"reviewDecision"]}]}
+        """
+        let partialThreads = """
+        {"data":{"node":{"reviewThreads":{"pageInfo":{"hasPreviousPage":false,"startCursor":"c0"},"nodes":[null]}}},
+         "errors":[{"message":"Something went wrong","path":["node","reviewThreads","nodes",0]}]}
         """
         let olderThreads = """
         {"data":{"node":{"reviewThreads":{"pageInfo":{"hasPreviousPage":false,"startCursor":"c0"},
@@ -513,7 +522,13 @@ final class PullRequestServiceRequestTests: XCTestCase {
             let variables = body["variables"] as? [String: Any] ?? [:]
             if token == "bad" { return (502, "") }
             if query.contains("search(") { return (200, search) }
-            if query.contains("before: $cursor"), variables["cursor"] as? String == "c1" { return (200, olderThreads) }
+            if query.contains("before: $cursor") {
+                switch variables["cursor"] as? String {
+                case "c1": return (200, olderThreads)
+                case "partial": return (200, partialThreads)
+                default: return (500, "")
+                }
+            }
             return (500, "")
         }
         let fetch = try await service.search(
@@ -529,6 +544,30 @@ final class PullRequestServiceRequestTests: XCTestCase {
         XCTAssertNil(byNumber[1]?.uncountedThreadsCursor)
         XCTAssertEqual(byNumber[2]?.uncountedThreadsCursor, "broken", "threads that couldn't be read stay uncounted")
         XCTAssertFalse(PullRequestTriage.isReady(try XCTUnwrap(byNumber[2])))
+        XCTAssertEqual(byNumber[3]?.uncountedThreadsCursor, "partial", "a page read with errors stays uncounted")
+        XCTAssertEqual(byNumber[1]?.isIncomplete, true, "an error inside a result marks only that result")
+        XCTAssertEqual(byNumber[2]?.isIncomplete, false)
+        XCTAssertFalse(PullRequestTriage.isReady(try XCTUnwrap(byNumber[1])))
+    }
+
+    func testLookupRetriesErroredAnswersAndTrustsSignedInAuthors() async throws {
+        let response = """
+        {"data":{"p0":null,"p1":null,"p2":{"pullRequest":\(pullRequest(13, olderThreads: nil, author: "other"))}},
+         "errors":[
+           {"message":"Resource protected by organization SAML enforcement.","type":"FORBIDDEN","path":["p0"]},
+           {"message":"Could not resolve to a PullRequest.","type":"NOT_FOUND","path":["p1","pullRequest"]},
+           {"message":"Something went wrong","path":["p2","pullRequest","reviewDecision"]}
+         ]}
+        """
+        GraphQLStub.respond = { _, _ in (200, response) }
+        let keys = [11, 12, 13].map { PullRequestKey(owner: "o", repo: "r", number: $0) }
+        // The search for "other" failed, so only its configured login says the pull request is its.
+        let lookup = await service.lookup(
+            keys, accounts: [GitHubAccount(login: "Other", token: "t")], logins: ["good"]
+        )
+        XCTAssertEqual(lookup.found.map(\.0.key), [keys[2]])
+        XCTAssertEqual(lookup.found.first?.0.isIncomplete, true)
+        XCTAssertEqual(lookup.missing, [keys[1]], "not found is an answer; a forbidden read isn't")
     }
 
     func testEnrichFailsClosedAndCountsStaleRequiredChecks() async throws {
@@ -560,12 +599,12 @@ final class PullRequestServiceRequestTests: XCTestCase {
         let enriched = await service.enrich(
             [unread, stale, errored], tokens: [unread.key: "t", stale.key: "t", errored.key: "t"]
         )
-        XCTAssertTrue(enriched[0].mergeStateFailed)
+        XCTAssertTrue(enriched[0].isIncomplete)
         XCTAssertFalse(PullRequestTriage.isReady(enriched[0]), "a failed merge-state read isn't ready")
-        XCTAssertFalse(enriched[1].mergeStateFailed)
+        XCTAssertFalse(enriched[1].isIncomplete)
         XCTAssertEqual(enriched[1].failingRequiredChecks, ["build"], "a stale required check fails")
         XCTAssertFalse(PullRequestTriage.isReady(enriched[1]))
-        XCTAssertTrue(enriched[2].mergeStateFailed, "field errors are a failed read")
+        XCTAssertTrue(enriched[2].isIncomplete, "field errors are a failed read")
         XCTAssertNil(enriched[2].failingRequiredChecks, "required checks read with errors stay unknown")
     }
 }

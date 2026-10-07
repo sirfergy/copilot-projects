@@ -113,7 +113,35 @@ struct GitHubGraphQL: Sendable {
     var timeout: TimeInterval = 30
 
     struct Response<Payload: Decodable>: Decodable {
-        struct Message: Decodable { let message: String? }
+        struct Message: Decodable {
+            let message: String?
+            let type: String?
+            /// Where in `data` the error is: field names and list indexes.
+            let path: [PathElement]?
+
+            /// The list item the error is inside, when `path` runs through `fields` into a list.
+            func index(after fields: [String]) -> Int? {
+                guard let path, path.count > fields.count,
+                      zip(path, fields).allSatisfy({ $0 == .field($1) }),
+                      case .index(let index) = path[fields.count] else { return nil }
+                return index
+            }
+        }
+
+        enum PathElement: Decodable, Equatable {
+            case field(String)
+            case index(Int)
+
+            init(from decoder: Decoder) throws {
+                let value = try decoder.singleValueContainer()
+                if let index = try? value.decode(Int.self) {
+                    self = .index(index)
+                } else {
+                    self = .field(try value.decode(String.self))
+                }
+            }
+        }
+
         let data: Payload?
         let errors: [Message]?
     }
@@ -335,8 +363,17 @@ struct PullRequestService: Sendable {
                     viewer = data.viewer.login ?? viewer
                     fetch.logins.insert(viewer.lowercased())
                     if let message = response.errors?.first?.message { fetch.warnings.append(message) }
+                    // An error inside one search result leaves that pull request partly
+                    // read; an error anywhere else could have touched any of them.
+                    let errors = response.errors ?? []
+                    let partial = Set(errors.compactMap { $0.index(after: ["search", "nodes"]) })
+                    let wholePage = errors.contains { $0.index(after: ["search", "nodes"]) == nil }
                     let mine = signedIn.union([viewer.lowercased()])
-                    found += data.search.nodes.compactMap { $0?.snapshot(viewerLogins: mine) }
+                    for (index, node) in data.search.nodes.enumerated() {
+                        guard var snapshot = node?.snapshot(viewerLogins: mine) else { continue }
+                        snapshot.isIncomplete = wholePage || partial.contains(index)
+                        found.append(snapshot)
+                    }
                     total = data.search.issueCount
                     hasMore = data.search.pageInfo.hasNextPage
                     guard hasMore, let next = data.search.pageInfo.endCursor else { break }
@@ -375,6 +412,8 @@ struct PullRequestService: Sendable {
     /// account here wrote. Keys a failed request couldn't answer are in neither list.
     func lookup(_ keys: [PullRequestKey], accounts: [GitHubAccount], logins: Set<String>) async -> Lookup {
         struct Repository: Decodable { let pullRequest: PullRequestNodes.Node? }
+        // An account whose search failed still wrote its pull requests.
+        let logins = logins.union(accounts.map { $0.login.lowercased() }.filter { !$0.isEmpty })
         var remaining = keys
         var result = Lookup()
         var unanswered = Set<PullRequestKey>()
@@ -398,13 +437,23 @@ struct PullRequestService: Sendable {
                     unresolved += batch
                     continue
                 }
+                let errors = response.errors ?? []
                 for (index, key) in batch.enumerated() {
-                    guard let node = data["p\(index)"]??.pullRequest else {
+                    let alias = "p\(index)"
+                    // An error without a path could be about any of them.
+                    let aliasErrors = errors.filter { $0.path?.first.map { $0 == .field(alias) } ?? true }
+                    guard let node = data[alias]??.pullRequest else {
+                        // GitHub saying it doesn't exist answers; any other error doesn't.
+                        if aliasErrors.contains(where: { $0.type != "NOT_FOUND" }) { unanswered.insert(key) }
                         unresolved.append(key)
                         continue
                     }
                     guard let author = node.author?.login?.lowercased(), logins.contains(author),
-                          let snapshot = node.snapshot(viewerLogins: logins) else { continue }
+                          var snapshot = node.snapshot(viewerLogins: logins) else {
+                        if !aliasErrors.isEmpty { unanswered.insert(key) }
+                        continue
+                    }
+                    snapshot.isIncomplete = !aliasErrors.isEmpty
                     let counted = await countingEarlierThreads(snapshot, token: account.token, viewerLogins: logins)
                     result.found.append((counted, account.token))
                 }
@@ -456,7 +505,7 @@ struct PullRequestService: Sendable {
             pr.mergeable = mergeable
             pr.mergeState = mergeState
         } else {
-            pr.mergeStateFailed = true
+            pr.isIncomplete = true
         }
         if pr.checksFailing {
             pr.failingRequiredChecks = await failingRequiredChecks(pr, token: token)
@@ -465,7 +514,8 @@ struct PullRequestService: Sendable {
     }
 
     /// Counts the review threads older than the first page, so a long review
-    /// can't hide an open thread. Leaves `uncountedThreadsCursor` set when it can't.
+    /// can't hide an open thread. Leaves `uncountedThreadsCursor` set when it can't,
+    /// including when GitHub reports errors alongside a page.
     func countingEarlierThreads(
         _ pr: PullRequestSnapshot, token: String, viewerLogins: Set<String>
     ) async -> PullRequestSnapshot {
@@ -490,6 +540,7 @@ struct PullRequestService: Sendable {
                   let response = try? await graphQL.run(
                       query, variables: ["id": pr.nodeId, "cursor": cursor], token: token, as: Payload.self
                   ),
+                  response.errors?.isEmpty != false,
                   let threads = response.data?.node?.reviewThreads else { return pr }
             let counts = PullRequestNodes.count(threads.nodes ?? [], viewerLogins: viewerLogins)
             pr.unresolvedThreads += counts.unresolved

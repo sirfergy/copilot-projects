@@ -66,8 +66,8 @@ struct PullRequestSnapshot: Identifiable, Equatable, Sendable {
     let headRefName: String
     var mergeable: Mergeable = .unknown
     var mergeState: MergeState = .unknown
-    /// The merge-state request failed: `.unknown` means unread, not still computing.
-    var mergeStateFailed = false
+    /// Part of what GitHub reported about it couldn't be read, so it is never called ready.
+    var isIncomplete = false
     /// Nil when the base branch requires no review.
     let reviewDecision: ReviewDecision?
     /// The head commit's combined check and status state, nil when it has none.
@@ -254,18 +254,16 @@ enum PullRequestTriage {
     }
 
     /// Approved (or needing no review), mergeable by you, with no required
-    /// check failing or pending, and every review thread counted.
+    /// check failing or pending, and everything about it read.
     static func isReady(_ pr: PullRequestSnapshot) -> Bool {
         guard !pr.isDraft, pr.viewerCanMerge, pr.mergeable != .conflicting,
-              pr.uncountedThreadsCursor == nil else { return false }
+              !pr.isIncomplete, pr.uncountedThreadsCursor == nil else { return false }
         guard pr.reviewDecision == .approved || pr.reviewDecision == nil else { return false }
         switch pr.mergeState {
         case .clean, .hasHooks, .unstable:
             return true
         case .unknown:
-            // GitHub is still computing; trust the checks we can see. A failed
-            // read says nothing, so it isn't ready.
-            guard !pr.mergeStateFailed else { return false }
+            // GitHub is still computing; trust the checks we can see.
             return pr.checks == nil || pr.checks == .success
                 || (pr.checksFailing && pr.failingRequiredChecks?.isEmpty == true)
         case .behind, .blocked, .dirty, .draft:
