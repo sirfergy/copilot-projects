@@ -122,6 +122,7 @@ final class NotificationReplyResolverTests: XCTestCase {
         )))
 
         XCTAssertEqual(question.text, "Which database?")
+        XCTAssertEqual(question.requestId, "older")
         let reply = try XCTUnwrap(question.reply)
         XCTAssertEqual(reply, RemoteNotificationReply(
             kind: .userInput,
@@ -393,6 +394,18 @@ final class NotificationReplyResolverTests: XCTestCase {
         ]))
         XCTAssertEqual(question?.text, "First?")
         XCTAssertNil(question?.reply)
+        XCTAssertEqual(question?.requestId, "first")
+    }
+
+    func testSyntheticDurableQuestionsAreNotFollowedByRequestId() {
+        let boolean: [String: RemoteJSONValue] = ["ok": field(["type": .string("boolean")])]
+        let question = NotificationReplyResolver.pendingQuestion(in: snapshot(elicitations: [
+            elicitation(
+                "synthetic::durable-ask-user::call", mode: "terminal-default", properties: boolean
+            ),
+        ]))
+        XCTAssertEqual(question?.text, "Ship it?")
+        XCTAssertNil(question?.requestId)
     }
 
     func testQuestionsWithoutReceiptSupportKeepTextButGetNoReply() {
@@ -402,6 +415,7 @@ final class NotificationReplyResolverTests: XCTestCase {
         ))
         XCTAssertEqual(question?.text, "Which database?")
         XCTAssertNil(question?.reply)
+        XCTAssertEqual(question?.requestId, "ask-1")
         XCTAssertNil(NotificationReplyResolver.pendingQuestion(in: snapshot()))
     }
 
@@ -439,11 +453,13 @@ final class NotificationReplyWiringTests: XCTestCase {
     @MainActor
     private final class NotificationSpy: NotificationPosting {
         var events: [NotificationEvent] = []
+        var dismissed: [UUID] = []
         var onPost: ((NotificationEvent) -> Void)?
         func post(_ event: NotificationEvent) {
             events.append(event)
             onPost?(event)
         }
+        func dismiss(id: UUID) { dismissed.append(id) }
     }
 
     private struct Harness {
@@ -456,6 +472,7 @@ final class NotificationReplyWiringTests: XCTestCase {
     @MainActor
     private func makeHarness(
         retryDelays: [UInt64] = [5_000_000, 5_000_000],
+        permissionDelay: UInt64 = 1_000_000_000,
         loader: @escaping @Sendable (String) -> TranscriptSnapshot = { _ in
             TranscriptSnapshot(schemaVersion: 3, updatedAt: Date(), copilotSessionId: "other", turns: [])
         }
@@ -474,6 +491,7 @@ final class NotificationReplyWiringTests: XCTestCase {
             stateRepository: repository,
             completionNotificationDelayNanoseconds: 1_000_000,
             completionTranscriptLoader: loader,
+            permissionNotificationDelayNanoseconds: permissionDelay,
             elicitationReplyRetryDelaysNanoseconds: retryDelays,
             persistPermissionStatus: { _, _, _, _ in },
             isAppActive: { false },
@@ -493,14 +511,18 @@ final class NotificationReplyWiringTests: XCTestCase {
 
     private func write(
         _ harness: Harness,
+        at date: Date = Date(),
         receipts: Bool = true,
         epoch: String? = nil,
         userInputs: [TrackedUserInput] = [],
-        workflow: RemoteSessionWorkflow? = nil
+        elicitations: [TrackedElicitation] = [],
+        pendingPermissionRequestIds: [String] = [],
+        workflow: RemoteSessionWorkflow? = nil,
+        runtimeActivity: RuntimeActivitySnapshot? = nil
     ) throws {
         var snapshot = AgentActivitySnapshot(
             schemaVersion: AgentActivitySnapshot.currentSchemaVersion,
-            updatedAt: Date().ISO8601Format(.init(includingFractionalSeconds: true)),
+            updatedAt: date.ISO8601Format(.init(includingFractionalSeconds: true)),
             foregroundTurnActive: false,
             scheduledTurnActive: false,
             activeSubagents: [],
@@ -510,8 +532,8 @@ final class NotificationReplyWiringTests: XCTestCase {
             lastIdleTurnKind: nil,
             error: nil,
             trackedUserInputs: userInputs,
-            trackedElicitations: [],
-            pendingPermissionRequestIds: []
+            trackedElicitations: elicitations,
+            pendingPermissionRequestIds: pendingPermissionRequestIds
         )
         if receipts {
             snapshot.copilotSessionId = copilotSessionId
@@ -519,6 +541,7 @@ final class NotificationReplyWiringTests: XCTestCase {
             snapshot.operationReceiptVersion = 1
         }
         snapshot.workflow = workflow
+        snapshot.runtimeActivity = runtimeActivity
         try JSONEncoder().encode(snapshot).write(
             to: harness.sessions.appendingPathComponent("\(harness.session.id).agent-activity.json"),
             options: .atomic
@@ -745,6 +768,267 @@ final class NotificationReplyWiringTests: XCTestCase {
         try write(harness, userInputs: [question])
         await settle(150_000_000)
         XCTAssertFalse(harness.spy.events.contains { $0.kind == .elicitation })
+    }
+
+    // MARK: answered elsewhere
+
+    private let form = TrackedElicitation(
+        requestId: "form-1",
+        message: "Ship it?",
+        mode: nil,
+        url: nil,
+        schema: .object([
+            "type": .string("object"),
+            "properties": .object(["ok": .object(["type": .string("boolean")])]),
+        ]),
+        elicitationSource: nil,
+        requestedAt: "2026-10-05T10:00:01.000Z",
+        agentId: nil
+    )
+
+    /// A question alert posted from a tracker snapshot taken at `start`,
+    /// with status timestamps on the same clock.
+    @MainActor
+    private func postTrackedQuestion(_ harness: Harness, start: Date) throws -> NotificationEvent {
+        let waitAt = Int64(start.timeIntervalSince1970 * 1_000)
+        try writeInputWait(harness, epoch: epoch, timestamp: waitAt)
+        try write(harness, at: start, userInputs: [question])
+        harness.model.refreshAgentActivitySnapshots()
+        ask(harness, timestamp: waitAt)
+        let alert = try XCTUnwrap(harness.spy.events.last)
+        XCTAssertEqual(alert.kind, .elicitation)
+        XCTAssertEqual(alert.reply?.requestId, "ask-1")
+        return alert
+    }
+
+    private func milliseconds(_ date: Date) -> Int64 {
+        Int64(date.timeIntervalSince1970 * 1_000)
+    }
+
+    @MainActor
+    func testQuestionAnsweredElsewhereWithdrawsItsAlertOnceTheTrackerDropsIt() throws {
+        let harness = try makeHarness()
+        let start = Date().addingTimeInterval(-8)
+        let alert = try postTrackedQuestion(harness, start: start)
+
+        // The answer's running hook can arrive before the tracker drops the question.
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .running, text: nil,
+            timestamp: milliseconds(start) + 500
+        )
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+
+        try write(harness, at: start.addingTimeInterval(1))
+        harness.model.refreshAgentActivitySnapshots()
+        XCTAssertEqual(harness.spy.dismissed, [alert.id])
+
+        try write(harness, at: start.addingTimeInterval(2))
+        harness.model.refreshAgentActivitySnapshots()
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .idle, text: nil,
+            timestamp: milliseconds(start) + 2_500
+        )
+        XCTAssertEqual(harness.spy.dismissed, [alert.id])
+    }
+
+    @MainActor
+    func testSessionWithoutATrackerWithdrawsTheAlertWhenItStopsWaiting() throws {
+        let harness = try makeHarness()
+        ask(harness)
+        let alert = try XCTUnwrap(harness.spy.events.first)
+        XCTAssertNil(alert.reply)
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .running, text: nil, timestamp: 101
+        )
+        XCTAssertEqual(harness.spy.dismissed, [alert.id])
+    }
+
+    @MainActor
+    func testAnsweringOneOfTwoQuestionsWithdrawsOnlyItsAlert() throws {
+        let harness = try makeHarness()
+        let start = Date().addingTimeInterval(-8)
+        let waitAt = milliseconds(start)
+        try writeInputWait(harness, epoch: epoch, timestamp: waitAt)
+        try write(harness, at: start, elicitations: [form])
+        harness.model.refreshAgentActivitySnapshots()
+        ask(harness, timestamp: waitAt)
+        let formAlert = try XCTUnwrap(harness.spy.events.last)
+        XCTAssertEqual(formAlert.reply?.requestId, "form-1")
+
+        try write(harness, at: start.addingTimeInterval(1), userInputs: [question], elicitations: [form])
+        harness.model.refreshAgentActivitySnapshots()
+        ask(harness, timestamp: waitAt + 1_000)
+        let askAlert = try XCTUnwrap(harness.spy.events.last)
+        XCTAssertEqual(askAlert.reply?.requestId, "ask-1")
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+
+        // The ask_user is answered from the watch while the form still waits.
+        try write(harness, at: start.addingTimeInterval(2), elicitations: [form])
+        harness.model.refreshAgentActivitySnapshots()
+        XCTAssertEqual(harness.spy.dismissed, [askAlert.id])
+        XCTAssertEqual(harness.model.projects[0].sessions[0].status, .waiting)
+
+        try write(harness, at: start.addingTimeInterval(3))
+        harness.model.refreshAgentActivitySnapshots()
+        XCTAssertEqual(harness.spy.dismissed, [askAlert.id, formAlert.id])
+    }
+
+    @MainActor
+    func testSnapshotsThatCannotVouchForAnAnswerKeepTheAlert() throws {
+        let harness = try makeHarness()
+        let start = Date().addingTimeInterval(-8)
+        let alert = try postTrackedQuestion(harness, start: start)
+
+        // Expired, older than the alert, or from a restarted tracker that
+        // hasn't recovered its questions yet.
+        let restarted = "\(copilotSessionId):restarted"
+        for (date, snapshotEpoch) in [
+            (start.addingTimeInterval(-30), epoch),
+            (start.addingTimeInterval(-1), epoch),
+            (start.addingTimeInterval(1), restarted),
+        ] {
+            try write(harness, at: date, epoch: snapshotEpoch)
+            harness.model.refreshAgentActivitySnapshots()
+            XCTAssertTrue(harness.spy.dismissed.isEmpty, "\(date) \(snapshotEpoch)")
+            XCTAssertEqual(harness.model.projects[0].sessions[0].status, .waiting)
+        }
+
+        try write(harness, at: start.addingTimeInterval(2), epoch: restarted, userInputs: [question])
+        harness.model.refreshAgentActivitySnapshots()
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+        try write(harness, at: start.addingTimeInterval(3), epoch: restarted)
+        harness.model.refreshAgentActivitySnapshots()
+        XCTAssertEqual(harness.spy.dismissed, [alert.id])
+    }
+
+    @MainActor
+    func testPermissionWaitDuringAPendingQuestionKeepsItsAlert() async throws {
+        let harness = try makeHarness(permissionDelay: 5_000_000)
+        let start = Date().addingTimeInterval(-8)
+        let waitAt = milliseconds(start)
+        let alert = try postTrackedQuestion(harness, start: start)
+
+        try write(
+            harness, at: start.addingTimeInterval(1),
+            userInputs: [question], pendingPermissionRequestIds: ["permission"]
+        )
+        harness.model.refreshAgentActivitySnapshots()
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .waiting, text: nil, timestamp: waitAt + 1_000,
+            copilotSessionId: copilotSessionId, notification: .permission
+        )
+        await settle()
+        try write(harness, at: start.addingTimeInterval(2), userInputs: [question])
+        harness.model.refreshAgentActivitySnapshots()
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .running, text: nil, timestamp: waitAt + 2_000
+        )
+        await settle()
+        harness.model.refreshAgentActivitySnapshots()
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+
+        try write(harness, at: start.addingTimeInterval(3))
+        harness.model.refreshAgentActivitySnapshots()
+        XCTAssertEqual(harness.spy.dismissed, [alert.id])
+    }
+
+    @MainActor
+    func testClosingTheSessionWithdrawsItsPendingQuestionAlert() throws {
+        let harness = try makeHarness()
+        let alert = try postTrackedQuestion(harness, start: Date().addingTimeInterval(-8))
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+
+        harness.model.closeSession(
+            projectId: harness.model.projects[0].id, sessionId: harness.session.id
+        )
+        XCTAssertEqual(harness.spy.dismissed, [alert.id])
+        harness.model.refreshAgentActivitySnapshots()
+        XCTAssertEqual(harness.spy.dismissed, [alert.id])
+    }
+
+    @MainActor
+    func testClosingTheSessionWithdrawsEveryOutstandingQuestionAlert() throws {
+        let harness = try makeHarness()
+        for timestamp in Int64(100)..<120 { ask(harness, timestamp: timestamp) }
+        let alerts = harness.spy.events.filter { $0.kind == .elicitation }.map(\.id)
+        XCTAssertEqual(alerts.count, 20)
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+
+        harness.model.closeSession(
+            projectId: harness.model.projects[0].id, sessionId: harness.session.id
+        )
+        XCTAssertEqual(harness.spy.dismissed, alerts)
+    }
+
+    @MainActor
+    func testSyntheticQuestionAlertWaitsForTheTurnToEnd() throws {
+        let harness = try makeHarness()
+        let start = Date().addingTimeInterval(-8)
+        let waitAt = milliseconds(start)
+        let synthetic = TrackedElicitation(
+            requestId: "synthetic::durable-ask-user::call",
+            message: "Continue?",
+            mode: "terminal",
+            url: nil,
+            schema: nil,
+            elicitationSource: "durable-ask-user",
+            requestedAt: "2026-10-05T10:00:00.000Z",
+            agentId: nil
+        )
+        try writeInputWait(harness, epoch: epoch, timestamp: waitAt)
+        try write(harness, at: start, elicitations: [synthetic])
+        harness.model.refreshAgentActivitySnapshots()
+        ask(harness, timestamp: waitAt)
+        let alert = try XCTUnwrap(harness.spy.events.last)
+        XCTAssertEqual(alert.kind, .elicitation)
+
+        // Another root event drops the synthetic entry and a parallel tool's
+        // hook reports activity while the ask_user still blocks the turn.
+        Thread.sleep(forTimeInterval: 0.01)
+        try write(harness, runtimeActivity: RuntimeActivitySnapshot(error: "unsupported"))
+        harness.model.refreshAgentActivitySnapshots()
+        XCTAssertEqual(harness.model.projects[0].sessions[0].status, .waiting)
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .running, text: nil, timestamp: waitAt + 1_000
+        )
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .idle, text: nil, timestamp: waitAt + 2_000
+        )
+        XCTAssertEqual(harness.spy.dismissed, [alert.id])
+    }
+
+    @MainActor
+    func testOnlyQuestionAlertsAreWithdrawn() async throws {
+        let harness = try makeHarness(permissionDelay: 1_000_000)
+        complete(harness, summaryContext: false)
+        let permission = expectation(description: "permission posted")
+        harness.spy.onPost = { if $0.kind == .permission { permission.fulfill() } }
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .waiting, text: nil, timestamp: 5_000,
+            copilotSessionId: copilotSessionId, notification: .permission
+        )
+        await fulfillment(of: [permission], timeout: 2)
+        ask(harness, timestamp: 5_001)
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .running, text: nil, timestamp: 5_002
+        )
+        ask(harness, timestamp: 5_003)
+        harness.model.closeSession(
+            projectId: harness.model.projects[0].id, sessionId: harness.session.id
+        )
+
+        XCTAssertEqual(
+            harness.spy.events.compactMap(\.kind),
+            [.completed, .permission, .elicitation, .elicitation]
+        )
+        XCTAssertEqual(
+            harness.spy.dismissed,
+            harness.spy.events.filter { $0.kind == .elicitation }.map(\.id)
+        )
     }
 
     // MARK: completion

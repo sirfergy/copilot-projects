@@ -473,6 +473,9 @@ final class AppModel: ObservableObject {
     }
     private var permissionNotificationTokens: [String: UUID] = [:]
     private var elicitationNotificationTokens: [String: UUID] = [:]
+    /// Question alerts that may still be showing, per session, so they can be
+    /// withdrawn once their question is answered anywhere.
+    private var questionNotifications: [String: [PostedQuestionNotification]] = [:]
     private var budgetNotificationKeys: [String: String] = [:]
     private var permissionStatusRestores: [String: PermissionStatusRestore] = [:]
     private let isAppActive: @MainActor () -> Bool
@@ -1580,6 +1583,7 @@ final class AppModel: ObservableObject {
         projects[pi].sessions.removeAll { $0.id == sid }
         if locateIndex(sid) == nil {
             remoteControlDeliveryLedger.removeClosedSession(sid)
+            dismissQuestionNotifications(sessionId: sid)
         }
         if wasSelected {
             if projects[pi].sessions.isEmpty {
@@ -2348,6 +2352,7 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+        dismissAnsweredQuestionNotifications(now: now)
         if changed { updateDockBadge() }
     }
 
@@ -3124,6 +3129,7 @@ final class AppModel: ObservableObject {
         projects.remove(at: pi)
         for sessionId in closedSessionIds where locateIndex(sessionId) == nil {
             remoteControlDeliveryLedger.removeClosedSession(sessionId)
+            dismissQuestionNotifications(sessionId: sessionId)
         }
         if selectedProjectId == pid {
             selectedProjectId = projects.first?.id
@@ -3302,6 +3308,9 @@ final class AppModel: ObservableObject {
         notification: StatusNotificationKind? = nil
     ) {
         guard let loc = locateIndex(sessionId) else { return }
+        // Runs after any status change below, including early exits that
+        // leave the status as it was.
+        defer { dismissAnsweredQuestionNotifications(sessionId: sessionId) }
         let previousTimestamp = sessionSemantics.statusClock.timestamp(for: sessionId)
         guard sessionSemantics.shouldApplyStatusEvent(
             sessionId: sessionId,
@@ -3692,6 +3701,8 @@ final class AppModel: ObservableObject {
             resumeMarkerDirectory: resumeMarkerDirectory
         )
         var question: NotificationReplyResolver.PendingQuestion?
+        var questionObservedAt: Int64?
+        var questionListWasFull = false
         if let snapshot = adapter.loadReceiptBoundSnapshot(sessionId: sessionId, now: now),
            let root = snapshot.copilotSessionId,
            let epoch = snapshot.conversationEpoch {
@@ -3705,13 +3716,15 @@ final class AppModel: ObservableObject {
             if observed.rootSessionId.lowercased() == root.lowercased(),
                observed.conversationEpoch == epoch {
                 question = NotificationReplyResolver.pendingQuestion(in: snapshot, now: now)
+                questionObservedAt = snapshot.updatedAtMilliseconds
+                questionListWasFull = AnsweredQuestionNotifications.mayOmitQuestions(snapshot)
                 // Only an empty snapshot can still be missing this hook's
                 // question; one that can't be answered here won't improve.
                 if question == nil, !isFinalAttempt { return false }
             }
         }
         elicitationNotificationTokens[sessionId] = nil
-        postNotification(
+        let id = postNotification(
             projectId: projects[loc.p].id,
             sessionId: sessionId,
             kind: .elicitation,
@@ -3719,7 +3732,67 @@ final class AppModel: ObservableObject {
             body: question?.notificationBody,
             reply: question?.reply
         )
+        let requestId = question?.requestId
+        let postedAt = Int64(now.timeIntervalSince1970 * 1_000)
+        rememberQuestionNotification(
+            PostedQuestionNotification(
+                id: id,
+                requestId: requestId,
+                rootSessionId: conversation?.rootSessionId,
+                conversationEpoch: conversation?.conversationEpoch,
+                evidenceAfterMilliseconds: requestId == nil
+                    ? postedAt
+                    : questionObservedAt ?? postedAt,
+                mayBeUnlisted: questionListWasFull,
+                listedWithoutRequestId: question != nil && requestId == nil
+            ),
+            sessionId: sessionId
+        )
         return true
+    }
+
+    private func rememberQuestionNotification(
+        _ notification: PostedQuestionNotification,
+        sessionId: String
+    ) {
+        // Never bounded: a forgotten alert could never be withdrawn.
+        questionNotifications[sessionId, default: []].append(notification)
+    }
+
+    /// Withdraws a session's question alerts whose questions are provably
+    /// resolved, wherever they were answered.
+    private func dismissAnsweredQuestionNotifications(sessionId: String, now: Date = Date()) {
+        guard let posted = questionNotifications[sessionId] else { return }
+        guard let loc = locateIndex(sessionId) else {
+            dismissQuestionNotifications(sessionId: sessionId)
+            return
+        }
+        let session = projects[loc.p].sessions[loc.s]
+        let result = AnsweredQuestionNotifications.partition(
+            posted,
+            status: session.status,
+            snapshot: session.agentActivity,
+            ownerSessionId: resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session"),
+            now: now
+        )
+        questionNotifications[sessionId] = result.pending.isEmpty ? nil : result.pending
+        for id in result.answered {
+            notifications?.dismiss(id: id)
+        }
+    }
+
+    private func dismissAnsweredQuestionNotifications(now: Date) {
+        for sessionId in Array(questionNotifications.keys) {
+            dismissAnsweredQuestionNotifications(sessionId: sessionId, now: now)
+        }
+    }
+
+    /// The session is gone, so none of its questions can still be answered.
+    private func dismissQuestionNotifications(sessionId: String) {
+        guard let posted = questionNotifications.removeValue(forKey: sessionId) else { return }
+        for notification in posted {
+            notifications?.dismiss(id: notification.id)
+        }
     }
 
     private func restoreCompletedPermissionWaits(now: Date) {
@@ -3814,6 +3887,7 @@ final class AppModel: ObservableObject {
             restore.promptStatusTimestamp
         )
         cancelWaitingNotifications(sessionId: sessionId)
+        dismissAnsweredQuestionNotifications(sessionId: sessionId, now: now)
         updateDockBadge()
         if restore.completionPending {
             postCompletionIfReady(sessionId: sessionId)
@@ -4361,6 +4435,7 @@ final class AppModel: ObservableObject {
             timestamp: timestamp,
             promptStatusTimestamp: timestamp
         )
+        dismissAnsweredQuestionNotifications(sessionId: sid)
     }
 
     private func reconcileLiveness(markFinished: Bool = true) {
@@ -4405,6 +4480,7 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @discardableResult
     func postNotification(
         projectId: String,
         sessionId: String,
@@ -4413,7 +4489,7 @@ final class AppModel: ObservableObject {
         body: String?,
         reply: RemoteNotificationReply? = nil,
         completionSummaryContext: CompletionSummaryContext? = nil
-    ) {
+    ) -> UUID {
         var subtitle: String?
         var isTargetVisible = false
         if let loc = locateIndex(sessionId) {
@@ -4442,7 +4518,7 @@ final class AppModel: ObservableObject {
         updateDockBadge()
         guard let context = completionSummaryContext else {
             notifications?.post(event)
-            return
+            return event.id
         }
         let completionClock = sessionSemantics.statusClock.timestamp(for: sessionId)
         // The status clock can't see a conversation rotating, so the reply
@@ -4477,6 +4553,7 @@ final class AppModel: ObservableObject {
                 reply: reply?.conversationEpoch == completionEpoch ? reply : nil
             ))
         }
+        return event.id
     }
 
     /// Read from disk at post time: the cached snapshot can lag the turn that
