@@ -517,7 +517,8 @@ final class NotificationReplyWiringTests: XCTestCase {
         userInputs: [TrackedUserInput] = [],
         elicitations: [TrackedElicitation] = [],
         pendingPermissionRequestIds: [String] = [],
-        workflow: RemoteSessionWorkflow? = nil
+        workflow: RemoteSessionWorkflow? = nil,
+        runtimeActivity: RuntimeActivitySnapshot? = nil
     ) throws {
         var snapshot = AgentActivitySnapshot(
             schemaVersion: AgentActivitySnapshot.currentSchemaVersion,
@@ -540,6 +541,7 @@ final class NotificationReplyWiringTests: XCTestCase {
             snapshot.operationReceiptVersion = 1
         }
         snapshot.workflow = workflow
+        snapshot.runtimeActivity = runtimeActivity
         try JSONEncoder().encode(snapshot).write(
             to: harness.sessions.appendingPathComponent("\(harness.session.id).agent-activity.json"),
             options: .atomic
@@ -958,6 +960,45 @@ final class NotificationReplyWiringTests: XCTestCase {
             projectId: harness.model.projects[0].id, sessionId: harness.session.id
         )
         XCTAssertEqual(harness.spy.dismissed, alerts)
+    }
+
+    @MainActor
+    func testSyntheticQuestionAlertWaitsForTheTurnToEnd() throws {
+        let harness = try makeHarness()
+        let start = Date().addingTimeInterval(-8)
+        let waitAt = milliseconds(start)
+        let synthetic = TrackedElicitation(
+            requestId: "synthetic::durable-ask-user::call",
+            message: "Continue?",
+            mode: "terminal",
+            url: nil,
+            schema: nil,
+            elicitationSource: "durable-ask-user",
+            requestedAt: "2026-10-05T10:00:00.000Z",
+            agentId: nil
+        )
+        try writeInputWait(harness, epoch: epoch, timestamp: waitAt)
+        try write(harness, at: start, elicitations: [synthetic])
+        harness.model.refreshAgentActivitySnapshots()
+        ask(harness, timestamp: waitAt)
+        let alert = try XCTUnwrap(harness.spy.events.last)
+        XCTAssertEqual(alert.kind, .elicitation)
+
+        // Another root event drops the synthetic entry and a parallel tool's
+        // hook reports activity while the ask_user still blocks the turn.
+        Thread.sleep(forTimeInterval: 0.01)
+        try write(harness, runtimeActivity: RuntimeActivitySnapshot(error: "unsupported"))
+        harness.model.refreshAgentActivitySnapshots()
+        XCTAssertEqual(harness.model.projects[0].sessions[0].status, .waiting)
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .running, text: nil, timestamp: waitAt + 1_000
+        )
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+
+        harness.model.setStatus(
+            sessionId: harness.session.id, status: .idle, text: nil, timestamp: waitAt + 2_000
+        )
+        XCTAssertEqual(harness.spy.dismissed, [alert.id])
     }
 
     @MainActor

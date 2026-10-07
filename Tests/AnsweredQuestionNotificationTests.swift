@@ -182,6 +182,20 @@ final class AnsweredQuestionNotificationTests: XCTestCase {
         )))
     }
 
+    func testSyntheticallyListedQuestionNeedsTheTurnToEnd() {
+        var alert = posted(nil)
+        alert.listedWithoutRequestId = true
+        // The tracker drops a synthetic entry on any later root event, and a
+        // parallel tool's hook can report activity, while the ask still blocks.
+        XCTAssertFalse(isAnswered(alert, status: .running, snapshot: snapshot(at: -5)))
+        XCTAssertFalse(isAnswered(alert, status: .running, snapshot: nil))
+        XCTAssertFalse(isAnswered(alert, status: .idle, snapshot: snapshot(at: -5, userInputs: ["ask-2"])))
+        XCTAssertFalse(isAnswered(alert, status: .idle, snapshot: snapshot(at: -11)))
+        XCTAssertTrue(isAnswered(alert, status: .idle, snapshot: snapshot(at: -5)))
+        XCTAssertTrue(isAnswered(alert, status: .idle, snapshot: nil))
+        XCTAssertTrue(isAnswered(alert, snapshot: snapshot(at: -5, root: otherRoot), owner: otherRoot))
+    }
+
     func testPartitionKeepsUnansweredAlertsInOrder() {
         let first = posted("ask-1")
         let second = posted("ask-2")

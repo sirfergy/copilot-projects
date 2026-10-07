@@ -18,6 +18,10 @@ struct PostedQuestionNotification: Equatable {
     /// tracker may then have dropped this question while it was still
     /// pending, so the question going missing no longer proves an answer.
     var mayBeUnlisted = false
+    /// The tracker listed the question only under an ID it can't follow (a
+    /// synthetic durable `ask_user` entry), which it can drop while the
+    /// question is still pending, so only an ended turn proves an answer.
+    var listedWithoutRequestId = false
 }
 
 /// Decides which posted question alerts can be withdrawn because their
@@ -69,6 +73,7 @@ enum AnsweredQuestionNotifications {
             let newer = updatedAt.map { $0 > record.evidenceAfterMilliseconds } ?? false
             let sameRoot = root != nil && root == record.rootSessionId?.lowercased()
             if sameRoot, full { record.mayBeUnlisted = true }
+            let vouched = record.requestId != nil || record.listedWithoutRequestId
             let resolved: Bool
             // Request IDs are only meaningful within their own conversation.
             if let requestId = record.requestId, sameRoot, listed.contains(requestId) {
@@ -84,7 +89,7 @@ enum AnsweredQuestionNotifications {
                 // evidence. A tracker that once vouched for the question going
                 // quiet is weaker (a transient read can miss it), so it needs
                 // the turn to have ended.
-                resolved = record.requestId == nil ? status != .waiting : status == .idle
+                resolved = vouched ? status == .idle : status != .waiting
             } else if !newer {
                 resolved = false
             } else if let root, record.rootSessionId != nil, !sameRoot, tabOwns(root) {
@@ -97,7 +102,10 @@ enum AnsweredQuestionNotifications {
                 resolved = sameRoot && tracksQuestions && !record.mayBeUnlisted
                     && fresh?.conversationEpoch == record.conversationEpoch
             } else {
-                resolved = status != .waiting && listed.isEmpty
+                // A synthetic entry can vanish, and a hook can report activity,
+                // while its question is still pending, but the turn can't end.
+                resolved = listed.isEmpty
+                    && (record.listedWithoutRequestId ? status == .idle : status != .waiting)
             }
             if resolved {
                 answered.append(record.id)

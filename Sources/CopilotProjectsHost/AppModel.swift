@@ -3743,7 +3743,8 @@ final class AppModel: ObservableObject {
                 evidenceAfterMilliseconds: requestId == nil
                     ? postedAt
                     : questionObservedAt ?? postedAt,
-                mayBeUnlisted: questionListWasFull
+                mayBeUnlisted: questionListWasFull,
+                listedWithoutRequestId: question != nil && requestId == nil
             ),
             sessionId: sessionId
         )
