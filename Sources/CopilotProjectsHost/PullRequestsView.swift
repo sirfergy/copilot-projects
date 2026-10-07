@@ -658,6 +658,7 @@ struct PullRequestChip: View {
         .accessibilityLabel("\(item.pr.shortName), \(item.pr.title)")
         .accessibilityValue(Self.statusText(item))
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { onSelect() }
         .accessibilityAction(named: "Open on GitHub", onOpen)
     }
 
