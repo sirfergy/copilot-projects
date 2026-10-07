@@ -49,7 +49,11 @@ enum AnsweredQuestionNotifications {
         ownerSessionId: @autoclosure () -> String?,
         now: Date = Date()
     ) -> (answered: [UUID], pending: [PostedQuestionNotification]) {
-        let fresh = snapshot?.isFresh(at: now) == true ? snapshot : nil
+        // A disconnected tracker keeps republishing its last lists but can no
+        // longer see questions complete, so it counts as no tracker at all.
+        let fresh = snapshot.flatMap {
+            $0.isFresh(at: now) && !$0.reportsTerminalDisconnect ? $0 : nil
+        }
         let tracksQuestions = fresh?.trackedUserInputs != nil
             && fresh?.trackedElicitations != nil
         let full = fresh.map(mayOmitQuestions) ?? false

@@ -117,6 +117,15 @@ final class AnsweredQuestionNotificationTests: XCTestCase {
         XCTAssertTrue(isAnswered(alert, status: .idle, snapshot: snapshot(at: -30)))
     }
 
+    func testDisconnectedTrackerCountsAsNoTracker() {
+        let alert = posted("ask-1")
+        // The heartbeat keeps republishing the lists it had when it lost the CLI.
+        var disconnected = snapshot(at: -5, userInputs: ["ask-1"])
+        disconnected.error = "Connection is closed."
+        XCTAssertFalse(isAnswered(alert, status: .running, snapshot: disconnected))
+        XCTAssertTrue(isAnswered(alert, status: .idle, snapshot: disconnected))
+    }
+
     func testRestartedTrackerRebindsARecoveredQuestion() throws {
         let alert = posted("ask-1")
         let recovered = AnsweredQuestionNotifications.partition(
