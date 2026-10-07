@@ -6,7 +6,9 @@ final class AnsweredQuestionNotificationTests: XCTestCase {
     private let root = "11111111-2222-3333-4444-555555555555"
     private let otherRoot = "66666666-7777-8888-9999-000000000000"
     private let epoch = "tracker:0"
-    private let now = Date()
+    // Whole seconds, so snapshot timestamps round-trip through ISO8601 to the
+    // same milliseconds `milliseconds(_:)` computes.
+    private let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
 
     private func milliseconds(_ offset: TimeInterval) -> Int64 {
         Int64(now.addingTimeInterval(offset).timeIntervalSince1970 * 1_000)
@@ -145,6 +147,11 @@ final class AnsweredQuestionNotificationTests: XCTestCase {
             XCTAssertFalse(isAnswered(alert, snapshot: replaced, owner: root))
             XCTAssertFalse(isAnswered(alert, snapshot: snapshot(at: -11, root: otherRoot), owner: otherRoot))
         }
+        // Request IDs are scoped to their conversation, so a replacement that
+        // reuses one does not keep the old alert.
+        let reused = snapshot(at: -5, root: otherRoot, userInputs: ["ask-1"])
+        XCTAssertTrue(isAnswered(posted("ask-1"), snapshot: reused, owner: otherRoot))
+        XCTAssertFalse(isAnswered(posted("ask-1"), snapshot: reused, owner: root))
         var ownerReads = 0
         _ = AnsweredQuestionNotifications.partition(
             [posted("ask-1"), posted(nil)],

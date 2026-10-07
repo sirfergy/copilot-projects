@@ -3751,13 +3751,8 @@ final class AppModel: ObservableObject {
         _ notification: PostedQuestionNotification,
         sessionId: String
     ) {
-        var posted = questionNotifications[sessionId] ?? []
-        posted.append(notification)
-        // Bounded: the oldest is forgotten, never withdrawn without evidence.
-        if posted.count > AnsweredQuestionNotifications.maxPerSession {
-            posted.removeFirst(posted.count - AnsweredQuestionNotifications.maxPerSession)
-        }
-        questionNotifications[sessionId] = posted
+        // Never bounded: a forgotten alert could never be withdrawn.
+        questionNotifications[sessionId, default: []].append(notification)
     }
 
     /// Withdraws a session's question alerts whose questions are provably

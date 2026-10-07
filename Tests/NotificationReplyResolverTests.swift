@@ -947,6 +947,20 @@ final class NotificationReplyWiringTests: XCTestCase {
     }
 
     @MainActor
+    func testClosingTheSessionWithdrawsEveryOutstandingQuestionAlert() throws {
+        let harness = try makeHarness()
+        for timestamp in Int64(100)..<120 { ask(harness, timestamp: timestamp) }
+        let alerts = harness.spy.events.filter { $0.kind == .elicitation }.map(\.id)
+        XCTAssertEqual(alerts.count, 20)
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+
+        harness.model.closeSession(
+            projectId: harness.model.projects[0].id, sessionId: harness.session.id
+        )
+        XCTAssertEqual(harness.spy.dismissed, alerts)
+    }
+
+    @MainActor
     func testOnlyQuestionAlertsAreWithdrawn() async throws {
         let harness = try makeHarness(permissionDelay: 1_000_000)
         complete(harness, summaryContext: false)

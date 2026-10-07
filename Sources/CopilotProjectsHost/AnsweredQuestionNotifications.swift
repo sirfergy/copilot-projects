@@ -24,8 +24,6 @@ struct PostedQuestionNotification: Equatable {
 /// restarted tracker re-lists recovered questions under a new epoch, so none
 /// of those alone withdraws an alert.
 enum AnsweredQuestionNotifications {
-    static let maxPerSession = 16
-
     static func partition(
         _ posted: [PostedQuestionNotification],
         status: SessionStatus,
@@ -56,9 +54,10 @@ enum AnsweredQuestionNotifications {
             let newer = updatedAt.map { $0 > record.evidenceAfterMilliseconds } ?? false
             let sameRoot = root != nil && root == record.rootSessionId?.lowercased()
             let resolved: Bool
-            if let requestId = record.requestId, listed.contains(requestId) {
+            // Request IDs are only meaningful within their own conversation.
+            if let requestId = record.requestId, sameRoot, listed.contains(requestId) {
                 // A restarted tracker recovers the question under a new epoch.
-                if sameRoot, newer, let epoch = fresh?.conversationEpoch,
+                if newer, let epoch = fresh?.conversationEpoch,
                    epoch != record.conversationEpoch, let updatedAt {
                     record.conversationEpoch = epoch
                     record.evidenceAfterMilliseconds = updatedAt
