@@ -168,16 +168,22 @@ final class AnsweredQuestionNotificationTests: XCTestCase {
         XCTAssertFalse(isAnswered(alert, status: .waiting, snapshot: nil))
         XCTAssertTrue(isAnswered(alert, status: .running, snapshot: nil))
         XCTAssertTrue(isAnswered(alert, status: .idle, snapshot: snapshot(at: -30)))
-        XCTAssertTrue(isAnswered(alert, status: .running, snapshot: snapshot(at: -5)))
-        XCTAssertTrue(isAnswered(alert, status: .running, snapshot: snapshot(
+        // A live tracker can publish an empty list while it recovers a missed
+        // question, and a parallel hook can report activity meanwhile.
+        XCTAssertFalse(isAnswered(alert, status: .running, snapshot: snapshot(at: -5)))
+        XCTAssertFalse(isAnswered(alert, status: .running, snapshot: snapshot(
+            at: -5, userInputs: nil, elicitations: nil
+        )))
+        XCTAssertTrue(isAnswered(alert, status: .idle, snapshot: snapshot(at: -5)))
+        XCTAssertTrue(isAnswered(alert, status: .idle, snapshot: snapshot(
             at: -5, userInputs: nil, elicitations: nil
         )))
         XCTAssertFalse(isAnswered(alert, status: .waiting, snapshot: snapshot(at: -5)))
-        XCTAssertFalse(isAnswered(alert, status: .running, snapshot: snapshot(at: -11)))
-        XCTAssertFalse(isAnswered(alert, status: .running, snapshot: snapshot(
+        XCTAssertFalse(isAnswered(alert, status: .idle, snapshot: snapshot(at: -11)))
+        XCTAssertFalse(isAnswered(alert, status: .idle, snapshot: snapshot(
             at: -5, userInputs: ["still-pending"]
         )))
-        XCTAssertFalse(isAnswered(alert, status: .running, snapshot: snapshot(
+        XCTAssertFalse(isAnswered(alert, status: .idle, snapshot: snapshot(
             at: -5, elicitations: ["synthetic::durable-ask-user::call"]
         )))
     }

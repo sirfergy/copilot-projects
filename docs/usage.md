@@ -84,10 +84,10 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   withdraws its alert from the Mac and from any installed integration's devices. It waits for
   positive evidence: a newer tracker snapshot of the same conversation without that request,
   the tab moving to another Copilot conversation, the session closing, or, when no tracker
-  vouches for the question, the session leaving the wait (an idle turn if a tracker had
-  listed it). A permission prompt during a pending question keeps the alert. Permission and
-  completion alerts are not withdrawn automatically. Unread sessions get a bell
-  badge + a Dock badge count. Completed sessions show one blue attention dot, not two.
+  vouches for the question, the turn ending (just leaving the wait is enough when no tracker
+  is running and none listed it). A permission prompt during a pending question keeps the
+  alert. Permission and completion alerts are not withdrawn automatically. Unread sessions
+  get a bell badge + a Dock badge count. Completed sessions show one blue attention dot, not two.
   Returning to the Mac app marks the selected session read without
   needing to switch sessions.
 - **Control socket + CLI:** the same `copilot-projects` binary is also a CLI that talks to the

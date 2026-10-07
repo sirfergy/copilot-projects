@@ -102,10 +102,11 @@ enum AnsweredQuestionNotifications {
                 resolved = sameRoot && tracksQuestions && !record.mayBeUnlisted
                     && fresh?.conversationEpoch == record.conversationEpoch
             } else {
-                // A synthetic entry can vanish, and a hook can report activity,
-                // while its question is still pending, but the turn can't end.
-                resolved = listed.isEmpty
-                    && (record.listedWithoutRequestId ? status == .idle : status != .waiting)
+                // Nothing tracks this question. A synthetic entry can vanish,
+                // a tracker still recovering a missed question can publish an
+                // empty list, and a parallel hook can report activity while it
+                // is still pending, but the turn can't end until it's answered.
+                resolved = listed.isEmpty && status == .idle
             }
             if resolved {
                 answered.append(record.id)
