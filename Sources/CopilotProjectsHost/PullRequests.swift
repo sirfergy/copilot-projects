@@ -66,6 +66,8 @@ struct PullRequestSnapshot: Identifiable, Equatable, Sendable {
     let headRefName: String
     var mergeable: Mergeable = .unknown
     var mergeState: MergeState = .unknown
+    /// The merge-state request failed: `.unknown` means unread, not still computing.
+    var mergeStateFailed = false
     /// Nil when the base branch requires no review.
     let reviewDecision: ReviewDecision?
     /// The head commit's combined check and status state, nil when it has none.
@@ -73,9 +75,11 @@ struct PullRequestSnapshot: Identifiable, Equatable, Sendable {
     /// Failing checks the base branch requires; nil until known.
     var failingRequiredChecks: [String]? = nil
     /// Open, current threads whose latest comment is someone else's.
-    let unresolvedThreads: Int
+    var unresolvedThreads: Int
     /// The part of `unresolvedThreads` that Copilot code review started.
-    let unresolvedCopilotThreads: Int
+    var unresolvedCopilotThreads: Int
+    /// Where older review threads that went uncounted start; nil once all are counted.
+    var uncountedThreadsCursor: String? = nil
     let inMergeQueue: Bool
     let autoMergeEnabled: Bool
     /// The base branch merges through a merge queue, which keeps branches current itself.
@@ -249,16 +253,19 @@ enum PullRequestTriage {
         return PullRequestAssessment(stage: stage(pr), reasons: reasons, status: status(pr))
     }
 
-    /// Approved (or needing no review), mergeable by you, and with no required
-    /// check failing or pending.
+    /// Approved (or needing no review), mergeable by you, with no required
+    /// check failing or pending, and every review thread counted.
     static func isReady(_ pr: PullRequestSnapshot) -> Bool {
-        guard !pr.isDraft, pr.viewerCanMerge, pr.mergeable != .conflicting else { return false }
+        guard !pr.isDraft, pr.viewerCanMerge, pr.mergeable != .conflicting,
+              pr.uncountedThreadsCursor == nil else { return false }
         guard pr.reviewDecision == .approved || pr.reviewDecision == nil else { return false }
         switch pr.mergeState {
         case .clean, .hasHooks, .unstable:
             return true
         case .unknown:
-            // GitHub is still computing; trust the checks we can see.
+            // GitHub is still computing; trust the checks we can see. A failed
+            // read says nothing, so it isn't ready.
+            guard !pr.mergeStateFailed else { return false }
             return pr.checks == nil || pr.checks == .success
                 || (pr.checksFailing && pr.failingRequiredChecks?.isEmpty == true)
         case .behind, .blocked, .dirty, .draft:

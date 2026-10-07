@@ -186,6 +186,19 @@ final class PullRequestTriageTests: XCTestCase {
         XCTAssertEqual(unstable.reasons, [.readyToMerge])
     }
 
+    func testUnreadMergeStateAndUncountedThreadsAreNeverReady() {
+        var unread = makePR(mergeState: .unknown, review: .approved)
+        XCTAssertTrue(PullRequestTriage.isReady(unread), "GitHub still computing: the checks decide")
+        unread.mergeStateFailed = true
+        XCTAssertFalse(PullRequestTriage.isReady(unread), "a failed read says nothing")
+        XCTAssertTrue(PullRequestTriage.assess(unread, session: session, now: now).reasons.isEmpty)
+
+        var truncated = makePR(mergeState: .clean, review: .approved)
+        truncated.uncountedThreadsCursor = "older"
+        XCTAssertFalse(PullRequestTriage.isReady(truncated), "an uncounted thread could be open")
+        XCTAssertTrue(PullRequestTriage.assess(truncated, session: session, now: now).reasons.isEmpty)
+    }
+
     func testNudgesForMissingSessionsAndQuietPullRequests() {
         let orphan = PullRequestTriage.assess(makePR(updated: -4 * 86_400), session: nil, now: now)
         XCTAssertEqual(orphan.reasons, [.noSession, .stale(days: 4)])
@@ -329,6 +342,17 @@ final class PullRequestServiceTests: XCTestCase {
         XCTAssertEqual(snapshot.checks, .pending)
         XCTAssertTrue(snapshot.inMergeQueue)
         XCTAssertFalse(snapshot.autoMergeEnabled)
+        XCTAssertFalse(snapshot.viewerCanMerge, "a permission GitHub didn't report can't merge")
+        XCTAssertNil(snapshot.uncountedThreadsCursor)
+
+        let writable = try decoder.decode(PullRequestNodes.Node.self, from: Data(json.replacingOccurrences(
+            of: #""nameWithOwner":"GitHub/Repo"}"#, with: #""nameWithOwner":"GitHub/Repo","viewerPermission":"WRITE"}"#
+        ).utf8))
+        XCTAssertEqual(writable.snapshot(viewerLogins: ["me"])?.viewerCanMerge, true)
+        let long = try decoder.decode(PullRequestNodes.Node.self, from: Data(json.replacingOccurrences(
+            of: #""reviewThreads":{"#, with: #""reviewThreads":{"pageInfo":{"hasPreviousPage":true,"startCursor":"older"},"#
+        ).utf8))
+        XCTAssertEqual(long.snapshot(viewerLogins: ["me"])?.uncountedThreadsCursor, "older")
 
         let closed = try decoder.decode(PullRequestNodes.Node.self, from: Data(json.replacingOccurrences(of: "\"OPEN\"", with: "\"MERGED\"").utf8))
         XCTAssertNil(closed.snapshot(viewerLogins: ["me"]))
@@ -404,5 +428,129 @@ final class PullRequestServiceTests: XCTestCase {
         let prompt = PullRequestsModel.startingPrompt(for: [makePR(1), makePR(2, repo: "github/hydro")])
         XCTAssertTrue(prompt.hasPrefix("Help me move these pull requests forward:"))
         XCTAssertTrue(prompt.contains("- https://github.com/github/github/pull/1\n- https://github.com/github/hydro/pull/2"))
+    }
+}
+
+/// Answers GitHub GraphQL requests to `host` from `respond`.
+final class GraphQLStub: URLProtocol {
+    static let host = "graphql.stub.invalid"
+    static var endpoint: URL { URL(string: "https://\(host)/graphql")! }
+    /// Token and request body → HTTP status and response body.
+    static var respond: (String, [String: Any]) -> (Int, String) = { _, _ in (500, "") }
+
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == host }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        var data = request.httpBody ?? Data()
+        if data.isEmpty, let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                data.append(buffer, count: count)
+            }
+        }
+        let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        let token = (request.value(forHTTPHeaderField: "Authorization") ?? "").replacingOccurrences(of: "bearer ", with: "")
+        let (status, text) = Self.respond(token, body)
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(text.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+final class PullRequestServiceRequestTests: XCTestCase {
+    private let service = PullRequestService(graphQL: GitHubGraphQL(endpoint: GraphQLStub.endpoint))
+
+    override func setUp() {
+        super.setUp()
+        URLProtocol.registerClass(GraphQLStub.self)
+    }
+
+    override func tearDown() {
+        URLProtocol.unregisterClass(GraphQLStub.self)
+        GraphQLStub.respond = { _, _ in (500, "") }
+        super.tearDown()
+    }
+
+    private func thread(resolved: Bool, by login: String) -> String {
+        """
+        {"isResolved":\(resolved),"isOutdated":false,"opener":{"nodes":[{"author":{"login":"\(login)"}}]},\
+        "latest":{"nodes":[{"author":{"login":"\(login)"}}]}}
+        """
+    }
+
+    private func pullRequest(_ number: Int, olderThreads cursor: String) -> String {
+        """
+        {"id":"PR_\(number)","number":\(number),"title":"long review","url":"https://github.com/o/r/pull/\(number)",
+         "isDraft":false,"state":"OPEN","createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-06T00:00:00Z",
+         "headRefName":"me/long-review-\(number)","author":{"login":"good"},
+         "repository":{"nameWithOwner":"o/r","viewerPermission":"WRITE"},"reviewDecision":null,
+         "autoMergeRequest":null,"mergeQueueEntry":null,
+         "reviewThreads":{"pageInfo":{"hasPreviousPage":true,"startCursor":"\(cursor)"},
+           "nodes":[\(thread(resolved: true, by: "alice"))]},
+         "commits":{"nodes":[]}}
+        """
+    }
+
+    func testSearchWarnsAboutAFailedAccountAndCountsOlderThreads() async throws {
+        let search = """
+        {"data":{"viewer":{"login":"good"},"search":{"issueCount":2,"pageInfo":{"hasNextPage":false,"endCursor":null},
+         "nodes":[\(pullRequest(1, olderThreads: "c1")),\(pullRequest(2, olderThreads: "broken"))]}}}
+        """
+        let olderThreads = """
+        {"data":{"node":{"reviewThreads":{"pageInfo":{"hasPreviousPage":false,"startCursor":"c0"},
+         "nodes":[\(thread(resolved: false, by: "copilot-pull-request-reviewer")),\(thread(resolved: true, by: "alice"))]}}}}
+        """
+        GraphQLStub.respond = { token, body in
+            let query = body["query"] as? String ?? ""
+            let variables = body["variables"] as? [String: Any] ?? [:]
+            if token == "bad" { return (502, "") }
+            if query.contains("search(") { return (200, search) }
+            if query.contains("before: $cursor"), variables["cursor"] as? String == "c1" { return (200, olderThreads) }
+            return (500, "")
+        }
+        let fetch = try await service.search(
+            accounts: [GitHubAccount(login: "bad", token: "bad"), GitHubAccount(login: "good", token: "good")], owners: []
+        )
+        XCTAssertEqual(fetch.warnings.first, "Couldn’t read bad’s pull requests: GitHub returned HTTP 502.")
+        let byNumber = Dictionary(uniqueKeysWithValues: fetch.pullRequests.map { ($0.key.number, $0) })
+        XCTAssertEqual(byNumber[1]?.unresolvedThreads, 1, "an open thread past the first page still counts")
+        XCTAssertEqual(byNumber[1]?.unresolvedCopilotThreads, 1)
+        XCTAssertNil(byNumber[1]?.uncountedThreadsCursor)
+        XCTAssertEqual(byNumber[2]?.uncountedThreadsCursor, "broken", "threads that couldn't be read stay uncounted")
+        XCTAssertFalse(PullRequestTriage.isReady(try XCTUnwrap(byNumber[2])))
+    }
+
+    func testEnrichFailsClosedAndCountsStaleRequiredChecks() async throws {
+        let contexts = """
+        {"data":{"node":{"commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{
+         "pageInfo":{"hasNextPage":false,"endCursor":null},
+         "nodes":[{"name":"build","conclusion":"STALE","isRequired":true},{"name":"lint","conclusion":"FAILURE","isRequired":false}]
+        }}}}]}}}}
+        """
+        GraphQLStub.respond = { _, body in
+            let query = body["query"] as? String ?? ""
+            let id = (body["variables"] as? [String: Any])?["id"] as? String
+            if query.contains("mergeStateStatus") {
+                return id == "n1" ? (502, "") : (200, #"{"data":{"node":{"mergeable":"MERGEABLE","mergeStateStatus":"UNKNOWN"}}}"#)
+            }
+            if query.contains("contexts(") { return (200, contexts) }
+            return (500, "")
+        }
+        let unread = makePR(1, mergeState: .unknown, review: .approved)
+        let stale = makePR(2, mergeState: .unknown, review: .approved, checks: .failure)
+        let enriched = await service.enrich([unread, stale], tokens: [unread.key: "t", stale.key: "t"])
+        XCTAssertTrue(enriched[0].mergeStateFailed)
+        XCTAssertFalse(PullRequestTriage.isReady(enriched[0]), "a failed merge-state read isn't ready")
+        XCTAssertFalse(enriched[1].mergeStateFailed)
+        XCTAssertEqual(enriched[1].failingRequiredChecks, ["build"], "a stale required check fails")
+        XCTAssertFalse(PullRequestTriage.isReady(enriched[1]))
     }
 }

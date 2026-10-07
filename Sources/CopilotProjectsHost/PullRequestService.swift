@@ -142,6 +142,15 @@ struct GitHubGraphQL: Sendable {
 
 /// The GraphQL shapes pull request fields decode from.
 enum PullRequestNodes {
+    static let threadFields = """
+    fragment ReviewThreadFields on PullRequestReviewThread {
+      isResolved isOutdated
+      opener: comments(first: 1) { nodes { author { login } } }
+      latest: comments(last: 1) { nodes { author { login } } }
+    }
+    """
+
+    /// The newest review threads come first: they are the ones still open.
     static let fields = """
     fragment PullRequestFields on PullRequest {
       id number title url isDraft state createdAt updatedAt headRefName isMergeQueueEnabled
@@ -150,15 +159,13 @@ enum PullRequestNodes {
       reviewDecision
       autoMergeRequest { enabledAt }
       mergeQueueEntry { state }
-      reviewThreads(first: 60) {
-        nodes {
-          isResolved isOutdated
-          opener: comments(first: 1) { nodes { author { login } } }
-          latest: comments(last: 1) { nodes { author { login } } }
-        }
+      reviewThreads(last: 60) {
+        pageInfo { hasPreviousPage startCursor }
+        nodes { ...ReviewThreadFields }
       }
       commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
     }
+    \(threadFields)
     """
 
     struct Login: Decodable { let login: String? }
@@ -172,10 +179,36 @@ enum PullRequestNodes {
         let latest: Comments?
     }
 
+    struct Threads: Decodable {
+        struct PageInfo: Decodable { let hasPreviousPage: Bool?; let startCursor: String? }
+        let pageInfo: PageInfo?
+        let nodes: [Thread?]?
+
+        /// Where the older threads this page left out start; nil when there are none.
+        var earlierCursor: String? {
+            pageInfo?.hasPreviousPage == true ? pageInfo?.startCursor ?? "" : nil
+        }
+    }
+
+    /// Open, current threads whose latest comment is someone else's, and how
+    /// many of those Copilot code review started.
+    static func count(_ threads: [Thread?], viewerLogins: Set<String>) -> (unresolved: Int, copilot: Int) {
+        var unresolved = 0
+        var copilot = 0
+        for thread in threads {
+            guard let thread, thread.isResolved == false, thread.isOutdated != true else { continue }
+            let latest = thread.latest?.nodes?.last??.author?.login?.lowercased()
+            if let latest, viewerLogins.contains(latest) { continue }
+            unresolved += 1
+            let opener = thread.opener?.nodes?.first??.author?.login?.lowercased() ?? ""
+            if opener.hasPrefix("copilot") { copilot += 1 }
+        }
+        return (unresolved, copilot)
+    }
+
     struct Node: Decodable {
         struct Repository: Decodable { let nameWithOwner: String?; let viewerPermission: String? }
         struct Present: Decodable {}
-        struct Threads: Decodable { let nodes: [Thread?]? }
         struct Rollup: Decodable { let state: String? }
         struct Commit: Decodable { let statusCheckRollup: Rollup? }
         struct CommitNode: Decodable { let commit: Commit? }
@@ -205,16 +238,7 @@ enum PullRequestNodes {
                   let repository = repository?.nameWithOwner,
                   let key = PullRequestKey(repository: repository, number: number),
                   state == nil || state == "OPEN" else { return nil }
-            var unresolved = 0
-            var copilot = 0
-            for thread in reviewThreads?.nodes ?? [] {
-                guard let thread, thread.isResolved == false, thread.isOutdated != true else { continue }
-                let latest = thread.latest?.nodes?.last??.author?.login?.lowercased()
-                if let latest, viewerLogins.contains(latest) { continue }
-                unresolved += 1
-                let opener = thread.opener?.nodes?.first??.author?.login?.lowercased() ?? ""
-                if opener.hasPrefix("copilot") { copilot += 1 }
-            }
+            let threads = PullRequestNodes.count(reviewThreads?.nodes ?? [], viewerLogins: viewerLogins)
             let rollup = commits?.nodes?.last??.commit?.statusCheckRollup?.state
             return PullRequestSnapshot(
                 key: key, nodeId: id, repository: repository, title: title, url: url,
@@ -225,12 +249,14 @@ enum PullRequestNodes {
                 headRefName: headRefName ?? "",
                 reviewDecision: reviewDecision.flatMap(PullRequestSnapshot.ReviewDecision.init(rawValue:)),
                 checks: rollup.flatMap(PullRequestSnapshot.CheckState.init(rawValue:)),
-                unresolvedThreads: unresolved,
-                unresolvedCopilotThreads: copilot,
+                unresolvedThreads: threads.unresolved,
+                unresolvedCopilotThreads: threads.copilot,
+                uncountedThreadsCursor: reviewThreads?.earlierCursor,
                 inMergeQueue: mergeQueueEntry != nil,
                 autoMergeEnabled: autoMergeRequest != nil,
                 isMergeQueueEnabled: isMergeQueueEnabled ?? false,
-                viewerCanMerge: ["ADMIN", "MAINTAIN", "WRITE"].contains(self.repository?.viewerPermission ?? "WRITE")
+                // A permission GitHub didn't report can't merge.
+                viewerCanMerge: ["ADMIN", "MAINTAIN", "WRITE"].contains(self.repository?.viewerPermission ?? "")
             )
         }
     }
@@ -289,6 +315,7 @@ struct PullRequestService: Sendable {
         let text = Self.searchQuery(owners: owners)
         var fetch = PullRequestFetch()
         var failures: [GitHubGraphQLError] = []
+        var accountWarnings: [String] = []
         for account in accounts {
             var cursor: String?
             var found: [PullRequestSnapshot] = []
@@ -313,19 +340,25 @@ struct PullRequestService: Sendable {
                     guard hasMore, let next = data.search.pageInfo.endCursor else { break }
                     cursor = next
                 }
-            } catch let error as GitHubGraphQLError {
-                failures.append(error)
-                continue
             } catch {
-                failures.append(GitHubGraphQLError(status: nil, message: error.localizedDescription))
+                let failure = error as? GitHubGraphQLError ?? GitHubGraphQLError(status: nil, message: error.localizedDescription)
+                failures.append(failure)
+                let name = viewer.isEmpty ? "a signed-in account" : viewer
+                accountWarnings.append("Couldn’t read \(name)’s pull requests: \(failure.message)")
                 continue
             }
             if hasMore { fetch.omitted += max(0, total - found.count) }
-            for pr in found { fetch.add(pr, token: account.token) }
+            let mine: Set<String> = [viewer.lowercased()]
+            for pr in found where fetch.tokens[pr.key] == nil {
+                let counted = await countingEarlierThreads(pr, token: account.token, viewerLogins: mine)
+                fetch.add(counted, token: account.token)
+            }
         }
         if fetch.logins.isEmpty, let failure = failures.first {
             throw failure.isUnauthorized ? PullRequestFetchError.notSignedIn : PullRequestFetchError.failed(failure.message)
         }
+        // Missing an account's pull requests matters more than a partial answer.
+        fetch.warnings.insert(contentsOf: accountWarnings, at: 0)
         return fetch
     }
 
@@ -370,7 +403,8 @@ struct PullRequestService: Sendable {
                     }
                     guard let author = node.author?.login?.lowercased(), logins.contains(author),
                           let snapshot = node.snapshot(viewerLogins: logins) else { continue }
-                    result.found.append((snapshot, account.token))
+                    let counted = await countingEarlierThreads(snapshot, token: account.token, viewerLogins: logins)
+                    result.found.append((counted, account.token))
                 }
             }
             remaining = unresolved
@@ -415,6 +449,8 @@ struct PullRequestService: Sendable {
         if let node = try? await graphQL.run(query, variables: ["id": pr.nodeId], token: token, as: Payload.self).data?.node {
             pr.mergeable = node.mergeable.flatMap(PullRequestSnapshot.Mergeable.init(rawValue:)) ?? .unknown
             pr.mergeState = node.mergeStateStatus.flatMap(PullRequestSnapshot.MergeState.init(rawValue:)) ?? .unknown
+        } else {
+            pr.mergeStateFailed = true
         }
         if pr.checksFailing {
             pr.failingRequiredChecks = await failingRequiredChecks(pr, token: token)
@@ -422,8 +458,43 @@ struct PullRequestService: Sendable {
         return pr
     }
 
+    /// Counts the review threads older than the first page, so a long review
+    /// can't hide an open thread. Leaves `uncountedThreadsCursor` set when it can't.
+    func countingEarlierThreads(
+        _ pr: PullRequestSnapshot, token: String, viewerLogins: Set<String>
+    ) async -> PullRequestSnapshot {
+        struct Payload: Decodable {
+            struct Node: Decodable { let reviewThreads: PullRequestNodes.Threads? }
+            let node: Node?
+        }
+        let query = """
+        query($id: ID!, $cursor: String!) {
+          node(id: $id) { ... on PullRequest {
+            reviewThreads(last: 100, before: $cursor) {
+              pageInfo { hasPreviousPage startCursor }
+              nodes { ...ReviewThreadFields }
+            }
+          } }
+        }
+        \(PullRequestNodes.threadFields)
+        """
+        var pr = pr
+        for _ in 0..<10 {
+            guard let cursor = pr.uncountedThreadsCursor, !cursor.isEmpty,
+                  let response = try? await graphQL.run(
+                      query, variables: ["id": pr.nodeId, "cursor": cursor], token: token, as: Payload.self
+                  ),
+                  let threads = response.data?.node?.reviewThreads else { return pr }
+            let counts = PullRequestNodes.count(threads.nodes ?? [], viewerLogins: viewerLogins)
+            pr.unresolvedThreads += counts.unresolved
+            pr.unresolvedCopilotThreads += counts.copilot
+            pr.uncountedThreadsCursor = threads.earlierCursor
+        }
+        return pr
+    }
+
     static let failingConclusions: Set<String> = [
-        "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE",
+        "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE",
     ]
 
     /// Names of failing checks the base branch requires; nil when they can't be read.
