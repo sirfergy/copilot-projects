@@ -193,15 +193,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // When the app is activated (clicked / ⌘-Tab'd back), put keyboard focus
-        // on the visible terminal instead of the sidebar list.
+        // on the visible terminal instead of the sidebar list. With the Pull
+        // Requests window in front, the workspace's session hasn't been seen.
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
+                guard !AuxiliaryWindows.contains(NSApp.keyWindow) else { return }
                 self?.model.markActiveSessionSeen()
                 if self?.input.hasWorkspaceSheet == false {
                     self?.model.focusActiveTerminal()
                 }
+            }
+        }
+
+        // Coming back to the workspace from another window of this app shows its session.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard NSApp.isActive, let key = NSApp.keyWindow, !AuxiliaryWindows.contains(key) else { return }
+                self?.model.markActiveSessionSeen()
             }
         }
     }

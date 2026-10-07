@@ -556,7 +556,8 @@ final class AppModel: ObservableObject {
                 promptStatusTimestamp: promptStatusTimestamp
             )
         },
-        isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive },
+        // The workspace is on screen: the app is active and no other window of it has the keyboard.
+        isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive && !AuxiliaryWindows.contains(NSApp.keyWindow) },
         agentActivityDirectory: URL = Paths.sessionsDir,
         resumeMarkerDirectory: URL = Paths.sessionsDir,
         remotePromptLiveSessions: ((Set<String>) -> Set<String>)? = nil,
