@@ -71,6 +71,9 @@ discards it. Closing the drawer or switching sessions dismisses that preview.
   connected Copilot CLI supports them.
 - **Find any session.** Press `⌘K` to search every project's sessions by name,
   project, folder, or what you worked on. Luna suggests matches by meaning.
+- **Pull requests by goal.** Press `⇧⌘P` for a separate window that lays out your
+  open pull requests as goal lanes across Draft, Checks, Review, and Ready, flags
+  the ones that need you, and takes you to the session working on them.
 - **Local pull-request reviews.** Choose **Review Pull Request…** from the split
   button's dropdown to open a Copilot CLI session with a local adversarial-review
   prompt for a GitHub pull request.
@@ -103,6 +106,7 @@ accessibility labels.
 | End the current session | `⌘W` |
 | Next / previous session | `⌃Tab` / `⌃⇧Tab` |
 | Find a session | `⌘K` |
+| Show pull requests | `⇧⌘P` |
 | Jump to a project | `⌘1`–`⌘9` |
 | Jump to a session | `⌃1`–`⌃9` |
 | Show / hide Projects | `⌘0` |
@@ -127,6 +131,44 @@ sessions to your Copilot history or load your MCP servers. It sees each
 session's name, project, folder, and short excerpts of its first and recent
 requests and latest reply. If the Copilot CLI is missing or signed out, the
 instant results still work and the finder says why Luna couldn't help.
+
+### Pull requests by goal
+
+**Pull Requests** (`⇧⌘P`, in the Window menu and the menu bar extra) opens a
+separate window showing your open pull requests. Each row is a goal: a set of
+pull requests working toward one outcome. Its columns are the stages Draft,
+Checks, Review, and Ready, so one row shows how far a goal has got and what is
+holding it up.
+
+- **Goals come from your sessions.** A pull request belongs to the live Copilot
+  session whose conversation keeps naming its head branch: the session that pushes
+  the branch, not one that merely reviews or lists it. Pull requests sharing a head
+  branch across repositories join the same goal. To regroup one, open its
+  menu and choose **Move to Goal ▸** another goal or **New Goal…**.
+- **What needs you** is ranked: a linked session waiting for your input, merge
+  conflicts, failing *required* checks (optional failures don't count), changes
+  requested, unresolved review threads (Copilot's are called out), ready to merge,
+  and behind its base branch (only after review, and never with a merge queue).
+  Pull requests with no live session, or with no activity for three days, are
+  flagged more quietly. Goals whose sessions need you come first.
+- **Act from it.** **Go to Session** switches the workspace to the goal's session.
+  A goal with no session offers **Start Session**, which opens Copilot in the
+  current project (or one you pick) with the pull request links as its prompt.
+  Double-click a pull request, or press `⌘Return`, to open it on GitHub. Use `↑`/`↓` to
+  move and Return to go to its session.
+- **Owners** limits the window to organizations or users you choose, such as
+  `github`. Pull requests elsewhere still appear when a session is working on them.
+  Leave it empty to include every owner, up to your hundred most recently
+  updated pull requests.
+
+The window reads GitHub with the accounts you signed in to with the GitHub CLI
+(`gh auth login`); every signed-in github.com account is included. Tokens stay in
+memory, and requests go straight to the GitHub API. It refreshes when opened
+and every five minutes while open, or on demand with `⌘R`. Matching pull requests
+to sessions reads each live session's Copilot CLI event log once, then only what
+was added since. The match counts and any goals you name are kept under
+`~/.local/state/copilot-projects/pull-requests/`. `⌘W` closes the window and never
+ends a session.
 
 VoiceOver exposes each session's selection and attention state, with separate
 select and end actions. The session-details drawer uses a fade instead of

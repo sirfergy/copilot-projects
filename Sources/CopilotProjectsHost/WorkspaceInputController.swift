@@ -56,8 +56,26 @@ final class WorkspaceInputController: ObservableObject {
         DispatchQueue.main.async { [model] in model.focusActiveTerminal() }
     }
 
+    /// Shortcuts of the Session and View menus that act on the workspace window:
+    /// find, new session, next/previous session, and show projects.
+    static func isWorkspaceMenuShortcut(_ event: NSEvent, mods: NSEvent.ModifierFlags) -> Bool {
+        let key = event.charactersIgnoringModifiers?.lowercased()
+        switch mods {
+        case .command:
+            return key == "k" || key == "t" || key == "0"
+        case [.command, .option]:
+            return key == "t" || key == "†"
+        case [.command, .shift]:
+            // [ and ] by key position: Shift turns their characters into { and }.
+            return event.keyCode == 33 || event.keyCode == 30
+        default:
+            return false
+        }
+    }
+
     func allowsWorkspaceEvents(_ event: NSEvent) -> Bool {
         imagePreview == nil && NSApp.modalWindow == nil
+            && !AuxiliaryWindows.contains(windowNumber: event.windowNumber)
             && event.window?.sheetParent == nil && event.window?.attachedSheet == nil
             && NSApp.keyWindow?.sheetParent == nil && NSApp.keyWindow?.attachedSheet == nil
     }
@@ -71,6 +89,17 @@ final class WorkspaceInputController: ObservableObject {
         guard NSApp.modalWindow == nil else {
             clearNumberHint()
             return event
+        }
+        // Another window's keys are its own. ⌘W closes it: the End Session menu
+        // shortcut would otherwise end the workspace's selected session. Other
+        // workspace menu shortcuts would act on a window that isn't in front.
+        if AuxiliaryWindows.contains(windowNumber: event.windowNumber) {
+            clearNumberHint()
+            if mods == .command, event.charactersIgnoringModifiers == "w" {
+                event.window?.performClose(nil)
+                return nil
+            }
+            return Self.isWorkspaceMenuShortcut(event, mods: mods) ? nil : event
         }
         if let finder = sessionFinder {
             clearNumberHint()

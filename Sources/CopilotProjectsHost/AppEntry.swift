@@ -19,9 +19,28 @@ struct CopilotProjectsApp: App {
             WorkspaceCommands(model: appDelegate.model, input: appDelegate.input,
                               keepRunning: $keepRunning, showsProjects: $showsProjects)
         }
+        Window(PullRequestsWindow.title, id: PullRequestsWindow.id) {
+            PullRequestsView(pullRequests: appDelegate.pullRequests)
+                .frame(minWidth: 880, minHeight: 480)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1200, height: 760)
         MenuBarExtra("Copilot Projects", systemImage: "terminal", isInserted: $keepRunning) {
             HostStatusMenu(keepRunning: $keepRunning)
         }
+    }
+}
+
+/// Opens (or brings forward) the Pull Requests window.
+struct OpenPullRequestsButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Pull Requests") {
+            openWindow(id: PullRequestsWindow.id)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        .keyboardShortcut("p", modifiers: [.command, .shift])
     }
 }
 
@@ -44,6 +63,10 @@ private struct WorkspaceCommands: Commands {
             Toggle("Show Projects", isOn: $showsProjects)
                 .keyboardShortcut("0", modifiers: .command)
                 .disabled(input.hasWorkspaceSheet)
+        }
+        CommandGroup(before: .windowList) {
+            OpenPullRequestsButton()
+            Divider()
         }
         CommandMenu("Session") {
             Group {
@@ -72,6 +95,7 @@ private struct WorkspaceCommands: Commands {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let model: AppModel
     let input: WorkspaceInputController
+    let pullRequests: PullRequestsModel
     private let nativeNotifications: NotificationManager
     private let integration: (any HostIntegration)?
     private let notifications: HostNotificationPoster
@@ -90,6 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notifications = HostNotificationPoster(native: native, integration: integration)
         self.model = model
         input = WorkspaceInputController(model: model)
+        pullRequests = PullRequestsModel(appModel: model)
         model.attach(integration: integration)
         super.init()
     }
@@ -217,6 +242,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleKeyEvent(_ event: NSEvent) -> NSEvent? {
         if event.type == .keyDown {
             return input.handleKeyDown(event) { hintWork?.cancel() }
+        }
+        // Auxiliary windows keep the native title-strip double-click; nothing else
+        // below applies to them.
+        if event.type == .leftMouseDown, event.clickCount == 2,
+           let window = event.window, AuxiliaryWindows.contains(window),
+           isInTitleStrip(event, window: window) {
+            performTitleBarDoubleClick(window)
+            return nil
         }
         guard input.allowsWorkspaceEvents(event) else {
             hintWork?.cancel()
