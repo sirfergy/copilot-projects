@@ -561,6 +561,41 @@ final class RemotePullRequestsOverviewTests: XCTestCase {
         try await settle(model)
     }
 
+    func testFreshActionsRematchBeforeTrustingTranscriptConflicts() async throws {
+        for kind in ["start", "resume"] {
+            let reader = OverviewTranscriptReader()
+            addTeardownBlock { await reader.release() }
+            let pr = makePR()
+            let cid = UUID().uuidString.lowercased()
+            let candidate = ResumableSession(copilotSessionId: cid, name: "Previous", cwd: root.path, lastActive: now)
+            current?.projects[0].sessions = [
+                .init(id: "live", title: "Live", status: .idle, copilotSessionId: UUID().uuidString.lowercased()),
+            ]
+            let (provider, model) = make(transcriptIndex: reader)
+            model.apply(.snapshot(current!))
+            model.show([pr], links: [pr.key: "live"], resumable: [pr.key: candidate], updated: now)
+            current?.projects[0].sessions[0].copilotSessionId = UUID().uuidString.lowercased()
+            let request = RemotePullRequestSessionRequest(
+                requestId: UUID(), kind: kind, projectId: "p",
+                pullRequestKeys: [pr.key.description], copilotSessionId: kind == "resume" ? cid : nil
+            )
+            current?.projects[0].sessions[0].pullRequestKeys = [pr.key.description]
+            XCTAssertEqual(provider.validate(request, workspace: current!), .conflict,
+                           "Persisted live claims remain authoritative before matching finishes")
+            current?.projects[0].sessions[0].pullRequestKeys = nil
+            guard case .stale = provider.validate(request, workspace: current!) else {
+                XCTFail("\(kind) must wait for rematching rather than conflict on an old transcript link")
+                continue
+            }
+            XCTAssertTrue(model.isMatchingSessions)
+            try await waitUntil { await reader.reads == 1 }
+            await reader.release()
+            try await settle(model)
+            XCTAssertTrue(model.sessionsKnown)
+            XCTAssertNil(model.links[pr.key])
+        }
+    }
+
     func testExistingResumeRejectsOtherLiveClaimsButAllowsItsOwn() throws {
         let pr = makePR()
         let cid = UUID().uuidString.lowercased()
