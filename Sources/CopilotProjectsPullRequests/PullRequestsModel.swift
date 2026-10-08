@@ -313,6 +313,9 @@ final class PullRequestsModel: ObservableObject {
 
             await waitForFirstWorkspaceAnswer()
             let matchedLive = isConnected
+            // Set before matching, so Copilot Projects answering while it runs
+            // queues another refresh instead of being missed.
+            matchedWithoutSessions = !matchedLive
             let newLinks: [PullRequestKey: String]
             if knowsSessions {
                 let sources = transcriptSources()
@@ -325,7 +328,6 @@ final class PullRequestsModel: ObservableObject {
                 // again once Copilot Projects answers.
                 newLinks = links
             }
-            matchedWithoutSessions = !matchedLive
             if firstLoad {
                 pullRequests = Self.inScope(fetch.pullRequests, owners: ownerList)
                 links = newLinks

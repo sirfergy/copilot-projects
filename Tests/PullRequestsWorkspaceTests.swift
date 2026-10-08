@@ -520,6 +520,37 @@ final class PullRequestsAppSupportTests: XCTestCase {
         XCTAssertTrue(PullRequestsAppLock.failureNote(errno: ENOTDIR).contains("Not a directory"))
     }
 
+    @MainActor
+    func testActivationFollowsARestartedCopilotProjectsOnlyToItsOwnBundle() throws {
+        let ended = Process()
+        ended.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try ended.run()
+        ended.waitUntilExit()
+        let gone = ended.processIdentifier
+        XCTAssertNil(PullRequestsHostApp.runningHost(gone, hostURL: nil), "a development build has no bundle to look for")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = root.appendingPathComponent("Copilot Projects.app")
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        let plist: [String: Any] = ["CFBundleIdentifier": "com.example.not-running.\(UUID().uuidString)"]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            .write(to: app.appendingPathComponent("Contents/Info.plist"))
+        XCTAssertNil(PullRequestsHostApp.runningHost(gone, hostURL: app))
+
+        let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
+        if finder.count == 1 {
+            let live = finder[0].processIdentifier
+            XCTAssertEqual(PullRequestsHostApp.runningHost(live, hostURL: nil)?.processIdentifier, live)
+            XCTAssertEqual(
+                PullRequestsHostApp.runningHost(gone, hostURL: URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app"))?
+                    .processIdentifier,
+                finder[0].processIdentifier,
+                "a host that restarted is found again by its bundle"
+            )
+        }
+    }
+
     func testAMissingPidStillHandsOffToTheOnlyOtherCopyOfThisApp() {
         let bring = PullRequestsAppDelegate.copyToBringForward
         XCTAssertEqual(bring(7, [(7, false), (8, true)]), 7, "the recorded lock holder wins, wherever it lives")
