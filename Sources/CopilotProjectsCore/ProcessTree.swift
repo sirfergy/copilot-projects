@@ -227,24 +227,31 @@ public enum ProcessTree {
     /// CLI's `--resume=<id>` or `--resume <id>` options, or the shell command
     /// Copilot Projects runs to resume it (`TerminalController.startupProgram`),
     /// known by the fallback only it prints. A prompt never counts: neither the
-    /// value of a prompt option nor a command that merely quotes one.
+    /// value of a prompt option nor a command that merely quotes one; nor does
+    /// another program given the flag, as a search pattern say.
     public static func resumes(_ arguments: [String], copilotSessionId: String) -> Bool {
         let id = copilotSessionId.lowercased()
         // Quoting a prompt escapes each `'`, so a prompt can never spell this.
         let fallback = "|| printf '\\n[copilot projects] could not resume copilot session \(id)\\n'"
         let promptOptions: Set<String> = ["--interactive", "-i", "--prompt", "-p"]
+        var copilot = false
         var index = 0
         while index < arguments.count {
             let argument = arguments[index].lowercased()
             let next = index + 1 < arguments.count ? arguments[index + 1].lowercased() : nil
-            if argument == "-c", let next {
+            if argument == "--" {
+                return false
+            } else if argument == "-c", let next {
                 if next.contains(fallback) { return true }
                 index += 2
             } else if promptOptions.contains(argument) {
                 index += 2
-            } else if argument == "--resume=" + id || (argument == "--resume" && next == id) {
+            } else if copilot, argument == "--resume=" + id || (argument == "--resume" && next == id) {
                 return true
             } else {
+                // The CLI, or the package a loader runs it from.
+                copilot = copilot || (argument as NSString).lastPathComponent == "copilot"
+                    || argument.contains("/@github/copilot/")
                 index += 1
             }
         }

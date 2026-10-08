@@ -327,6 +327,28 @@ final class ResumableSessionFinderTests: XCTestCase {
         XCTAssertFalse(search.deferred)
     }
 
+    func testATranscriptItCannotReadNeverHoldsUpTheCandidatesAfterIt() async throws {
+        let home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
+        let pr = makePR(61, repo: "o/r", branch: "me/after-the-locked-one")
+        let valid = transcript(mentioning: pr.headRefName, times: 3)
+        let locked = try home.addSession(
+            cwd: work, updated: Date(timeIntervalSince1970: 1_800_000_000), transcript: valid + valid,
+            said: ["github.com/o/r/pull/61"]
+        )
+        let id = try home.addSession(
+            cwd: work, updated: Date(timeIntervalSince1970: 1_700_000_000), transcript: valid,
+            said: ["github.com/o/r/pull/61"]
+        )
+        let path = home.root.appendingPathComponent("session-state/\(locked)/events.jsonl").path
+        XCTAssertEqual(chmod(path, 0), 0)
+        defer { chmod(path, 0o600) }
+        let finder = finder(home, budget: valid.utf8.count)
+        let search = await finder.search(for: [pr], liveCopilotSessionIds: [])
+        XCTAssertEqual(search.sessions[pr.key]?.copilotSessionId, id)
+        let read = await finder.lastBytesRead()
+        XCTAssertEqual(read, valid.utf8.count)
+    }
+
     func testANewBranchIsCountedOverSeveralPassesWithoutLosingWhatWasFound() async throws {
         let home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
         let first = makePR(41, repo: "o/r", branch: "me/first-branch-x")

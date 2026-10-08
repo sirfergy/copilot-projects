@@ -368,6 +368,14 @@ final class PullRequestsHostCommandTests: XCTestCase {
         XCTAssertTrue(ProcessTree.resumes(resume, copilotSessionId: id.uppercased()), "the tab's shell while it runs")
         XCTAssertTrue(ProcessTree.resumes(["/opt/copilot", "--no-remote", "--no-remote-export", "--resume=\(id)"],
                                           copilotSessionId: id), "the Copilot it starts")
+        XCTAssertTrue(ProcessTree.resumes(["copilot", "--resume", id], copilotSessionId: id), "typed by hand")
+        XCTAssertTrue(ProcessTree.resumes(
+            ["node", "/opt/homebrew/lib/node_modules/@github/copilot/index.js", "--resume=\(id)"], copilotSessionId: id
+        ), "run by its loader")
+        XCTAssertFalse(ProcessTree.resumes(["rg", "--", "--resume=\(id)", "/work"], copilotSessionId: id),
+                       "another program searching for it")
+        XCTAssertFalse(ProcessTree.resumes(["grep", "-r", "--resume=\(id)", "."], copilotSessionId: id))
+        XCTAssertFalse(ProcessTree.resumes(["copilot", "--", "--resume=\(id)"], copilotSessionId: id))
 
         // A session started to talk about it, however its prompt quotes the command.
         for prompt in [

@@ -274,7 +274,8 @@ actor ResumableTranscriptCache {
         var unread = false
         for request in requests {
             var info = stat()
-            guard stat(request.path, &info) == 0 else { continue }
+            // One it can't read would only take budget from the rest.
+            guard stat(request.path, &info) == 0, access(request.path, R_OK) == 0 else { continue }
             let modified = Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec))
             let size = Int(info.st_size)
             func reads(_ entry: PullRequestTranscriptIndex.Entry) -> Bool {
@@ -326,6 +327,9 @@ actor ResumableTranscriptCache {
             }
             return results
         }
+        // A replaced search's scans may finish after its replacement's; never
+        // let them overwrite what the replacement read.
+        guard !Task.isCancelled else { return ([:], false) }
 
         var read = 0
         var progressed = false
