@@ -72,6 +72,39 @@ final class PullRequestsPresentationTests: XCTestCase {
         XCTAssertTrue(PullRequestsPresentation.hasPartialStatus(pr))
     }
 
+    func testSessionlessTextOnlyClaimsAnActiveMatchIsMatching() {
+        for (connected, known, matching, manual, expected) in [
+            (false, false, true, false, "Session unknown"),
+            (true, false, true, false, "Matching sessions…"),
+            (true, false, false, false, "Sessions not matched"),
+            (true, true, false, false, "No session on this goal"),
+            (true, true, false, true, "Your goal · no session"),
+        ] {
+            XCTAssertEqual(PullRequestsPresentation.sessionlessText(
+                isConnected: connected, sessionsKnown: known, isMatchingSessions: matching, isManualGoal: manual
+            ), expected)
+        }
+    }
+
+    func testSpokenStatusIncludesPartialWarningAndEveryAttentionReason() {
+        var incomplete = makePR(review: .approved)
+        incomplete.isIncomplete = true
+        var uncounted = makePR(review: .approved)
+        uncounted.uncountedThreadsCursor = "more"
+        for pr in [incomplete, uncounted] {
+            let row = item(1, session: idle, pr: pr)
+            XCTAssertEqual(PullRequestChip.statusText(row), "Approved, some status unavailable")
+            XCTAssertEqual(PullRequestChip.statusText(row, checkingStatus: true), "Approved, checking status")
+        }
+        let waitingOnChecks = item(1, session: waiting, pr: makePR(checks: .failure, threads: 2))
+        XCTAssertEqual(
+            PullRequestChip.statusText(waitingOnChecks),
+            "Session needs your input, Checks failing, 2 unresolved threads, some status unavailable"
+        )
+        let complete = item(1, session: idle, pr: makePR(review: .approved))
+        XCTAssertEqual(PullRequestChip.statusText(complete, checkingStatus: true), "Approved")
+    }
+
     func testRefreshingCannotRedirectTheNextReturnToAnotherPullRequest() {
         let first = makePR(1).key
         let second = makePR(2).key
@@ -93,6 +126,37 @@ final class PullRequestsDesignCaptureTests: XCTestCase {
     private struct NoHistoricalSessions: ResumableSessionSearching {
         func search(for prs: [PullRequestSnapshot], liveCopilotSessionIds: Set<String>) async -> ResumableSearch {
             ResumableSearch()
+        }
+    }
+
+    func testNeedsYouEmptyStateDoesNotClaimUnknownGoalsAreClear() async {
+        let model = PullRequestsModel(
+            workspace: FakeWorkspace(snapshot: WorkspaceSnapshot(
+                hostProcessIdentifier: 4242, selectedProjectId: "p", projects: [
+                    .init(id: "p", name: "Features", sessions: [
+                        .init(id: "idle", title: "Feature", status: .idle),
+                    ]),
+                ]
+            )),
+            defaults: UserDefaults(suiteName: "pr-design-\(UUID().uuidString)")!,
+            stateDirectory: nil, resumableFinder: NoHistoricalSessions(),
+            isVisible: { false }, presentError: { _, _ in }
+        )
+        await model.pollWorkspace()
+        let complete = makePR()
+        var incomplete = complete
+        incomplete.isIncomplete = true
+        var uncounted = complete
+        uncounted.uncountedThreadsCursor = "more"
+        for pr in [complete, incomplete, uncounted] {
+            model.show([pr], links: [pr.key: "idle"])
+            let goals = model.goals(now: testNow)
+            XCTAssertEqual(goals.count, 1)
+            XCTAssertTrue(PullRequestsFilter.needsYou.goals(in: goals).isEmpty)
+            let state = PullRequestsView(pullRequests: model).needsYouEmptyState
+            let isPartial = PullRequestsPresentation.hasPartialStatus(pr)
+            XCTAssertEqual(state.title, isPartial ? "Some PR status is unknown" : "Nothing needs you")
+            XCTAssertEqual(state.systemImage, isPartial ? "questionmark.circle" : "checkmark.circle")
         }
     }
 

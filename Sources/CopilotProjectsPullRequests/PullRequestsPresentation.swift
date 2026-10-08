@@ -22,6 +22,14 @@ enum PullRequestsPresentation {
             || (pr.checksFailing && pr.failingRequiredChecks == nil)
     }
 
+    static func sessionlessText(
+        isConnected: Bool, sessionsKnown: Bool, isMatchingSessions: Bool, isManualGoal: Bool
+    ) -> String {
+        guard isConnected else { return "Session unknown" }
+        guard sessionsKnown else { return isMatchingSessions ? "Matching sessions…" : "Sessions not matched" }
+        return isManualGoal ? "Your goal · no session" : "No session on this goal"
+    }
+
     /// A summary describes the whole goal only when sessionless items agree too.
     static func sharesSessionState(_ goal: PullRequestGoal) -> Bool {
         Set(goal.items.map { $0.session?.id }).count == 1
