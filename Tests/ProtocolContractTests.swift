@@ -10,6 +10,88 @@ final class ProtocolContractTests: XCTestCase {
         )
     }
 
+    private func session(_ id: String, models: [RemoteAvailableModel]?) -> RemoteSessionSnapshot {
+        RemoteSessionSnapshot(
+            id: id, title: "Session \(id)", status: "idle", statusText: nil,
+            unread: false, ready: true, background: false, scheduled: false,
+            promptable: true,
+            model: RemoteModelInfo(name: "Model \(id)", reasoningEffort: "high"),
+            availableModels: models,
+            conversationEpoch: "epoch-\(id)",
+            operationSupport: .receipts,
+            operationReceipts: []
+        )
+    }
+
+    private func catalogWorkspace(stamp: Int64? = 1_700_000_000_000) -> RemoteWorkspaceSnapshot {
+        let catalog = [
+            RemoteAvailableModel(id: "auto", name: "Auto"),
+            RemoteAvailableModel(
+                id: "gpt", name: "GPT", supportedReasoningEfforts: ["low", "high"],
+                defaultReasoningEffort: "high", category: "powerful"
+            ),
+        ]
+        return RemoteWorkspaceSnapshot(
+            projects: [
+                RemoteProjectSnapshot(
+                    id: "p1", name: "One", selectedSessionId: "a",
+                    sessions: [session("a", models: catalog), session("b", models: catalog)]
+                ),
+                RemoteProjectSnapshot(
+                    id: "p2", name: "Two", selectedSessionId: nil,
+                    sessions: [session("c", models: Array(catalog.prefix(1))), session("d", models: nil)]
+                ),
+            ],
+            selectedProjectId: "p1",
+            protocolInfo: .current,
+            servedAtMilliseconds: stamp
+        )
+    }
+
+    func testKeepingAvailableModelsKeepsOnlyTheStreamedSessionsCatalog() {
+        let full = catalogWorkspace()
+        let kept = full.keepingAvailableModels(for: "c")
+        let expected = RemoteWorkspaceSnapshot(
+            projects: [
+                RemoteProjectSnapshot(
+                    id: "p1", name: "One", selectedSessionId: "a",
+                    sessions: [session("a", models: nil), session("b", models: nil)]
+                ),
+                RemoteProjectSnapshot(
+                    id: "p2", name: "Two", selectedSessionId: nil,
+                    sessions: [
+                        session("c", models: full.projects[1].sessions[0].availableModels),
+                        session("d", models: nil),
+                    ]
+                ),
+            ],
+            selectedProjectId: "p1",
+            protocolInfo: .current,
+            servedAtMilliseconds: full.servedAtMilliseconds
+        )
+        XCTAssertEqual(kept, expected)
+        XCTAssertEqual(kept.projects[1].sessions[0].availableModels?.map(\.id), ["auto"])
+    }
+
+    func testKeepingAvailableModelsWithoutAKnownSessionKeepsNone() {
+        let full = catalogWorkspace(stamp: nil)
+        for sessionId in [nil, "missing"] {
+            let kept = full.keepingAvailableModels(for: sessionId)
+            XCTAssertTrue(kept.projects.flatMap(\.sessions).allSatisfy { $0.availableModels == nil })
+            XCTAssertEqual(kept.projects.flatMap(\.sessions).map(\.id), ["a", "b", "c", "d"])
+            XCTAssertEqual(kept.projects.flatMap(\.sessions).map(\.model), full.projects.flatMap(\.sessions).map(\.model))
+            XCTAssertNil(kept.servedAtMilliseconds)
+        }
+    }
+
+    func testKeptCatalogEncodesOnlyOnceAndOmitsTheOthers() throws {
+        let kept = catalogWorkspace().keepingAvailableModels(for: "b")
+        let json = try XCTUnwrap(String(data: JSONEncoder().encode(kept), encoding: .utf8))
+        XCTAssertEqual(json.components(separatedBy: "\"availableModels\"").count - 1, 1)
+        let decoded = try JSONDecoder().decode(RemoteWorkspaceSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded, kept)
+    }
+
     func testLegacyWorkspaceRetainsItsAbsentFieldsAndBehavior() throws {
         let snapshot = try workspace("legacy-workspace")
         let session = try XCTUnwrap(snapshot.projects.first?.sessions.first)
