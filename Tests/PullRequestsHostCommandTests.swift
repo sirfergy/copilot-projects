@@ -2,6 +2,8 @@ import AppKit
 import Foundation
 import XCTest
 import CopilotProjectsCore
+import CopilotProjectsProtocol
+@testable import CopilotProjectsPullRequests
 @testable import CopilotProjectsHost
 
 /// The control commands Copilot Pull Requests uses, against a real workspace
@@ -27,7 +29,8 @@ final class PullRequestsHostCommandTests: XCTestCase {
         _ body: (Host) throws -> Void
     ) throws {
         _ = NSApplication.shared
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".scratch/pr-host-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root.appendingPathComponent("work"), withIntermediateDirectories: true)
         let keys = ["SHELL", "COPILOT_PROJECTS_STATE_DIR", "COPILOT_PROJECTS_SOCKET", "COPILOT_PROJECTS_DTACH", "COPILOT_HOME"]
         let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, ProcessInfo.processInfo.environment[$0]) })
@@ -513,6 +516,263 @@ final class PullRequestsHostCommandTests: XCTestCase {
                            "unknown-project")
             XCTAssertTrue(host.launches().isEmpty)
             XCTAssertEqual(model.project("A")?.sessions.map(\.id), ["a1", "a2"])
+        }
+    }
+}
+
+extension PullRequestsHostCommandTests {
+    private func overview(
+        _ host: Host, prs: [PullRequestSnapshot] = [makePR(1), makePR(2)],
+        resumable: [PullRequestKey: ResumableSession] = [:]
+    ) -> PullRequestsModel {
+        let engine = PullRequestsModel(
+            workspace: FakeWorkspace(snapshot: host.model.workspaceSnapshot()),
+            defaults: UserDefaults(suiteName: "host-pr-\(UUID().uuidString)")!,
+            stateDirectory: host.root.appendingPathComponent("host-cache"), loadAccounts: { [] },
+            resumableFinder: ResumableSessionFinder(
+                store: CopilotSessionStore(environment: ["COPILOT_HOME": host.root.appendingPathComponent("copilot").path]),
+                cacheURL: nil
+            ),
+            hostedReadOnly: true, readOnlyGoalsURL: host.root.appendingPathComponent("goals.json"),
+            transcriptPath: { _ in nil }, isVisible: { false }, presentError: { _, _ in XCTFail("No remote alerts") }
+        )
+        engine.apply(.snapshot(host.model.workspaceSnapshot()))
+        engine.show(prs, links: [:], resumable: resumable)
+        host.model.pullRequestsOverviewProvider = PullRequestsOverviewProvider(
+            model: engine, workspace: { [weak model = host.model] in model?.workspaceSnapshot() }
+        )
+        return engine
+    }
+
+    private func prRequest(
+        _ id: UUID = UUID(), kind: String = "start", project: String = "A",
+        keys: [String] = ["github/github#1"], cid: String? = nil
+    ) -> RemotePullRequestSessionRequest {
+        .init(requestId: id, kind: kind, projectId: project, pullRequestKeys: keys, copilotSessionId: cid)
+    }
+
+    func testRemotePullRequestStartConflictReplayRestartAndMacSelection() throws {
+        try withHost(projects: twoProjects, selectedProjectIndex: 1) { host in
+            let engine = overview(host)
+            let model = host.model
+            var windows = 0
+            model.requestMainWindow = { windows += 1 }
+            let selectedTabCwd = try XCTUnwrap(model.project("A")?.sessions.first { $0.id == "a1" }?.cwd)
+            XCTAssertNotEqual(selectedTabCwd, model.project("A")?.cwd)
+            let request = prRequest(keys: ["GITHUB/GITHUB#2", "github/github#1", "github/github#2"])
+            guard case .created(let created) = model.performRemotePullRequestSession(request) else {
+                return XCTFail("Start should create")
+            }
+            XCTAssertEqual(host.launches().count, 1)
+            XCTAssertEqual(model.selectedProjectId, "B")
+            XCTAssertEqual(model.globalSelectedSessionId, "b1")
+            XCTAssertEqual(model.project("A")?.selectedSessionId, "a1")
+            XCTAssertEqual(model.project("A")?.sessions.last?.cwd, selectedTabCwd,
+                           "same folder as local PR Start, without taking the selected tab")
+            XCTAssertEqual(windows, 0)
+            XCTAssertEqual(model.project("A")?.sessions.last?.pullRequestKeys, ["github/github#1", "github/github#2"])
+            XCTAssertEqual(host.launches()[0].prompt, PullRequestsOverviewProvider.startingPrompt(
+                for: ["github/github#1", "github/github#2"]))
+            XCTAssertEqual(model.performRemotePullRequestSession(prRequest()), .conflict,
+                           "a second UUID cannot start another tab for the linked PR")
+            XCTAssertEqual(model.performRemotePullRequestSession(prRequest(request.requestId, keys: ["github/github#1"])),
+                           .conflict)
+            engine.show([], links: [:])
+            XCTAssertEqual(model.performRemotePullRequestSession(request), .existing(created), "replay after PRs merge")
+            let restarted = host.restart()
+            XCTAssertEqual(restarted.performRemotePullRequestSession(request), .existing(created))
+            XCTAssertEqual(restarted.project("A")?.sessions.last?.pullRequestKeys,
+                           ["github/github#1", "github/github#2"])
+            XCTAssertEqual(host.launches().count, 1)
+            restarted.closeSession(projectId: "A", sessionId: created.sessionId)
+            XCTAssertEqual(restarted.performRemotePullRequestSession(request), .gone)
+            XCTAssertEqual(host.restart().performRemotePullRequestSession(request), .gone)
+        }
+    }
+
+    func testRemotePullRequestStartThenStaleResumeCannotLaunchTheSamePullRequestTwice() throws {
+        try withHost(projects: twoProjects, selectedProjectIndex: 1) { host in
+            let home = try CopilotHomeFixture(root: host.root.appendingPathComponent("copilot"))
+            let cid = try home.addSession(cwd: host.root.path, transcript: "")
+            let pr = makePR()
+            let candidate = ResumableSession(copilotSessionId: cid, name: "Previous", cwd: host.root.path, lastActive: testNow)
+            let engine = overview(host, resumable: [pr.key: candidate])
+            let start = prRequest()
+            let resume = prRequest(kind: "resume", cid: cid)
+            XCTAssertNotEqual(start.requestId, resume.requestId)
+            guard case .created(let created) = host.model.performRemotePullRequestSession(start) else {
+                return XCTFail("The first client should start a new session")
+            }
+            XCTAssertEqual(engine.resumable[pr.key], candidate, "The second client's candidate is still cached")
+            XCTAssertEqual(host.model.performRemotePullRequestSession(resume), .conflict)
+            XCTAssertEqual(host.launches().map(\.id), [created.sessionId])
+            XCTAssertEqual(host.model.performRemotePullRequestSession(start), .existing(created))
+            XCTAssertEqual(host.model.selectedProjectId, "B")
+            XCTAssertEqual(host.model.globalSelectedSessionId, "b1")
+        }
+    }
+
+    func testRemotePullRequestResumeVerifiesSubsetReturnsActualOwnerAndPreservesOriginalBinding() throws {
+        try withHost(projects: twoProjects, selectedProjectIndex: 1) { host in
+            let home = try CopilotHomeFixture(root: host.root.appendingPathComponent("copilot"))
+            let cid = try home.addSession(cwd: host.root.appendingPathComponent("work").path, transcript: "")
+            let candidate = ResumableSession(copilotSessionId: cid, name: "Previous", cwd: host.root.path, lastActive: testNow)
+            let first = makePR(1), other = makePR(2)
+            let engine = overview(host, resumable: [first.key: candidate])
+            let wrong = prRequest(kind: "resume", keys: [first.key.description, other.key.description], cid: cid)
+            guard case .stale = host.model.performRemotePullRequestSession(wrong) else { return XCTFail("subset") }
+            XCTAssertTrue(host.launches().isEmpty)
+            let original = prRequest(kind: "resume", cid: cid)
+            guard case .created(let created) = host.model.performRemotePullRequestSession(original) else {
+                return XCTFail("Resume should create")
+            }
+            let fingerprint = host.model.project("A")?.sessions.last?.creationFingerprint
+            XCTAssertEqual(host.model.selectedProjectId, "B")
+            XCTAssertEqual(host.model.globalSelectedSessionId, "b1")
+            XCTAssertEqual(host.model.project("A")?.selectedSessionId, "a1")
+            XCTAssertEqual(host.model.project("A")?.sessions.last?.cwd, host.root.appendingPathComponent("work").path)
+            XCTAssertFalse(FileManager.default.fileExists(
+                atPath: host.root.appendingPathComponent("\(created.sessionId).copilot-session").path))
+            let second = prRequest(kind: "resume", project: "B", cid: cid.uppercased())
+            guard case .existing(let existing) = host.model.performRemotePullRequestSession(second) else {
+                return XCTFail("Resume existing tab")
+            }
+            XCTAssertEqual(existing.projectId, "A", "the owning project, not the requested destination")
+            XCTAssertEqual(existing.sessionId, created.sessionId)
+            XCTAssertEqual(host.model.project("A")?.sessions.last?.creationFingerprint, fingerprint)
+            engine.show([], links: [:])
+            XCTAssertEqual(host.model.performRemotePullRequestSession(original), .existing(created))
+            guard case .existing(let third) = host.model.performRemotePullRequestSession(
+                prRequest(kind: "resume", project: "B", cid: cid)
+            ) else { return XCTFail("An existing tab's verified associations outlive the open PR list") }
+            XCTAssertEqual(third.sessionId, created.sessionId)
+            let restarted = host.restart()
+            XCTAssertEqual(restarted.performRemotePullRequestSession(original), .existing(created))
+            XCTAssertEqual(restarted.performRemotePullRequestSession(second), .existing(existing))
+            XCTAssertEqual(host.launches().count, 1)
+        }
+    }
+
+    func testRemotePullRequestResumeGoneInUseMissingCwdAndUnknownProject() throws {
+        try withHost(projects: twoProjects) { host in
+            let home = try CopilotHomeFixture(root: host.root.appendingPathComponent("copilot"))
+            let held = try home.addSession(cwd: host.root.path, transcript: "")
+            try home.lock(held)
+            let missing = try home.addSession(cwd: host.root.appendingPathComponent("deleted").path, transcript: "")
+            let gone = UUID().uuidString.lowercased()
+            let good = try home.addSession(cwd: host.root.path, transcript: "")
+            let engine = overview(host)
+            for (cid, project, expected) in [
+                (held, "A", RemotePullRequestSessionOutcome.inUse),
+                (gone, "A", .gone),
+                (missing, "A", .invalid("The session's working directory is no longer available.")),
+                (good, "missing", .unknownProject),
+            ] {
+                engine.show([makePR()], links: [:], resumable: [
+                    makePR().key: .init(copilotSessionId: cid, name: "Previous", cwd: "/not-used", lastActive: testNow),
+                ])
+                XCTAssertEqual(host.model.performRemotePullRequestSession(prRequest(kind: "resume", project: project,
+                                                                                     cid: cid)), expected)
+            }
+            XCTAssertTrue(host.launches().isEmpty)
+        }
+    }
+
+    func testRemotePullRequestPersistenceFailureRepairsAssociationsWithoutDuplicateLaunch() throws {
+        try withHost(projects: twoProjects) { host in
+            _ = overview(host)
+            try Data(#"{"records":[]}"#.utf8).write(to: host.root.appendingPathComponent("ledger.json"))
+            let request = prRequest()
+            XCTAssertEqual(chmod(host.root.path, 0o500), 0)
+            let unsaved = host.model.performRemotePullRequestSession(request)
+            XCTAssertEqual(chmod(host.root.path, 0o700), 0)
+            XCTAssertEqual(unsaved, .persistenceUnavailable)
+            XCTAssertEqual(host.launches().count, 1)
+            XCTAssertEqual(host.model.performRemotePullRequestSession(prRequest()), .conflict)
+            guard case .existing(let response) = host.model.performRemotePullRequestSession(request) else {
+                return XCTFail("Repair should succeed")
+            }
+            XCTAssertEqual(host.restart().performRemotePullRequestSession(request), .existing(response))
+            XCTAssertEqual(host.restart().project("A")?.sessions.last?.pullRequestKeys, ["github/github#1"])
+            XCTAssertEqual(host.launches().count, 1)
+        }
+    }
+
+    func testRemotePullRequestSecondaryBindingRepairsSavedAssociationsAfterRestart() throws {
+        try withHost(projects: twoProjects) { host in
+            let cid = UUID().uuidString.lowercased()
+            try Data(cid.utf8).write(to: host.root.appendingPathComponent("b1.copilot-session"))
+            let candidate = ResumableSession(copilotSessionId: cid, name: "Previous", cwd: host.root.path, lastActive: testNow)
+            _ = overview(host, resumable: [makePR().key: candidate])
+            let request = prRequest(kind: "resume", cid: cid)
+            // A directory where state.json was makes only workspace persistence fail.
+            let state = host.root.appendingPathComponent("state.json")
+            let oldState = try Data(contentsOf: state)
+            try FileManager.default.removeItem(at: state)
+            try FileManager.default.createDirectory(at: state, withIntermediateDirectories: false)
+            XCTAssertEqual(host.model.performRemotePullRequestSession(request), .persistenceUnavailable)
+            try FileManager.default.removeItem(at: state)
+            try oldState.write(to: state)
+            let restarted = host.restart()
+            guard case .existing(let result) = restarted.performRemotePullRequestSession(request) else {
+                return XCTFail("Ledger replay must repair the missing association")
+            }
+            XCTAssertEqual(result.projectId, "B")
+            XCTAssertEqual(result.sessionId, "b1")
+            XCTAssertEqual(restarted.project("B")?.sessions.first?.pullRequestKeys, ["github/github#1"])
+            XCTAssertNil(restarted.project("B")?.sessions.first?.creationFingerprint)
+            XCTAssertTrue(host.launches().isEmpty)
+        }
+    }
+
+    func testRemotePullRequestRejectsStaleAndOversizedPromptBeforeLaunch() throws {
+        try withHost(projects: twoProjects) { host in
+            let engine = overview(host)
+            guard case .stale = host.model.performRemotePullRequestSession(prRequest(keys: ["github/other#99"])) else {
+                return XCTFail("Out of scope")
+            }
+
+            let longRepository = String(repeating: "r", count: 100)
+            let prs = (1...100).map { makePR($0, repo: "\(String(repeating: "o", count: 39))/\(longRepository)") }
+            engine.show(prs, links: [:])
+            guard case .invalid = host.model.performRemotePullRequestSession(prRequest(keys: prs.map(\.key.description)))
+            else { return XCTFail("Prompt must use the existing input limit") }
+            XCTAssertTrue(host.launches().isEmpty)
+        }
+    }
+}
+
+extension PullRequestsHostCommandTests {
+    func testRemotePullRequestAssociationMergeIsBoundedAndKeepsOriginalFingerprint() throws {
+        try withHost(projects: { root in
+            let session = Session(id: "tab", title: "Original", cwd: root.path, creationFingerprint: "original",
+                                  pullRequestKeys: ["github/github#2", "GITHUB/GITHUB#1"])
+            return [Project(id: "A", name: "A", cwd: root.path, sessions: [session], selectedSessionId: nil)]
+        }) { host in
+            let cid = UUID().uuidString.lowercased()
+            try Data(cid.utf8).write(to: host.root.appendingPathComponent("tab.copilot-session"))
+            let third = makePR(3)
+            let engine = overview(host, prs: [third], resumable: [
+                third.key: .init(copilotSessionId: cid, name: "Previous", cwd: host.root.path, lastActive: testNow),
+            ])
+            guard case .existing = host.model.performRemotePullRequestSession(
+                prRequest(kind: "resume", keys: [third.key.description], cid: cid)
+            ) else { return XCTFail("Merge") }
+            XCTAssertEqual(host.model.project("A")?.sessions.first?.pullRequestKeys,
+                           ["github/github#1", "github/github#2", "github/github#3"])
+            XCTAssertEqual(host.model.project("A")?.sessions.first?.creationFingerprint, "original")
+            // AppModel may repair an initially missing tab selection while restoring.
+            let selection = host.model.project("A")?.selectedSessionId
+            let additions = (4...101).map { makePR($0) }
+            engine.show(additions, links: [:], resumable: Dictionary(uniqueKeysWithValues: additions.map {
+                ($0.key, ResumableSession(copilotSessionId: cid, name: "Previous", cwd: host.root.path, lastActive: testNow))
+            }))
+            guard case .invalid = host.model.performRemotePullRequestSession(
+                prRequest(kind: "resume", keys: additions.map(\.key.description), cid: cid)
+            ) else { return XCTFail("Bound") }
+            XCTAssertEqual(host.model.project("A")?.sessions.first?.pullRequestKeys?.count, 3)
+            XCTAssertEqual(host.model.project("A")?.selectedSessionId, selection)
+            XCTAssertTrue(host.launches().isEmpty)
         }
     }
 }

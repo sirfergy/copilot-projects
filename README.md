@@ -166,15 +166,42 @@ Ready, so one row shows how far a goal has got and what is holding it up.
   through the Copilot CLI's local session store; one whose folder is gone, or that
   another Copilot CLI has open, isn't offered. Double-click a pull request, or press
   `⌘Return`, to open it on GitHub. Use `↑`/`↓` to move and Return to go to its session.
+- **Focus without losing context.** **All** keeps every goal visible; **Needs you**
+  keeps goals with at least one PR needing attention, including their quieter
+  sibling PRs. A shared session's status appears beside the goal, leaving each PR
+  to show its own blocker or readiness. **Resume in _project_** names the destination
+  before you click. GitHub freshness, incomplete status, and the connection to Copilot Projects are
+  shown separately, and session creation waits until matching finishes.
 - **Copilot Projects closed?** The lanes keep the sessions it last reported, with
   their states unknown, and their buttons become **Open Copilot Projects**. A
-  Copilot Projects too old to list its sessions is called out at the bottom of
+  Copilot Projects too old to list its sessions is called out above the lanes in
   the window: update it to match sessions again.
 - **Owners** limits the window to one or more organizations or users, such as
   `github` and `my-org`; each is its own token in the Owners popover. Only pull
   requests in those owners appear. Leave it empty to include every owner, up to
   your hundred most recently updated pull requests. It's saved with Copilot
   Projects' settings.
+
+The public host also exposes this engine through `SessionHost`'s
+`pull-request-overview-v1` contract for remote clients. It uses its own caches,
+reads the helper's goals without writing them, and regroups cached GitHub facts
+against the live workspace on every request. GitHub refreshes are single-flight:
+at most once per five minutes, or once per minute for explicit Refresh, including
+failed attempts. No remote polling means no GitHub refresh timer.
+The remote `isRefreshing` flag also covers local transcript matching and active
+previous-session searches, including deferred passes, so clients keep polling
+quickly until those results settle without requesting GitHub on each poll.
+
+Remote Start/Resume requests contain only project/session identities and canonical
+PR keys. Start uses the same working directory as local Start in the chosen
+project (its selected tab's folder, then the project default); Resume uses the
+previous session's recorded directory. Neither changes Mac selection or opens a
+window. Associations are persisted on the workspace session, and request IDs bind
+the complete intent in the existing creation ledger. Both fresh Start and Resume
+wait for GitHub status and workspace matching, and refuse PRs already claimed by
+a live session. Existing live sessions remain navigable while the first refresh loads.
+Retry the same request after an uncertain outcome; clients must expire pending
+retries after 24 hours.
 
 The window reads GitHub with the accounts you signed in to with the GitHub CLI
 (`gh auth login`); every signed-in github.com account is included. Tokens stay in

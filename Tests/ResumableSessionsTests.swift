@@ -531,7 +531,8 @@ final class ResumableRefreshTests: XCTestCase {
     private let accountLoads = Counter()
 
     override func setUpWithError() throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".scratch/resumable-refresh-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root.appendingPathComponent("work"), withIntermediateDirectories: true)
         home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
         // Live sessions' transcripts are read from COPILOT_HOME too: keep them in the fixture.
@@ -603,6 +604,98 @@ final class ResumableRefreshTests: XCTestCase {
         let loads = await accountLoads.value
         model.refresh()
         try await waitUntil { await self.accountLoads.value > loads && !model.isRefreshing }
+    }
+
+    private final class EnrichmentGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private let ready = DispatchSemaphore(value: 0)
+        private var _entered = false
+        var entered: Bool { lock.withLock { _entered } }
+        func hold() {
+            lock.withLock { _entered = true }
+            _ = ready.wait(timeout: .now() + 5)
+        }
+        func release() { ready.signal() }
+    }
+
+    @MainActor
+    func testMergedPRKeepsItsOldSessionUntilTheEnrichedListReplacesIt() async throws {
+        let cid = try home.addSession(cwd: root.appendingPathComponent("work").path,
+                                      transcript: transcript(mentioning: branch, times: 4))
+        let model = makeModel(
+            FakeWorkspace(snapshot: snapshot([("tab", cid)])),
+            finder: ScriptedResumableSearch([ResumableSearch()])
+        )
+        await model.pollWorkspace()
+        let merged = makePR(2, repo: "o/r", branch: "me/just-merged")
+        model.show([makePR(1, repo: "o/r", branch: branch), merged], links: [key: "tab", merged.key: "tab"])
+        let responder = GraphQLStub.respond
+        let gate = EnrichmentGate()
+        defer { gate.release() }
+        GraphQLStub.respond = { token, body in
+            if (body["query"] as? String ?? "").contains("mergeStateStatus") { gate.hold() }
+            return responder(token, body)
+        }
+        model.refresh()
+        try await waitUntil { gate.entered }
+        XCTAssertTrue(model.isRefreshing)
+        XCTAssertFalse(model.isMatchingSessions)
+        XCTAssertTrue(model.sessionsKnown)
+        XCTAssertEqual(model.links[merged.key], "tab")
+        XCTAssertEqual(model.goals(now: testNow).first?.items.count, 2)
+        gate.release()
+        try await waitUntil { !model.isRefreshing }
+        XCTAssertEqual(model.pullRequests.map(\.key), [key])
+        XCTAssertNil(model.links[merged.key])
+    }
+
+    @MainActor
+    func testFirstLoadDoesNotCallUnenrichedStatusReady() async throws {
+        let model = makeModel(FakeWorkspace(snapshot: snapshot([])), finder: ScriptedResumableSearch([ResumableSearch()]))
+        let responder = GraphQLStub.respond
+        let gate = EnrichmentGate()
+        defer { gate.release() }
+        GraphQLStub.respond = { token, body in
+            if (body["query"] as? String ?? "").contains("mergeStateStatus") { gate.hold() }
+            return responder(token, body)
+        }
+        model.refresh()
+        try await waitUntil { gate.entered }
+        XCTAssertTrue(model.isRefreshing)
+        XCTAssertFalse(model.isMatchingSessions, "session matching finishes before enrichment")
+        XCTAssertTrue(model.sessionsKnown)
+        XCTAssertNil(model.lastUpdated, "the view labels this as checking, not unavailable")
+        let pr = try XCTUnwrap(model.pullRequests.first)
+        XCTAssertTrue(pr.isIncomplete)
+        XCTAssertFalse(PullRequestTriage.isReady(pr))
+        let emptyState = PullRequestsView(pullRequests: model).needsYouEmptyState
+        XCTAssertEqual(emptyState.title, "Checking PR status…")
+        XCTAssertEqual(emptyState.systemImage, "questionmark.circle")
+        gate.release()
+        try await waitUntil { !model.isRefreshing }
+        XCTAssertNotNil(model.lastUpdated)
+        XCTAssertFalse(try XCTUnwrap(model.pullRequests.first).isIncomplete)
+    }
+
+    @MainActor
+    func testFailedRematchAfterReconnectDoesNotKeepSayingMatching() async throws {
+        let workspace = FakeWorkspace(fetches: [.unreachable])
+        let model = makeModel(workspace, finder: ScriptedResumableSearch([ResumableSearch()]))
+        try await refreshed(model)
+        XCTAssertFalse(model.isConnected)
+        XCTAssertFalse(model.sessionsKnown)
+        GraphQLStub.respond = { _, _ in (401, #"{"message":"Bad credentials"}"#) }
+        workspace.answer(fetches: [.snapshot(snapshot([]))])
+        await model.pollWorkspace()
+        try await waitUntil { !model.isRefreshing && model.warning != nil }
+        XCTAssertTrue(model.isConnected)
+        XCTAssertFalse(model.isMatchingSessions)
+        XCTAssertFalse(model.sessionsKnown)
+        XCTAssertEqual(PullRequestsPresentation.sessionlessText(
+            isConnected: model.isConnected, sessionsKnown: model.sessionsKnown,
+            isMatchingSessions: model.isMatchingSessions, isManualGoal: false
+        ), "Sessions not matched")
+        XCTAssertFalse(model.goals(now: testNow).flatMap(\.items).contains { $0.assessment.reasons.contains(.noSession) })
     }
 
     @MainActor

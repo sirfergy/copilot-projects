@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "phase": "loaded",
+  "updatedAtMilliseconds": 1791446400000,
+  "isRefreshing": false,
+  "sessionsKnown": true,
+  "owners": ["example"],
+  "omitted": 0,
+  "openCount": 2,
+  "needsYouCount": 2,
+  "goals": [{
+    "id": "manual:settings",
+    "name": "Ship review settings",
+    "kind": "manual",
+    "resumable": {
+      "copilotSessionId": "11111111-2222-4333-8444-555555555555",
+      "name": "Continue review settings",
+      "lastActiveAtMilliseconds": 1791273600000,
+      "pullRequestKeys": ["example/api#12"]
+    },
+    "items": [{
+      "id": "example/api#12",
+      "repository": "example/api",
+      "number": 12,
+      "title": "Accept review settings",
+      "url": "https://github.com/example/api/pull/12",
+      "stage": "checks",
+      "status": "Checks failing",
+      "reasons": [{"kind": "failingRequiredChecks", "label": "1 required check failing", "symbol": "xmark.octagon.fill", "isNudge": false}],
+      "needsYou": true,
+      "isPartial": false,
+      "updatedAtMilliseconds": 1791442800000
+    }, {
+      "id": "example/mobile#18",
+      "repository": "example/mobile",
+      "number": 18,
+      "title": "Display review settings",
+      "url": "https://github.com/example/mobile/pull/18",
+      "stage": "review",
+      "status": "Awaiting review",
+      "reasons": [{"kind": "noSession", "label": "No session on it", "symbol": "terminal", "isNudge": true}],
+      "needsYou": true,
+      "isPartial": true,
+      "updatedAtMilliseconds": 1791442800000
+    }]
+  }]
+}

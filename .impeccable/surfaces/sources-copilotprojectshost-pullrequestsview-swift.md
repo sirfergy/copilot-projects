@@ -2,7 +2,7 @@
 version: 1
 slug: "sources-copilotprojectshost-pullrequestsview-swift"
 primary_target: "Sources/CopilotProjectsPullRequests/PullRequestsView.swift"
-related_targets: ["Sources/CopilotProjectsPullRequests/PullRequests.swift","Sources/CopilotProjectsPullRequests/PullRequestsModel.swift","Sources/CopilotProjectsPullRequests/PullRequestsWorkspace.swift","Sources/CopilotProjectsPullRequests/PullRequestsApplication.swift","Sources/CopilotProjectsHost/PullRequestsAppLauncher.swift","Sources/CopilotProjectsStyle/StudioStyle.swift"]
+related_targets: ["Sources/CopilotProjectsPullRequests/PullRequests.swift","Sources/CopilotProjectsPullRequests/PullRequestsPresentation.swift","Sources/CopilotProjectsPullRequests/PullRequestsModel.swift","Sources/CopilotProjectsPullRequests/PullRequestsWorkspace.swift","Sources/CopilotProjectsPullRequests/PullRequestsApplication.swift","Sources/CopilotProjectsHost/PullRequestsAppLauncher.swift","Sources/CopilotProjectsStyle/StudioStyle.swift","Tests/PullRequestsPresentationTests.swift","Tests/ResumableSessionsTests.swift"]
 ---
 
 # Pull Requests: Goal Lanes
@@ -21,6 +21,12 @@ resume-copilot-session); while the host is away, lanes keep its last known
 sessions with unknown states. Must not
 touch terminal behavior, the main window, or CopilotProjectsProtocol.
 
+This is a scoped extension of the incumbent surface, not a new visual world.
+`PRODUCT.md`, `DESIGN.md`, and `.impeccable/design.json` remain unchanged.
+Implementation recorded on October 8, 2026. The native finish verdict cleared
+its five requested fixes at the captured Mac/native-preview scope. That scoped
+verdict is not whole-surface, hardware, or shipping approval.
+
 ## Direction contract
 
 THESIS: Each goal is one lane read left to right across Draft, Checks, Review,
@@ -31,21 +37,139 @@ OWN-WORLD: Studio Console unchanged: chrome ground, sidebar-recessed goal column
 raised PR chips on the 6pt session corner, steel selection with 1pt edge, native
 orange for needs-you and green for ready, system type, no new tokens.
 
-STORY: Open the window, read how many PRs need you, scan lanes ordered by urgency,
-see each needs-you chip's reason, jump straight to the driving session or the PR,
-and resume the ended session that worked on a goal, or start one, where it has none.
+STORY: Open on All, read how many PRs need you, optionally filter whole goals to
+Needs you without losing quieter siblings, and inspect each PR's own blocker.
+Go explicitly to the driving session or open the PR; when resuming an ended
+session, see its identity, previous activity, and destination before acting.
 
-FIRST VIEWPORT: 38pt drag strip; 56pt header with needs-you count, last refresh,
-owners filter, refresh; 32pt sidebar footer with the window's keys. Sticky stage
-row over four equal columns beside a 240pt goal column (two-line goal, session
-state and project or "Previous session · <when>", Go to Session, Resume Session
-with Start New Session in its menu, or Start Session). Session goals that need you lead.
+FIRST VIEWPORT: 38pt drag strip; 56pt header with the all-PR needs-you count,
+owners filter, and Refresh. A separate row carries All / Needs you, visible/total
+goal count, GitHub freshness, and workspace status; refresh warnings sit below it.
+The 32pt sidebar footer retains the window's keys and storage/settings warnings.
+A sticky stage row heads four equal columns beside the unchanged 240pt goal
+column: two-line goal, session/project context or previous-session identity and
+activity, then Go to Session, Resume in <project>, or Start Session.
+Session goals that need you lead.
 Chips: repo#number with age, up to two title lines (omitted when the goal is named
-after that pull request), reason line with a 1pt orange edge (green when ready,
-quiet edge for nudges). Signature: the most urgent chip is preselected so Return
+after that pull request), PR-specific reason with a 1pt orange edge (green when
+ready, quiet for nudges), and an explicit qualifier for partial status.
+Signature: the most urgent chip is initially selected so Return
 opens its session; refresh slides an advancing chip into its new stage (0.2s
 ease-out); Reduce Motion changes lanes in place.
 
 FORM: Goal Lanes, candidate 3 of 7 on the ordered list, surface seed 50c9b438.
 
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+
+## Implemented surface behavior
+
+**Whole-goal filtering.** `PullRequestsFilter` defaults to All. Needs you retains
+each goal whose `needsYouCount` is positive, including no-session/stale nudges,
+and keeps every PR in that goal. It does not change triage, grouping, urgency, or
+the header's all-fetched-PR counts. The status row reports visible/total goals;
+stage counts follow visible lanes. The native segmented picker is 180pt wide
+and disabled before the loaded phase. An empty filtered result says
+"Nothing needs you" with Show All Goals only when status is complete. Otherwise
+it repeats the header's "Checking PR status…" or "Some PR status is unknown"
+with a question-mark icon, distinct from having no open PRs.
+
+**Selection stays intentional.** `SelectionInputs` observes filter and visible
+keys. A still-visible selection survives. If it disappears after a deliberate
+filter change, the first visible key is selected; if it disappears on refresh,
+selection clears rather than redirecting the next Return to a different PR.
+Changing the filter returns focus to the lanes. Keyboard actions resolve only
+against visible items: arrows move, Return goes to a connected session or GitHub,
+Command-Return opens GitHub, and Escape clears selection. Double-click and the
+existing chip context menu retain their destinations and manual goal assignment.
+Arrow-key announcements and chip accessibility values share the same spoken
+status, preserving every attention reason and any checking/unavailable qualifier.
+
+**Session context once, when truthful.** The goal summary carries shared session
+state. `sharesSessionState` compares every optional session ID, including nil.
+Only when all agree and the summary has a session or sessions are known does
+the chip omit `sessionWaiting` and `noSession` from its displayed reasons.
+Mixed manual goals retain each item's session reasons. The chip edge, reason,
+and +N reflect this displayed subset; a chip with no remaining reason uses its
+assessment status. The original reasons still determine attention, ordering,
+counts, tooltip content, keyboard announcements, and accessibility values.
+
+**Resume names its destination.** A distinct, nongeneric candidate name appears
+above "Previous session · <relative activity>". Names duplicating the goal
+(case-insensitively after normalization) and "Copilot session" are omitted.
+The primary menu label is "Resume in <project>", choosing the selected valid
+project or the first available project. Its menu has Resume in and Start New
+Session in sections listing projects. The label truncates within the existing
+goal column; help and the accessibility label retain the full destination.
+Resuming… disables repeat activation. Existing live goals use Go to Session;
+known sessionless goals without a candidate use Start Session.
+
+**Freshness is not connectivity.** The row independently shows Loading…,
+Matching sessions…, or Refreshing… while busy, plus "GitHub checked <relative
+time>" whenever a last-success timestamp exists. A later refresh failure keeps
+the previous lanes and timestamp, with a readable warning below the row.
+Connecting, unavailable, and incompatible-host messages describe Copilot
+Projects separately. Disconnected last-known sessions keep their goals with
+"Status unknown"; no snapshot says sessions were not matched, not that none
+exist. Open Copilot Projects is offered only when the bundled host is openable.
+The synthetic offline capture has no openable host and therefore no such button.
+
+**Unknown is not ready or sessionless.** `sessionsKnown` requires a completed
+match, a connected host, no match performed without live sessions, and no active
+matching pass. An unmatched connected goal says Matching sessions… only during
+an active pass, otherwise Sessions not matched (including after a failed rematch).
+Start and Resume are withheld until matching and first-load status checking finish.
+Ordinary refresh preserves known session actions/reasons; old PR links survive
+until the enriched list replaces them. Initial unenriched PRs are incomplete,
+not ready. Chips show Checking status… during initial enrichment and Some status
+unavailable afterward for incomplete data, uncounted threads, or unknown required
+check failures. The summary qualifies partial results instead of claiming
+Nothing needs you when status is unknown and no known attention reason exists.
+
+## Inherited visual rules
+
+Studio Console's palette, native semantic type, geometry, depth, and motion are
+unchanged. Callout semibold identifies the window; title3 semibold carries the
+summary; body medium names goals; callout names PRs; caption/caption2 handle
+context, reasons, identity, and age. The new row reuses caption secondary ink and
+monospaced counts. Existing sidebar/raised/steel roles, native symbols, dividers,
+and controls remain authoritative. These surface behaviors introduce no tokens
+and do not turn Goal Lanes into an app-wide composition rule.
+
+## Evidence and coverage boundary
+
+- Source: `PullRequestsView.swift`, `PullRequestsPresentation.swift`, the
+  matching/refresh/workspace phases in `PullRequestsModel.swift`, and shared
+  `Sources/CopilotProjectsStyle/StudioStyle.swift`.
+- `Tests/PullRequestsPresentationTests.swift` covers whole-goal filtering with
+  quiet siblings/nudges, shared versus mixed session reasons, all-reason
+  announcements with partial-status qualifiers, candidate-name suppression,
+  active/inactive matching labels, partial status, and selection
+  reconciliation. Its `PullRequestsDesignCaptureTests` also checks filtered
+  empty states with complete/incomplete/uncounted status and ordinary
+  refresh stability. `Tests/ResumableSessionsTests.swift` checks retention of
+  old links through enrichment and first-load incomplete status, including
+  the checking-status empty state, and a failed rematch after reconnecting.
+- Native captures are outside the repository, under session
+  `d550907b-ea83-42c8-81e0-5b459ea0eb06/files/pr-design-evidence/`:
+  `mac-dark.png`, `mac-light.png`, `mac-compact.png`, and `mac-offline.png`.
+  `PullRequestsDesignCaptureTests.testCaptureNativeDesignStates` renders the
+  actual SwiftUI/AppKit window at 1280x800pt or 880x800pt with `FakeWorkspace`,
+  `model.show`, and no historical-session lookup. Sample PRs are
+  `sample/workspace#14`, `sample/api#27`, `sample/agents#35`,
+  `sample/automation#18`, and `sample/mobile#46`; the last is deliberately
+  incomplete. The long project name, two live sessions, previous-session
+  candidate, two-minute freshness, and offline failure are injected test data,
+  not a live account, host, or GitHub observation.
+- `mac-final-reviewed.log` records 101 selected tests, zero failures, and one
+  skipped capture test when its environment variable was absent. The captures
+  are separate evidence; a skipped renderer is not a rendered pass.
+  `final-source-sha256.txt` records the source snapshot. No tests or captures
+  were rerun for this documentation-only change.
+- This is not end-to-end certification of live GitHub/host actions, keyboard
+  focus, VoiceOver, high-contrast runtime, or every window size/state. The native
+  finish verdict covers its five scored fixes, not those unobserved interactions.
+
+Not canonized or repaired: the root DESIGN.md still describes earlier PR
+freshness placement/labels, and the context loader does not recognize
+PRODUCT.md's existing platform spelling. Both remain untouched under the
+surface-only boundary; neither is a new system rule or a claim of final approval.

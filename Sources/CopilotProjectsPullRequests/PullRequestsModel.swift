@@ -29,6 +29,8 @@ final class PullRequestsModel: ObservableObject {
     @Published private(set) var links: [PullRequestKey: String] = [:]
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isMatchingSessions = false
+    @Published private(set) var isSearchingPreviousSessions = false
     /// Whether transcripts have been matched to pull requests yet.
     @Published private(set) var sessionsMatched = false
     @Published private(set) var lastUpdated: Date?
@@ -46,7 +48,7 @@ final class PullRequestsModel: ObservableObject {
     /// shown; empty means every owner.
     @Published var owners: String {
         didSet {
-            defaults.set(owners, forKey: Self.ownersKey)
+            if !hostedReadOnly { defaults.set(owners, forKey: Self.ownersKey) }
             pullRequests = Self.inScope(pullRequests, owners: ownerList)
         }
     }
@@ -58,9 +60,16 @@ final class PullRequestsModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let service: PullRequestService
-    private let index: PullRequestTranscriptIndex
+    private let index: any PullRequestTranscriptReading
     private let resumableFinder: any ResumableSessionSearching
     private let overridesURL: URL?
+    private let hostedReadOnly: Bool
+    private let transcriptPath: @Sendable (String) -> String?
+    private let clock: @MainActor () -> Date
+    private var scopeGeneration = 0
+    private var hostedRelink: Task<Void, Never>?
+    private var matchedWorkspace: [String]?
+    private(set) var overridesWarning: String?
     private let loadAccounts: @Sendable () async throws -> [GitHubAccount]
     private let source: any PullRequestsWorkspace
     private let host: PullRequestsHostApp
@@ -87,6 +96,7 @@ final class PullRequestsModel: ObservableObject {
     /// The search for ended sessions, which keeps going while the byte budget
     /// leaves candidates unread. At most one runs; each refresh replaces it.
     private var resumableSearch: Task<Void, Never>?
+    private var resumableSearchGeneration = UUID()
     /// Ended sessions seen live again in a tab, lowercased, whose pull requests
     /// were matched once more to link them there.
     private var relinkedSessions: Set<String> = []
@@ -112,6 +122,13 @@ final class PullRequestsModel: ObservableObject {
         service: PullRequestService = PullRequestService(),
         loadAccounts: @escaping @Sendable () async throws -> [GitHubAccount] = { try await PullRequestsModel.signedInAccounts() },
         resumableFinder: (any ResumableSessionSearching)? = nil,
+        transcriptIndex: (any PullRequestTranscriptReading)? = nil,
+        hostedReadOnly: Bool = false,
+        readOnlyGoalsURL: URL? = nil,
+        transcriptPath: @escaping @Sendable (String) -> String? = {
+            PullRequestTranscriptIndex.transcriptPath(copilotSessionId: $0)
+        },
+        clock: @escaping @MainActor () -> Date = Date.init,
         isVisible: @escaping @MainActor () -> Bool = { NSApp?.occlusionState.contains(.visible) ?? true },
         presentError: @escaping @MainActor (_ title: String, _ message: String) -> Void = PullRequestsModel.presentAlert
     ) {
@@ -124,12 +141,16 @@ final class PullRequestsModel: ObservableObject {
         self.loadAccounts = loadAccounts
         self.isVisible = isVisible
         self.presentError = presentError
+        self.hostedReadOnly = hostedReadOnly
+        self.transcriptPath = transcriptPath
+        self.clock = clock
         owners = defaults.string(forKey: Self.ownersKey) ?? ""
-        index = PullRequestTranscriptIndex(storeURL: stateDirectory?.appendingPathComponent("transcript-index.json"))
+        index = transcriptIndex
+            ?? PullRequestTranscriptIndex(storeURL: stateDirectory?.appendingPathComponent("transcript-index.json"))
         self.resumableFinder = resumableFinder ?? ResumableSessionFinder(
             cacheURL: stateDirectory?.appendingPathComponent("resumable-index.json")
         )
-        overridesURL = stateDirectory?.appendingPathComponent("goals.json")
+        overridesURL = hostedReadOnly ? readOnlyGoalsURL : stateDirectory?.appendingPathComponent("goals.json")
         overrides = overridesURL
             .flatMap { try? Data(contentsOf: $0) }
             .flatMap { try? JSONDecoder().decode(PullRequestGoalOverrides.self, from: $0) }
@@ -216,7 +237,10 @@ final class PullRequestsModel: ObservableObject {
     }
 
     /// "No session" is only claimed when the sessions are current and were matched.
-    var sessionsKnown: Bool { sessionsMatched && isConnected && !matchedWithoutSessions }
+    var sessionsKnown: Bool {
+        sessionsMatched && isConnected && !matchedWithoutSessions && !isMatchingSessions
+            && (!hostedReadOnly || (lastUpdated != nil && matchedWorkspace == workspaceIdentity))
+    }
 
     func goals(now: Date = Date()) -> [PullRequestGoal] {
         let sessions = liveSessions
@@ -265,6 +289,7 @@ final class PullRequestsModel: ObservableObject {
     /// Reads the workspace when the window opens, then every two seconds while
     /// it is visible. Each read finishes, or times out, before the next starts.
     func runWorkspaceLoop() async {
+        guard !hostedReadOnly else { return }
         await pollWorkspace()
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: UInt64(Self.workspacePollInterval * 1_000_000_000))
@@ -285,7 +310,7 @@ final class PullRequestsModel: ObservableObject {
         apply(await source.snapshot())
     }
 
-    private func apply(_ fetch: WorkspaceFetch) {
+    func apply(_ fetch: WorkspaceFetch) {
         let wasConnected = isConnected
         let state: WorkspaceState
         switch fetch {
@@ -298,6 +323,7 @@ final class PullRequestsModel: ObservableObject {
             state = .incompatibleHost
         }
         if workspace != state { workspace = state }
+        if hostedReadOnly, wasConnected, !isConnected { cancelResumableSearch() }
         var rematch = false
         if case .connected(let snapshot) = state {
             settleResumes(in: snapshot)
@@ -307,7 +333,86 @@ final class PullRequestsModel: ObservableObject {
         // its sessions: match them once more, not on every poll.
         // A refresh still running queues this one behind it.
         if !wasConnected, isConnected, matchedWithoutSessions { rematch = true }
-        if rematch { refresh() }
+        if rematch, !hostedReadOnly { refresh() }
+    }
+
+    /// Read helper-owned settings without becoming a second writer. A scope
+    /// change invalidates even overlapping cached rows and any in-flight result.
+    func reloadHostedSettings() {
+        guard hostedReadOnly else { return }
+        let sharedOwners = defaults.string(forKey: Self.ownersKey) ?? ""
+        let changed = Self.ownerList(sharedOwners).map { $0.lowercased() }.sorted()
+            != ownerList.map { $0.lowercased() }.sorted()
+        owners = sharedOwners
+        if changed {
+            scopeGeneration += 1
+            pullRequests = []
+            links = [:]
+            resumable = [:]
+            sessionsMatched = false
+            lastUpdated = nil
+            lastAttempt = nil
+            matchedWorkspace = nil
+            phase = .idle
+            warning = nil
+            omitted = 0
+            cancelResumableSearch()
+            hostedRelink?.cancel()
+        }
+        guard let overridesURL else { return }
+        do {
+            let data = try Data(contentsOf: overridesURL)
+            overrides = try JSONDecoder().decode(PullRequestGoalOverrides.self, from: data)
+            overridesWarning = nil
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            overrides = PullRequestGoalOverrides()
+            overridesWarning = nil
+        } catch {
+            overridesWarning = "Could not read saved pull request goals. Showing the last known goals."
+        }
+    }
+
+    func refreshHosted(manual: Bool) {
+        guard hostedReadOnly, refreshTask == nil,
+              lastAttempt.map({ clock().timeIntervalSince($0) >= (manual ? 60 : Self.refreshInterval) }) ?? true
+        else { return }
+        hostedRelink?.cancel()
+        lastAttempt = clock()
+        isRefreshing = true
+        if lastUpdated == nil { phase = .loading }
+        refresh()
+    }
+
+    /// Workspace changes re-match local evidence, never schedule a GitHub fetch.
+    private var workspaceIdentity: [String] {
+        liveSessions.values.map { "\($0.id):\($0.copilotSessionId ?? "")" }.sorted()
+    }
+
+    func rematchHostedSessions() {
+        guard hostedReadOnly, isConnected, lastUpdated != nil,
+              refreshTask == nil, hostedRelink == nil else { return }
+        let identity = workspaceIdentity
+        guard identity != matchedWorkspace else { return }
+        let generation = scopeGeneration
+        let prs = pullRequests
+        let sources = transcriptSources()
+        isMatchingSessions = true
+        hostedRelink = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.hostedRelink = nil
+                if !self.isRefreshing { self.isMatchingSessions = false }
+            }
+            let evidence = await self.index.evidence(
+                for: sources, branches: Set(prs.map(\.headRefName).filter(PullRequestLinker.isDistinctiveBranch))
+            )
+            guard !Task.isCancelled, generation == self.scopeGeneration else { return }
+            self.links = PullRequestLinker.links(pullRequests: prs, evidence: evidence)
+            self.sessionsMatched = true
+            self.matchedWithoutSessions = false
+            self.matchedWorkspace = identity
+            self.searchResumable()
+        }
     }
 
     /// Whether an ended session just came back live in a tab while one of its
@@ -341,6 +446,7 @@ final class PullRequestsModel: ObservableObject {
     }
 
     func openHost() {
+        guard !hostedReadOnly else { return }
         host.open?()
     }
 
@@ -350,20 +456,23 @@ final class PullRequestsModel: ObservableObject {
     /// captures and tests, which must not reach GitHub.
     func show(
         _ prs: [PullRequestSnapshot], links: [PullRequestKey: String],
-        resumable: [PullRequestKey: ResumableSession] = [:], updated: Date = Date()
+        resumable: [PullRequestKey: ResumableSession] = [:], updated: Date = Date(),
+        warning: String? = nil, sessionsMatched: Bool = true
     ) {
         pullRequests = prs
         self.links = links
         self.resumable = resumable
-        sessionsMatched = true
+        self.sessionsMatched = sessionsMatched
+        if hostedReadOnly, sessionsMatched { matchedWorkspace = workspaceIdentity }
+        self.warning = warning
         lastUpdated = updated
-        lastAttempt = updated
+        lastAttempt = clock()
         phase = .loaded
     }
 
     func refresh() {
         guard refreshTask == nil else {
-            refreshAgain = true
+            if !hostedReadOnly { refreshAgain = true }
             return
         }
         refreshTask = Task { [weak self] in
@@ -381,6 +490,7 @@ final class PullRequestsModel: ObservableObject {
     /// under a minute old, then every five minutes. Failures wait for the next
     /// interval too; Try Again and ⌘R retry at once.
     func runRefreshLoop() async {
+        guard !hostedReadOnly else { return }
         if lastAttempt.map({ Date().timeIntervalSince($0) >= Self.reopenFreshness }) ?? true { refresh() }
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 15_000_000_000)
@@ -391,21 +501,33 @@ final class PullRequestsModel: ObservableObject {
 
     private func performRefresh() async {
         isRefreshing = true
-        defer { isRefreshing = false }
-        lastAttempt = Date()
+        isMatchingSessions = !sessionsKnown
+        defer {
+            isRefreshing = false
+            isMatchingSessions = false
+        }
+        lastAttempt = clock()
+        let generation = scopeGeneration
         let firstLoad = lastUpdated == nil
         if pullRequests.isEmpty, !isFailed { phase = .loading }
         do {
             let accounts = try await loadAccounts()
+            guard generation == scopeGeneration, !Task.isCancelled else { return }
             let owners = ownerList
             let fetch = try await service.search(accounts: accounts, owners: owners)
+            guard generation == scopeGeneration, !Task.isCancelled else { return }
             if firstLoad {
-                pullRequests = Self.inScope(fetch.pullRequests, owners: ownerList)
+                pullRequests = Self.inScope(fetch.pullRequests, owners: ownerList).map {
+                    var pr = $0
+                    pr.isIncomplete = true
+                    return pr
+                }
                 phase = .loaded
             }
 
             await waitForFirstWorkspaceAnswer()
             let matchedLive = isConnected
+            let matchedIdentity = workspaceIdentity
             // Set before matching, so Copilot Projects answering while it runs
             // queues another refresh instead of being missed.
             matchedWithoutSessions = !matchedLive
@@ -414,6 +536,7 @@ final class PullRequestsModel: ObservableObject {
                 let sources = transcriptSources()
                 let branches = Set(fetch.pullRequests.map(\.headRefName).filter(PullRequestLinker.isDistinctiveBranch))
                 let evidence = await index.evidence(for: sources, branches: branches)
+                guard generation == scopeGeneration, !Task.isCancelled else { return }
                 newLinks = PullRequestLinker.links(pullRequests: fetch.pullRequests, evidence: evidence)
             } else {
                 // No sessions known: matching against none would empty the
@@ -421,23 +544,25 @@ final class PullRequestsModel: ObservableObject {
                 // again once Copilot Projects answers.
                 newLinks = links
             }
-            if firstLoad {
-                pullRequests = Self.inScope(fetch.pullRequests, owners: ownerList)
-                links = newLinks
-                sessionsMatched = true
-            }
+            let fetchedKeys = Set(fetch.pullRequests.map(\.key))
+            links = newLinks.merging(links.filter { !fetchedKeys.contains($0.key) }) { new, _ in new }
+            sessionsMatched = true
+            if hostedReadOnly, matchedLive { matchedWorkspace = matchedIdentity }
+            isMatchingSessions = false
 
             let enriched = await service.enrich(fetch.pullRequests, tokens: fetch.tokens)
+            guard generation == scopeGeneration, !Task.isCancelled else { return }
             // Owners may have changed while this ran; a later refresh fills in the rest.
             apply(Self.inScope(enriched, owners: ownerList), links: newLinks, animated: !firstLoad)
             omitted = fetch.omitted
             warning = fetch.warnings.first
-            lastUpdated = Date()
+            lastUpdated = clock()
             phase = .loaded
             // Ended sessions are looked for only against current live ones;
             // otherwise the last ones found stay.
             if matchedLive { searchResumable() }
         } catch {
+            guard generation == scopeGeneration, !Task.isCancelled else { return }
             let failure = (error as? PullRequestFetchError) ?? .failed(error.localizedDescription)
             if pullRequests.isEmpty {
                 phase = .failed(failure)
@@ -450,21 +575,36 @@ final class PullRequestsModel: ObservableObject {
     /// Searches for ended sessions in the background, replacing any search
     /// still running, and again while the byte budget leaves candidates unread.
     private func searchResumable() {
-        resumableSearch?.cancel()
-        resumableSearch = nil
+        cancelResumableSearch()
         guard isConnected else { return }
+        let generation = resumableSearchGeneration
+        isSearchingPreviousSessions = true
         resumableSearch = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.resumableSearchGeneration == generation {
+                    self.isSearchingPreviousSessions = false
+                    self.resumableSearch = nil
+                }
+            }
             while !Task.isCancelled {
-                guard let self, self.isConnected else { return }
+                guard self.isConnected, self.resumableSearchGeneration == generation else { return }
                 let needing = self.pullRequestsWithoutSession(self.pullRequests, links: self.links)
                 let live = Set(self.liveSessions.values.compactMap(\.copilotSessionId))
                 let search = await self.resumableFinder.search(for: needing, liveCopilotSessionIds: live)
-                guard !Task.isCancelled, self.isConnected else { return }
+                guard !Task.isCancelled, self.isConnected, self.resumableSearchGeneration == generation else { return }
                 self.assignResumable(search.sessions)
                 guard search.deferred else { return }
                 try? await Task.sleep(nanoseconds: UInt64(Self.resumableSearchPause * 1_000_000_000))
             }
         }
+    }
+
+    private func cancelResumableSearch() {
+        resumableSearchGeneration = UUID()
+        resumableSearch?.cancel()
+        resumableSearch = nil
+        isSearchingPreviousSessions = false
     }
 
     /// Takes what a search found, keeping each session being resumed, and each
@@ -495,7 +635,7 @@ final class PullRequestsModel: ObservableObject {
             self.sessionsMatched = true
         }
         // Under Reduce Motion lanes change in place rather than sliding.
-        if animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        if animated, !hostedReadOnly, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             withAnimation(.easeOut(duration: 0.2), update)
         } else {
             update()
@@ -505,7 +645,7 @@ final class PullRequestsModel: ObservableObject {
     private func transcriptSources() -> [PullRequestTranscriptIndex.Source] {
         liveSessions.values.sorted { $0.id < $1.id }.compactMap { session in
             guard let copilotId = session.copilotSessionId,
-                  let path = PullRequestTranscriptIndex.transcriptPath(copilotSessionId: copilotId) else { return nil }
+                  let path = transcriptPath(copilotId) else { return nil }
             return PullRequestTranscriptIndex.Source(sessionId: session.id, path: path)
         }
     }
@@ -515,6 +655,7 @@ final class PullRequestsModel: ObservableObject {
     /// Brings Copilot Projects forward on the session. While it can't be
     /// reached, opens it instead.
     func goToSession(_ session: PullRequestSession) {
+        guard !hostedReadOnly else { return }
         guard let snapshot = connectedSnapshot else {
             openHost()
             return
@@ -547,20 +688,24 @@ final class PullRequestsModel: ObservableObject {
     }
 
     func openOnGitHub(_ pr: PullRequestSnapshot) {
+        guard !hostedReadOnly else { return }
         NSWorkspace.shared.open(pr.url)
     }
 
     func copyLink(_ pr: PullRequestSnapshot) {
+        guard !hostedReadOnly else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(pr.url.absoluteString, forType: .string)
     }
 
     func move(_ key: PullRequestKey, toGoal goalId: String?) {
+        guard !hostedReadOnly else { return }
         overrides.assign(key, to: goalId)
         saveOverrides()
     }
 
     func moveToNewGoal(_ key: PullRequestKey, named name: String) {
+        guard !hostedReadOnly else { return }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let goalId = "manual:\(UUID().uuidString)"
@@ -570,8 +715,12 @@ final class PullRequestsModel: ObservableObject {
     }
 
     nonisolated static func startingPrompt(for pullRequests: [PullRequestSnapshot]) -> String {
-        let subject = pullRequests.count == 1 ? "this pull request" : "these pull requests"
-        let list = pullRequests.map { "- \($0.url.absoluteString)" }.joined(separator: "\n")
+        startingPrompt(urls: pullRequests.map(\.url.absoluteString))
+    }
+
+    nonisolated static func startingPrompt(urls: [String]) -> String {
+        let subject = urls.count == 1 ? "this pull request" : "these pull requests"
+        let list = urls.map { "- \($0)" }.joined(separator: "\n")
         return """
         Help me move \(subject) forward:
 
@@ -584,7 +733,7 @@ final class PullRequestsModel: ObservableObject {
     /// Starts a Copilot session for a goal no session is working on, links the
     /// goal's pull requests to it, and shows it in Copilot Projects.
     func startSession(for goal: PullRequestGoal, projectId: String) {
-        guard isConnected, !startingGoals.contains(goal.id) else { return }
+        guard !hostedReadOnly, isConnected, !startingGoals.contains(goal.id) else { return }
         let prompt = Self.startingPrompt(for: goal.items.map(\.pr))
         let start = pendingStarts[goal.id].flatMap { $0.projectId == projectId && $0.prompt == prompt ? $0 : nil }
             ?? PendingStart(requestId: UUID(), projectId: projectId, prompt: prompt)
@@ -646,6 +795,7 @@ final class PullRequestsModel: ObservableObject {
     /// it worked in, and shows it in Copilot Projects. Its pull requests follow
     /// it once the workspace reports it live.
     func resume(_ candidate: ResumableSession, projectId: String) {
+        guard !hostedReadOnly else { return }
         let copilotId = candidate.copilotSessionId
         guard isConnected, !resumingSessions.contains(copilotId) else { return }
         let resume = pendingResumes[copilotId].flatMap { $0.projectId == projectId ? $0 : nil }
@@ -725,7 +875,7 @@ final class PullRequestsModel: ObservableObject {
     }
 
     private func saveOverrides() {
-        guard let overridesURL, let data = try? JSONEncoder().encode(overrides) else { return }
+        guard !hostedReadOnly, let overridesURL, let data = try? JSONEncoder().encode(overrides) else { return }
         try? FileManager.default.createDirectory(
             at: overridesURL.deletingLastPathComponent(), withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
