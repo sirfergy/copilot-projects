@@ -121,7 +121,8 @@ public final class PullRequestsOverviewProvider {
                 guard let key = PullRequestKey(key) else { return false }
                 if model.resumable[key]?.copilotSessionId.lowercased() == request.copilotSessionId { return true }
                 guard let id = existingSessionId, let tab = model.liveSessions[id] else { return false }
-                return tab.pullRequestKeys.contains(key.description) || model.links[key] == id
+                return tab.pullRequestKeys.contains(key.description)
+                    || (model.sessionsKnown && model.links[key] == id)
             }
             guard verified else {
                 return .stale("These pull requests have not been verified for that previous session.")

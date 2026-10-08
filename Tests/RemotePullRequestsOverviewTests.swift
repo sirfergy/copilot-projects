@@ -561,6 +561,69 @@ final class RemotePullRequestsOverviewTests: XCTestCase {
         try await settle(model)
     }
 
+    func testExistingResumeRejectsTranscriptLinksFromAPreviousCopilotSessionInTheSameTab() {
+        let pr = makePR()
+        let previousId = UUID().uuidString.lowercased()
+        current?.projects[0].sessions = [
+            .init(id: "live", title: "Live", status: .idle, copilotSessionId: previousId),
+        ]
+        let (provider, model) = make()
+        model.apply(.snapshot(current!))
+        model.show([pr], links: [pr.key: "live"], updated: now)
+        let previousRequest = RemotePullRequestSessionRequest(
+            requestId: UUID(), kind: "resume", projectId: "p",
+            pullRequestKeys: [pr.key.description], copilotSessionId: previousId
+        )
+        XCTAssertNil(provider.validate(previousRequest, workspace: current!, existingSessionId: "live"))
+
+        let currentId = UUID().uuidString.lowercased()
+        current?.projects[0].sessions[0].copilotSessionId = currentId
+        let currentRequest = RemotePullRequestSessionRequest(
+            requestId: UUID(), kind: "resume", projectId: "p",
+            pullRequestKeys: [pr.key.description], copilotSessionId: currentId
+        )
+        if case .stale = provider.validate(currentRequest, workspace: current!, existingSessionId: "live") {
+        } else {
+            XCTFail("The same tab ID does not verify a link for its new Copilot session")
+        }
+        XCTAssertFalse(model.sessionsKnown)
+        XCTAssertEqual(model.links[pr.key], "live", "The previous transcript match is still cached")
+
+        model.show([pr], links: [pr.key: "live"], updated: now)
+        XCTAssertTrue(model.sessionsKnown)
+        XCTAssertNil(provider.validate(currentRequest, workspace: current!, existingSessionId: "live"))
+    }
+
+    func testExistingResumeKeepsPersistedAssociationsAvailableDuringRematching() async throws {
+        let reader = OverviewTranscriptReader()
+        addTeardownBlock { await reader.release() }
+        let pr = makePR()
+        current?.projects[0].sessions = [
+            .init(id: "live", title: "Live", status: .idle, copilotSessionId: UUID().uuidString.lowercased()),
+        ]
+        let (provider, model) = make(transcriptIndex: reader)
+        model.apply(.snapshot(current!))
+        model.show([pr], links: [pr.key: "live"], updated: now)
+        let cid = UUID().uuidString.lowercased()
+        current?.projects[0].sessions[0].copilotSessionId = cid
+        _ = provider.snapshot()
+        try await waitUntil { await reader.reads == 1 }
+        XCTAssertTrue(model.isMatchingSessions)
+        let request = RemotePullRequestSessionRequest(
+            requestId: UUID(), kind: "resume", projectId: "p",
+            pullRequestKeys: [pr.key.description], copilotSessionId: cid
+        )
+        if case .stale = provider.validate(request, workspace: current!, existingSessionId: "live") {
+        } else {
+            XCTFail("In-flight matching must not authorize a stale transcript link")
+        }
+        current?.projects[0].sessions[0].pullRequestKeys = [pr.key.description]
+        XCTAssertNil(provider.validate(request, workspace: current!, existingSessionId: "live"))
+        XCTAssertFalse(model.sessionsKnown)
+        await reader.release()
+        try await settle(model)
+    }
+
     func testPreviousSessionWithoutMetadataDatesUsesConcreteTranscriptTimeAcrossCacheReload() async throws {
         let home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
         let pr = makePR(7, branch: "me/undated-session")
