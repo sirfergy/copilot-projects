@@ -11,9 +11,11 @@ final class FakeWorkspace: PullRequestsWorkspace, @unchecked Sendable {
     private var fetches: [WorkspaceFetch]
     private var reveals: [WorkspaceCommandResult] = [.done(code: "revealed", text: nil)]
     private var starts: [WorkspaceCommandResult] = [.done(code: "created", text: "started")]
+    private var resumes: [WorkspaceCommandResult] = [.done(code: "created", text: "resumed")]
     private var _snapshotCalls = 0
     private var _revealCalls: [(projectId: String?, sessionId: String)] = []
     private var _startCalls: [(projectId: String, requestId: UUID, prompt: String)] = []
+    private var _resumeCalls: [(projectId: String, requestId: UUID, copilotSessionId: String)] = []
 
     init(snapshot: WorkspaceSnapshot? = nil) {
         fetches = [snapshot.map(WorkspaceFetch.snapshot) ?? .unreachable]
@@ -24,17 +26,21 @@ final class FakeWorkspace: PullRequestsWorkspace, @unchecked Sendable {
     }
 
     func answer(fetches: [WorkspaceFetch]? = nil, reveals: [WorkspaceCommandResult]? = nil,
-                starts: [WorkspaceCommandResult]? = nil) {
+                starts: [WorkspaceCommandResult]? = nil, resumes: [WorkspaceCommandResult]? = nil) {
         lock.withLock {
             if let fetches { self.fetches = fetches }
             if let reveals { self.reveals = reveals }
             if let starts { self.starts = starts }
+            if let resumes { self.resumes = resumes }
         }
     }
 
     var snapshotCalls: Int { lock.withLock { _snapshotCalls } }
     var revealCalls: [(projectId: String?, sessionId: String)] { lock.withLock { _revealCalls } }
     var startCalls: [(projectId: String, requestId: UUID, prompt: String)] { lock.withLock { _startCalls } }
+    var resumeCalls: [(projectId: String, requestId: UUID, copilotSessionId: String)] {
+        lock.withLock { _resumeCalls }
+    }
 
     private static func next<T>(_ answers: inout [T]) -> T {
         answers.count > 1 ? answers.removeFirst() : answers[0]
@@ -58,6 +64,13 @@ final class FakeWorkspace: PullRequestsWorkspace, @unchecked Sendable {
         lock.withLock {
             _startCalls.append((projectId, requestId, prompt))
             return Self.next(&starts)
+        }
+    }
+
+    func resumeCopilotSession(projectId: String, requestId: UUID, copilotSessionId: String) async -> WorkspaceCommandResult {
+        lock.withLock {
+            _resumeCalls.append((projectId, requestId, copilotSessionId))
+            return Self.next(&resumes)
         }
     }
 }
@@ -173,6 +186,10 @@ final class PullRequestsWorkspaceBridgeTests: XCTestCase {
             case "start-copilot-session":
                 return request.requestId.flatMap(UUID.init(uuidString:)) != nil && request.prompt == "go"
                     ? .success("new", code: "created") : .failure("bad", code: "bad-request")
+            case "resume-copilot-session":
+                return request.requestId.flatMap(UUID.init(uuidString:)) != nil && request.projectId == "p"
+                    && request.copilotSessionId == "0f1e2d3c-4b5a-4000-8000-000000000002"
+                    ? .success("back", code: "created") : .failure("bad", code: "bad-request")
             default: return .failure("unknown command: \(request.command)")
             }
         }
@@ -185,6 +202,10 @@ final class PullRequestsWorkspaceBridgeTests: XCTestCase {
         XCTAssertEqual(gone, .refused(code: "gone", message: "the session has ended"))
         let started = await bridge.startCopilotSession(projectId: "p", requestId: UUID(), prompt: "go")
         XCTAssertEqual(started, .done(code: "created", text: "new"))
+        let resumed = await bridge.resumeCopilotSession(
+            projectId: "p", requestId: UUID(), copilotSessionId: "0f1e2d3c-4b5a-4000-8000-000000000002"
+        )
+        XCTAssertEqual(resumed, .done(code: "created", text: "back"))
     }
 
     func testAnOlderHostIsIncompatibleAndAMissingOneIsUnreachable() async throws {
@@ -196,6 +217,10 @@ final class PullRequestsWorkspaceBridgeTests: XCTestCase {
         XCTAssertEqual(reveal, .incompatibleHost)
         let start = await older.startCopilotSession(projectId: "p", requestId: UUID(), prompt: "go")
         XCTAssertEqual(start, .incompatibleHost)
+        let resume = await older.resumeCopilotSession(
+            projectId: "p", requestId: UUID(), copilotSessionId: "0f1e2d3c-4b5a-4000-8000-000000000002"
+        )
+        XCTAssertEqual(resume, .incompatibleHost)
 
         let garbled = try TestControlSocket { _ in .success("not a snapshot") }
         let unreadable = await ControlWorkspaceBridge(socketPath: garbled.path, timeout: 2).snapshot()
@@ -245,7 +270,12 @@ final class PullRequestsWorkspaceModelTests: XCTestCase {
         return PullRequestsModel(
             workspace: workspace, host: recorder.host,
             defaults: UserDefaults(suiteName: UUID().uuidString)!, stateDirectory: root,
-            loadAccounts: { [] }, isVisible: { true },
+            loadAccounts: { [] },
+            resumableFinder: ResumableSessionFinder(
+                store: CopilotSessionStore(environment: ["COPILOT_HOME": root.appendingPathComponent("copilot").path]),
+                cacheURL: nil
+            ),
+            isVisible: { true },
             presentError: { title, message in recorder.alerts.append("\(title): \(message)") }
         )
     }
@@ -444,6 +474,101 @@ final class PullRequestsWorkspaceModelTests: XCTestCase {
         try await waitUntil { model.startingGoals.isEmpty }
         XCTAssertEqual(workspace.startCalls.last?.requestId, unsaved)
         XCTAssertEqual(model.overrides.sessionLinks[pr.key.description], "s2")
+    }
+
+    func testResumeSessionShowsTheTabItOpenedAndItsPullRequestsFollowItOnceLive() async throws {
+        let copilotId = "0f1e2d3c-4b5a-4000-8000-0000000000aa"
+        let workspace = FakeWorkspace(fetches: [.snapshot(fixtureSnapshot)])
+        let recorder = HostRecorder()
+        var revealsWhenActivated: [Int] = []
+        let host = PullRequestsHostApp(activate: { pid in
+            recorder.activations.append(pid)
+            revealsWhenActivated.append(workspace.revealCalls.count)
+        }, open: nil)
+        let model = PullRequestsModel(
+            workspace: workspace, host: host, defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            stateDirectory: root, loadAccounts: { [] },
+            resumableFinder: ResumableSessionFinder(store: CopilotSessionStore(environment: ["COPILOT_HOME": root.path]),
+                                                    cacheURL: nil),
+            isVisible: { true }, presentError: { title, message in recorder.alerts.append("\(title): \(message)") }
+        )
+        let pr = makePR(1, branch: "me/needs-a-session")
+        let candidate = ResumableSession(copilotSessionId: copilotId, name: "Ship it", cwd: "/work", lastActive: testNow)
+        model.show([pr], links: [:], resumable: [pr.key: candidate])
+        await model.pollWorkspace()
+        XCTAssertEqual(model.goals(now: testNow).first?.resumable, candidate)
+
+        var opened = fixtureSnapshot
+        opened.projects[1].sessions.append(.init(id: "back", title: "Copilot", status: .running))
+        workspace.answer(fetches: [.snapshot(opened)], resumes: [.done(code: "created", text: "back")])
+        model.resume(candidate, projectId: "q")
+        XCTAssertTrue(model.resumingSessions.contains(copilotId))
+        model.resume(candidate, projectId: "q")
+        try await waitUntil { recorder.activations == [4242] }
+        XCTAssertEqual(workspace.resumeCalls.count, 1, "a second click while it resumes does nothing")
+        XCTAssertEqual(workspace.resumeCalls.first?.projectId, "q")
+        XCTAssertEqual(workspace.resumeCalls.first?.copilotSessionId, copilotId)
+        XCTAssertEqual(revealsWhenActivated, [1], "Copilot Projects shows the tab before it becomes active")
+        XCTAssertEqual(workspace.revealCalls.last?.sessionId, "back")
+        XCTAssertEqual(workspace.revealCalls.last?.projectId, "q")
+        XCTAssertTrue(model.resumingSessions.contains(copilotId), "busy until Copilot reports the session")
+        XCTAssertTrue(recorder.alerts.isEmpty)
+
+        var live = opened
+        live.projects[1].sessions[0].copilotSessionId = copilotId.uppercased()
+        workspace.answer(fetches: [.snapshot(live)])
+        await model.pollWorkspace()
+        XCTAssertTrue(model.resumingSessions.isEmpty)
+        let goal = try XCTUnwrap(model.goals(now: testNow).first)
+        XCTAssertEqual(goal.session?.id, "back", "its pull requests follow it to its new tab")
+        XCTAssertNil(goal.resumable)
+        XCTAssertTrue(model.overrides.sessionLinks.isEmpty, "resuming binds nothing by hand")
+    }
+
+    func testResumeSessionRetriesWithTheSameRequestIdAndStopsOfferingASessionThatIsGone() async throws {
+        let copilotId = "0f1e2d3c-4b5a-4000-8000-0000000000bb"
+        let workspace = FakeWorkspace(fetches: [.snapshot(fixtureSnapshot)])
+        workspace.answer(resumes: [
+            .unreachable, .unreachable,
+            .refused(code: "persistence-unavailable", message: "Copilot Projects couldn’t save the session."),
+            .refused(code: "gone", message: "That Copilot session no longer exists."),
+        ])
+        let recorder = HostRecorder()
+        let model = makeModel(workspace, recorder: recorder)
+        let pr = makePR(1, branch: "me/needs-a-session")
+        let candidate = ResumableSession(copilotSessionId: copilotId, name: "Ship it", cwd: "/work", lastActive: testNow)
+        model.show([pr], links: [:], resumable: [pr.key: candidate])
+        await model.pollWorkspace()
+
+        model.resume(candidate, projectId: "p")
+        try await waitUntil { model.resumingSessions.isEmpty }
+        XCTAssertEqual(workspace.resumeCalls.count, 2, "a lost answer is asked again once")
+        XCTAssertEqual(recorder.alerts.count, 1)
+        XCTAssertTrue(recorder.alerts[0].contains("won’t open twice"))
+        XCTAssertEqual(model.goals(now: testNow).first?.resumable, candidate)
+
+        model.resume(candidate, projectId: "p")
+        try await waitUntil { model.resumingSessions.isEmpty }
+        XCTAssertEqual(workspace.resumeCalls.count, 3)
+        XCTAssertEqual(recorder.alerts.last, "Could Not Resume Session: Copilot Projects couldn’t save the session.")
+        XCTAssertEqual(model.resumable[pr.key], candidate, "a resume it couldn't save is still offered")
+
+        model.resume(candidate, projectId: "p")
+        try await waitUntil { model.resumingSessions.isEmpty }
+        XCTAssertEqual(workspace.resumeCalls.count, 4)
+        XCTAssertEqual(Set(workspace.resumeCalls.map(\.requestId)).count, 1, "trying again replays the same request")
+        XCTAssertEqual(recorder.alerts.last, "Could Not Resume Session: That Copilot session no longer exists.")
+        XCTAssertTrue(model.resumable.isEmpty)
+        XCTAssertNil(model.goals(now: testNow).first?.resumable, "a session that's gone is no longer offered")
+        XCTAssertTrue(recorder.activations.isEmpty)
+
+        model.show([pr], links: [:], resumable: [pr.key: candidate])
+        workspace.answer(resumes: [.incompatibleHost])
+        model.resume(candidate, projectId: "p")
+        try await waitUntil { model.resumingSessions.isEmpty }
+        XCTAssertNotEqual(workspace.resumeCalls.last?.requestId, workspace.resumeCalls.first?.requestId)
+        XCTAssertEqual(recorder.alerts.last, "Could Not Resume Session: Update Copilot Projects to resume sessions from here.")
+        XCTAssertEqual(model.resumable[pr.key], candidate, "an older Copilot Projects says nothing about the session")
     }
 
     func testSessionLinksArePrunedOnlyWhileConnected() async throws {

@@ -56,6 +56,19 @@ struct SessionCreationRecord: Codable, Equatable, Sendable {
         }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
+
+    /// Binds a request to resume `copilotSessionId` in `projectId`; never equal to
+    /// a creation's fingerprint.
+    static func resumeFingerprint(projectId: String, copilotSessionId: String) -> String {
+        var hash = SHA256()
+        for field in ["copilot-projects/session-resume/v1", projectId, copilotSessionId.lowercased()] {
+            let bytes = Data(field.utf8)
+            var length = UInt64(bytes.count).bigEndian
+            withUnsafeBytes(of: &length) { hash.update(data: Data($0)) }
+            hash.update(data: bytes)
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 /// Thread-safe, bounded, persisted ledger of remote session creations. Acts as the

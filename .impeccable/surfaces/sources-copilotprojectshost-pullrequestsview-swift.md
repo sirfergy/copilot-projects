@@ -16,8 +16,9 @@ merged by shared head branch, and reassignable by hand. Scope: PRs in the chosen
 owners only (a token list; empty means every owner). Attention: failing required checks, changes
 requested, conflicts/behind, unresolved threads, ready to merge, linked session
 waiting, no live session, stale. Reaches the workspace only through the host's
-control socket (list-sessions, reveal-session, start-copilot-session); while the
-host is away, lanes keep its last known sessions with unknown states. Must not
+control socket (list-sessions, reveal-session, start-copilot-session,
+resume-copilot-session); while the host is away, lanes keep its last known
+sessions with unknown states. Must not
 touch terminal behavior, the main window, or CopilotProjectsProtocol.
 
 ## Direction contract
@@ -32,12 +33,13 @@ orange for needs-you and green for ready, system type, no new tokens.
 
 STORY: Open the window, read how many PRs need you, scan lanes ordered by urgency,
 see each needs-you chip's reason, jump straight to the driving session or the PR,
-and start a session where a goal has none.
+and resume the ended session that worked on a goal, or start one, where it has none.
 
 FIRST VIEWPORT: 38pt drag strip; 56pt header with needs-you count, last refresh,
 owners filter, refresh; 32pt sidebar footer with the window's keys. Sticky stage
 row over four equal columns beside a 240pt goal column (two-line goal, session
-state, project, Go to Session or Start Session). Session goals that need you lead.
+state and project or "Previous session · <when>", Go to Session, Resume Session
+with Start New Session in its menu, or Start Session). Session goals that need you lead.
 Chips: repo#number with age, up to two title lines (omitted when the goal is named
 after that pull request), reason line with a 1pt orange edge (green when ready,
 quiet edge for nudges). Signature: the most urgent chip is preselected so Return

@@ -182,6 +182,90 @@ public enum ProcessTree {
         return sessions
     }
 
+    /// Tabs still bringing back Copilot session `copilotSessionId`: the command
+    /// that resumes it, or the Copilot CLI it started, runs in them. Once that CLI
+    /// exits, the tab's shell replaces the command and the tab no longer counts.
+    /// dtach keeps the command among its arguments for the tab's life, so it never
+    /// counts; another tab's dtach started from inside this one belongs to that tab.
+    public static func sessionsResuming(copilotSessionId: String, in snap: Snapshot) -> Set<String> {
+        sessionsResuming(
+            copilotSessionId: copilotSessionId,
+            in: snap,
+            argumentsOf: { inspect($0).args },
+            dtachProcesses: dtachProcesses(in: snap),
+            sessionsDirectory: Paths.sessionsDir
+        )
+    }
+
+    static func sessionsResuming(
+        copilotSessionId: String,
+        in snap: Snapshot,
+        argumentsOf: (pid_t) -> [String],
+        dtachProcesses: [DtachProcess],
+        sessionsDirectory: URL
+    ) -> Set<String> {
+        var sessions = Set<String>()
+        for dtach in dtachProcesses {
+            guard let socket = dtach.socketPath,
+                  let sessionId = sessionId(fromDtachSocket: socket, sessionsDirectory: sessionsDirectory),
+                  !sessions.contains(sessionId) else { continue }
+            var pending = snap.childrenOf[dtach.pid] ?? []
+            var seen = Set<pid_t>()
+            while let pid = pending.popLast() {
+                guard seen.insert(pid).inserted, snap.nameOf[pid] != "dtach" else { continue }
+                if resumes(argumentsOf(pid), copilotSessionId: copilotSessionId) {
+                    sessions.insert(sessionId)
+                    break
+                }
+                pending.append(contentsOf: snap.childrenOf[pid] ?? [])
+            }
+        }
+        return sessions
+    }
+
+    /// Arguments that resume Copilot session `copilotSessionId`: the Copilot
+    /// CLI's `--resume=<id>` or `--resume <id>` options, or the shell command
+    /// Copilot Projects runs to resume it (`TerminalController.startupProgram`),
+    /// known by the fallback only it prints. Only Copilot's own options count:
+    /// not a prompt, a command that merely quotes one, or another program's
+    /// arguments, as when it searches for the flag.
+    public static func resumes(_ arguments: [String], copilotSessionId: String) -> Bool {
+        let id = copilotSessionId.lowercased()
+        // Quoting a prompt escapes each `'`, so a prompt can never spell this.
+        let fallback = "|| printf '\\n[copilot projects] could not resume copilot session \(id)\\n'"
+        let arguments = arguments.map { $0.lowercased() }
+        func name(_ path: String) -> String { (path as NSString).lastPathComponent }
+        guard let program = arguments.first else { return false }
+        // Where Copilot's own options start: after the CLI, after the `$0` a
+        // shell wrapper runs it as, or after the script its loader runs.
+        var options: Int?
+        if name(program) == "copilot" {
+            options = 1
+        } else if ["sh", "bash", "zsh", "dash", "ksh", "fish"].contains(name(program).trimmingCharacters(in: ["-"])),
+                  let shell = arguments.prefix(3).firstIndex(of: "-c"), shell + 1 < arguments.count {
+            if arguments[shell + 1].contains(fallback) { return true }
+            if shell + 2 < arguments.count, name(arguments[shell + 2]) == "copilot" { options = shell + 3 }
+        } else if name(program) == "node",
+                  let script = arguments.dropFirst().firstIndex(where: { !$0.hasPrefix("-") }),
+                  name(arguments[script]) == "copilot" || arguments[script].contains("/@github/copilot/") {
+            options = script + 1
+        }
+        guard var index = options else { return false }
+        let promptOptions: Set<String> = ["--interactive", "-i", "--prompt", "-p"]
+        while index < arguments.count, arguments[index] != "--" {
+            let argument = arguments[index]
+            if promptOptions.contains(argument) {
+                index += 2
+            } else if argument == "--resume=" + id
+                        || (argument == "--resume" && index + 1 < arguments.count && arguments[index + 1] == id) {
+                return true
+            } else {
+                index += 1
+            }
+        }
+        return false
+    }
+
     /// Resolve the Copilot Projects tab that owns `pid`.
     ///
     /// Managed terminals run below a dtach process whose socket filename is the

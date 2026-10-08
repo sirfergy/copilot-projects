@@ -35,6 +35,8 @@ protocol PullRequestsWorkspace: Sendable {
     func revealSession(projectId: String?, sessionId: String) async -> WorkspaceCommandResult
     /// Starts a Copilot session with `prompt`; replaying `requestId` never starts a second one.
     func startCopilotSession(projectId: String, requestId: UUID, prompt: String) async -> WorkspaceCommandResult
+    /// Opens an ended Copilot session in a new tab; replaying `requestId` never opens a second one.
+    func resumeCopilotSession(projectId: String, requestId: UUID, copilotSessionId: String) async -> WorkspaceCommandResult
 }
 
 /// Copilot Projects over its control socket. Each request runs on a dispatch
@@ -72,6 +74,14 @@ actor ControlWorkspaceBridge: PullRequestsWorkspace {
         request.projectId = projectId
         request.requestId = requestId.uuidString
         request.prompt = prompt
+        return Self.result(await send(request))
+    }
+
+    func resumeCopilotSession(projectId: String, requestId: UUID, copilotSessionId: String) async -> WorkspaceCommandResult {
+        var request = ControlRequest(command: "resume-copilot-session")
+        request.projectId = projectId
+        request.requestId = requestId.uuidString
+        request.copilotSessionId = copilotSessionId
         return Self.result(await send(request))
     }
 

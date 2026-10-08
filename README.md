@@ -160,8 +160,12 @@ Ready, so one row shows how far a goal has got and what is holding it up.
 - **Act from it.** **Go to Session** brings Copilot Projects forward on the goal's
   session. A goal with no session offers **Start Session**, which opens Copilot in
   the current project (or one you pick) with the pull request links as its prompt,
-  then shows it. Double-click a pull request, or press `⌘Return`, to open it on
-  GitHub. Use `↑`/`↓` to move and Return to go to its session.
+  then shows it. When an ended Copilot session worked on the goal, it offers
+  **Resume Session** instead, reopening that session in a new tab in the folder it
+  worked in (its menu still has **Start New Session**). Ended sessions are found
+  through the Copilot CLI's local session store; one whose folder is gone, or that
+  another Copilot CLI has open, isn't offered. Double-click a pull request, or press
+  `⌘Return`, to open it on GitHub. Use `↑`/`↓` to move and Return to go to its session.
 - **Copilot Projects closed?** The lanes keep the sessions it last reported, with
   their states unknown, and their buttons become **Open Copilot Projects**. A
   Copilot Projects too old to list its sessions is called out at the bottom of
@@ -178,10 +182,13 @@ memory, and requests go straight to the GitHub API. It refreshes when opened
 and every five minutes while open, or on demand with `⌘R`. It reads your sessions
 from Copilot Projects over its local control socket every two seconds while its
 window is visible. Matching pull requests to sessions reads each live session's
-Copilot CLI event log once, then only what was added since. The match counts and
-any goals you name are kept under `~/.local/state/copilot-projects/pull-requests/`.
-Only one copy of the app writes there; opening another brings the first forward. If
-that folder can't be locked, the window opens anyway and says that it saves nothing.
+Copilot CLI event log once, then only what was added since. Looking for an ended
+session reads, in the background and 1 GB at a time, only the event logs of
+sessions the Copilot CLI's session store ties to a pull request, each once. The
+match counts and any goals you name are kept under
+`~/.local/state/copilot-projects/pull-requests/`. Only one copy of the app writes
+there; opening another brings the first forward. If that folder can't be locked,
+the window opens anyway and says that it saves nothing.
 
 VoiceOver exposes each session's selection and attention state, with separate
 select and end actions. The session-details drawer uses a fade instead of

@@ -390,6 +390,19 @@ final class AppModel: ObservableObject {
             }
             return self.startPullRequestsSession(requestId: requestId, projectId: projectId, prompt: prompt)
         },
+        resumeCopilotSession: { [unowned self] request in
+            guard let projectId = request.projectId,
+                  let rawRequestId = request.requestId,
+                  let requestId = UUID(uuidString: rawRequestId),
+                  let copilotSessionId = request.copilotSessionId,
+                  CopilotSessionStore.isValidSessionId(copilotSessionId) else {
+                return .failure("resume-copilot-session requires a project, request id, and Copilot session id",
+                                code: "bad-request")
+            }
+            return self.resumePullRequestsSession(
+                requestId: requestId, projectId: projectId, copilotSessionId: copilotSessionId
+            )
+        },
         screenshot: { _ in
             .failure("screenshot must be handled by the control server")
         },
@@ -399,6 +412,14 @@ final class AppModel: ObservableObject {
                 ?? .failure("This build does not include a remote integration.")
         }
     ))
+    /// The tab each Copilot session was last resumed in for Copilot Pull Requests,
+    /// by Copilot session id (lowercased), and when: until its shell has started
+    /// the command that resumes it, nothing else shows that it is coming back.
+    private var pullRequestsResumeLaunches: [String: (sessionId: String, launchedAt: Date)] = [:]
+    static let pullRequestsResumeStartupGrace: TimeInterval = 5
+    /// The Copilot session each captured launch resumes, by tab. Launches are
+    /// captured only when `remoteSessionLauncher` is set, in tests.
+    private(set) var capturedResumeLaunches: [String: String] = [:]
     private var stateLoadFailure: String?
     private var didFailToLoadWorkspaceState = false
     private var stateRecoveryMessage: String?
@@ -500,6 +521,8 @@ final class AppModel: ObservableObject {
     private var powerOffProtectionGeneration = 0
     private(set) var isPoweringOff = false
     private let remotePromptLiveSessions: ((Set<String>) -> Set<String>)?
+    /// Tabs still bringing back a Copilot session (tests stand in for the process tree).
+    private let copilotResumeSessions: ((String) -> Set<String>)?
     private let remotePromptTarget: ((String) -> RemotePromptTarget?)?
     private let remoteElicitationTarget:
         ((String) -> RemoteElicitationTerminalTarget?)?
@@ -576,6 +599,7 @@ final class AppModel: ObservableObject {
         agentActivityDirectory: URL = Paths.sessionsDir,
         resumeMarkerDirectory: URL = Paths.sessionsDir,
         remotePromptLiveSessions: ((Set<String>) -> Set<String>)? = nil,
+        copilotResumeSessions: ((String) -> Set<String>)? = nil,
         remotePromptTarget: ((String) -> RemotePromptTarget?)? = nil,
         remoteElicitationTarget:
             ((String) -> RemoteElicitationTerminalTarget?)? = nil,
@@ -622,6 +646,7 @@ final class AppModel: ObservableObject {
         self.agentActivityDirectory = agentActivityDirectory
         self.resumeMarkerDirectory = resumeMarkerDirectory
         self.remotePromptLiveSessions = remotePromptLiveSessions
+        self.copilotResumeSessions = copilotResumeSessions
         self.remotePromptTarget = remotePromptTarget
         self.remoteElicitationTarget = remoteElicitationTarget
         self.remoteCopilotExecutable = remoteCopilotExecutable
@@ -760,12 +785,14 @@ final class AppModel: ObservableObject {
     /// controller is created here (a fresh remote session).
     /// Ordinary restoration keeps recorded resume behavior; configured remote
     /// launches ignore stale markers left behind for a recycled session id.
+    /// `resumeCopilotSessionId` resumes that Copilot session instead of any recorded one.
     @discardableResult
     func controller(
         for sessionId: String,
         resumeRecordedSession: Bool = true,
         copilotExecutable: String? = nil,
-        launchCopilotInitialPrompt: String? = nil
+        launchCopilotInitialPrompt: String? = nil,
+        resumeCopilotSessionId: String? = nil
     ) -> TerminalController? {
         if let c = controllers[sessionId] { return c }
         guard !isTerminating else { return nil }
@@ -806,7 +833,8 @@ final class AppModel: ObservableObject {
             extraEnvironment: environment(projectId: project.id, sessionId: sessionId),
             dtachExecutable: dtach,
             dtachSocket: socket,
-            copilotSessionId: (recordedCopilot?.isEmpty == false) ? recordedCopilot : nil,
+            copilotSessionId: resumeCopilotSessionId.flatMap { TerminalController.isSafeSessionId($0) ? $0 : nil }
+                ?? ((recordedCopilot?.isEmpty == false) ? recordedCopilot : nil),
             launchCopilotExecutable: copilotExecutable,
             launchCopilotInitialPrompt: launchCopilotInitialPrompt,
             kittyImageDiskStore: kittyImageDiskStore
@@ -1145,16 +1173,19 @@ final class AppModel: ObservableObject {
         _ sessionId: String,
         executable: String?,
         initialPrompt: String?,
-        resumeRecordedSession: Bool = true
+        resumeRecordedSession: Bool = true,
+        resumeCopilotSessionId: String? = nil
     ) {
         if let remoteSessionLauncher {
             remoteSessionLauncher(sessionId, executable, initialPrompt)
+            if let resumeCopilotSessionId { capturedResumeLaunches[sessionId] = resumeCopilotSessionId }
         } else {
             controller(
                 for: sessionId,
                 resumeRecordedSession: resumeRecordedSession,
                 copilotExecutable: executable,
-                launchCopilotInitialPrompt: initialPrompt
+                launchCopilotInitialPrompt: initialPrompt,
+                resumeCopilotSessionId: resumeCopilotSessionId
             )
         }
     }
@@ -4819,6 +4850,170 @@ final class AppModel: ObservableObject {
         default:
             return Self.controlResponse(for: outcome)
         }
+    }
+
+    private static func pullRequestsFailure(_ error: Error) -> ControlResponse {
+        guard let error = error as? CopilotSessionStartError else {
+            return .failure(error.localizedDescription, code: "unavailable")
+        }
+        let code: String
+        switch error {
+        case .projectUnavailable: code = "unknown-project"
+        case .invalidPrompt: code = "bad-request"
+        case .workingDirectoryUnavailable: code = "invalid"
+        case .shuttingDown, .backendUnavailable, .copilotUnavailable, .terminalUnavailable: code = "unavailable"
+        }
+        return .failure(error.localizedDescription, code: code)
+    }
+
+    /// Opens an ended Copilot CLI session for Copilot Pull Requests in a new tab
+    /// of `projectId`, in the folder it worked in, selected in its project. A tab
+    /// that already has it, or is still bringing it back, is returned (`existing`).
+    /// Like Start Session it shares the creation ledger, so a request id replayed
+    /// even after a restart returns the same tab (`existing`), `gone` once it
+    /// ended, or `conflict` for another project or session. `gone` when the CLI no
+    /// longer has the session, `in-use` when a running CLI holds it, `invalid`
+    /// when its folder is gone.
+    func resumePullRequestsSession(
+        requestId: UUID, projectId: String, copilotSessionId: String, now: Date = Date()
+    ) -> ControlResponse {
+        guard !isTerminating else {
+            return .failure(CopilotSessionStartError.shuttingDown.localizedDescription, code: "unavailable")
+        }
+        let unsaved = ControlResponse.failure(
+            "Copilot Projects couldn’t save the session. Try again; it won’t open twice.",
+            code: "persistence-unavailable"
+        )
+        guard !didFailToLoadWorkspaceState else { return unsaved }
+        let copilotId = copilotSessionId.lowercased()
+        let fingerprint = SessionCreationRecord.resumeFingerprint(projectId: projectId, copilotSessionId: copilotId)
+        let tabId = requestId.uuidString
+        let record: SessionCreationRecord?
+        do {
+            record = try sessionCreationLedger.record(for: requestId, now: now)
+        } catch {
+            NSLog("copilot-projects: could not read the session creation ledger for resume request \(tabId): "
+                + error.localizedDescription)
+            return unsaved
+        }
+        if let record {
+            guard record.creationFingerprint == fingerprint, record.projectId == projectId else {
+                return .failure("request id is bound to a different session", code: "conflict")
+            }
+            guard locateIndex(record.sessionId) != nil else {
+                return .failure("request id already resumed a session that has since ended", code: "gone")
+            }
+            return .success(record.sessionId, code: "existing")
+        }
+        // Opened for this request before its record was saved.
+        if let loc = locateIndex(tabId) {
+            guard projects[loc.p].id == projectId,
+                  projects[loc.p].sessions[loc.s].creationFingerprint == fingerprint else {
+                return .failure("request id is bound to a different session", code: "conflict")
+            }
+            guard rememberPullRequestsResume(requestId, projectId: projectId, sessionId: tabId,
+                                             fingerprint: fingerprint, now: now) else { return unsaved }
+            return .success(tabId, code: "existing")
+        }
+        let store = CopilotSessionStore()
+        if let sessionId = tabHoldingCopilotSession(copilotId, now: now) {
+            guard rememberPullRequestsResume(requestId, projectId: projectId, sessionId: sessionId,
+                                             fingerprint: fingerprint, now: now) else { return unsaved }
+            return .success(sessionId, code: "existing")
+        }
+        // A terminal left behind for this request has no record of what it runs.
+        if FileManager.default.fileExists(atPath: Paths.dtachSocketPath(sessionId: tabId)) {
+            return .failure("request id is bound to a different session", code: "conflict")
+        }
+        guard let copilotRecord = store.record(for: copilotId) else {
+            return .failure("That Copilot session no longer exists.", code: "gone")
+        }
+        guard !store.isInUse(copilotId) else {
+            return .failure("That Copilot session is open somewhere else.", code: "in-use")
+        }
+        let cwd = Paths.normalizedDirectory(copilotRecord.cwd ?? "")
+        var isDirectory: ObjCBool = false
+        guard !cwd.isEmpty, FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return .failure("The folder it worked in, \(cwd), no longer exists.", code: "invalid")
+        }
+        let executable: String
+        do {
+            executable = try copilotSessionExecutable(toProjectId: projectId)
+        } catch {
+            return Self.pullRequestsFailure(error)
+        }
+        guard let pi = projectIndex(projectId) else {
+            return .failure(CopilotSessionStartError.projectUnavailable.localizedDescription, code: "unknown-project")
+        }
+        let session = Session(id: tabId, title: "Copilot", cwd: cwd, creationFingerprint: fingerprint)
+        let previousSelection = projects[pi].selectedSessionId
+        projects[pi].sessions.append(session)
+        projects[pi].selectedSessionId = session.id
+        // No suspension between appending and creating the launch controller: a
+        // view update must not lazily create a plain shell for this tab. The
+        // marker isn't written here; Copilot writes it once it has resumed.
+        launchSession(session.id, executable: executable, initialPrompt: nil, resumeCopilotSessionId: copilotId)
+        if remoteSessionLauncher == nil, controllers[session.id]?.terminalView.process?.running != true {
+            controllers[session.id] = nil
+            projects[pi].sessions.removeAll { $0.id == session.id }
+            projects[pi].selectedSessionId = previousSelection
+            return .failure("The terminal could not be started.", code: "unavailable")
+        }
+        pullRequestsResumeLaunches[copilotId] = (session.id, now)
+        refreshSelectedTranscriptController()
+        // The tab stays if saving fails, so the retry finds it instead of opening another.
+        guard rememberPullRequestsResume(requestId, projectId: projectId, sessionId: session.id,
+                                         fingerprint: fingerprint, now: now) else { return unsaved }
+        return .success(session.id, code: "created")
+    }
+
+    /// Saves the workspace, then which tab `requestId` resumed its session in.
+    private func rememberPullRequestsResume(
+        _ requestId: UUID, projectId: String, sessionId: String, fingerprint: String, now: Date
+    ) -> Bool {
+        do {
+            try persistWorkspace()
+            try sessionCreationLedger.remember(
+                SessionCreationRecord(
+                    requestId: requestId.uuidString, projectId: projectId, sessionId: sessionId,
+                    createdAt: now, creationFingerprint: fingerprint
+                ),
+                now: now
+            )
+            return true
+        } catch {
+            NSLog("copilot-projects: could not save resume request \(requestId.uuidString); "
+                + "retry with the same request id: " + error.localizedDescription)
+            return false
+        }
+    }
+
+    /// A tab that has Copilot session `copilotId`: its resume marker names it, or
+    /// it is still bringing it back, without a marker until Copilot has resumed.
+    /// Once that Copilot exits without resuming, the tab is a plain shell and no
+    /// longer has it.
+    private func tabHoldingCopilotSession(_ copilotId: String, now: Date) -> String? {
+        let sessions = projects.flatMap(\.sessions).map(\.id)
+        // Only a marker the tab's own Copilot wrote, as a relaunch requires before resuming it.
+        if let marked = sessions.first(where: { sessionId in
+            guard let marker = resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session"),
+                  marker.lowercased() == copilotId else { return false }
+            return TranscriptController.transcriptOwnerAllowsRead(sessionId: sessionId, directory: resumeMarkerDirectory)
+                && !TranscriptController.isCopilotSessionQuarantined(
+                    sessionId: sessionId, copilotSessionId: marker, directory: resumeMarkerDirectory
+                )
+        }) {
+            return marked
+        }
+        let resuming = copilotResumeSessions?(copilotId)
+            ?? ProcessTree.sessionsResuming(copilotSessionId: copilotId, in: ProcessTree.snapshot())
+        if let starting = sessions.first(where: resuming.contains) { return starting }
+        if let launch = pullRequestsResumeLaunches[copilotId], locateIndex(launch.sessionId) != nil,
+           now.timeIntervalSince(launch.launchedAt) < Self.pullRequestsResumeStartupGrace {
+            return launch.sessionId
+        }
+        return nil
     }
 
     /// Every project and live session with the state the workspace shows, for `list-sessions`.

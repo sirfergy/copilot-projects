@@ -458,6 +458,9 @@ struct PullRequestGoal: Identifiable, Equatable {
     let session: PullRequestSession?
     /// Most urgent first.
     let items: [PullRequestItem]
+    /// An ended Copilot session that worked on these pull requests, offered only
+    /// while no live session does.
+    var resumable: ResumableSession? = nil
 
     var actionCount: Int { items.filter { $0.assessment.needsAction }.count }
     var needsYouCount: Int { items.filter { $0.assessment.needsYou }.count }
@@ -529,7 +532,8 @@ enum PullRequestGrouping {
         sessions: [String: PullRequestSession],
         overrides: PullRequestGoalOverrides,
         now: Date,
-        sessionsKnown: Bool = true
+        sessionsKnown: Bool = true,
+        resumable: [PullRequestKey: ResumableSession] = [:]
     ) -> [PullRequestGoal] {
         struct Placement { var goalId: String; var kind: PullRequestGoal.Kind; var manual: Bool }
 
@@ -609,9 +613,29 @@ enum PullRequestGrouping {
             case .branch, .single:
                 name = sentenceCase(prs.min { ($0.createdAt, $0.key) < ($1.createdAt, $1.key) }?.title ?? goalId)
             }
-            return PullRequestGoal(id: goalId, kind: kind, name: name, session: goalSession, items: items)
+            var goal = PullRequestGoal(id: goalId, kind: kind, name: name, session: goalSession, items: items)
+            if goalSession == nil, items.allSatisfy({ $0.session == nil }) {
+                goal.resumable = previousSession(for: items, in: resumable)
+            }
+            return goal
         }
         return goals.sorted(by: goalOrder)
+    }
+
+    /// The ended session that worked on most of the goal's pull requests, then
+    /// the one active most recently.
+    private static func previousSession(
+        for items: [PullRequestItem], in resumable: [PullRequestKey: ResumableSession]
+    ) -> ResumableSession? {
+        var counts: [String: (session: ResumableSession, count: Int)] = [:]
+        for item in items {
+            guard let session = resumable[item.pr.key] else { continue }
+            counts[session.copilotSessionId, default: (session, 0)].count += 1
+        }
+        return counts.values.max {
+            ($0.count, $0.session.lastActive, $1.session.copilotSessionId)
+                < ($1.count, $1.session.lastActive, $0.session.copilotSessionId)
+        }?.session
     }
 
     private static func itemOrder(_ lhs: PullRequestItem, _ rhs: PullRequestItem) -> Bool {
