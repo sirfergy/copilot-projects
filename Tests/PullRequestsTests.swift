@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import XCTest
 @testable import CopilotProjectsHost
 
@@ -541,6 +542,22 @@ final class PullRequestServiceRequestTests: XCTestCase {
         XCTAssertEqual(PullRequestsView.ownersLabel([]), "Every Owner")
         XCTAssertEqual(PullRequestsView.ownersLabel(["github", "my-org"]), "github, my-org")
         XCTAssertEqual(PullRequestsView.ownersLabel(["github", "my-org", "a", "b"]), "github, my-org +2")
+    }
+
+    @MainActor
+    func testReturnInTheOwnersFieldAppliesPendingText() {
+        var draft: [String] = []
+        var submitted: [String]?
+        let coordinator = OwnersTokenField.Coordinator(
+            owners: Binding(get: { draft }, set: { draft = $0 }), onSubmit: { submitted = $0 }
+        )
+        let field = NSTokenField()
+        field.stringValue = "github, @my-org"
+        XCTAssertFalse(coordinator.control(field, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertTab(_:))))
+        XCTAssertNil(submitted)
+        XCTAssertTrue(coordinator.control(field, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        XCTAssertEqual(submitted, ["github", "my-org"])
+        XCTAssertEqual(draft, ["github", "my-org"])
     }
 
     func testSearchWarnsAboutAFailedAccountAndCountsOlderThreads() async throws {

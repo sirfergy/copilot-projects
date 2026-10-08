@@ -765,7 +765,7 @@ private struct OwnersEditor: View {
                 .font(.callout)
                 .foregroundStyle(StudioStyle.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
-            OwnersTokenField(owners: $draft)
+            OwnersTokenField(owners: $draft, onSubmit: commit)
                 .frame(minHeight: 24)
             Text("Separate owners with commas or spaces; Return applies.")
                 .font(.caption)
@@ -774,7 +774,7 @@ private struct OwnersEditor: View {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onDone)
                     .keyboardShortcut(.cancelAction)
-                Button("Apply", action: commit)
+                Button("Apply") { commit(draft) }
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -783,18 +783,19 @@ private struct OwnersEditor: View {
         .onAppear { draft = PullRequestsModel.ownerList(owners) }
     }
 
-    private func commit() {
-        owners = PullRequestsModel.ownerList(draft.joined(separator: ",")).joined(separator: ", ")
+    private func commit(_ tokens: [String]) {
+        owners = PullRequestsModel.ownerList(tokens.joined(separator: ",")).joined(separator: ", ")
         onDone()
     }
 }
 
 /// A native token field: each organization or user is its own token, removable
 /// on its own, so several owners read as a list rather than one string.
-private struct OwnersTokenField: NSViewRepresentable {
+struct OwnersTokenField: NSViewRepresentable {
     @Binding var owners: [String]
+    let onSubmit: ([String]) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(owners: $owners) }
+    func makeCoordinator() -> Coordinator { Coordinator(owners: $owners, onSubmit: onSubmit) }
 
     func makeNSView(context: Context) -> NSTokenField {
         let field = NSTokenField()
@@ -809,6 +810,7 @@ private struct OwnersTokenField: NSViewRepresentable {
 
     func updateNSView(_ field: NSTokenField, context: Context) {
         context.coordinator.owners = $owners
+        context.coordinator.onSubmit = onSubmit
         // Leave the field alone while someone is typing in it.
         guard field.currentEditor() == nil, Coordinator.tokens(in: field) != owners else { return }
         field.objectValue = owners
@@ -816,8 +818,12 @@ private struct OwnersTokenField: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTokenFieldDelegate {
         var owners: Binding<[String]>
+        var onSubmit: ([String]) -> Void
 
-        init(owners: Binding<[String]>) { self.owners = owners }
+        init(owners: Binding<[String]>, onSubmit: @escaping ([String]) -> Void) {
+            self.owners = owners
+            self.onSubmit = onSubmit
+        }
 
         /// Every token, plus anything typed but not yet turned into one.
         static func tokens(in field: NSTokenField) -> [String] {
@@ -837,6 +843,17 @@ private struct OwnersTokenField: NSViewRepresentable {
         func controlTextDidEndEditing(_ notification: Notification) {
             guard let field = notification.object as? NSTokenField else { return }
             owners.wrappedValue = Self.tokens(in: field)
+        }
+
+        /// The field spends Return on tokenizing, so the default button never
+        /// sees it; apply from here instead, pending text included.
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)),
+                  let field = control as? NSTokenField else { return false }
+            let tokens = Self.tokens(in: field)
+            owners.wrappedValue = tokens
+            onSubmit(tokens)
+            return true
         }
     }
 }
