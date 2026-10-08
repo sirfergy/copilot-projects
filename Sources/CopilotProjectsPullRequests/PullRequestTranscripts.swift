@@ -214,9 +214,15 @@ enum TranscriptMentionScanner {
     }
 }
 
+protocol PullRequestTranscriptReading: Sendable {
+    func evidence(
+        for sources: [PullRequestTranscriptIndex.Source], branches: Set<String>
+    ) async -> [String: TranscriptEvidence]
+}
+
 /// Mentions per live session's Copilot transcript, kept on disk so a relaunch only
 /// reads what the transcripts gained since.
-actor PullRequestTranscriptIndex {
+actor PullRequestTranscriptIndex: PullRequestTranscriptReading {
     struct Source: Hashable, Sendable {
         let sessionId: String
         let path: String

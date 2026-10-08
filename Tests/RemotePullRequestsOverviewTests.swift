@@ -5,6 +5,52 @@ import CopilotProjectsProtocol
 @testable import CopilotProjectsPullRequests
 @testable import CopilotProjectsHost
 
+private actor OverviewTranscriptReader: PullRequestTranscriptReading {
+    private var holding = true
+    private var held: [CheckedContinuation<Void, Never>] = []
+    private(set) var reads = 0
+
+    func evidence(
+        for sources: [PullRequestTranscriptIndex.Source], branches: Set<String>
+    ) async -> [String: TranscriptEvidence] {
+        reads += 1
+        if holding { await withCheckedContinuation { held.append($0) } }
+        return [:]
+    }
+
+    func release() {
+        holding = false
+        held.forEach { $0.resume() }
+        held = []
+    }
+}
+
+private actor OverviewPreviousSearch: ResumableSessionSearching {
+    private var pending: [Int: CheckedContinuation<ResumableSearch, Never>] = [:]
+    private var stopped = false
+    private(set) var searches = 0
+    private(set) var completed: Set<Int> = []
+
+    func search(for pullRequests: [PullRequestSnapshot], liveCopilotSessionIds: Set<String>) async -> ResumableSearch {
+        guard !stopped, !pullRequests.isEmpty else { return ResumableSearch() }
+        searches += 1
+        let call = searches
+        let result = await withCheckedContinuation { pending[call] = $0 }
+        completed.insert(call)
+        return result
+    }
+
+    func complete(_ call: Int, with result: ResumableSearch = ResumableSearch()) {
+        pending.removeValue(forKey: call)?.resume(returning: result)
+    }
+
+    func finish() {
+        stopped = true
+        for continuation in pending.values { continuation.resume(returning: ResumableSearch()) }
+        pending = [:]
+    }
+}
+
 private actor OverviewAccounts {
     var calls = 0
     var suspended = true
@@ -51,16 +97,19 @@ final class RemotePullRequestsOverviewTests: XCTestCase {
     }
 
     private func make(
-        loadAccounts: @escaping @Sendable () async throws -> [GitHubAccount] = { [] }
+        loadAccounts: @escaping @Sendable () async throws -> [GitHubAccount] = { [] },
+        resumableFinder: (any ResumableSessionSearching)? = nil,
+        transcriptIndex: (any PullRequestTranscriptReading)? = nil
     ) -> (PullRequestsOverviewProvider, PullRequestsModel) {
         let model = PullRequestsModel(
             workspace: FakeWorkspace(snapshot: current), defaults: defaults, stateDirectory: root,
             service: PullRequestService(graphQL: GitHubGraphQL(endpoint: GraphQLStub.endpoint)),
             loadAccounts: loadAccounts,
-            resumableFinder: ResumableSessionFinder(
+            resumableFinder: resumableFinder ?? ResumableSessionFinder(
                 store: CopilotSessionStore(environment: ["COPILOT_HOME": root.appendingPathComponent("home").path]),
                 cacheURL: nil
             ),
+            transcriptIndex: transcriptIndex,
             hostedReadOnly: true, readOnlyGoalsURL: root.appendingPathComponent("goals.json"),
             transcriptPath: { _ in nil }, clock: { self.now },
             isVisible: { false }, presentError: { _, _ in XCTFail("Hosted engine must never alert") }
@@ -72,10 +121,133 @@ final class RemotePullRequestsOverviewTests: XCTestCase {
     private func settle(_ model: PullRequestsModel) async throws {
         for _ in 0..<300 {
             await Task.yield()
-            if !model.isRefreshing && !model.isMatchingSessions { return }
+            if !model.isRefreshing && !model.isMatchingSessions && !model.isSearchingPreviousSessions { return }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTFail("Hosted refresh did not settle")
+    }
+
+    private func waitUntil(_ condition: @MainActor () async -> Bool) async throws {
+        for _ in 0..<300 {
+            if await condition() { return }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("Hosted background work did not reach the expected state")
+    }
+
+    func testLocalMatchingAdvertisesBusyWithoutChangingGitHubRefreshCadence() async throws {
+        let reader = OverviewTranscriptReader()
+        addTeardownBlock { await reader.release() }
+        let accounts = OverviewAccounts()
+        await accounts.release()
+        let (provider, model) = make(loadAccounts: { try await accounts.load() }, transcriptIndex: reader)
+        model.apply(.snapshot(current!))
+        model.show([makePR()], links: [:], updated: now)
+        current?.projects[0].sessions.append(.init(id: "appeared", title: "New tab", status: .idle))
+        XCTAssertTrue(provider.snapshot().isRefreshing)
+        try await waitUntil { await reader.reads == 1 }
+        XCTAssertTrue(model.isMatchingSessions)
+        XCTAssertFalse(model.isRefreshing, "The Mac's GitHub refresh flag keeps its existing meaning")
+        XCTAssertFalse(provider.snapshot().sessionsKnown)
+        XCTAssertTrue(provider.snapshot().isRefreshing, "Polling stays fast while local matching is held")
+        let loadsDuringMatching = await accounts.calls
+        XCTAssertEqual(loadsDuringMatching, 0)
+
+        await reader.release()
+        try await settle(model)
+        XCTAssertTrue(provider.snapshot().sessionsKnown)
+        XCTAssertFalse(provider.snapshot().isRefreshing)
+        now = now.addingTimeInterval(299)
+        XCTAssertFalse(provider.snapshot().isRefreshing)
+        let loadsBeforeCadence = await accounts.calls
+        XCTAssertEqual(loadsBeforeCadence, 0)
+        now = now.addingTimeInterval(1)
+        XCTAssertTrue(provider.snapshot().isRefreshing)
+        try await settle(model)
+        let loadsAtCadence = await accounts.calls
+        XCTAssertEqual(loadsAtCadence, 1, "Fast UI polling does not shorten the five-minute GitHub cadence")
+    }
+
+    func testPreviousSessionSearchStaysBusyThroughDeferredPassesThenSettles() async throws {
+        let finder = OverviewPreviousSearch()
+        addTeardownBlock { await finder.finish() }
+        let (provider, model) = make(resumableFinder: finder)
+        let pr = makePR()
+        model.apply(.snapshot(current!))
+        model.show([pr], links: [:], updated: now)
+        current?.projects[0].sessions.append(.init(id: "appeared", title: "New tab", status: .idle))
+        _ = provider.snapshot()
+        try await waitUntil { await finder.searches == 1 && !model.isMatchingSessions }
+        XCTAssertFalse(model.isRefreshing)
+        XCTAssertTrue(model.isSearchingPreviousSessions)
+        XCTAssertTrue(provider.snapshot().isRefreshing)
+        XCTAssertTrue(provider.snapshot().sessionsKnown, "Historical discovery does not invalidate live matching")
+
+        let candidate = ResumableSession(copilotSessionId: UUID().uuidString.lowercased(),
+                                        name: "Previous", cwd: root.path, lastActive: now)
+        await finder.complete(1, with: ResumableSearch(sessions: [pr.key: candidate], deferred: true))
+        XCTAssertTrue(provider.snapshot().isRefreshing)
+        try await waitUntil { await finder.searches == 2 }
+        XCTAssertTrue(provider.snapshot().isRefreshing, "A deferred pass remains active work, not an idle handle")
+        await finder.complete(2, with: ResumableSearch(sessions: [pr.key: candidate]))
+        try await settle(model)
+        XCTAssertFalse(model.isSearchingPreviousSessions)
+        XCTAssertFalse(provider.snapshot().isRefreshing)
+        XCTAssertEqual(provider.snapshot().goals.first?.resumable?.copilotSessionId, candidate.copilotSessionId)
+        let searches = await finder.searches
+        XCTAssertEqual(searches, 2)
+    }
+
+    func testCancelledPreviousSearchCannotClearTheReplacementSearchBusyState() async throws {
+        let finder = OverviewPreviousSearch()
+        addTeardownBlock { await finder.finish() }
+        let (provider, model) = make(resumableFinder: finder)
+        model.apply(.snapshot(current!))
+        model.show([makePR()], links: [:], updated: now)
+        current?.projects[0].sessions.append(.init(id: "first", title: "First", status: .idle))
+        _ = provider.snapshot()
+        try await waitUntil { await finder.searches == 1 }
+        current?.projects[0].sessions.append(.init(id: "second", title: "Second", status: .idle))
+        _ = provider.snapshot()
+        try await waitUntil { await finder.searches == 2 && !model.isMatchingSessions }
+        await finder.complete(1)
+        try await waitUntil { await finder.completed.contains(1) }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertTrue(model.isSearchingPreviousSessions, "A cancelled generation cannot mark its replacement idle")
+        XCTAssertTrue(provider.snapshot().isRefreshing)
+        await finder.complete(2)
+        try await settle(model)
+        XCTAssertFalse(provider.snapshot().isRefreshing)
+    }
+
+    func testScopeChangeAndDisconnectClearPreviousSearchBusyWithoutWaitingForCancelledFinder() async throws {
+        let finder = OverviewPreviousSearch()
+        addTeardownBlock { await finder.finish() }
+        let (provider, model) = make(resumableFinder: finder)
+        model.apply(.snapshot(current!))
+        model.show([makePR()], links: [:], updated: now)
+        current?.projects[0].sessions.append(.init(id: "first", title: "First", status: .idle))
+        _ = provider.snapshot()
+        try await waitUntil { await finder.searches == 1 && !model.isMatchingSessions }
+        current = nil
+        XCTAssertFalse(provider.snapshot().isRefreshing)
+        XCTAssertFalse(model.isSearchingPreviousSessions)
+        await finder.complete(1)
+        try await waitUntil { await finder.completed.contains(1) }
+
+        current = WorkspaceSnapshot(hostProcessIdentifier: 1, selectedProjectId: "p",
+                                    projects: [.init(id: "p", name: "Project", sessions: [])])
+        _ = provider.snapshot()
+        try await waitUntil { await finder.searches == 2 && !model.isMatchingSessions }
+        defaults.set("other-owner", forKey: PullRequestsModel.ownersKey)
+        _ = provider.snapshot()
+        XCTAssertFalse(model.isSearchingPreviousSessions, "Scope invalidation ends the old search's busy lifetime")
+        try await settle(model)
+        XCTAssertFalse(provider.snapshot().isRefreshing)
+        await finder.complete(2)
+        try await waitUntil { await finder.completed.contains(2) }
+        try await settle(model)
+        XCTAssertFalse(provider.snapshot().isRefreshing)
     }
 
     func testFirstLoadDoesNotBlockAndCoalescesManualRefreshIncludingFailures() async throws {
@@ -322,6 +494,12 @@ final class RemotePullRequestsOverviewTests: XCTestCase {
         XCTAssertFalse(model.isMatchingSessions, "This regression occurs after transcript matching finishes")
         XCTAssertTrue(pending.isRefreshing)
         XCTAssertFalse(pending.sessionsKnown, "Creation must wait for initial GitHub status enrichment")
+        XCTAssertFalse(model.sessionsKnown, "Grouping and the wire must share the same readiness predicate")
+        XCTAssertFalse(model.goals(now: now).flatMap(\.items).contains {
+            $0.assessment.reasons.contains(.noSession)
+        })
+        XCTAssertFalse(pending.goals.flatMap(\.items).flatMap(\.reasons).contains { $0.kind == "noSession" },
+                       "Unknown matching state must not claim that a PR has no session")
         let live = pending.goals.first { $0.items.contains { $0.id == "o/r#1" } }
         XCTAssertEqual(live?.session?.id, "live", "Go to an existing session remains available")
         XCTAssertEqual(live?.items.first?.session?.id, "live")
@@ -335,7 +513,83 @@ final class RemotePullRequestsOverviewTests: XCTestCase {
         try await settle(model)
         XCTAssertNotNil(model.lastUpdated)
         XCTAssertTrue(provider.snapshot().sessionsKnown)
+        XCTAssertTrue(provider.snapshot().goals.flatMap(\.items).contains {
+            $0.id == "o/r#2" && $0.reasons.contains { $0.kind == "noSession" }
+        })
         XCTAssertNil(provider.validate(request, workspace: current!))
+    }
+
+    func testFreshResumeRejectsLiveAssociationsManualAssignmentsAndTranscriptLinks() throws {
+        let cid = UUID().uuidString.lowercased()
+        let pr = makePR()
+        let candidate = ResumableSession(copilotSessionId: cid, name: "Previous", cwd: root.path, lastActive: now)
+        let request = RemotePullRequestSessionRequest(requestId: UUID(), kind: "resume", projectId: "p",
+                                                     pullRequestKeys: [pr.key.description], copilotSessionId: cid)
+        current?.projects[0].sessions = [.init(id: "live", title: "Live", status: .idle)]
+        let (provider, model) = make()
+        model.apply(.snapshot(current!))
+        model.show([pr], links: [:], resumable: [pr.key: candidate], updated: now)
+        XCTAssertNil(provider.validate(request, workspace: current!))
+
+        current?.projects[0].sessions[0].pullRequestKeys = [pr.key.description]
+        XCTAssertEqual(provider.validate(request, workspace: current!), .conflict)
+        current?.projects[0].sessions[0].pullRequestKeys = nil
+
+        var overrides = PullRequestGoalOverrides()
+        overrides.assign(pr.key, to: "session:live")
+        let file = root.appendingPathComponent("goals.json")
+        try JSONEncoder().encode(overrides).write(to: file, options: .atomic)
+        XCTAssertEqual(provider.validate(request, workspace: current!), .conflict)
+        try FileManager.default.removeItem(at: file)
+
+        model.show([pr], links: [pr.key: "live"], resumable: [pr.key: candidate], updated: now)
+        XCTAssertEqual(provider.validate(request, workspace: current!), .conflict)
+    }
+
+    func testFreshResumeWaitsForMatchingEvenWithACachedVerifiedCandidate() async throws {
+        let pr = makePR()
+        let cid = UUID().uuidString.lowercased()
+        let candidate = ResumableSession(copilotSessionId: cid, name: "Previous", cwd: root.path, lastActive: now)
+        let (provider, model) = make()
+        model.apply(.snapshot(current!))
+        model.show([pr], links: [:], resumable: [pr.key: candidate], updated: now, sessionsMatched: false)
+        let request = RemotePullRequestSessionRequest(requestId: UUID(), kind: "resume", projectId: "p",
+                                                     pullRequestKeys: [pr.key.description], copilotSessionId: cid)
+        guard case .stale = provider.validate(request, workspace: current!) else {
+            return XCTFail("Fresh Resume must wait for current workspace matching")
+        }
+        try await settle(model)
+    }
+
+    func testPreviousSessionWithoutMetadataDatesUsesConcreteTranscriptTimeAcrossCacheReload() async throws {
+        let home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
+        let pr = makePR(7, branch: "me/undated-session")
+        let cid = try home.addSession(
+            cwd: root.path, transcript: transcript(mentioning: pr.headRefName, times: 3), refs: [pr.key.number]
+        )
+        let directory = home.root.appendingPathComponent("session-state/\(cid)")
+        try Data("id: \(cid)\ncwd: \(root.path)\nclient_name: github/cli\n".utf8)
+            .write(to: directory.appendingPathComponent("workspace.yaml"))
+        XCTAssertNil(home.store.record(for: cid)?.updatedAt)
+        let transcriptURL = directory.appendingPathComponent("events.jsonl")
+        try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: transcriptURL.path)
+        let cacheURL = root.appendingPathComponent("resumable-index.json")
+        let finder = ResumableSessionFinder(store: home.store, cacheURL: cacheURL)
+        let first = await finder.find(for: [pr], liveCopilotSessionIds: [])
+        XCTAssertEqual(first[pr.key]?.lastActive, now)
+
+        let reopened = ResumableSessionFinder(store: home.store, cacheURL: cacheURL)
+        let cached = await reopened.find(for: [pr], liveCopilotSessionIds: [])
+        XCTAssertEqual(cached[pr.key]?.lastActive, now)
+        let (provider, model) = make()
+        model.apply(.snapshot(current!))
+        model.show([pr], links: [:], resumable: cached, updated: now)
+        XCTAssertEqual(provider.snapshot().goals.first?.resumable?.lastActiveAtMilliseconds,
+                       Int64(now.timeIntervalSince1970 * 1_000))
+
+        try FileManager.default.removeItem(at: transcriptURL)
+        let missing = await reopened.find(for: [pr], liveCopilotSessionIds: [])
+        XCTAssertTrue(missing.isEmpty, "Unreadable transcripts cannot supply cached evidence without a current timestamp")
     }
 
     func testGraphQLCacheUsesTheSamePipelineAndKeepsLastGoodOnFailure() async throws {

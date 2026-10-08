@@ -531,7 +531,8 @@ final class ResumableRefreshTests: XCTestCase {
     private let accountLoads = Counter()
 
     override func setUpWithError() throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".scratch/resumable-refresh-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root.appendingPathComponent("work"), withIntermediateDirectories: true)
         home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
         // Live sessions' transcripts are read from COPILOT_HOME too: keep them in the fixture.

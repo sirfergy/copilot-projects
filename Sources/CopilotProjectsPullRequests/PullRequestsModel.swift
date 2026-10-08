@@ -30,6 +30,7 @@ final class PullRequestsModel: ObservableObject {
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var isRefreshing = false
     @Published private(set) var isMatchingSessions = false
+    @Published private(set) var isSearchingPreviousSessions = false
     /// Whether transcripts have been matched to pull requests yet.
     @Published private(set) var sessionsMatched = false
     @Published private(set) var lastUpdated: Date?
@@ -59,7 +60,7 @@ final class PullRequestsModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let service: PullRequestService
-    private let index: PullRequestTranscriptIndex
+    private let index: any PullRequestTranscriptReading
     private let resumableFinder: any ResumableSessionSearching
     private let overridesURL: URL?
     private let hostedReadOnly: Bool
@@ -95,6 +96,7 @@ final class PullRequestsModel: ObservableObject {
     /// The search for ended sessions, which keeps going while the byte budget
     /// leaves candidates unread. At most one runs; each refresh replaces it.
     private var resumableSearch: Task<Void, Never>?
+    private var resumableSearchGeneration = UUID()
     /// Ended sessions seen live again in a tab, lowercased, whose pull requests
     /// were matched once more to link them there.
     private var relinkedSessions: Set<String> = []
@@ -120,6 +122,7 @@ final class PullRequestsModel: ObservableObject {
         service: PullRequestService = PullRequestService(),
         loadAccounts: @escaping @Sendable () async throws -> [GitHubAccount] = { try await PullRequestsModel.signedInAccounts() },
         resumableFinder: (any ResumableSessionSearching)? = nil,
+        transcriptIndex: (any PullRequestTranscriptReading)? = nil,
         hostedReadOnly: Bool = false,
         readOnlyGoalsURL: URL? = nil,
         transcriptPath: @escaping @Sendable (String) -> String? = {
@@ -142,7 +145,8 @@ final class PullRequestsModel: ObservableObject {
         self.transcriptPath = transcriptPath
         self.clock = clock
         owners = defaults.string(forKey: Self.ownersKey) ?? ""
-        index = PullRequestTranscriptIndex(storeURL: stateDirectory?.appendingPathComponent("transcript-index.json"))
+        index = transcriptIndex
+            ?? PullRequestTranscriptIndex(storeURL: stateDirectory?.appendingPathComponent("transcript-index.json"))
         self.resumableFinder = resumableFinder ?? ResumableSessionFinder(
             cacheURL: stateDirectory?.appendingPathComponent("resumable-index.json")
         )
@@ -235,7 +239,7 @@ final class PullRequestsModel: ObservableObject {
     /// "No session" is only claimed when the sessions are current and were matched.
     var sessionsKnown: Bool {
         sessionsMatched && isConnected && !matchedWithoutSessions && !isMatchingSessions
-            && (!hostedReadOnly || matchedWorkspace == workspaceIdentity)
+            && (!hostedReadOnly || (lastUpdated != nil && matchedWorkspace == workspaceIdentity))
     }
 
     func goals(now: Date = Date()) -> [PullRequestGoal] {
@@ -319,6 +323,7 @@ final class PullRequestsModel: ObservableObject {
             state = .incompatibleHost
         }
         if workspace != state { workspace = state }
+        if hostedReadOnly, wasConnected, !isConnected { cancelResumableSearch() }
         var rematch = false
         if case .connected(let snapshot) = state {
             settleResumes(in: snapshot)
@@ -351,7 +356,7 @@ final class PullRequestsModel: ObservableObject {
             phase = .idle
             warning = nil
             omitted = 0
-            resumableSearch?.cancel()
+            cancelResumableSearch()
             hostedRelink?.cancel()
         }
         guard let overridesURL else { return }
@@ -570,21 +575,36 @@ final class PullRequestsModel: ObservableObject {
     /// Searches for ended sessions in the background, replacing any search
     /// still running, and again while the byte budget leaves candidates unread.
     private func searchResumable() {
-        resumableSearch?.cancel()
-        resumableSearch = nil
+        cancelResumableSearch()
         guard isConnected else { return }
+        let generation = resumableSearchGeneration
+        isSearchingPreviousSessions = true
         resumableSearch = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.resumableSearchGeneration == generation {
+                    self.isSearchingPreviousSessions = false
+                    self.resumableSearch = nil
+                }
+            }
             while !Task.isCancelled {
-                guard let self, self.isConnected else { return }
+                guard self.isConnected, self.resumableSearchGeneration == generation else { return }
                 let needing = self.pullRequestsWithoutSession(self.pullRequests, links: self.links)
                 let live = Set(self.liveSessions.values.compactMap(\.copilotSessionId))
                 let search = await self.resumableFinder.search(for: needing, liveCopilotSessionIds: live)
-                guard !Task.isCancelled, self.isConnected else { return }
+                guard !Task.isCancelled, self.isConnected, self.resumableSearchGeneration == generation else { return }
                 self.assignResumable(search.sessions)
                 guard search.deferred else { return }
                 try? await Task.sleep(nanoseconds: UInt64(Self.resumableSearchPause * 1_000_000_000))
             }
         }
+    }
+
+    private func cancelResumableSearch() {
+        resumableSearchGeneration = UUID()
+        resumableSearch?.cancel()
+        resumableSearch = nil
+        isSearchingPreviousSessions = false
     }
 
     /// Takes what a search found, keeping each session being resumed, and each

@@ -8,7 +8,6 @@ public final class PullRequestsOverviewProvider {
     private let model: PullRequestsModel
     private let workspace: @MainActor () -> WorkspaceSnapshot?
     private let clock: @MainActor () -> Date
-    private var sessionsKnown: Bool { model.lastUpdated != nil && model.sessionsKnown }
 
     public convenience init(
         cacheDirectory: URL, readOnlyGoalsURL: URL, defaults: UserDefaults = .standard,
@@ -83,7 +82,8 @@ public final class PullRequestsOverviewProvider {
         }
         return RemotePullRequestsOverview(
             phase: phase, updatedAtMilliseconds: model.lastUpdated.map(Self.milliseconds),
-            isRefreshing: model.isRefreshing, sessionsKnown: sessionsKnown, owners: model.ownerList,
+            isRefreshing: model.isRefreshing || model.isMatchingSessions || model.isSearchingPreviousSessions,
+            sessionsKnown: model.sessionsKnown, owners: model.ownerList,
             warning: warnings.isEmpty ? nil : warnings.joined(separator: " "), omitted: model.omitted,
             openCount: goals.reduce(0) { $0 + $1.items.count },
             needsYouCount: goals.reduce(0) { $0 + $1.needsYouCount }, goals: goals
@@ -105,15 +105,18 @@ public final class PullRequestsOverviewProvider {
             return .stale("Refresh pull requests; some requested pull requests are no longer in scope.")
         }
         let items = model.goals(now: clock()).flatMap(\.items)
-        if request.kind == "start" {
+        if request.kind == "start" || existingSessionId == nil {
             let liveKeys = Set(model.liveSessions.values.flatMap(\.pullRequestKeys))
             guard keys.isDisjoint(with: liveKeys),
                   !items.contains(where: { keys.contains($0.pr.key.description) && $0.session != nil }) else {
                 return .conflict
             }
             model.rematchHostedSessions()
-            guard sessionsKnown else { return .stale("Wait until pull request status and workspace sessions are ready.") }
-        } else {
+            guard model.sessionsKnown else {
+                return .stale("Wait until pull request status and workspace sessions are ready.")
+            }
+        }
+        if request.kind == "resume" {
             let verified = keys.allSatisfy { key in
                 guard let key = PullRequestKey(key) else { return false }
                 if model.resumable[key]?.copilotSessionId.lowercased() == request.copilotSessionId { return true }

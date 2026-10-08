@@ -590,6 +590,28 @@ extension PullRequestsHostCommandTests {
         }
     }
 
+    func testRemotePullRequestStartThenStaleResumeCannotLaunchTheSamePullRequestTwice() throws {
+        try withHost(projects: twoProjects, selectedProjectIndex: 1) { host in
+            let home = try CopilotHomeFixture(root: host.root.appendingPathComponent("copilot"))
+            let cid = try home.addSession(cwd: host.root.path, transcript: "")
+            let pr = makePR()
+            let candidate = ResumableSession(copilotSessionId: cid, name: "Previous", cwd: host.root.path, lastActive: testNow)
+            let engine = overview(host, resumable: [pr.key: candidate])
+            let start = prRequest()
+            let resume = prRequest(kind: "resume", cid: cid)
+            XCTAssertNotEqual(start.requestId, resume.requestId)
+            guard case .created(let created) = host.model.performRemotePullRequestSession(start) else {
+                return XCTFail("The first client should start a new session")
+            }
+            XCTAssertEqual(engine.resumable[pr.key], candidate, "The second client's candidate is still cached")
+            XCTAssertEqual(host.model.performRemotePullRequestSession(resume), .conflict)
+            XCTAssertEqual(host.launches().map(\.id), [created.sessionId])
+            XCTAssertEqual(host.model.performRemotePullRequestSession(start), .existing(created))
+            XCTAssertEqual(host.model.selectedProjectId, "B")
+            XCTAssertEqual(host.model.globalSelectedSessionId, "b1")
+        }
+    }
+
     func testRemotePullRequestResumeVerifiesSubsetReturnsActualOwnerAndPreservesOriginalBinding() throws {
         try withHost(projects: twoProjects, selectedProjectIndex: 1) { host in
             let home = try CopilotHomeFixture(root: host.root.appendingPathComponent("copilot"))
