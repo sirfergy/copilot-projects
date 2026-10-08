@@ -7,6 +7,7 @@ import fcntl
 import multiprocessing
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import shlex
 import subprocess
@@ -249,13 +250,19 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse((self.project_root / "dist-build.txt").exists())
         self.assertFalse(any(command == "codesign" for _, command, _ in self.calls))
 
-    def run_assembler(self, shader_source=True):
+    def run_assembler(self, shader_source=True, pull_requests_icon=True):
         shutil.copyfile(RELEASE.with_name("build-app.sh"), self.public / "scripts/build-app.sh")
         shutil.copyfile(RELEASE.with_name("bundle-resources.sh"), self.public / "scripts/bundle-resources.sh")
         build = self.public / ".build/products"
         build.mkdir(parents=True, exist_ok=True)
-        for name in ("copilot-projects", "copilot-projects-link"):
+        for name in ("copilot-projects", "copilot-projects-link", "copilot-pull-requests"):
             self.executable(build / name, "#!/bin/sh\nexit 0\n")
+        icons = self.public / "Resources"
+        icons.mkdir(parents=True, exist_ok=True)
+        if pull_requests_icon:
+            (icons / "PullRequestsIcon.icns").write_text("pull requests icon fixture\n")
+        else:
+            (icons / "PullRequestsIcon.icns").unlink(missing_ok=True)
         tracker = build / "copilot-projects_CopilotProjectsCore.bundle/tracker"
         tracker.mkdir(parents=True, exist_ok=True)
         (tracker / "extension.mjs").write_text("// fixture\n")
@@ -293,7 +300,7 @@ class ReleaseTests(unittest.TestCase):
                 result = self.run_assembler()
                 self.assertEqual(result.returncode, 0, result.stdout)
                 signing = [args for _, cmd, args in self.calls if cmd == "codesign" and "--sign" in args]
-                self.assertEqual(len(signing), 3)
+                self.assertEqual(len(signing), 4)
                 for args in signing:
                     if keychain and identity != "-":
                         self.assertEqual(args[args.index("--keychain") + 1], keychain)
@@ -302,6 +309,53 @@ class ReleaseTests(unittest.TestCase):
                 lookups = [args for _, cmd, args in self.calls if cmd == "security"]
                 expected = ["find-identity", "-v", "-p", "codesigning"]
                 self.assertEqual(lookups, [] if identity == "-" else [expected + ([keychain] if keychain else [])])
+
+    def test_actual_assembler_nests_and_signs_the_pull_requests_app(self):
+        result = self.run_assembler()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        app = self.public / "dist/Copilot Projects.app"
+        helper = app / "Contents/Helpers/Copilot Pull Requests.app"
+        with open(app / "Contents/Info.plist", "rb") as handle:
+            host = plistlib.load(handle)
+        with open(helper / "Contents/Info.plist", "rb") as handle:
+            info = plistlib.load(handle)
+        self.assertEqual(info["CFBundleIdentifier"], host["CFBundleIdentifier"] + ".pull-requests")
+        self.assertEqual(info["CFBundleName"], "Copilot Pull Requests")
+        self.assertEqual(info["CFBundleDisplayName"], "Copilot Pull Requests")
+        self.assertEqual(info["CFBundleExecutable"], "copilot-pull-requests")
+        self.assertEqual(info["CFBundlePackageType"], "APPL")
+        self.assertEqual(info["CFBundleIconFile"], "PullRequestsIcon")
+        self.assertEqual(info["CFBundleShortVersionString"], host["CFBundleShortVersionString"])
+        self.assertEqual(info["CFBundleVersion"], host["CFBundleVersion"])
+        self.assertEqual(info["CFBundleShortVersionString"], "1.2.3")
+        self.assertEqual(info["LSMinimumSystemVersion"], "26.0")
+        self.assertIs(info["NSHighResolutionCapable"], True)
+        self.assertEqual(info["NSPrincipalClass"], "NSApplication")
+        self.assertEqual(info["CopilotProjectsHostBundleIdentifier"], host["CFBundleIdentifier"])
+        self.assertNotIn("LSUIElement", info, "the helper is a regular Dock and \u2318Tab app")
+        executable = helper / "Contents/MacOS/copilot-pull-requests"
+        self.assertTrue(executable.is_file())
+        self.assertTrue(os.access(executable, os.X_OK))
+        self.assertEqual(
+            (helper / "Contents/Resources/PullRequestsIcon.icns").read_text(),
+            "pull requests icon fixture\n",
+            "the icon is in the helper's own Resources",
+        )
+        signing = [args for _, cmd, args in self.calls if cmd == "codesign" and "--sign" in args]
+        self.assertEqual(
+            [Path(args[-1]).name for args in signing],
+            ["dtach", "Copilot Projects Link.app", "Copilot Pull Requests.app", "Copilot Projects.app"],
+            "nested code is signed before the bundle that seals it",
+        )
+        link, pull_requests = signing[1], signing[2]
+        self.assertEqual(pull_requests[:-1], link[:-1], "the same identity and flags as the Link helper")
+        self.assertIn("runtime", pull_requests)
+
+    def test_actual_assembler_requires_the_pull_requests_icon(self):
+        result = self.run_assembler(pull_requests_icon=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("PullRequestsIcon.icns is missing", result.stdout)
+        self.assertFalse(any(cmd == "codesign" for _, cmd, _ in self.calls))
 
     def test_actual_assembler_precompiles_swiftterm_shaders_from_checkout(self):
         result = self.run_assembler()

@@ -71,9 +71,10 @@ discards it. Closing the drawer or switching sessions dismisses that preview.
   connected Copilot CLI supports them.
 - **Find any session.** Press `⌘K` to search every project's sessions by name,
   project, folder, or what you worked on. Luna suggests matches by meaning.
-- **Pull requests by goal.** Press `⇧⌘P` for a separate window that lays out your
-  open pull requests as goal lanes across Draft, Checks, Review, and Ready, flags
-  the ones that need you, and takes you to the session working on them.
+- **Pull requests by goal.** Press `⇧⌘P` to open Copilot Pull Requests, a companion
+  app that lays out your open pull requests as goal lanes across Draft, Checks,
+  Review, and Ready, flags the ones that need you, and takes you to the session
+  working on them.
 - **Local pull-request reviews.** Choose **Review Pull Request…** from the split
   button's dropdown to open a Copilot CLI session with a local adversarial-review
   prompt for a GitHub pull request.
@@ -134,11 +135,16 @@ instant results still work and the finder says why Luna couldn't help.
 
 ### Pull requests by goal
 
-**Pull Requests** (`⇧⌘P`, in the Window menu and the menu bar extra) opens a
-separate window showing your open pull requests. Each row is a goal: a set of
-pull requests working toward one outcome. Its columns are the stages Draft,
-Checks, Review, and Ready, so one row shows how far a goal has got and what is
-holding it up.
+**Pull Requests** (`⇧⌘P`, in the Window menu and the menu bar extra) opens
+**Copilot Pull Requests**, a separate app that ships inside Copilot Projects, or
+brings it forward when it's already open. It has its own Dock icon and stays in
+`⌘Tab` while it's open, so you switch between it and your sessions like any other
+app. To keep it in the Dock, Control-click its icon and choose **Options ▸ Keep in
+Dock**. Closing its window quits it; that never ends a session.
+
+It shows your open pull requests. Each row is a goal: a set of pull requests
+working toward one outcome. Its columns are the stages Draft, Checks, Review, and
+Ready, so one row shows how far a goal has got and what is holding it up.
 
 - **Goals come from your sessions.** A pull request belongs to the live Copilot
   session whose conversation keeps naming its head branch: the session that pushes
@@ -151,24 +157,29 @@ holding it up.
   and behind its base branch (only after review, and never with a merge queue).
   Pull requests with no live session, or with no activity for three days, are
   flagged more quietly. Goals whose sessions need you come first.
-- **Act from it.** **Go to Session** switches the workspace to the goal's session.
-  A goal with no session offers **Start Session**, which opens Copilot in the
-  current project (or one you pick) with the pull request links as its prompt.
-  Double-click a pull request, or press `⌘Return`, to open it on GitHub. Use `↑`/`↓` to
-  move and Return to go to its session.
+- **Act from it.** **Go to Session** brings Copilot Projects forward on the goal's
+  session. A goal with no session offers **Start Session**, which opens Copilot in
+  the current project (or one you pick) with the pull request links as its prompt,
+  then shows it. Double-click a pull request, or press `⌘Return`, to open it on
+  GitHub. Use `↑`/`↓` to move and Return to go to its session.
+- **Copilot Projects closed?** The lanes keep the sessions it last reported, with
+  their states unknown, and their buttons become **Open Copilot Projects**. A
+  Copilot Projects too old to list its sessions is called out at the bottom of
+  the window: update it to match sessions again.
 - **Owners** limits the window to one or more organizations or users, such as
   `github` and `my-org`; each is its own token in the Owners popover. Only pull
   requests in those owners appear. Leave it empty to include every owner, up to
-  your hundred most recently updated pull requests.
+  your hundred most recently updated pull requests. It's saved with Copilot
+  Projects' settings.
 
 The window reads GitHub with the accounts you signed in to with the GitHub CLI
 (`gh auth login`); every signed-in github.com account is included. Tokens stay in
 memory, and requests go straight to the GitHub API. It refreshes when opened
-and every five minutes while open, or on demand with `⌘R`. Matching pull requests
-to sessions reads each live session's Copilot CLI event log once, then only what
-was added since. The match counts and any goals you name are kept under
-`~/.local/state/copilot-projects/pull-requests/`. `⌘W` closes the window and never
-ends a session.
+and every five minutes while open, or on demand with `⌘R`. It reads your sessions
+from Copilot Projects over its local control socket every two seconds while its
+window is visible. Matching pull requests to sessions reads each live session's
+Copilot CLI event log once, then only what was added since. The match counts and
+any goals you name are kept under `~/.local/state/copilot-projects/pull-requests/`.
 
 VoiceOver exposes each session's selection and attention state, with separate
 select and end actions. The session-details drawer uses a fade instead of

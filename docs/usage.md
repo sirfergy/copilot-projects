@@ -38,11 +38,16 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   meaning-based suggestions through a tool-less `copilot -p` run in a throwaway
   `COPILOT_HOME` seeded only with your signed-in account, so it never adds sessions to your
   Copilot history. `↑`/`↓` or `⌃N`/`⌃P` move, Return opens, Escape clears then closes.
-- **Pull Requests (`⇧⌘P`):** a separate window of your open pull requests, one row per
-  goal and one column per stage (Draft, Checks, Review, Ready), with what needs you
-  called out. Goals are inferred from the live session whose Copilot event log names
-  each pull request's head branch, and can be regrouped by hand. It uses your `gh`
-  accounts and the GitHub GraphQL API; see the README for the rules.
+- **Pull Requests (`⇧⌘P`):** opens Copilot Pull Requests, a separate app nested in
+  `Copilot Projects.app/Contents/Helpers/`, with its own Dock icon and `⌘Tab` entry
+  (Control-click its Dock icon ▸ **Options ▸ Keep in Dock** to keep it there). It shows
+  your open pull requests, one row per goal and one column per stage (Draft, Checks,
+  Review, Ready), with what needs you called out. Goals are inferred from the live
+  session whose Copilot event log names each pull request's head branch, and can be
+  regrouped by hand. It uses your `gh` accounts and the GitHub GraphQL API, and reads
+  sessions from Copilot Projects over the control socket (`list-sessions`,
+  `reveal-session`, `start-copilot-session`), so it never touches terminals itself.
+  Only one copy per state directory writes its goals; see the README for the rules.
 - **Prompt-first sessions:** the **+** split button's dropdown, Session menu, and project context
   menu offer **Start with Prompt…**. Compose multiple lines, then use `⌘Return` to launch
   an interactive session (not a one-shot/headless command). Cancel creates no session.
@@ -202,8 +207,11 @@ Requires Xcode 26+, macOS 26+.
 ./scripts/build-app.sh --release        # optimized build
 ```
 
-`build-app.sh` runs `swift build`, assembles `dist/Copilot Projects.app`, precompiles
-SwiftTerm's Metal shaders, and signs the nested executables inner-first. Local builds
+`build-app.sh` runs `swift build`, assembles `dist/Copilot Projects.app` (with the
+Copilot Projects Link and Copilot Pull Requests helper apps under `Contents/Helpers/`),
+precompiles SwiftTerm's Metal shaders, and signs the nested executables inner-first.
+`swift run copilot-projects` has no helpers, so Pull Requests explains that it needs
+the built app. Local builds
 use an available Developer ID identity, falling back to ad-hoc signing. Set
 `CODESIGN_IDENTITY=-` to force ad-hoc signing for a validation build.
 

@@ -272,11 +272,18 @@ and no-result states use native `ContentUnavailableView`. While open, the sheet
 owns workspace keys and workspace commands are disabled.
 
 **Pull Requests window:** [Goal Lanes](.impeccable/surfaces/sources-copilotprojectshost-pullrequestsview-swift.md),
-a separate hidden-title-bar window (1200x760pt default, 880x480pt minimum) on
-`chrome`, opened from Window ▸ Pull Requests (Shift-Command-P) or the menu bar
-item. It is registered as auxiliary, so workspace shortcuts and terminal input
-never act on it. It reuses the main window's 38pt drag strip (80pt traffic-light
-inset, callout semibold title) and a 56pt header: a title3 semibold needs-you
+the one hidden-title-bar window (1200x760pt default, 880x480pt minimum) on
+`chrome` of Copilot Pull Requests, a separate app nested in Copilot Projects so it
+has its own Dock icon and Command-Tab entry. Window ▸ Pull Requests
+(Shift-Command-P) or the menu bar item opens it or brings it forward; closing the
+window quits it. It is the same Studio Console world, shared through the
+`CopilotProjectsStyle` module, and being another process, workspace shortcuts and
+terminal input never reach it. Its icon is the Copilot Projects teal squircle with
+the white primer/octicons `git-pull-request-24` glyph (MIT) in place of the
+mascot, drawn by `scripts/make-icon.swift --pull-requests` and built into
+`Resources/PullRequestsIcon.icns` by `scripts/make-icns.sh`. It reuses the main
+window's 38pt drag strip (80pt traffic-light inset, callout semibold title, the
+system title-bar double-click action) and a 56pt header: a title3 semibold needs-you
 headline over a caption secondary summary (open, goals, nudge-only count, owners),
 then a trailing refresh note (spinner, "Updated" relative time, or a warning
 behind the native orange symbol), the owners filter (a native token field in a
@@ -309,7 +316,14 @@ context menu opens, copies, goes to the session, or moves it to another goal.
 The first load shows three redacted placeholder lanes under an unredacted stage
 row; no pull requests and a first-load failure use native
 `ContentUnavailableView`, the failure with Try Again. Later failures keep the
-lanes and surface in the header's warning note. The most urgent chip is
+lanes and surface in the header's warning note. Sessions come from Copilot
+Projects over its control socket. While it isn't answering, lanes keep its last
+known sessions with their state shown as "Status unknown" and no indicator, the
+goal column's button becomes Open Copilot Projects, and the footer's trailing note
+says so in secondary ink; no-session nudges wait until sessions are known again.
+A Copilot Projects too old to list sessions puts "Update Copilot Projects to match
+sessions" behind the native orange warning symbol in the same note. Neither state
+uses `ContentUnavailableView`, which stays for having no data at all. The most urgent chip is
 preselected and the lanes take focus: arrows move and announce, Return goes to the
 chip's session (or GitHub when it has none), Command-Return opens GitHub, and
 Escape clears selection. The footer is the session finder's 32pt `sidebar`

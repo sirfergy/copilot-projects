@@ -19,11 +19,14 @@ public enum ControlClientError: Error, CustomStringConvertible {
 
 /// Minimal blocking client for the control socket: connect, send one JSON line,
 /// read one JSON line, close.
-public struct ControlClient {
+public struct ControlClient: Sendable {
     public let socketPath: String
+    /// How long a read or write may wait for the app.
+    public let timeout: TimeInterval
 
-    public init(socketPath: String = Paths.socketPath) {
+    public init(socketPath: String = Paths.socketPath, timeout: TimeInterval = 3) {
         self.socketPath = socketPath
+        self.timeout = timeout
     }
 
     public func send(_ request: ControlRequest) throws -> ControlResponse {
@@ -42,7 +45,11 @@ public struct ControlClient {
         // it synchronous (not backgrounded) preserves status ordering — a
         // running→waiting transition can't land out of order — while the timeout
         // prevents a hang.
-        var tv = timeval(tv_sec: 3, tv_usec: 0)
+        let bounded = max(timeout, 0.001)
+        var tv = timeval(
+            tv_sec: Int(bounded),
+            tv_usec: Int32((bounded - Double(Int(bounded))) * 1_000_000)
+        )
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 

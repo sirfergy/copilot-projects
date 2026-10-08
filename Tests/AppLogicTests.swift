@@ -6159,6 +6159,9 @@ final class AppLogicTests: XCTestCase {
             closeSession: { closeRequests.append($0); return .success(code: "closed") },
             renameProject: { _, _ in .success() },
             focus: { _ in .success() },
+            listSessions: { .success() },
+            revealSession: { _ in .success() },
+            startCopilotSession: { _ in .success() },
             screenshot: { _ in .success() },
             diagnostics: { "" },
             remote: { _ in .success() }

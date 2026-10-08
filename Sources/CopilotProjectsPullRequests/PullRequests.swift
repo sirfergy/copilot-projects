@@ -1,4 +1,5 @@
 import Foundation
+import CopilotProjectsCore
 
 /// `owner/repo#number`, lowercased: GitHub treats owner and repository names
 /// case-insensitively, and transcripts spell them however the user typed them.
@@ -222,10 +223,10 @@ enum PullRequestTriage {
     static let staleInterval: TimeInterval = 3 * 86_400
 
     static func assess(
-        _ pr: PullRequestSnapshot, session: Session?, now: Date, sessionsKnown: Bool = true
+        _ pr: PullRequestSnapshot, session: PullRequestSession?, now: Date, sessionsKnown: Bool = true
     ) -> PullRequestAssessment {
         var reasons: [PullRequestAttention] = []
-        if session?.displayStatus == .waiting { reasons.append(.sessionWaiting) }
+        if session?.status == .waiting { reasons.append(.sessionWaiting) }
         if pr.mergeable == .conflicting || pr.mergeState == .dirty { reasons.append(.conflicts) }
         if pr.checksFailing {
             if let required = pr.failingRequiredChecks {
@@ -358,20 +359,80 @@ enum PullRequestLinker {
     }
 }
 
-/// A live session as the Pull Requests window shows it.
-struct PullRequestSessionRef: Equatable {
-    let session: Session
+/// A live workspace session as the Pull Requests window shows it, read from
+/// Copilot Projects over its control socket.
+struct PullRequestSession: Equatable, Sendable {
+    let id: String
+    let title: String
     let projectId: String
     let projectName: String
+    /// The status the workspace shows, waiting while a question is pending. Nil
+    /// when Copilot Projects can't be reached and this is its last known session.
+    var status: SessionStatus?
+    var finishedUnseen: Bool
+    var hasPendingInput: Bool
+    /// The Copilot CLI session in this tab, whose event log names its pull requests.
+    let copilotSessionId: String?
 
-    var sessionId: String { session.id }
+    init(
+        id: String, title: String, projectId: String, projectName: String, status: SessionStatus? = .idle,
+        finishedUnseen: Bool = false, hasPendingInput: Bool = false, copilotSessionId: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.projectId = projectId
+        self.projectName = projectName
+        self.status = status
+        self.finishedUnseen = finishedUnseen
+        self.hasPendingInput = hasPendingInput
+        self.copilotSessionId = copilotSessionId
+    }
+
+    init(_ session: WorkspaceSnapshot.Session, in project: WorkspaceSnapshot.Project) {
+        self.init(
+            id: session.id, title: session.title, projectId: project.id, projectName: project.name,
+            status: session.status, finishedUnseen: session.finishedUnseen,
+            hasPendingInput: session.hasPendingInput, copilotSessionId: session.copilotSessionId
+        )
+    }
+
+    /// The same session with its state unknown: what is shown while Copilot
+    /// Projects can't be reached.
+    var withUnknownState: PullRequestSession {
+        var session = self
+        session.status = nil
+        session.finishedUnseen = false
+        session.hasPendingInput = false
+        return session
+    }
+
+    /// The attention state beside the session's project, as the workspace words it.
+    var attentionLabel: String {
+        switch status {
+        case .running: return "Running"
+        case .waiting: return "Waiting for input"
+        case .idle: return finishedUnseen ? "Finished" : "Idle"
+        case nil: return "Status unknown"
+        }
+    }
+
+    /// Every session in a snapshot by id.
+    static func sessions(in snapshot: WorkspaceSnapshot) -> [String: PullRequestSession] {
+        var sessions: [String: PullRequestSession] = [:]
+        for project in snapshot.projects {
+            for session in project.sessions {
+                sessions[session.id] = PullRequestSession(session, in: project)
+            }
+        }
+        return sessions
+    }
 }
 
 struct PullRequestItem: Identifiable, Equatable {
     let pr: PullRequestSnapshot
     let assessment: PullRequestAssessment
     /// The session working on this pull request, when there is one.
-    let session: PullRequestSessionRef?
+    let session: PullRequestSession?
     /// A user-chosen goal rather than an inferred one.
     let isManuallyAssigned: Bool
 
@@ -394,7 +455,7 @@ struct PullRequestGoal: Identifiable, Equatable {
     let id: String
     let kind: Kind
     let name: String
-    let session: PullRequestSessionRef?
+    let session: PullRequestSession?
     /// Most urgent first.
     let items: [PullRequestItem]
 
@@ -465,7 +526,7 @@ enum PullRequestGrouping {
     static func goals(
         pullRequests: [PullRequestSnapshot],
         links: [PullRequestKey: String],
-        sessions: [String: PullRequestSessionRef],
+        sessions: [String: PullRequestSession],
         overrides: PullRequestGoalOverrides,
         now: Date,
         sessionsKnown: Bool = true
@@ -532,7 +593,7 @@ enum PullRequestGrouping {
                 return PullRequestItem(
                     pr: pr,
                     assessment: PullRequestTriage.assess(
-                        pr, session: session?.session, now: now, sessionsKnown: sessionsKnown
+                        pr, session: session, now: now, sessionsKnown: sessionsKnown
                     ),
                     session: session,
                     isManuallyAssigned: placements[pr.key]?.manual == true
@@ -542,7 +603,7 @@ enum PullRequestGrouping {
             let name: String
             switch kind {
             case .session:
-                name = goalSession.map { goalName(sessionTitle: $0.session.title) } ?? items[0].pr.title
+                name = goalSession.map { goalName(sessionTitle: $0.title) } ?? items[0].pr.title
             case .manual:
                 name = overrides.names[goalId] ?? sentenceCase(items[0].pr.title)
             case .branch, .single:

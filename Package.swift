@@ -13,6 +13,7 @@ let package = Package(
         .library(name: "CopilotProjectsCore", targets: ["CopilotProjectsCore"]),
         .executable(name: "copilot-projects", targets: ["copilot-projects"]),
         .executable(name: "copilot-projects-link", targets: ["copilot-projects-link"]),
+        .executable(name: "copilot-pull-requests", targets: ["copilot-pull-requests"]),
         .executable(name: "workspace-capture-host", targets: ["WorkspaceCaptureHost"]),
         .library(name: "CopilotProjectsUI", targets: ["CopilotProjectsUI"]),
         .library(
@@ -61,15 +62,32 @@ let package = Package(
             resources: [.copy("Resources/tracker")]
         ),
         .target(
+            name: "CopilotProjectsStyle",
+            path: "Sources/CopilotProjectsStyle"
+        ),
+        .target(
             name: "CopilotProjectsHost",
             dependencies: [
                 "CopilotProjectsUI",
                 "CopilotProjectsCore",
                 "CopilotProjectsProtocol",
+                "CopilotProjectsStyle",
                 "SessionDomain",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ],
             path: "Sources/CopilotProjectsHost"
+        ),
+        // The Copilot Pull Requests app. It reaches the workspace only through the
+        // host's control socket, so the host never links it.
+        .target(
+            name: "CopilotProjectsPullRequests",
+            dependencies: [
+                "CopilotProjectsCore",
+                "CopilotProjectsProtocol",
+                "CopilotProjectsStyle",
+                "SessionDomain",
+            ],
+            path: "Sources/CopilotProjectsPullRequests"
         ),
         .executableTarget(
             name: "copilot-projects",
@@ -81,6 +99,11 @@ let package = Package(
             dependencies: ["CopilotProjectsCore"],
             path: "Sources/copilot-projects-link"
         ),
+        .executableTarget(
+            name: "copilot-pull-requests",
+            dependencies: ["CopilotProjectsPullRequests"],
+            path: "Sources/copilot-pull-requests"
+        ),
         .testTarget(
             name: "CopilotProjectsTests",
             dependencies: [
@@ -88,6 +111,8 @@ let package = Package(
                 "CopilotProjectsProtocol",
                 "CopilotProjectsProtocolFixtures",
                 "CopilotProjectsHost",
+                "CopilotProjectsPullRequests",
+                "CopilotProjectsStyle",
                 "WorkspaceCaptureSupport",
             ],
             path: "Tests",

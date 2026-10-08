@@ -2,7 +2,8 @@ import AppKit
 import Foundation
 import SwiftUI
 import XCTest
-@testable import CopilotProjectsHost
+import CopilotProjectsCore
+@testable import CopilotProjectsPullRequests
 
 let testNow = Date(timeIntervalSince1970: 1_800_000_000)
 
@@ -115,7 +116,9 @@ final class PullRequestScannerTests: XCTestCase {
 final class PullRequestTriageTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
-    private let session = Session(title: "Block CCR - GitHub Copilot", cwd: "/tmp")
+    private let session = PullRequestSession(
+        id: "s", title: "Block CCR - GitHub Copilot", projectId: "p", projectName: "Features"
+    )
 
     func testReasonsArriveMostUrgentFirst() {
         var waiting = session
@@ -233,16 +236,17 @@ final class PullRequestTriageTests: XCTestCase {
 final class PullRequestGroupingTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
-    private func ref(_ title: String, waiting: Bool = false) -> PullRequestSessionRef {
-        var session = Session(title: title, cwd: "/tmp")
-        if waiting { session.status = .waiting }
-        return PullRequestSessionRef(session: session, projectId: "p", projectName: "Features")
+    private func ref(_ title: String, waiting: Bool = false) -> PullRequestSession {
+        PullRequestSession(
+            id: UUID().uuidString, title: title, projectId: "p", projectName: "Features",
+            status: waiting ? .waiting : .idle
+        )
     }
 
     func testSessionsBecomeGoalsAndSiblingsOnTheSameBranchJoinThem() {
         let auto = ref("Integrate Auto Mode into Settings - GitHub Copilot")
         let flags = ref("Clean Up Feature Flags - Waiting for background shells - GitHub Copilot", waiting: true)
-        let sessions = [auto.sessionId: auto, flags.sessionId: flags]
+        let sessions = [auto.id: auto, flags.id: flags]
         let model = makePR(1, branch: "me/auto-effort-model")
         let hydro = makePR(2, repo: "github/hydro", branch: "me/auto-effort")
         let api = makePR(3, repo: "github/api", branch: "me/auto-effort")
@@ -252,7 +256,7 @@ final class PullRequestGroupingTests: XCTestCase {
         let lonely = makePR(7, repo: "github/ops", branch: "me/migrate-playbooks")
         let goals = PullRequestGrouping.goals(
             pullRequests: [model, hydro, api, flag, orphanA, orphanB, lonely],
-            links: [model.key: auto.sessionId, hydro.key: auto.sessionId, flag.key: flags.sessionId],
+            links: [model.key: auto.id, hydro.key: auto.id, flag.key: flags.id],
             sessions: sessions, overrides: .init(), now: now
         )
         XCTAssertEqual(goals.map(\.name), [
@@ -271,8 +275,8 @@ final class PullRequestGroupingTests: XCTestCase {
         let threads = makePR(1, branch: "me/live-branch", threads: 1)
         let conflicted = makePR(2, repo: "github/old", branch: "me/old-branch", mergeable: .conflicting, mergeState: .dirty)
         let goals = PullRequestGrouping.goals(
-            pullRequests: [conflicted, threads], links: [threads.key: live.sessionId],
-            sessions: [live.sessionId: live], overrides: .init(), now: now
+            pullRequests: [conflicted, threads], links: [threads.key: live.id],
+            sessions: [live.id: live], overrides: .init(), now: now
         )
         XCTAssertEqual(goals.map(\.name), ["Live", "PR 2"])
         XCTAssertEqual(goals.map(\.focusRank), [0, 1])
@@ -281,7 +285,7 @@ final class PullRequestGroupingTests: XCTestCase {
     func testManualGoalsSessionOverridesAndStartedSessions() {
         let auto = ref("Auto - GitHub Copilot")
         let other = ref("Other - GitHub Copilot")
-        let sessions = [auto.sessionId: auto, other.sessionId: other]
+        let sessions = [auto.id: auto, other.id: other]
         let first = makePR(1, branch: "me/first-branch")
         let second = makePR(2, branch: "me/second-branch")
         let third = makePR(3, branch: "me/third-branch")
@@ -289,17 +293,17 @@ final class PullRequestGroupingTests: XCTestCase {
         var overrides = PullRequestGoalOverrides()
         overrides.names["manual:x"] = "Hardening"
         overrides.assign(first.key, to: "manual:x")
-        overrides.assign(second.key, to: PullRequestGrouping.sessionGoalId(other.sessionId))
+        overrides.assign(second.key, to: PullRequestGrouping.sessionGoalId(other.id))
         overrides.assign(fourth.key, to: "session:ended")
-        overrides.sessionLinks[third.key.description] = other.sessionId
+        overrides.sessionLinks[third.key.description] = other.id
         let goals = PullRequestGrouping.goals(
             pullRequests: [first, second, third, fourth],
-            links: [first.key: auto.sessionId, fourth.key: auto.sessionId],
+            links: [first.key: auto.id, fourth.key: auto.id],
             sessions: sessions, overrides: overrides, now: now
         )
         let byName = Dictionary(uniqueKeysWithValues: goals.map { ($0.name, $0) })
         XCTAssertEqual(byName["Hardening"]?.items.map(\.pr.key), [first.key])
-        XCTAssertEqual(byName["Hardening"]?.items.first?.session?.sessionId, auto.sessionId, "its own session still counts")
+        XCTAssertEqual(byName["Hardening"]?.items.first?.session?.id, auto.id, "its own session still counts")
         XCTAssertEqual(Set(byName["Other"]?.items.map(\.pr.key) ?? []), [second.key, third.key])
         XCTAssertEqual(byName["Auto"]?.items.map(\.pr.key), [fourth.key], "an ended session's override falls back")
         XCTAssertEqual(byName["Other"]?.items.first { $0.pr.key == second.key }?.isManuallyAssigned, true)
@@ -387,13 +391,12 @@ final class PullRequestServiceTests: XCTestCase {
         actor Calls { var count = 0; func bump() { count += 1 } }
         let calls = Calls()
         let model = PullRequestsModel(
-            appModel: nil, defaults: UserDefaults(suiteName: UUID().uuidString)!, stateDirectory: nil,
+            workspace: FakeWorkspace(), defaults: UserDefaults(suiteName: UUID().uuidString)!, stateDirectory: nil,
             loadAccounts: {
                 await calls.bump()
                 try await Task.sleep(nanoseconds: 50_000_000)
                 throw PullRequestFetchError.notSignedIn
-            },
-            copilotSessionId: { _ in nil }, sessions: { [:] }, projects: { [] }
+            }
         )
         model.refresh()
         model.refresh()
@@ -409,8 +412,8 @@ final class PullRequestServiceTests: XCTestCase {
     @MainActor
     func testChangingOwnersDropsRowsOutsideTheNewScopeAtOnce() {
         let model = PullRequestsModel(
-            appModel: nil, defaults: UserDefaults(suiteName: UUID().uuidString)!, stateDirectory: nil,
-            loadAccounts: { [] }, copilotSessionId: { _ in nil }, sessions: { [:] }, projects: { [] }
+            workspace: FakeWorkspace(), defaults: UserDefaults(suiteName: UUID().uuidString)!, stateDirectory: nil,
+            loadAccounts: { [] }
         )
         model.show([makePR(1, repo: "github/github"), makePR(2, repo: "My-Org/tools")], links: [:])
         model.owners = "MY-ORG"
@@ -537,15 +540,17 @@ final class PullRequestServiceRequestTests: XCTestCase {
             }
             return (500, "")
         }
-        let session = Session(title: "Elsewhere - GitHub Copilot", cwd: "/tmp")
+        let workspace = FakeWorkspace(snapshot: WorkspaceSnapshot(
+            hostProcessIdentifier: 1, selectedProjectId: "p",
+            projects: [.init(id: "p", name: "P", sessions: [
+                .init(id: "elsewhere", title: "Elsewhere - GitHub Copilot", status: .idle, copilotSessionId: copilotId),
+            ])]
+        ))
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         defaults.set("o, other-org", forKey: PullRequestsModel.ownersKey)
         let model = PullRequestsModel(
-            appModel: nil, defaults: defaults, stateDirectory: root.appendingPathComponent("state"),
-            service: service, loadAccounts: { [GitHubAccount(login: "good", token: "good")] },
-            copilotSessionId: { _ in copilotId },
-            sessions: { [session.id: PullRequestSessionRef(session: session, projectId: "p", projectName: "P")] },
-            projects: { [] }
+            workspace: workspace, defaults: defaults, stateDirectory: root.appendingPathComponent("state"),
+            service: service, loadAccounts: { [GitHubAccount(login: "good", token: "good")] }
         )
         model.refresh()
         for _ in 0..<250 where model.isRefreshing || model.lastUpdated == nil {

@@ -374,6 +374,22 @@ final class AppModel: ObservableObject {
             self.focus(projectId: request.projectId, sessionId: request.sessionId)
             return .success()
         },
+        listSessions: { [unowned self] in
+            Self.listSessionsResponse(self.workspaceSnapshot())
+        },
+        revealSession: { [unowned self] request in
+            self.revealSession(projectId: request.projectId, sessionId: request.sessionId ?? "")
+        },
+        startCopilotSession: { [unowned self] request in
+            guard let projectId = request.projectId,
+                  let rawRequestId = request.requestId,
+                  let requestId = UUID(uuidString: rawRequestId),
+                  let prompt = request.prompt else {
+                return .failure("start-copilot-session requires a project, request id, and prompt",
+                                code: "bad-request")
+            }
+            return self.startPullRequestsSession(requestId: requestId, projectId: projectId, prompt: prompt)
+        },
         screenshot: { _ in
             .failure("screenshot must be handled by the control server")
         },
@@ -383,6 +399,14 @@ final class AppModel: ObservableObject {
                 ?? .failure("This build does not include a remote integration.")
         }
     ))
+    /// Sessions started for Copilot Pull Requests, by request id, for as long as
+    /// this app runs, so a retried request never starts a second session.
+    private var pullRequestsSessionStarts: [UUID: PullRequestsSessionStart] = [:]
+    private struct PullRequestsSessionStart {
+        let projectId: String
+        let prompt: String
+        let sessionId: String
+    }
     private var stateLoadFailure: String?
     private var didFailToLoadWorkspaceState = false
     private var stateRecoveryMessage: String?
@@ -556,8 +580,7 @@ final class AppModel: ObservableObject {
                 promptStatusTimestamp: promptStatusTimestamp
             )
         },
-        // The workspace is on screen: the app is active and no other window of it has the keyboard.
-        isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive && !AuxiliaryWindows.contains(NSApp.keyWindow) },
+        isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive },
         agentActivityDirectory: URL = Paths.sessionsDir,
         resumeMarkerDirectory: URL = Paths.sessionsDir,
         remotePromptLiveSessions: ((Set<String>) -> Set<String>)? = nil,
@@ -669,6 +692,18 @@ final class AppModel: ObservableObject {
     func startServer() -> Bool {
         let server = ControlServer { [weak self] req in
             guard let self else { return .failure("app shutting down") }
+            if req.command == "list-sessions" {
+                // Resume markers are read here, off the main thread: the Pull
+                // Requests app asks every two seconds.
+                let (snapshot, markers) = DispatchQueue.main.sync {
+                    MainActor.assumeIsolated {
+                        (self.workspaceSnapshotWithoutCopilotSessions(), self.resumeMarkerDirectory)
+                    }
+                }
+                return Self.listSessionsResponse(
+                    Self.recordingCopilotSessions(in: snapshot, markerDirectory: markers)
+                )
+            }
             if req.command == "screenshot" {
                 let path = req.path ?? FileManager.default.homeDirectoryForCurrentUser
                     .appendingPathComponent("Downloads/copilot-projects.png").path
@@ -4674,6 +4709,15 @@ final class AppModel: ObservableObject {
     }
 
     func focus(projectId: String?, sessionId: String?) {
+        show(projectId: projectId, sessionId: sessionId)
+        requestMainWindow?()
+        NSApp.activate(ignoringOtherApps: true)
+        // An already-visible session may not trigger activation or reveal callbacks.
+        focusActiveTerminal()
+    }
+
+    /// Selects a session, or a project's shown session, and marks it read.
+    private func show(projectId: String?, sessionId: String?) {
         if let sessionId, let loc = locateIndex(sessionId) {
             selectedProjectId = projects[loc.p].id
             projects[loc.p].selectedSessionId = sessionId
@@ -4692,10 +4736,110 @@ final class AppModel: ObservableObject {
         if let sid = currentSelectedSessionId { controller(for: sid) }
         refreshSelectedTranscriptController()
         updateDockBadge()
+    }
+
+    // MARK: - Copilot Pull Requests
+
+    /// Shows a session for Copilot Pull Requests. Strict, unlike `focus`: a
+    /// session that ended is `gone`, one that moved to another project is a
+    /// `conflict`. It never activates the app; the caller already yielded
+    /// activation to it.
+    func revealSession(projectId: String?, sessionId: String) -> ControlResponse {
+        guard let loc = locateIndex(sessionId) else {
+            return .failure("the session has ended", code: "gone")
+        }
+        let owner = projects[loc.p].id
+        if let projectId, projectId != owner {
+            return .failure("the session is in another project", code: "conflict")
+        }
+        show(projectId: owner, sessionId: sessionId)
         requestMainWindow?()
-        NSApp.activate(ignoringOtherApps: true)
-        // An already-visible session may not trigger activation or reveal callbacks.
         focusActiveTerminal()
+        return .success(sessionId, code: "revealed")
+    }
+
+    /// Starts a Copilot session for Copilot Pull Requests exactly as Start
+    /// Session did inside the app: in the project's current folder, selected in
+    /// its project. A request id replayed while this app runs returns the same
+    /// session (`existing`), `gone` once it ended, or `conflict` when the
+    /// project or prompt differ.
+    func startPullRequestsSession(requestId: UUID, projectId: String, prompt: String) -> ControlResponse {
+        if let start = pullRequestsSessionStarts[requestId] {
+            guard start.projectId == projectId, start.prompt == prompt else {
+                return .failure("request id is bound to a different session", code: "conflict")
+            }
+            guard locateIndex(start.sessionId) != nil else {
+                return .failure("request id already started a session that has since ended", code: "gone")
+            }
+            return .success(start.sessionId, code: "existing")
+        }
+        guard SessionInputValidation.isValidPrompt(prompt) else {
+            return .failure(CopilotSessionStartError.invalidPrompt.localizedDescription, code: "bad-request")
+        }
+        do {
+            let sessionId = try addCopilotSession(toProjectId: projectId, initialPrompt: prompt)
+            pullRequestsSessionStarts[requestId] = PullRequestsSessionStart(
+                projectId: projectId, prompt: prompt, sessionId: sessionId
+            )
+            return .success(sessionId, code: "created")
+        } catch let error as CopilotSessionStartError {
+            let code: String
+            switch error {
+            case .projectUnavailable: code = "unknown-project"
+            case .invalidPrompt: code = "bad-request"
+            case .workingDirectoryUnavailable: code = "invalid"
+            case .shuttingDown, .backendUnavailable, .copilotUnavailable, .terminalUnavailable: code = "unavailable"
+            }
+            return .failure(error.localizedDescription, code: code)
+        } catch {
+            return .failure(error.localizedDescription, code: "unavailable")
+        }
+    }
+
+    /// Every project and live session with the state the workspace shows, for `list-sessions`.
+    func workspaceSnapshot() -> WorkspaceSnapshot {
+        Self.recordingCopilotSessions(
+            in: workspaceSnapshotWithoutCopilotSessions(), markerDirectory: resumeMarkerDirectory
+        )
+    }
+
+    private func workspaceSnapshotWithoutCopilotSessions() -> WorkspaceSnapshot {
+        WorkspaceSnapshot(
+            hostProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+            selectedProjectId: selectedProjectId,
+            projects: projects.map { project in
+                WorkspaceSnapshot.Project(id: project.id, name: project.name, sessions: project.sessions.map {
+                    WorkspaceSnapshot.Session(
+                        id: $0.id, title: $0.title, status: $0.displayStatus, finishedUnseen: $0.finishedUnseen,
+                        hasPendingInput: $0.hasPendingInput
+                    )
+                })
+            }
+        )
+    }
+
+    /// Fills in each session's Copilot CLI session from its resume marker.
+    nonisolated static func recordingCopilotSessions(
+        in snapshot: WorkspaceSnapshot, markerDirectory: URL
+    ) -> WorkspaceSnapshot {
+        var snapshot = snapshot
+        for p in snapshot.projects.indices {
+            for s in snapshot.projects[p].sessions.indices {
+                let id = snapshot.projects[p].sessions[s].id
+                let marker = (try? String(
+                    contentsOf: markerDirectory.appendingPathComponent("\(id).copilot-session"), encoding: .utf8
+                ))?.trimmingCharacters(in: .whitespacesAndNewlines)
+                snapshot.projects[p].sessions[s].copilotSessionId = marker?.isEmpty == false ? marker : nil
+            }
+        }
+        return snapshot
+    }
+
+    nonisolated static func listSessionsResponse(_ snapshot: WorkspaceSnapshot) -> ControlResponse {
+        guard let data = try? JSONEncoder().encode(snapshot), let text = String(data: data, encoding: .utf8) else {
+            return .failure("could not encode the workspace")
+        }
+        return .success(text)
     }
 
     /// Mark a session read on behalf of a remote client that is now viewing it (iOS
