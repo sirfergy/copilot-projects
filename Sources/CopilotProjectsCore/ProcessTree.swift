@@ -185,7 +185,8 @@ public enum ProcessTree {
     /// Tabs still bringing back Copilot session `copilotSessionId`: the command
     /// that resumes it, or the Copilot CLI it started, runs in them. Once that CLI
     /// exits, the tab's shell replaces the command and the tab no longer counts.
-    /// dtach keeps the command among its arguments for the tab's life, so it never counts.
+    /// dtach keeps the command among its arguments for the tab's life, so it never
+    /// counts; another tab's dtach started from inside this one belongs to that tab.
     public static func sessionsResuming(copilotSessionId: String, in snap: Snapshot) -> Set<String> {
         sessionsResuming(
             copilotSessionId: copilotSessionId,
@@ -211,9 +212,8 @@ public enum ProcessTree {
             var pending = snap.childrenOf[dtach.pid] ?? []
             var seen = Set<pid_t>()
             while let pid = pending.popLast() {
-                guard seen.insert(pid).inserted else { continue }
-                if snap.nameOf[pid] != "dtach",
-                   resumes(argumentsOf(pid), copilotSessionId: copilotSessionId) {
+                guard seen.insert(pid).inserted, snap.nameOf[pid] != "dtach" else { continue }
+                if resumes(argumentsOf(pid), copilotSessionId: copilotSessionId) {
                     sessions.insert(sessionId)
                     break
                 }

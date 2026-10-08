@@ -139,6 +139,34 @@ final class CopilotSessionStoreTests: XCTestCase {
         }
         XCTAssertEqual(resuming(), [tab], "dtach's own copy of the command never counts")
 
+        // Another tab's dtach started from inside this one: its Copilot is that tab's.
+        let nested = "5B3C4D5E-6F70-4182-93A4-B5C6D7E8F901"
+        snapshot.childrenOf[21] = [40]
+        snapshot.childrenOf[40] = [41]
+        snapshot.childrenOf[41] = [42]
+        snapshot.childrenOf[42] = [43]
+        snapshot.nameOf[40] = "dtach"
+        snapshot.nameOf[41] = "dtach"
+        snapshot.nameOf[42] = "zsh"
+        snapshot.nameOf[43] = "copilot"
+        arguments[40] = dtach(nested, 40)
+        arguments[41] = dtach(nested, 41)
+        arguments[42] = ["/bin/zsh", "-l", "-c", command]
+        arguments[43] = ["/opt/copilot", "--resume=\(id)"]
+        let withNested = processes + [
+            ProcessTree.DtachProcess(pid: 40, parentPID: 21, socketPath: dtach(nested, 40)[2], isMaster: false),
+            ProcessTree.DtachProcess(pid: 41, parentPID: 40, socketPath: dtach(nested, 41)[2], isMaster: true),
+        ]
+        XCTAssertEqual(ProcessTree.sessionsResuming(
+            copilotSessionId: id, in: snapshot, argumentsOf: { arguments[$0] ?? [] },
+            dtachProcesses: withNested, sessionsDirectory: sessions
+        ), [tab, nested])
+        for pid in [40, 41, 42, 43] as [pid_t] {
+            snapshot.nameOf[pid] = nil
+            arguments[pid] = nil
+        }
+        snapshot.childrenOf[21] = nil
+
         snapshot.childrenOf[20] = nil
         arguments[10] = nil
         XCTAssertEqual(resuming(), [tab], "before the shell has started Copilot")
