@@ -313,6 +313,7 @@ struct PullRequestsView: View {
                                 projects: pullRequests.projects,
                                 defaultProjectId: pullRequests.defaultProjectId,
                                 isStarting: pullRequests.startingGoals.contains(goal.id),
+                                resumingSessions: pullRequests.resumingSessions,
                                 goalChoices: goalChoices(goals),
                                 actions: laneActions
                             )
@@ -428,6 +429,7 @@ struct PullRequestsView: View {
             copyLink: { pullRequests.copyLink($0) },
             goToSession: { pullRequests.goToSession($0) },
             startSession: { goal, projectId in pullRequests.startSession(for: goal, projectId: projectId) },
+            resumeSession: { candidate, projectId in pullRequests.resume(candidate, projectId: projectId) },
             openHost: { pullRequests.openHost() },
             move: { key, goalId in pullRequests.move(key, toGoal: goalId) },
             moveToNewGoal: { item in
@@ -462,6 +464,7 @@ private struct GoalLane: View {
         let copyLink: (PullRequestSnapshot) -> Void
         let goToSession: (PullRequestSession) -> Void
         let startSession: (PullRequestGoal, String) -> Void
+        let resumeSession: (ResumableSession, String) -> Void
         let openHost: () -> Void
         let move: (PullRequestKey, String?) -> Void
         let moveToNewGoal: (PullRequestItem) -> Void
@@ -484,11 +487,25 @@ private struct GoalLane: View {
     let projects: [(id: String, name: String)]
     let defaultProjectId: String?
     let isStarting: Bool
+    /// Copilot sessions on their way back; their Resume Session buttons wait.
+    let resumingSessions: Set<String>
     let goalChoices: [(id: String, name: String)]
     let actions: Actions
 
     private var laneSession: PullRequestSession? {
         goal.session ?? goal.items.lazy.compactMap(\.session).first
+    }
+
+    /// The ended session to offer, once the workspace has said nothing live drives this goal.
+    private var previousSession: ResumableSession? {
+        workspace == .connected && laneSession == nil ? goal.resumable : nil
+    }
+
+    private static func lastActive(_ session: ResumableSession, now: Date = Date()) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.dateTimeStyle = .named
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: min(session.lastActive, now), relativeTo: now)
     }
 
     var body: some View {
@@ -585,6 +602,17 @@ private struct GoalLane: View {
             .font(.caption)
             .foregroundStyle(StudioStyle.secondaryText)
             .accessibilityElement(children: .combine)
+        } else if let previous = previousSession {
+            Label {
+                Text("Previous session · \(Self.lastActive(previous))")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } icon: {
+                Image(systemName: "clock.arrow.circlepath")
+            }
+            .font(.caption)
+            .foregroundStyle(StudioStyle.secondaryText)
+            .help(previous.name)
         } else {
             Label {
                 Text(noSessionText)
@@ -632,6 +660,31 @@ private struct GoalLane: View {
             Button("Go to Session") { actions.goToSession(session) }
                 .controlSize(.small)
                 .help("Show \(PullRequestGrouping.goalName(sessionTitle: session.title)) in the workspace")
+        } else if let previous = previousSession, !projects.isEmpty {
+            let target = defaultProjectId ?? projects[0].id
+            let resuming = resumingSessions.contains(previous.copilotSessionId)
+            Menu {
+                Section("Resume in") {
+                    ForEach(projects, id: \.id) { project in
+                        Button(project.name) { actions.resumeSession(previous, project.id) }
+                    }
+                }
+                Divider()
+                Section("Start New Session in") {
+                    ForEach(projects, id: \.id) { project in
+                        Button(project.name) { actions.startSession(goal, project.id) }
+                    }
+                }
+            } label: {
+                Text(resuming ? "Resuming…" : "Resume Session")
+            } primaryAction: {
+                actions.resumeSession(previous, target)
+            }
+            .menuStyle(.button)
+            .controlSize(.small)
+            .fixedSize()
+            .disabled(resuming || isStarting)
+            .help("Resume “\(previous.name)”, last active \(Self.lastActive(previous)), in \(projects.first { $0.id == target }?.name ?? "the current project"); start a new session or choose another project from the menu")
         } else if !projects.isEmpty {
             let target = defaultProjectId ?? projects[0].id
             Menu {

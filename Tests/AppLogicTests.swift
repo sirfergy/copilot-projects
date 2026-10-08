@@ -6162,6 +6162,7 @@ final class AppLogicTests: XCTestCase {
             listSessions: { .success() },
             revealSession: { _ in .success() },
             startCopilotSession: { _ in .success() },
+            resumeCopilotSession: { _ in .success() },
             screenshot: { _ in .success() },
             diagnostics: { "" },
             remote: { _ in .success() }

@@ -21,9 +21,10 @@ final class PullRequestsHostCommandTests: XCTestCase {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("work"), withIntermediateDirectories: true)
-        let keys = ["SHELL", "COPILOT_PROJECTS_STATE_DIR", "COPILOT_PROJECTS_SOCKET", "COPILOT_PROJECTS_DTACH"]
+        let keys = ["SHELL", "COPILOT_PROJECTS_STATE_DIR", "COPILOT_PROJECTS_SOCKET", "COPILOT_PROJECTS_DTACH", "COPILOT_HOME"]
         let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, ProcessInfo.processInfo.environment[$0]) })
         setenv("SHELL", "/bin/cat", 1)
+        setenv("COPILOT_HOME", root.appendingPathComponent("copilot").path, 1)
         setenv("COPILOT_PROJECTS_STATE_DIR", root.path, 1)
         setenv("COPILOT_PROJECTS_SOCKET", root.appendingPathComponent("control.sock").path, 1)
         unsetenv("COPILOT_PROJECTS_DTACH")
@@ -66,12 +67,13 @@ final class PullRequestsHostCommandTests: XCTestCase {
     }
 
     nonisolated private func request(_ command: String, project: String? = nil, session: String? = nil,
-                         requestId: String? = nil, prompt: String? = nil) -> ControlRequest {
+                         requestId: String? = nil, prompt: String? = nil, copilot: String? = nil) -> ControlRequest {
         var request = ControlRequest(command: command)
         request.projectId = project
         request.sessionId = session
         request.requestId = requestId
         request.prompt = prompt
+        request.copilotSessionId = copilot
         return request
     }
 
@@ -86,6 +88,10 @@ final class PullRequestsHostCommandTests: XCTestCase {
             listSessions: { dispatched.append("list-sessions"); return .success("{}") },
             revealSession: { dispatched.append("reveal-session:\($0.sessionId ?? "")"); return .success(code: "revealed") },
             startCopilotSession: { dispatched.append("start:\($0.requestId ?? "")"); return .success("s", code: "created") },
+            resumeCopilotSession: {
+                dispatched.append("resume:\($0.copilotSessionId ?? "")")
+                return .success("t", code: "created")
+            },
             screenshot: { _ in .success() }, diagnostics: { "" }, remote: { _ in .success() }
         ))
         let uuid = UUID().uuidString
@@ -98,6 +104,12 @@ final class PullRequestsHostCommandTests: XCTestCase {
             request("start-copilot-session", project: "A", prompt: "p"),
             request("start-copilot-session", project: "A", requestId: "not-a-uuid", prompt: "p"),
             request("start-copilot-session", project: "A", requestId: uuid),
+            request("resume-copilot-session", requestId: uuid, copilot: uuid),
+            request("resume-copilot-session", project: "", requestId: uuid, copilot: uuid),
+            request("resume-copilot-session", project: "A", copilot: uuid),
+            request("resume-copilot-session", project: "A", requestId: "not-a-uuid", copilot: uuid),
+            request("resume-copilot-session", project: "A", requestId: uuid),
+            request("resume-copilot-session", project: "A", requestId: uuid, copilot: "../../etc/passwd"),
         ] {
             let response = router.handle(invalid)
             XCTAssertFalse(response.ok)
@@ -108,7 +120,9 @@ final class PullRequestsHostCommandTests: XCTestCase {
         XCTAssertEqual(router.handle(request("reveal-session", session: "s")).code, "revealed")
         XCTAssertEqual(router.handle(request("start-copilot-session", project: "A", requestId: uuid, prompt: "p")).code,
                        "created")
-        XCTAssertEqual(dispatched, ["list-sessions", "reveal-session:s", "start:\(uuid)"])
+        XCTAssertEqual(router.handle(request("resume-copilot-session", project: "A", requestId: uuid, copilot: uuid)).code,
+                       "created")
+        XCTAssertEqual(dispatched, ["list-sessions", "reveal-session:s", "start:\(uuid)", "resume:\(uuid)"])
     }
 
     func testListSessionsReportsEveryProjectAndSessionAsJSON() throws {
@@ -226,6 +240,109 @@ final class PullRequestsHostCommandTests: XCTestCase {
             XCTAssertFalse(ended.ok)
             XCTAssertEqual(ended.code, "gone", "an ended session is never started again for the same request")
             XCTAssertEqual(host.launches().count, 1)
+        }
+    }
+
+    func testResumeCopilotSessionOpensItInItsFolderAndIsIdempotentPerRequest() throws {
+        try withHost(projects: twoProjects, selectedProjectIndex: 1) { host in
+            let model = host.model
+            let home = try CopilotHomeFixture(root: host.root.appendingPathComponent("copilot"))
+            let folder = host.root.appendingPathComponent("worktree")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let copilotId = try home.addSession(cwd: folder.path, transcript: "")
+            let other = try home.addSession(cwd: folder.path, transcript: "")
+            let requestId = UUID().uuidString
+            @MainActor func resume(_ id: String = requestId, project: String = "A", copilot: String = copilotId) -> ControlResponse {
+                model.handle(request("resume-copilot-session", project: project, requestId: id, copilot: copilot))
+            }
+
+            let created = resume()
+            XCTAssertTrue(created.ok, created.error ?? "")
+            XCTAssertEqual(created.code, "created")
+            let tab = try XCTUnwrap(created.text)
+            XCTAssertEqual(host.launches().map(\.id), [tab])
+            XCTAssertEqual(host.launches()[0].executable, "/opt/copilot/bin/copilot")
+            XCTAssertNil(host.launches()[0].prompt)
+            XCTAssertEqual(model.capturedResumeLaunches, [tab: copilotId])
+            let project = try XCTUnwrap(model.project("A"))
+            let session = try XCTUnwrap(project.sessions.last)
+            XCTAssertEqual(session.id, tab)
+            XCTAssertEqual(session.title, "Copilot")
+            XCTAssertEqual(session.cwd, folder.path, "it resumes in the folder it worked in")
+            XCTAssertEqual(project.selectedSessionId, tab)
+            XCTAssertEqual(model.selectedProjectId, "B", "revealing it is a separate request")
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: host.root.appendingPathComponent("\(tab).copilot-session").path),
+                "Copilot writes the resume marker once it has resumed"
+            )
+
+            XCTAssertEqual(resume().code, "existing")
+            XCTAssertEqual(resume().text, tab)
+            XCTAssertEqual(resume(project: "B").code, "conflict")
+            XCTAssertEqual(resume(copilot: other).code, "conflict")
+
+            // While it comes back, a new request finds the tab bringing it back.
+            try home.lock(copilotId)
+            let starting = resume(UUID().uuidString, copilot: copilotId.uppercased())
+            XCTAssertEqual(starting.code, "existing")
+            XCTAssertEqual(starting.text, tab)
+            // Once resumed, its marker names it wherever the request asks.
+            try Data("\(copilotId)\n".utf8).write(to: host.root.appendingPathComponent("\(tab).copilot-session"))
+            let marked = resume(UUID().uuidString, project: "B")
+            XCTAssertEqual(marked.code, "existing")
+            XCTAssertEqual(marked.text, tab)
+            XCTAssertEqual(host.launches().count, 1)
+
+            model.closeSession(projectId: "A", sessionId: tab)
+            let ended = resume()
+            XCTAssertFalse(ended.ok)
+            XCTAssertEqual(ended.code, "gone", "an ended tab is never opened again for the same request")
+            XCTAssertEqual(host.launches().count, 1)
+        }
+    }
+
+    func testResumeCopilotSessionReturnsATabWhoseMarkerAlreadyNamesIt() throws {
+        try withHost(projects: twoProjects) { host in
+            let home = try CopilotHomeFixture(root: host.root.appendingPathComponent("copilot"))
+            let copilotId = try home.addSession(cwd: host.root.path, transcript: "")
+            try Data(copilotId.uppercased().utf8).write(to: host.root.appendingPathComponent("b1.copilot-session"))
+            let response = host.model.handle(request(
+                "resume-copilot-session", project: "A", requestId: UUID().uuidString, copilot: copilotId
+            ))
+            XCTAssertEqual(response.code, "existing")
+            XCTAssertEqual(response.text, "b1")
+            XCTAssertTrue(host.launches().isEmpty)
+        }
+    }
+
+    func testResumeCopilotSessionRefusesSessionsItCannotOpenHere() throws {
+        try withHost(projects: twoProjects) { host in
+            let model = host.model
+            let home = try CopilotHomeFixture(root: host.root.appendingPathComponent("copilot"))
+            @MainActor func resume(_ copilot: String, project: String = "A") -> ControlResponse {
+                model.handle(request(
+                    "resume-copilot-session", project: project, requestId: UUID().uuidString, copilot: copilot
+                ))
+            }
+            let gone = resume(UUID().uuidString)
+            XCTAssertEqual(gone.code, "gone")
+            XCTAssertEqual(gone.error, "That Copilot session no longer exists.")
+
+            let held = try home.addSession(cwd: host.root.path, transcript: "")
+            try home.lock(held)
+            let inUse = resume(held)
+            XCTAssertEqual(inUse.code, "in-use")
+            XCTAssertEqual(inUse.error, "That Copilot session is open somewhere else.")
+
+            let deleted = host.root.appendingPathComponent("deleted-worktree").path
+            let invalid = resume(try home.addSession(cwd: deleted, transcript: ""))
+            XCTAssertEqual(invalid.code, "invalid")
+            XCTAssertEqual(invalid.error, "The folder it worked in, \(deleted), no longer exists.")
+
+            XCTAssertEqual(resume(try home.addSession(cwd: host.root.path, transcript: ""), project: "missing").code,
+                           "unknown-project")
+            XCTAssertTrue(host.launches().isEmpty)
+            XCTAssertEqual(model.project("A")?.sessions.map(\.id), ["a1", "a2"])
         }
     }
 }

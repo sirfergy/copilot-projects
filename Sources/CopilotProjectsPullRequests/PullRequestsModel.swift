@@ -20,6 +20,10 @@ final class PullRequestsModel: ObservableObject {
     static let reopenFreshness: TimeInterval = 60
     /// How often the workspace's sessions are read while the window is visible.
     static let workspacePollInterval: TimeInterval = 2
+    /// How long Resume Session stays busy waiting for the resumed session to report itself.
+    static let resumeSettleInterval: TimeInterval = 20
+    /// The pause between searches for ended sessions while some are left unread.
+    static let resumableSearchPause: TimeInterval = 0.25
 
     @Published private(set) var pullRequests: [PullRequestSnapshot] = []
     @Published private(set) var links: [PullRequestKey: String] = [:]
@@ -34,6 +38,10 @@ final class PullRequestsModel: ObservableObject {
     @Published private(set) var workspace: WorkspaceState = .connecting
     /// Goals whose Start Session request is on its way to Copilot Projects.
     @Published private(set) var startingGoals: Set<String> = []
+    /// Ended Copilot sessions that worked on pull requests no live session drives.
+    @Published private(set) var resumable: [PullRequestKey: ResumableSession] = [:]
+    /// Copilot sessions being resumed, until the workspace shows them live.
+    @Published private(set) var resumingSessions: Set<String> = []
     /// Comma- or space-separated GitHub owners. Only pull requests they own are
     /// shown; empty means every owner.
     @Published var owners: String {
@@ -49,6 +57,7 @@ final class PullRequestsModel: ObservableObject {
     private let defaults: UserDefaults
     private let service: PullRequestService
     private let index: PullRequestTranscriptIndex
+    private let resumableFinder: any ResumableSessionSearching
     private let overridesURL: URL?
     private let loadAccounts: @Sendable () async throws -> [GitHubAccount]
     private let source: any PullRequestsWorkspace
@@ -69,11 +78,26 @@ final class PullRequestsModel: ObservableObject {
     /// Start Session requests that didn't get an answer, by goal, so trying again
     /// reuses the request id and never starts a second session.
     private var pendingStarts: [String: PendingStart] = [:]
+    /// Resume Session requests that didn't get an answer, by Copilot session.
+    private var pendingResumes: [String: PendingResume] = [:]
+    /// Resumed sessions not yet live in the workspace, and when to stop waiting.
+    private var resumeDeadlines: [String: Date] = [:]
+    /// The search for ended sessions, which keeps going while the byte budget
+    /// leaves candidates unread. At most one runs; each refresh replaces it.
+    private var resumableSearch: Task<Void, Never>?
+    /// Ended sessions seen live again in a tab, lowercased, whose pull requests
+    /// were matched once more to link them there.
+    private var relinkedSessions: Set<String> = []
 
     private struct PendingStart {
         let requestId: UUID
         let projectId: String
         let prompt: String
+    }
+
+    private struct PendingResume {
+        let requestId: UUID
+        let projectId: String
     }
 
     init(
@@ -84,6 +108,7 @@ final class PullRequestsModel: ObservableObject {
         stateDirectory: URL? = Paths.pullRequestsStateDir,
         service: PullRequestService = PullRequestService(),
         loadAccounts: @escaping @Sendable () async throws -> [GitHubAccount] = { try await PullRequestsModel.signedInAccounts() },
+        resumableFinder: (any ResumableSessionSearching)? = nil,
         isVisible: @escaping @MainActor () -> Bool = { NSApp?.occlusionState.contains(.visible) ?? true },
         presentError: @escaping @MainActor (_ title: String, _ message: String) -> Void = PullRequestsModel.presentAlert
     ) {
@@ -97,6 +122,9 @@ final class PullRequestsModel: ObservableObject {
         self.presentError = presentError
         owners = defaults.string(forKey: Self.ownersKey) ?? ""
         index = PullRequestTranscriptIndex(storeURL: stateDirectory?.appendingPathComponent("transcript-index.json"))
+        self.resumableFinder = resumableFinder ?? ResumableSessionFinder(
+            cacheURL: stateDirectory?.appendingPathComponent("resumable-index.json")
+        )
         overridesURL = stateDirectory?.appendingPathComponent("goals.json")
         overrides = overridesURL
             .flatMap { try? Data(contentsOf: $0) }
@@ -178,10 +206,47 @@ final class PullRequestsModel: ObservableObject {
     var sessionsKnown: Bool { sessionsMatched && isConnected && !matchedWithoutSessions }
 
     func goals(now: Date = Date()) -> [PullRequestGoal] {
-        PullRequestGrouping.goals(
-            pullRequests: pullRequests, links: links, sessions: liveSessions,
-            overrides: overrides, now: now, sessionsKnown: sessionsKnown
+        let sessions = liveSessions
+        let (links, offered) = linkingResumed(links, sessions: sessions)
+        return PullRequestGrouping.goals(
+            pullRequests: pullRequests, links: links, sessions: sessions,
+            overrides: overrides, now: now, sessionsKnown: sessionsKnown, resumable: offered
         )
+    }
+
+    /// `links`, plus each pull request whose ended session is live again in a
+    /// tab, which drives it from there; and the ended sessions still to offer.
+    private func linkingResumed(
+        _ links: [PullRequestKey: String], sessions: [String: PullRequestSession]
+    ) -> (links: [PullRequestKey: String], offered: [PullRequestKey: ResumableSession]) {
+        guard !resumable.isEmpty else { return (links, [:]) }
+        var links = links
+        var offered: [PullRequestKey: ResumableSession] = [:]
+        var tabs: [String: String] = [:]
+        for session in sessions.values {
+            if let copilotId = session.copilotSessionId?.lowercased() { tabs[copilotId] = session.id }
+        }
+        for (key, candidate) in resumable {
+            if let tab = tabs[candidate.copilotSessionId.lowercased()] {
+                if links[key].flatMap({ sessions[$0] }) == nil { links[key] = tab }
+            } else {
+                offered[key] = candidate
+            }
+        }
+        return (links, offered)
+    }
+
+    /// Pull requests no live session works on, by link, goal, or shared branch.
+    private func pullRequestsWithoutSession(
+        _ prs: [PullRequestSnapshot], links: [PullRequestKey: String]
+    ) -> [PullRequestSnapshot] {
+        let sessions = liveSessions
+        let goals = PullRequestGrouping.goals(
+            pullRequests: prs, links: linkingResumed(links, sessions: sessions).links, sessions: sessions,
+            overrides: overrides, now: Date()
+        )
+        let sessionless = Set(goals.filter { $0.session == nil }.flatMap(\.items).filter { $0.session == nil }.map(\.pr.key))
+        return prs.filter { sessionless.contains($0.key) }
     }
 
     /// Reads the workspace when the window opens, then every two seconds while
@@ -220,10 +285,34 @@ final class PullRequestsModel: ObservableObject {
             state = .incompatibleHost
         }
         if workspace != state { workspace = state }
+        var rematch = false
+        if case .connected(let snapshot) = state {
+            settleResumes(in: snapshot)
+            rematch = resumedSessionsAppeared(in: snapshot)
+        }
         // Copilot Projects came back after pull requests were matched without
         // its sessions: match them once more, not on every poll.
         // A refresh still running queues this one behind it.
-        if !wasConnected, isConnected, matchedWithoutSessions { refresh() }
+        if !wasConnected, isConnected, matchedWithoutSessions { rematch = true }
+        if rematch { refresh() }
+    }
+
+    /// Whether an ended session just came back live in a tab while one of its
+    /// pull requests has no live link: matching transcripts again links them to
+    /// it, since its event log still names them. Once per session while it stays live.
+    private func resumedSessionsAppeared(in snapshot: WorkspaceSnapshot) -> Bool {
+        let sessions = PullRequestSession.sessions(in: snapshot)
+        let live = Set(sessions.values.compactMap { $0.copilotSessionId?.lowercased() })
+        relinkedSessions.formIntersection(live)
+        var appeared = false
+        for (key, candidate) in resumable {
+            let copilotId = candidate.copilotSessionId.lowercased()
+            guard live.contains(copilotId), !relinkedSessions.contains(copilotId),
+                  links[key].flatMap({ sessions[$0] }) == nil else { continue }
+            relinkedSessions.insert(copilotId)
+            appeared = true
+        }
+        return appeared
     }
 
     /// Before matching transcripts, find out whether Copilot Projects is there.
@@ -246,9 +335,13 @@ final class PullRequestsModel: ObservableObject {
 
     /// Shows pull requests fetched elsewhere, as a completed refresh. Used by
     /// captures and tests, which must not reach GitHub.
-    func show(_ prs: [PullRequestSnapshot], links: [PullRequestKey: String], updated: Date = Date()) {
+    func show(
+        _ prs: [PullRequestSnapshot], links: [PullRequestKey: String],
+        resumable: [PullRequestKey: ResumableSession] = [:], updated: Date = Date()
+    ) {
         pullRequests = prs
         self.links = links
+        self.resumable = resumable
         sessionsMatched = true
         lastUpdated = updated
         lastAttempt = updated
@@ -326,6 +419,9 @@ final class PullRequestsModel: ObservableObject {
             warning = fetch.warnings.first
             lastUpdated = Date()
             phase = .loaded
+            // Ended sessions are looked for only against current live ones;
+            // otherwise the last ones found stay.
+            if matchedLive { searchResumable() }
         } catch {
             let failure = (error as? PullRequestFetchError) ?? .failed(error.localizedDescription)
             if pullRequests.isEmpty {
@@ -334,6 +430,42 @@ final class PullRequestsModel: ObservableObject {
                 warning = failure.message
             }
         }
+    }
+
+    /// Searches for ended sessions in the background, replacing any search
+    /// still running, and again while the byte budget leaves candidates unread.
+    private func searchResumable() {
+        resumableSearch?.cancel()
+        resumableSearch = nil
+        guard isConnected else { return }
+        resumableSearch = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.isConnected else { return }
+                let needing = self.pullRequestsWithoutSession(self.pullRequests, links: self.links)
+                let live = Set(self.liveSessions.values.compactMap(\.copilotSessionId))
+                let search = await self.resumableFinder.search(for: needing, liveCopilotSessionIds: live)
+                guard !Task.isCancelled, self.isConnected else { return }
+                self.assignResumable(search.sessions)
+                guard search.deferred else { return }
+                try? await Task.sleep(nanoseconds: UInt64(Self.resumableSearchPause * 1_000_000_000))
+            }
+        }
+    }
+
+    /// Takes what a search found, keeping each session being resumed, and each
+    /// one live again in a tab before its pull requests are linked to it there:
+    /// the search skips those, as in use or as driven by that tab.
+    private func assignResumable(_ found: [PullRequestKey: ResumableSession]) {
+        let sessions = liveSessions
+        let live = Set(sessions.values.compactMap { $0.copilotSessionId?.lowercased() })
+        let resuming = Set(resumingSessions.map { $0.lowercased() } + resumeDeadlines.keys.map { $0.lowercased() })
+        let kept = resumable.filter { key, candidate in
+            let copilotId = candidate.copilotSessionId.lowercased()
+            return resuming.contains(copilotId)
+                || (live.contains(copilotId) && links[key].flatMap { sessions[$0] } == nil)
+        }
+        let scope = Set(pullRequests.map(\.key))
+        resumable = found.merging(kept) { _, kept in kept }.filter { scope.contains($0.key) }
     }
 
     private var isFailed: Bool {
@@ -490,6 +622,87 @@ final class PullRequestsModel: ObservableObject {
             pendingStarts[goalId] = nil
             await pollWorkspace()
             presentError("Could Not Start Copilot", "Update Copilot Projects to start sessions from here.")
+        }
+    }
+
+    /// Opens an ended Copilot session in a new tab in `projectId`, in the folder
+    /// it worked in, and shows it in Copilot Projects. Its pull requests follow
+    /// it once the workspace reports it live.
+    func resume(_ candidate: ResumableSession, projectId: String) {
+        let copilotId = candidate.copilotSessionId
+        guard isConnected, !resumingSessions.contains(copilotId) else { return }
+        let resume = pendingResumes[copilotId].flatMap { $0.projectId == projectId ? $0 : nil }
+            ?? PendingResume(requestId: UUID(), projectId: projectId)
+        pendingResumes[copilotId] = resume
+        resumingSessions.insert(copilotId)
+        Task { await performResume(resume, copilotSessionId: copilotId) }
+    }
+
+    private func performResume(_ resume: PendingResume, copilotSessionId copilotId: String) async {
+        var result = await source.resumeCopilotSession(
+            projectId: resume.projectId, requestId: resume.requestId, copilotSessionId: copilotId
+        )
+        if result == .unreachable {
+            // The answer may have been lost after the session opened; the same
+            // request id returns that tab instead of opening another.
+            result = await source.resumeCopilotSession(
+                projectId: resume.projectId, requestId: resume.requestId, copilotSessionId: copilotId
+            )
+        }
+        let title = "Could Not Resume Session"
+        switch result {
+        case .done(_, let sessionId?) where !sessionId.isEmpty:
+            pendingResumes[copilotId] = nil
+            awaitLive(copilotId)
+            await pollWorkspace()
+            let pid = connectedSnapshot?.hostProcessIdentifier
+            // A tab that already had it open may be in another project.
+            let projectId = liveSessions[sessionId]?.projectId ?? resume.projectId
+            if await reveal(projectId: projectId, sessionId: sessionId), let pid { host.activate(pid) }
+        case .done:
+            pendingResumes[copilotId] = nil
+            resumingSessions.remove(copilotId)
+            presentError(title, "Copilot Projects didn’t say which session it opened.")
+        case .refused(let code, let message):
+            pendingResumes[copilotId] = nil
+            resumingSessions.remove(copilotId)
+            if let code, ["gone", "in-use", "invalid"].contains(code) {
+                resumable = resumable.filter { $0.value.copilotSessionId != copilotId }
+            }
+            await pollWorkspace()
+            presentError(title, message)
+        case .unreachable:
+            resumingSessions.remove(copilotId)
+            await pollWorkspace()
+            presentError(title, "Copilot Projects isn’t answering. Try again; a session that did resume won’t open twice.")
+        case .incompatibleHost:
+            pendingResumes[copilotId] = nil
+            resumingSessions.remove(copilotId)
+            await pollWorkspace()
+            presentError(title, "Update Copilot Projects to resume sessions from here.")
+        }
+    }
+
+    /// Keeps Resume Session busy until the workspace reports the session live,
+    /// which happens once Copilot has resumed it, or for twenty seconds.
+    private func awaitLive(_ copilotId: String) {
+        let deadline = Date().addingTimeInterval(Self.resumeSettleInterval)
+        resumeDeadlines[copilotId] = deadline
+        if let snapshot = connectedSnapshot { settleResumes(in: snapshot) }
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.resumeSettleInterval * 1_000_000_000))
+            guard let self, self.resumeDeadlines[copilotId] == deadline else { return }
+            self.resumeDeadlines[copilotId] = nil
+            self.resumingSessions.remove(copilotId)
+        }
+    }
+
+    private func settleResumes(in snapshot: WorkspaceSnapshot) {
+        guard !resumeDeadlines.isEmpty else { return }
+        let live = Set(snapshot.projects.flatMap(\.sessions).compactMap { $0.copilotSessionId?.lowercased() })
+        for copilotId in resumeDeadlines.keys where live.contains(copilotId.lowercased()) {
+            resumeDeadlines[copilotId] = nil
+            resumingSessions.remove(copilotId)
         }
     }
 

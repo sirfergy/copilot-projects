@@ -1,4 +1,5 @@
 import Foundation
+import CopilotProjectsCore
 
 /// Finds many byte patterns in one pass over the input (Aho–Corasick compiled to
 /// a DFA), so a transcript is read once however many pull requests are open.
@@ -236,13 +237,7 @@ actor PullRequestTranscriptIndex {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         home: String = NSHomeDirectory()
     ) -> String? {
-        guard copilotSessionId.range(of: #"^[A-Za-z0-9-]{8,64}$"#, options: .regularExpression) != nil else {
-            return nil
-        }
-        let copilotHome = environment["COPILOT_HOME"].flatMap { $0.isEmpty ? nil : $0 }
-            ?? (home as NSString).appendingPathComponent(".copilot")
-        return ((copilotHome as NSString).appendingPathComponent("session-state") as NSString)
-            .appendingPathComponent("\(copilotSessionId)/events.jsonl")
+        CopilotSessionStore(environment: environment, home: home).transcriptPath(for: copilotSessionId)
     }
 
     func evidence(for sources: [Source], branches: Set<String>) async -> [String: TranscriptEvidence] {

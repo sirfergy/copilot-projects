@@ -44,9 +44,13 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   your open pull requests, one row per goal and one column per stage (Draft, Checks,
   Review, Ready), with what needs you called out. Goals are inferred from the live
   session whose Copilot event log names each pull request's head branch, and can be
-  regrouped by hand. It uses your `gh` accounts and the GitHub GraphQL API, and reads
-  sessions from Copilot Projects over the control socket (`list-sessions`,
-  `reveal-session`, `start-copilot-session`), so it never touches terminals itself.
+  regrouped by hand. A goal no live session drives offers **Resume Session** when an
+  ended Copilot session worked on it: found through the Copilot CLI's local session
+  store, it reopens with `copilot --resume` in a new tab in the folder it worked in.
+  Sessions whose folder is gone, or that another Copilot CLI has open, aren't offered.
+  It uses your `gh` accounts and the GitHub GraphQL API, and reads sessions from
+  Copilot Projects over the control socket (`list-sessions`, `reveal-session`,
+  `start-copilot-session`, `resume-copilot-session`), so it never touches terminals itself.
   Only one copy per state directory writes its goals; see the README for the rules.
 - **Prompt-first sessions:** the **+** split button's dropdown, Session menu, and project context
   menu offer **Start with Prompt…**. Compose multiple lines, then use `⌘Return` to launch
