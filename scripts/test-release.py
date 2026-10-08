@@ -234,6 +234,14 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(any(command != "git" or "fetch" in args for _, command, args in self.calls))
         self.assertFalse((self.project_root / "dist-build.txt").exists())
 
+    def test_publish_refuses_a_version_dated_after_today(self):
+        self.env["MOCK_DATE"] = "2026 10 08 PDT"
+        result = self.run_release(version="2026.10.9.1")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("v2026.10.9.1 is dated after today (2026.10.8 in America/Los_Angeles)", result.stdout)
+        self.assertFalse(any(cmd in ("gh", "codesign", "xcrun", "hdiutil") for _, cmd, _ in self.calls))
+        self.assertFalse((self.project_root / "dist-build.txt").exists())
+
     def test_override_runs_entire_pipeline_in_selected_root(self):
         # Even inherited Git selectors must not validate a different checkout.
         self.env.update(GIT_DIR=str(self.public / ".git"), GIT_WORK_TREE=str(self.public))
@@ -825,18 +833,22 @@ class ReleaseTests(unittest.TestCase):
                 self.assertNotIn("should_release", outputs)
                 self.assertNotIn("version", outputs)
 
-    def test_workflow_dispatch_requires_a_date_version_through_today(self):
-        root = self.release_checkout("dispatch", ("v0.9.121",))
-        for version, published, message in (
-            ("v2026.10.8.2", "2026.10.8.2", None),
-            ("2026.10.7.1", "2026.10.7.1", None),
-            ("0.9.122", None, "Version must be YYYY.M.D.N"),
-            ("v2026.10.08.1", None, "Version must be YYYY.M.D.N"),
-            ("2026.10.8.0", None, "Version must be YYYY.M.D.N"),
-            ("2026.2.30.1", None, "Version must be YYYY.M.D.N"),
-            ("2026.10.9.1", None, "v2026.10.9.1 is dated after today (2026.10.8 in America/Los_Angeles)"),
+    def test_workflow_dispatch_requires_the_next_date_version(self):
+        first = self.release_checkout("dispatch", ("v0.9.121",))
+        second = self.release_checkout("dispatch-second", ("v0.9.121", "v2026.10.8.1"))
+        for root, version, published, message in (
+            (first, "v2026.10.8.1", "2026.10.8.1", None),
+            (second, "2026.10.8.2", "2026.10.8.2", None),
+            (first, "v2026.10.8.2", None, "Version must be the next release, 2026.10.8.1 (after v0.9.121)"),
+            (first, "2026.10.7.1", None, "Version must be the next release, 2026.10.8.1 (after v0.9.121)"),
+            (second, "2026.10.8.1", None, "Version must be the next release, 2026.10.8.2 (after v2026.10.8.1)"),
+            (first, "0.9.122", None, "Version must be YYYY.M.D.N"),
+            (first, "v2026.10.08.1", None, "Version must be YYYY.M.D.N"),
+            (first, "2026.10.8.0", None, "Version must be YYYY.M.D.N"),
+            (first, "2026.2.30.1", None, "Version must be YYYY.M.D.N"),
+            (first, "2026.10.9.1", None, "v2026.10.9.1 is dated after today (2026.10.8 in America/Los_Angeles)"),
         ):
-            with self.subTest(version=version):
+            with self.subTest(root=root.name, version=version):
                 result, outputs = self.run_release_validation(
                     root, "2026 10 08 PDT", event="workflow_dispatch", version=version)
                 if published:

@@ -48,7 +48,8 @@ Eligible PR merges get their version from the Release workflow. For a manual
 dispatch, use today's Pacific date: the next `N` after today's latest release, or
 `.1` when the latest release is from an earlier day or is a legacy `vX.Y.Z` tag
 (for example, `2026.10.8.4` after `v2026.10.8.3`, `2026.10.9.1` after it on the
-next day). Never use a future date; it blocks automatic releases until that day.
+next day). The workflow rejects any other version and names the expected one.
+Never use a future date; it blocks automatic releases until that day.
 Never overwrite an existing tag or release asset.
 
 ### 3. Validate

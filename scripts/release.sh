@@ -131,6 +131,9 @@ if [ "$PUBLISH" = "1" ]; then
     echo "error: refusing to publish $SHA because it is not on origin/main" >&2
     exit 1
   }
+  # A future-dated release would stop automatic releases until that date.
+  TODAY="$(pacific_release_date)" || exit 1
+  check_release_version_date "$VERSION" "$TODAY" || exit 1
 fi
 
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"

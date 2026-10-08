@@ -122,6 +122,19 @@ jobs:
             exit 1
           fi
           check_release_version_date "$version" "$today"
+          if [[ "$EVENT_NAME" != "push" ]]; then
+            # A dispatched version must be the one an automatic release would pick.
+            latest_tag="$(git tag --list 'v*' | latest_release_tag)"
+            if [[ -z "$latest_tag" ]]; then
+              echo "No release tag exists to increment." >&2
+              exit 1
+            fi
+            expected="$(next_release_version "$latest_tag" "$today")"
+            if [[ "$version" != "$expected" ]]; then
+              echo "Version must be the next release, $expected (after $latest_tag)." >&2
+              exit 1
+            fi
+          fi
           tag="v$version"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $tag already exists." >&2

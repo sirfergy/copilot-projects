@@ -259,7 +259,7 @@ below date tags. If the latest release tag is dated after today, the workflow
 fails instead of publishing a lower version. The rules live in
 [`scripts/release-version.sh`](../scripts/release-version.sh).
 
-To publish a specific new version, dispatch the workflow from `main`:
+To publish the next version manually, dispatch the workflow from `main`:
 
 ```bash
 gh workflow run release.yml \
@@ -268,9 +268,11 @@ gh workflow run release.yml \
   -f version=YYYY.M.D.N
 ```
 
-Replace `YYYY.M.D.N` with an unused date version dated no later than today in
-Pacific time. The workflow runs validation and tests before entering the protected
-`release` environment for signing and publishing.
+Replace `YYYY.M.D.N` with the version an automatic release would pick now; the
+workflow rejects any other version and names the expected one. Publishing with
+`scripts/release.sh --publish` likewise refuses a version dated after today. The
+workflow runs validation and tests before entering the protected `release`
+environment for signing and publishing.
 
 #### Local builds and fallback publishing
 
