@@ -605,6 +605,74 @@ final class ResumableRefreshTests: XCTestCase {
         try await waitUntil { await self.accountLoads.value > loads && !model.isRefreshing }
     }
 
+    private final class EnrichmentGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private let ready = DispatchSemaphore(value: 0)
+        private var _entered = false
+        var entered: Bool { lock.withLock { _entered } }
+        func hold() {
+            lock.withLock { _entered = true }
+            _ = ready.wait(timeout: .now() + 5)
+        }
+        func release() { ready.signal() }
+    }
+
+    @MainActor
+    func testMergedPRKeepsItsOldSessionUntilTheEnrichedListReplacesIt() async throws {
+        let cid = try home.addSession(cwd: root.appendingPathComponent("work").path,
+                                      transcript: transcript(mentioning: branch, times: 4))
+        let model = makeModel(
+            FakeWorkspace(snapshot: snapshot([("tab", cid)])),
+            finder: ScriptedResumableSearch([ResumableSearch()])
+        )
+        await model.pollWorkspace()
+        let merged = makePR(2, repo: "o/r", branch: "me/just-merged")
+        model.show([makePR(1, repo: "o/r", branch: branch), merged], links: [key: "tab", merged.key: "tab"])
+        let responder = GraphQLStub.respond
+        let gate = EnrichmentGate()
+        defer { gate.release() }
+        GraphQLStub.respond = { token, body in
+            if (body["query"] as? String ?? "").contains("mergeStateStatus") { gate.hold() }
+            return responder(token, body)
+        }
+        model.refresh()
+        try await waitUntil { gate.entered }
+        XCTAssertTrue(model.isRefreshing)
+        XCTAssertFalse(model.isMatchingSessions)
+        XCTAssertTrue(model.sessionsKnown)
+        XCTAssertEqual(model.links[merged.key], "tab")
+        XCTAssertEqual(model.goals(now: testNow).first?.items.count, 2)
+        gate.release()
+        try await waitUntil { !model.isRefreshing }
+        XCTAssertEqual(model.pullRequests.map(\.key), [key])
+        XCTAssertNil(model.links[merged.key])
+    }
+
+    @MainActor
+    func testFirstLoadDoesNotCallUnenrichedStatusReady() async throws {
+        let model = makeModel(FakeWorkspace(snapshot: snapshot([])), finder: ScriptedResumableSearch([ResumableSearch()]))
+        let responder = GraphQLStub.respond
+        let gate = EnrichmentGate()
+        defer { gate.release() }
+        GraphQLStub.respond = { token, body in
+            if (body["query"] as? String ?? "").contains("mergeStateStatus") { gate.hold() }
+            return responder(token, body)
+        }
+        model.refresh()
+        try await waitUntil { gate.entered }
+        XCTAssertTrue(model.isRefreshing)
+        XCTAssertFalse(model.isMatchingSessions, "session matching finishes before enrichment")
+        XCTAssertTrue(model.sessionsKnown)
+        XCTAssertNil(model.lastUpdated, "the view labels this as checking, not unavailable")
+        let pr = try XCTUnwrap(model.pullRequests.first)
+        XCTAssertTrue(pr.isIncomplete)
+        XCTAssertFalse(PullRequestTriage.isReady(pr))
+        gate.release()
+        try await waitUntil { !model.isRefreshing }
+        XCTAssertNotNil(model.lastUpdated)
+        XCTAssertFalse(try XCTUnwrap(model.pullRequests.first).isIncomplete)
+    }
+
     @MainActor
     func testARefreshOffersTheEndedSessionForAPullRequestNoLiveSessionDrives() async throws {
         let work = root.appendingPathComponent("work")

@@ -29,6 +29,7 @@ final class PullRequestsModel: ObservableObject {
     @Published private(set) var links: [PullRequestKey: String] = [:]
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isMatchingSessions = false
     /// Whether transcripts have been matched to pull requests yet.
     @Published private(set) var sessionsMatched = false
     @Published private(set) var lastUpdated: Date?
@@ -216,7 +217,7 @@ final class PullRequestsModel: ObservableObject {
     }
 
     /// "No session" is only claimed when the sessions are current and were matched.
-    var sessionsKnown: Bool { sessionsMatched && isConnected && !matchedWithoutSessions }
+    var sessionsKnown: Bool { sessionsMatched && isConnected && !matchedWithoutSessions && !isMatchingSessions }
 
     func goals(now: Date = Date()) -> [PullRequestGoal] {
         let sessions = liveSessions
@@ -350,14 +351,16 @@ final class PullRequestsModel: ObservableObject {
     /// captures and tests, which must not reach GitHub.
     func show(
         _ prs: [PullRequestSnapshot], links: [PullRequestKey: String],
-        resumable: [PullRequestKey: ResumableSession] = [:], updated: Date = Date()
+        resumable: [PullRequestKey: ResumableSession] = [:], updated: Date = Date(),
+        warning: String? = nil, sessionsMatched: Bool = true
     ) {
         pullRequests = prs
         self.links = links
         self.resumable = resumable
-        sessionsMatched = true
+        self.sessionsMatched = sessionsMatched
+        self.warning = warning
         lastUpdated = updated
-        lastAttempt = updated
+        lastAttempt = Date()
         phase = .loaded
     }
 
@@ -391,7 +394,11 @@ final class PullRequestsModel: ObservableObject {
 
     private func performRefresh() async {
         isRefreshing = true
-        defer { isRefreshing = false }
+        isMatchingSessions = !sessionsKnown
+        defer {
+            isRefreshing = false
+            isMatchingSessions = false
+        }
         lastAttempt = Date()
         let firstLoad = lastUpdated == nil
         if pullRequests.isEmpty, !isFailed { phase = .loading }
@@ -400,7 +407,11 @@ final class PullRequestsModel: ObservableObject {
             let owners = ownerList
             let fetch = try await service.search(accounts: accounts, owners: owners)
             if firstLoad {
-                pullRequests = Self.inScope(fetch.pullRequests, owners: ownerList)
+                pullRequests = Self.inScope(fetch.pullRequests, owners: ownerList).map {
+                    var pr = $0
+                    pr.isIncomplete = true
+                    return pr
+                }
                 phase = .loaded
             }
 
@@ -421,11 +432,10 @@ final class PullRequestsModel: ObservableObject {
                 // again once Copilot Projects answers.
                 newLinks = links
             }
-            if firstLoad {
-                pullRequests = Self.inScope(fetch.pullRequests, owners: ownerList)
-                links = newLinks
-                sessionsMatched = true
-            }
+            let fetchedKeys = Set(fetch.pullRequests.map(\.key))
+            links = newLinks.merging(links.filter { !fetchedKeys.contains($0.key) }) { new, _ in new }
+            sessionsMatched = true
+            isMatchingSessions = false
 
             let enriched = await service.enrich(fetch.pullRequests, tokens: fetch.tokens)
             // Owners may have changed while this ran; a later refresh fills in the rest.

@@ -166,9 +166,15 @@ Ready, so one row shows how far a goal has got and what is holding it up.
   through the Copilot CLI's local session store; one whose folder is gone, or that
   another Copilot CLI has open, isn't offered. Double-click a pull request, or press
   `⌘Return`, to open it on GitHub. Use `↑`/`↓` to move and Return to go to its session.
+- **Focus without losing context.** **All** keeps every goal visible; **Needs you**
+  keeps goals with at least one PR needing attention, including their quieter
+  sibling PRs. A shared session's status appears beside the goal, leaving each PR
+  to show its own blocker or readiness. **Resume in _project_** names the destination
+  before you click. GitHub freshness, incomplete status, and the connection to Copilot Projects are
+  shown separately, and session creation waits until matching finishes.
 - **Copilot Projects closed?** The lanes keep the sessions it last reported, with
   their states unknown, and their buttons become **Open Copilot Projects**. A
-  Copilot Projects too old to list its sessions is called out at the bottom of
+  Copilot Projects too old to list its sessions is called out above the lanes in
   the window: update it to match sessions again.
 - **Owners** limits the window to one or more organizations or users, such as
   `github` and `my-org`; each is its own token in the Owners popover. Only pull

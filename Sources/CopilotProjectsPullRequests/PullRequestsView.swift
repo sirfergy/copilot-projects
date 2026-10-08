@@ -30,6 +30,8 @@ struct PullRequestsView: View {
     @Namespace private var chips
     @State private var selection: PullRequestKey?
     @State private var editingOwners = false
+    @State private var filter: PullRequestsFilter = .all
+    @State private var selectedInitialItem = false
     /// Legacy scrollers take width from the lanes; rebuild them when the style changes.
     @State private var scrollerStyle = NSScroller.preferredScrollerStyle
     @FocusState private var lanesFocused: Bool
@@ -38,20 +40,41 @@ struct PullRequestsView: View {
 
     var body: some View {
         let goals = pullRequests.goals()
+        let visible = filter.goals(in: goals)
+        let selectionInputs = PullRequestsPresentation.SelectionInputs(
+            filter: filter, keys: visible.flatMap(\.items).map(\.id)
+        )
         VStack(spacing: 0) {
             titleStrip
             header(goals)
+            filterBar(visibleCount: visible.count, totalCount: goals.count)
+            if let warning = pullRequests.warning {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(StudioStyle.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
+                    .textSelection(.enabled)
+            }
             Divider()
-            content(goals)
+            content(visible, allGoals: goals)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
-            footer(goals)
+            footer(visible)
         }
         .ignoresSafeArea(.container, edges: .top)
         .background(StudioStyle.chrome)
         .background(TitlebarSeparatorRemover())
         .task { await pullRequests.runRefreshLoop() }
         .task { await pullRequests.runWorkspaceLoop() }
+        .onChange(of: selectionInputs) { previous, current in
+            let changedFilter = previous.filter != current.filter
+            selection = PullRequestsPresentation.selection(
+                selection, visible: current.keys, userChangedFilter: changedFilter
+            )
+            if changedFilter { lanesFocused = true }
+        }
     }
 
     private var titleStrip: some View {
@@ -88,7 +111,6 @@ struct PullRequestsView: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 12)
-            refreshStatus
             ownersButton
             Button {
                 pullRequests.refresh()
@@ -106,10 +128,13 @@ struct PullRequestsView: View {
 
     private func headline(needsYou: Int, total: Int) -> String {
         if pullRequests.phase != .loaded && total == 0 { return "Open Pull Requests" }
+        if needsYou == 0, pullRequests.pullRequests.contains(where: PullRequestsPresentation.hasPartialStatus) {
+            return checkingStatus ? "Checking PR status…" : "Some PR status is unknown"
+        }
         switch needsYou {
         case 0: return total == 0 ? "No open pull requests" : "Nothing needs you"
-        case 1: return "1 needs you"
-        default: return "\(needsYou) need you"
+        case 1: return "1 PR needs you"
+        default: return "\(needsYou) PRs need you"
         }
     }
 
@@ -119,6 +144,8 @@ struct PullRequestsView: View {
             return "Reading your pull requests from GitHub and matching them to sessions…"
         }
         var parts = ["\(total) open", goals == 1 ? "1 goal" : "\(goals) goals"]
+        let partial = pullRequests.pullRequests.filter(PullRequestsPresentation.hasPartialStatus).count
+        if partial > 0, !checkingStatus { parts.append("\(partial) with partial status") }
         if !nudges.isEmpty {
             let sessionless = nudges.allSatisfy { $0.assessment.reasons.contains(.noSession) }
             let quiet = nudges.allSatisfy { $0.assessment.reasons.allSatisfy { if case .stale = $0 { true } else { false } } }
@@ -143,18 +170,10 @@ struct PullRequestsView: View {
             .font(.caption)
             .foregroundStyle(StudioStyle.secondaryText)
             .accessibilityElement(children: .combine)
-        } else if let warning = pullRequests.warning {
-            Label {
-                Text(warning).lineLimit(1).truncationMode(.tail)
-            } icon: {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            }
-            .font(.caption)
-            .frame(maxWidth: 280, alignment: .trailing)
-            .help(warning)
-        } else if let updated = pullRequests.lastUpdated {
+        }
+        if let updated = pullRequests.lastUpdated {
             TimelineView(.periodic(from: .now, by: 30)) { _ in
-                Text("Updated \(updated, format: .relative(presentation: .named))")
+                Text("GitHub checked \(updated, format: .relative(presentation: .named))")
                     .font(.caption)
                     .monospacedDigit()
                     .foregroundStyle(StudioStyle.secondaryText)
@@ -164,7 +183,48 @@ struct PullRequestsView: View {
 
     private var refreshingLabel: String {
         if pullRequests.pullRequests.isEmpty { return "Loading…" }
-        return pullRequests.sessionsMatched ? "Refreshing…" : "Matching sessions…"
+        return pullRequests.isMatchingSessions ? "Matching sessions…" : "Refreshing…"
+    }
+
+    private var checkingStatus: Bool { pullRequests.lastUpdated == nil && pullRequests.isRefreshing }
+
+    private func filterBar(visibleCount: Int, totalCount: Int) -> some View {
+        HStack(spacing: 12) {
+            Picker("Show goals", selection: $filter) {
+                ForEach(PullRequestsFilter.allCases) { choice in
+                    Text(choice.rawValue).tag(choice)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 180)
+            .disabled(pullRequests.phase != .loaded)
+            Text("\(visibleCount) of \(totalCount) goals")
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(StudioStyle.secondaryText)
+            Spacer(minLength: 8)
+            refreshStatus
+            switch pullRequests.workspace {
+            case .connecting:
+                Text("Connecting to Copilot Projects…")
+            case .disconnected(let lastGood):
+                Text(lastGood == nil ? "Copilot Projects unavailable · sessions not matched"
+                     : "Copilot Projects unavailable · session states unknown")
+                    .lineLimit(2)
+                    .help("Open Copilot Projects to see current session states.")
+            case .incompatibleHost:
+                Label("Update Copilot Projects", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .help("This version of Copilot Projects can’t list its sessions.")
+            case .connected:
+                EmptyView()
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(StudioStyle.secondaryText)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 10)
     }
 
     private var ownersButton: some View {
@@ -225,30 +285,9 @@ struct PullRequestsView: View {
         .background(StudioStyle.sidebar)
     }
 
-    /// Whether the lanes know the workspace's sessions, said quietly: secondary
-    /// ink while Copilot Projects is away, the orange warning only when it must
-    /// be updated.
+    /// Storage/settings warnings stay beside the keyboard hints.
     @ViewBuilder
     private var workspaceNote: some View {
-        switch pullRequests.workspace {
-        case .disconnected(let lastGood):
-            Text(lastGood == nil
-                 ? "Copilot Projects isn’t open, so sessions aren’t matched"
-                 : "Copilot Projects isn’t open; session states are unknown")
-                .lineLimit(1)
-                .truncationMode(.tail)
-        case .incompatibleHost:
-            Label {
-                Text("Update Copilot Projects to match sessions")
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            } icon: {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            }
-            .help("This version of Copilot Projects can’t list its sessions, so pull requests aren’t matched to them.")
-        case .connecting, .connected:
-            EmptyView()
-        }
         ForEach([pullRequests.storageNote, pullRequests.settingsNote].compactMap { $0 }, id: \.self) { note in
             Label {
                 Text(note).lineLimit(1).truncationMode(.tail)
@@ -270,7 +309,7 @@ struct PullRequestsView: View {
     // MARK: Content
 
     @ViewBuilder
-    private func content(_ goals: [PullRequestGoal]) -> some View {
+    private func content(_ goals: [PullRequestGoal], allGoals: [PullRequestGoal]) -> some View {
         switch pullRequests.phase {
         case .failed(let error) where pullRequests.pullRequests.isEmpty:
             ContentUnavailableView {
@@ -281,9 +320,17 @@ struct PullRequestsView: View {
                 Button("Try Again") { pullRequests.refresh() }
             }
         case .idle, .loading where pullRequests.pullRequests.isEmpty:
-            lanes(SkeletonLanes.goals, placeholder: true)
+            lanes(SkeletonLanes.goals, allGoals: [], placeholder: true)
         default:
-            if goals.isEmpty {
+            if goals.isEmpty, !allGoals.isEmpty {
+                ContentUnavailableView {
+                    Label("Nothing needs you", systemImage: "checkmark.circle")
+                } description: {
+                    Text("Your other goals are still here.")
+                } actions: {
+                    Button("Show All Goals") { filter = .all }
+                }
+            } else if goals.isEmpty {
                 ContentUnavailableView {
                     Label("No Open Pull Requests", systemImage: "arrow.triangle.pull")
                 } description: {
@@ -292,12 +339,12 @@ struct PullRequestsView: View {
                          : "Pull requests you open in \(pullRequests.ownerList.joined(separator: ", ")) appear here.")
                 }
             } else {
-                lanes(goals, placeholder: false)
+                lanes(goals, allGoals: allGoals, placeholder: false)
             }
         }
     }
 
-    private func lanes(_ goals: [PullRequestGoal], placeholder: Bool) -> some View {
+    private func lanes(_ goals: [PullRequestGoal], allGoals: [PullRequestGoal], placeholder: Bool) -> some View {
         let order = goals.flatMap { goal in PullRequestStage.allCases.flatMap { goal.items(in: $0) } }
         return ScrollViewReader { proxy in
             ScrollView {
@@ -310,11 +357,13 @@ struct PullRequestsView: View {
                                 chips: chips,
                                 animatesMoves: !reduceMotion && !placeholder,
                                 workspace: laneWorkspace,
+                                sessionsKnown: pullRequests.sessionsKnown,
+                                checkingStatus: checkingStatus,
                                 projects: pullRequests.projects,
                                 defaultProjectId: pullRequests.defaultProjectId,
                                 isStarting: pullRequests.startingGoals.contains(goal.id),
                                 resumingSessions: pullRequests.resumingSessions,
-                                goalChoices: goalChoices(goals),
+                                goalChoices: goalChoices(allGoals),
                                 actions: laneActions
                             )
                             Divider()
@@ -349,8 +398,11 @@ struct PullRequestsView: View {
             .onAppear {
                 guard !placeholder else { return }
                 // The most urgent pull request is selected, so Return goes straight to its session.
-                if selection == nil { selection = goals.first?.items.first?.id }
-                lanesFocused = true
+                if !selectedInitialItem {
+                    selection = goals.first?.items.first?.id
+                    selectedInitialItem = true
+                    lanesFocused = true
+                }
             }
             .id(scrollerStyle)
             .onReceive(NotificationCenter.default.publisher(for: NSScroller.preferredScrollerStyleDidChangeNotification)) { _ in
@@ -484,6 +536,8 @@ private struct GoalLane: View {
     let chips: Namespace.ID
     let animatesMoves: Bool
     let workspace: Workspace
+    let sessionsKnown: Bool
+    let checkingStatus: Bool
     let projects: [(id: String, name: String)]
     let defaultProjectId: String?
     let isStarting: Bool
@@ -536,6 +590,8 @@ private struct GoalLane: View {
     private func chip(_ item: PullRequestItem) -> some View {
         let chip = PullRequestChip(
             item: item,
+            sessionStateInSummary: PullRequestsPresentation.sharesSessionState(goal) && (laneSession != nil || sessionsKnown),
+            checkingStatus: checkingStatus,
             // A goal named after its pull request doesn't repeat the title.
             showsTitle: PullRequestGrouping.sentenceCase(item.pr.title) != goal.name,
             isSelected: item.id == selection,
@@ -603,6 +659,13 @@ private struct GoalLane: View {
             .foregroundStyle(StudioStyle.secondaryText)
             .accessibilityElement(children: .combine)
         } else if let previous = previousSession {
+            if let name = PullRequestsPresentation.candidateName(previous.name, goalName: goal.name) {
+                Text(name)
+                    .font(.caption)
+                    .foregroundStyle(StudioStyle.secondaryText)
+                    .lineLimit(2)
+                    .help(previous.name)
+            }
             Label {
                 Text("Previous session · \(Self.lastActive(previous))")
                     .lineLimit(1)
@@ -627,6 +690,7 @@ private struct GoalLane: View {
     /// Only a connected workspace can say a goal has no session.
     private var noSessionText: String {
         guard workspace == .connected else { return "Session unknown" }
+        guard sessionsKnown else { return "Matching sessions…" }
         return goal.kind == .manual ? "Your goal · no session" : "No session on this goal"
     }
 
@@ -660,6 +724,8 @@ private struct GoalLane: View {
             Button("Go to Session") { actions.goToSession(session) }
                 .controlSize(.small)
                 .help("Show \(PullRequestGrouping.goalName(sessionTitle: session.title)) in the workspace")
+        } else if !sessionsKnown || checkingStatus {
+            EmptyView()
         } else if let previous = previousSession, !projects.isEmpty {
             let target = defaultProjectId ?? projects[0].id
             let resuming = resumingSessions.contains(previous.copilotSessionId)
@@ -676,14 +742,17 @@ private struct GoalLane: View {
                     }
                 }
             } label: {
-                Text(resuming ? "Resuming…" : "Resume Session")
+                Text(resuming ? "Resuming…" : "Resume in \(projects.first { $0.id == target }?.name ?? "project")")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             } primaryAction: {
                 actions.resumeSession(previous, target)
             }
             .menuStyle(.button)
             .controlSize(.small)
-            .fixedSize()
+            .frame(maxWidth: PullRequestsView.goalColumnWidth - 28, alignment: .leading)
             .disabled(resuming || isStarting)
+            .accessibilityLabel(resuming ? "Resuming session" : "Resume in \(projects.first { $0.id == target }?.name ?? "project")")
             .help("Resume “\(previous.name)”, last active \(Self.lastActive(previous)), in \(projects.first { $0.id == target }?.name ?? "the current project"); start a new session or choose another project from the menu")
         } else if !projects.isEmpty {
             let target = defaultProjectId ?? projects[0].id
@@ -753,11 +822,17 @@ struct PullRequestSessionIndicator: View {
 /// A pull request inside its goal's lane.
 struct PullRequestChip: View {
     let item: PullRequestItem
+    var sessionStateInSummary = false
+    var checkingStatus = false
     var showsTitle = true
     let isSelected: Bool
     let onSelect: () -> Void
     let onOpen: () -> Void
     @State private var isHovering = false
+
+    private var displayedReasons: [PullRequestAttention] {
+        PullRequestsPresentation.reasons(for: item, sessionStateInSummary: sessionStateInSummary)
+    }
 
     static func statusText(_ item: PullRequestItem) -> String {
         item.assessment.reasons.isEmpty
@@ -766,7 +841,7 @@ struct PullRequestChip: View {
     }
 
     private var tint: Color {
-        guard let primary = item.assessment.primary else { return StudioStyle.secondaryText }
+        guard let primary = displayedReasons.first else { return StudioStyle.secondaryText }
         if primary == .readyToMerge { return .green }
         return primary.isNudge ? StudioStyle.secondaryText : .orange
     }
@@ -775,7 +850,7 @@ struct PullRequestChip: View {
     /// strengthens a quiet edge, so it never reads as a weak selection; selection
     /// adds its own ring outside, so the status edge stays visible.
     private var edge: Color {
-        guard let primary = item.assessment.primary else {
+        guard let primary = displayedReasons.first else {
             if isSelected { return .clear }
             return isHovering ? StudioStyle.secondaryText.opacity(0.8) : .clear
         }
@@ -797,6 +872,12 @@ struct PullRequestChip: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             reason
+            if PullRequestsPresentation.hasPartialStatus(item.pr) {
+                Label(checkingStatus ? "Checking status…" : "Some status unavailable", systemImage: "questionmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(StudioStyle.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -821,7 +902,8 @@ struct PullRequestChip: View {
         .help(help)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(item.pr.shortName), \(item.pr.title)")
-        .accessibilityValue(Self.statusText(item))
+        .accessibilityValue(Self.statusText(item) + (PullRequestsPresentation.hasPartialStatus(item.pr)
+                             ? (checkingStatus ? ", checking status" : ", some status unavailable") : ""))
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction { onSelect() }
         .accessibilityAction(named: "Open on GitHub", onOpen)
@@ -860,7 +942,7 @@ struct PullRequestChip: View {
     /// The most urgent reason, shortened before it is ever cut off; "+N" counts the rest.
     @ViewBuilder
     private var reason: some View {
-        if let primary = item.assessment.primary {
+        if let primary = displayedReasons.first {
             ViewThatFits(in: .horizontal) {
                 reasonLine(primary, primary.label, showsMore: true)
                 reasonLine(primary, primary.shortLabel, showsMore: true)
@@ -885,7 +967,7 @@ struct PullRequestChip: View {
                 .foregroundStyle(primary.isNudge ? StudioStyle.secondaryText : Color.primary)
                 .lineLimit(1)
                 .fixedSize()
-            let more = item.assessment.reasons.count - 1
+            let more = displayedReasons.count - 1
             if showsMore, more > 0 {
                 Text("+\(more)")
                     .monospacedDigit()
