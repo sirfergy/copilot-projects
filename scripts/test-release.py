@@ -242,6 +242,12 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(any(cmd in ("gh", "codesign", "xcrun", "hdiutil") for _, cmd, _ in self.calls))
         self.assertFalse((self.project_root / "dist-build.txt").exists())
 
+    def test_publish_accepts_a_version_prepared_before_pacific_midnight(self):
+        self.env["MOCK_DATE"] = "2026 10 09 PDT"
+        result = self.run_release(version="2026.10.8.2")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue((self.project_root / "dist/Copilot-Projects-2026.10.8.2.dmg").exists())
+
     def test_override_runs_entire_pipeline_in_selected_root(self):
         # Even inherited Git selectors must not validate a different checkout.
         self.env.update(GIT_DIR=str(self.public / ".git"), GIT_WORK_TREE=str(self.public))
