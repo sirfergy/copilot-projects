@@ -1,5 +1,6 @@
 import Foundation
 import CopilotProjectsCore
+import CopilotProjectsProtocol
 
 /// `owner/repo#number`, lowercased: GitHub treats owner and repository names
 /// case-insensitively, and transcripts spell them however the user typed them.
@@ -373,10 +374,12 @@ struct PullRequestSession: Equatable, Sendable {
     var hasPendingInput: Bool
     /// The Copilot CLI session in this tab, whose event log names its pull requests.
     let copilotSessionId: String?
+    var pullRequestKeys: [String] = []
 
     init(
         id: String, title: String, projectId: String, projectName: String, status: SessionStatus? = .idle,
-        finishedUnseen: Bool = false, hasPendingInput: Bool = false, copilotSessionId: String? = nil
+        finishedUnseen: Bool = false, hasPendingInput: Bool = false, copilotSessionId: String? = nil,
+        pullRequestKeys: [String] = []
     ) {
         self.id = id
         self.title = title
@@ -386,13 +389,16 @@ struct PullRequestSession: Equatable, Sendable {
         self.finishedUnseen = finishedUnseen
         self.hasPendingInput = hasPendingInput
         self.copilotSessionId = copilotSessionId
+        self.pullRequestKeys = Array(Set(pullRequestKeys.prefix(RemotePullRequestsContract.maximumKeys)
+            .compactMap(RemotePullRequestsContract.canonicalKey))).sorted()
     }
 
     init(_ session: WorkspaceSnapshot.Session, in project: WorkspaceSnapshot.Project) {
         self.init(
             id: session.id, title: session.title, projectId: project.id, projectName: project.name,
             status: session.status, finishedUnseen: session.finishedUnseen,
-            hasPendingInput: session.hasPendingInput, copilotSessionId: session.copilotSessionId
+            hasPendingInput: session.hasPendingInput, copilotSessionId: session.copilotSessionId,
+            pullRequestKeys: session.pullRequestKeys ?? []
         )
     }
 
@@ -544,6 +550,10 @@ enum PullRequestGrouping {
         }
 
         var sessionOf: [PullRequestKey: String] = [:]
+        var associated: [String: String] = [:]
+        for session in sessions.values.sorted(by: { $0.id < $1.id }) {
+            for key in session.pullRequestKeys where associated[key] == nil { associated[key] = session.id }
+        }
         var placements: [PullRequestKey: Placement] = [:]
         for pr in pullRequests {
             let override = overrides.goalId(for: pr.key)
@@ -553,7 +563,8 @@ enum PullRequestGrouping {
                 continue
             }
             let started = overrides.sessionLinks[pr.key.description].flatMap { sessions[$0] == nil ? nil : $0 }
-            if let sessionId = started ?? links[pr.key], sessions[sessionId] != nil { sessionOf[pr.key] = sessionId }
+            if let sessionId = started ?? associated[pr.key.description] ?? links[pr.key],
+               sessions[sessionId] != nil { sessionOf[pr.key] = sessionId }
             if let override, override.hasPrefix("manual:"), overrides.names[override] != nil {
                 placements[pr.key] = Placement(goalId: override, kind: .manual, manual: true)
             } else if let sessionId = sessionOf[pr.key] {

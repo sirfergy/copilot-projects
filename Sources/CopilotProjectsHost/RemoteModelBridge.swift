@@ -246,6 +246,18 @@ final class RemoteModelBridge: SessionHost {
 
     var supportsSessionSearch: Bool { true }
 
+    var supportsPullRequests: Bool { model != nil }
+
+    func pullRequestsOverview(refresh: Bool) async -> RemotePullRequestsOverviewOutcome {
+        guard let model else { return .unavailable("Copilot Projects is closing.") }
+        return await model.pullRequestsOverview(refresh: refresh)
+    }
+
+    func performPullRequestSession(_ request: RemotePullRequestSessionRequest) async -> RemotePullRequestSessionOutcome {
+        guard let model else { return .unavailable("Copilot Projects is closing.") }
+        return await model.performPullRequestSession(request)
+    }
+
     var sessionSearchCapabilities: [String] {
         [RemoteSessionSearchContract.capability, RemoteSessionSearchContract.recentCapability]
     }

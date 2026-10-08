@@ -72,13 +72,13 @@ let package = Package(
                 "CopilotProjectsCore",
                 "CopilotProjectsProtocol",
                 "CopilotProjectsStyle",
+                "CopilotProjectsPullRequests",
                 "SessionDomain",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ],
             path: "Sources/CopilotProjectsHost"
         ),
-        // The Copilot Pull Requests app. It reaches the workspace only through the
-        // host's control socket, so the host never links it.
+        // Shared PR engine and helper UI. The host uses only its read-only provider.
         .target(
             name: "CopilotProjectsPullRequests",
             dependencies: [

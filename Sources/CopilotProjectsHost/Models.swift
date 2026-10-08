@@ -8,6 +8,7 @@ struct Session: Identifiable, Codable, Equatable {
     var title: String
     var cwd: String
     var creationFingerprint: String?
+    var pullRequestKeys: [String]?
 
     // Transient (not persisted): reset on load.
     var status: SessionStatus = .idle
@@ -56,18 +57,20 @@ struct Session: Identifiable, Codable, Equatable {
         }
     }
 
-    private enum CodingKeys: String, CodingKey { case id, title, cwd, creationFingerprint }
+    private enum CodingKeys: String, CodingKey { case id, title, cwd, creationFingerprint, pullRequestKeys }
 
     init(
         id: String = UUID().uuidString,
         title: String,
         cwd: String,
-        creationFingerprint: String? = nil
+        creationFingerprint: String? = nil,
+        pullRequestKeys: [String]? = nil
     ) {
         self.id = id
         self.title = title
         self.cwd = cwd
         self.creationFingerprint = creationFingerprint
+        self.pullRequestKeys = pullRequestKeys
     }
 }
 

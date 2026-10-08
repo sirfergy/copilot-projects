@@ -69,6 +69,19 @@ struct SessionCreationRecord: Codable, Equatable, Sendable {
         }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
+
+    static func pullRequestFingerprint(_ request: RemotePullRequestSessionRequest) -> String {
+        let fields = ["copilot-projects/pull-request-session/v1", request.kind, request.projectId,
+                      request.copilotSessionId ?? ""] + request.pullRequestKeys.sorted()
+        var hash = SHA256()
+        for field in fields {
+            let bytes = Data(field.utf8)
+            var length = UInt64(bytes.count).bigEndian
+            withUnsafeBytes(of: &length) { hash.update(data: Data($0)) }
+            hash.update(data: bytes)
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 /// Thread-safe, bounded, persisted ledger of remote session creations. Acts as the

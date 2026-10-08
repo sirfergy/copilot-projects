@@ -15,10 +15,12 @@ public struct WorkspaceSnapshot: Codable, Equatable, Sendable {
         public var hasPendingInput: Bool
         /// The Copilot CLI session last seen in this tab, from its resume marker.
         public var copilotSessionId: String?
+        public var pullRequestKeys: [String]?
 
         public init(
             id: String, title: String, status: SessionStatus, finishedUnseen: Bool = false,
-            hasPendingInput: Bool = false, copilotSessionId: String? = nil
+            hasPendingInput: Bool = false, copilotSessionId: String? = nil,
+            pullRequestKeys: [String]? = nil
         ) {
             self.id = id
             self.title = title
@@ -26,6 +28,7 @@ public struct WorkspaceSnapshot: Codable, Equatable, Sendable {
             self.finishedUnseen = finishedUnseen
             self.hasPendingInput = hasPendingInput
             self.copilotSessionId = copilotSessionId
+            self.pullRequestKeys = pullRequestKeys
         }
     }
 

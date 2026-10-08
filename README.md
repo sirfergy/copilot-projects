@@ -182,6 +182,23 @@ Ready, so one row shows how far a goal has got and what is holding it up.
   your hundred most recently updated pull requests. It's saved with Copilot
   Projects' settings.
 
+The public host also exposes this engine through `SessionHost`'s
+`pull-request-overview-v1` contract for remote clients. It uses its own caches,
+reads the helper's goals without writing them, and regroups cached GitHub facts
+against the live workspace on every request. GitHub refreshes are single-flight:
+at most once per five minutes, or once per minute for explicit Refresh, including
+failed attempts. No remote polling means no GitHub refresh timer.
+
+Remote Start/Resume requests contain only project/session identities and canonical
+PR keys. Start uses the same working directory as local Start in the chosen
+project (its selected tab's folder, then the project default); Resume uses the
+previous session's recorded directory. Neither changes Mac selection or opens a
+window. Associations are persisted on the workspace session, and request IDs bind
+the complete intent in the existing creation ledger. New sessions wait for the
+first GitHub status refresh; existing live sessions remain navigable while it loads.
+Retry the same request after an uncertain outcome; clients must expire pending
+retries after 24 hours.
+
 The window reads GitHub with the accounts you signed in to with the GitHub CLI
 (`gh auth login`); every signed-in github.com account is included. Tokens stay in
 memory, and requests go straight to the GitHub API. It refreshes when opened

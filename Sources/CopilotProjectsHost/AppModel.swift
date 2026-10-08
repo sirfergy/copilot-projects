@@ -4,6 +4,7 @@ import AppKit
 import ScreenCaptureKit
 import CopilotProjectsCore
 import CopilotProjectsProtocol
+import CopilotProjectsPullRequests
 import Darwin
 
 private final class ScreenshotCaptureBox: @unchecked Sendable {
@@ -553,6 +554,8 @@ final class AppModel: ObservableObject {
     private let projectCreationLedger: ProjectCreationLedger
     /// Remote session search; tests swap in a fake ranker or transcript reader.
     var remoteSessionSearch = RemoteSessionSearch()
+    var pullRequestsOverviewProvider: PullRequestsOverviewProvider?
+    private var pendingPullRequestBindings: [UUID: SessionCreationRecord] = [:]
 
     /// Sessions hosting a live agent (refreshed by the liveness reconciler). Used
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.
@@ -1394,6 +1397,8 @@ final class AppModel: ObservableObject {
         /// Copilot Pull Requests: like Start Session in the app, in the project's
         /// current folder and selected in its project.
         case local
+        /// Remote PR Start uses the same current folder, without changing Mac selection.
+        case project
     }
 
     private func createRemoteSession(
@@ -1403,6 +1408,8 @@ final class AppModel: ObservableObject {
         title: String,
         initialPrompt: String?,
         placement: CreatedSessionPlacement = .remote,
+        fingerprintOverride: String? = nil,
+        pullRequestKeys: [String]? = nil,
         now: Date
     ) -> RemoteSessionCreationOutcome {
         // A failed startup load leaves the in-memory workspace empty, so neither
@@ -1411,7 +1418,7 @@ final class AppModel: ObservableObject {
             return .persistenceUnavailable
         }
         let sessionId = request.requestId.uuidString
-        let fingerprint = SessionCreationRecord.fingerprint(
+        let fingerprint = fingerprintOverride ?? SessionCreationRecord.fingerprint(
             projectId: request.projectId,
             kind: kind,
             initialPrompt: request.pullRequestURL == nil ? initialPrompt : nil,
@@ -1500,7 +1507,7 @@ final class AppModel: ObservableObject {
         case .remote:
             guard let repos = remoteReposDirectory() else { return .invalid }
             cwd = repos
-        case .local:
+        case .local, .project:
             let folder = Paths.normalizedDirectory(defaultCwd(forProjectIndex: pi))
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: folder, isDirectory: &isDirectory),
@@ -1521,12 +1528,12 @@ final class AppModel: ObservableObject {
         }
 
         let session = Session(
-            id: sessionId, title: title, cwd: cwd, creationFingerprint: fingerprint)
+            id: sessionId, title: title, cwd: cwd, creationFingerprint: fingerprint, pullRequestKeys: pullRequestKeys)
         let previousSelection = projects[pi].selectedSessionId
         projects[pi].sessions.append(session)
         // A remote client must NOT steal the Mac's selected tab: only adopt the new
         // session when the project currently has no selection.
-        if placement == .local || (projects[pi].selectedSessionId ?? "").isEmpty {
+        if placement == .local || (placement == .remote && (projects[pi].selectedSessionId ?? "").isEmpty) {
             projects[pi].selectedSessionId = sessionId
         }
 
@@ -1538,7 +1545,7 @@ final class AppModel: ObservableObject {
         )
         // Like Start Session in the app, never keep a tab whose terminal didn't
         // start; nothing is recorded, so nothing was created.
-        if placement == .local, remoteSessionLauncher == nil,
+        if placement != .remote, remoteSessionLauncher == nil,
            controllers[sessionId]?.terminalView.process?.running != true {
             controllers[sessionId] = nil
             projects[pi].sessions.removeAll { $0.id == sessionId }
@@ -4812,13 +4819,142 @@ final class AppModel: ObservableObject {
         return .success(sessionId, code: "revealed")
     }
 
+    private func remotePullRequestsProvider() -> PullRequestsOverviewProvider {
+        if let pullRequestsOverviewProvider { return pullRequestsOverviewProvider }
+        let provider = PullRequestsOverviewProvider(
+            cacheDirectory: Paths.pullRequestsStateDir.appendingPathComponent("host-cache"),
+            readOnlyGoalsURL: Paths.pullRequestsStateDir.appendingPathComponent("goals.json"),
+            workspace: { [weak self] in self?.workspaceSnapshot() }
+        )
+        pullRequestsOverviewProvider = provider
+        return provider
+    }
+
+    var supportsPullRequests: Bool { true }
+
+    func pullRequestsOverview(refresh: Bool) async -> RemotePullRequestsOverviewOutcome {
+        guard !isTerminating else { return .unavailable("Copilot Projects is closing.") }
+        guard !didFailToLoadWorkspaceState else { return .unavailable("The workspace could not be loaded.") }
+        let overview = remotePullRequestsProvider().snapshot(refresh: refresh)
+        guard let data = try? JSONEncoder().encode(overview),
+              data.count <= RemotePullRequestsContract.maximumResponseBytes else {
+            return .unavailable("The pull request overview exceeds the response limit.")
+        }
+        return .overview(overview)
+    }
+
+    func performPullRequestSession(_ request: RemotePullRequestSessionRequest) async -> RemotePullRequestSessionOutcome {
+        performRemotePullRequestSession(request)
+    }
+
+    /// No suspension between fresh eligibility, association, append and launch:
+    /// two independent client UUIDs cannot both start work for the same PR.
+    func performRemotePullRequestSession(
+        _ input: RemotePullRequestSessionRequest, now: Date = Date()
+    ) -> RemotePullRequestSessionOutcome {
+        guard let request = input.normalized() else { return .invalid("Invalid pull request session request.") }
+        guard !isTerminating else { return .unavailable("Copilot Projects is closing.") }
+        guard !didFailToLoadWorkspaceState else { return .persistenceUnavailable }
+        let fingerprint = SessionCreationRecord.pullRequestFingerprint(request)
+        let record: SessionCreationRecord?
+        do {
+            record = try sessionCreationLedger.record(for: request.requestId, now: now)
+                ?? pendingPullRequestBindings[request.requestId]
+        } catch {
+            return .persistenceUnavailable
+        }
+        // Replay before current scope, merged PRs, expired historical search, or a
+        // moved tab. The immutable requested project is part of the fingerprint.
+        if let record {
+            guard record.creationFingerprint == fingerprint else { return .conflict }
+            return finishPullRequestSession(request, sessionId: record.sessionId,
+                                            created: false, record: record, now: now)
+        }
+        let tabId = request.requestId.uuidString
+        if let loc = locateIndex(tabId) {
+            guard projects[loc.p].sessions[loc.s].creationFingerprint == fingerprint else { return .conflict }
+            return finishPullRequestSession(request, sessionId: tabId, created: false, now: now)
+        }
+        let existing = request.copilotSessionId.flatMap { tabHoldingCopilotSession($0, now: now) }
+        if let failure = remotePullRequestsProvider().validate(
+            request, workspace: workspaceSnapshot(), existingSessionId: existing
+        ) { return failure }
+        if let existing {
+            return finishPullRequestSession(request, sessionId: existing, created: false, now: now)
+        }
+        let result: ControlResponse
+        if request.kind == "start" {
+            guard let prompt = PullRequestsOverviewProvider.startingPrompt(for: request.pullRequestKeys),
+                  SessionInputValidation.isValidPrompt(prompt) else {
+                return .invalid("The pull request batch is too large for a starting prompt.")
+            }
+            result = startPullRequestsSession(
+                requestId: request.requestId, projectId: request.projectId, prompt: prompt, selectOnMac: false,
+                fingerprintOverride: fingerprint, pullRequestKeys: request.pullRequestKeys, now: now
+            )
+        } else {
+            result = resumePullRequestsSession(
+                requestId: request.requestId, projectId: request.projectId,
+                copilotSessionId: request.copilotSessionId!, selectOnMac: false,
+                fingerprintOverride: fingerprint, pullRequestKeys: request.pullRequestKeys, now: now
+            )
+        }
+        if result.ok, let sessionId = result.text, !sessionId.isEmpty {
+            return finishPullRequestSession(request, sessionId: sessionId, created: result.code == "created", now: now)
+        }
+        switch result.code {
+        case "conflict": return .conflict
+        case "gone": return .gone
+        case "in-use": return .inUse
+        case "unknown-project": return .unknownProject
+        case "persistence-unavailable": return .persistenceUnavailable
+        case "invalid": return .invalid("The session's working directory is no longer available.")
+        case "bad-request": return .invalid("Invalid starting prompt.")
+        default: return .unavailable("Copilot or the session backend is unavailable.")
+        }
+    }
+
+    /// Every successful path repairs persisted associations. A secondary Resume
+    /// binds the ledger, never overwrites the tab's original creation fingerprint.
+    private func finishPullRequestSession(
+        _ request: RemotePullRequestSessionRequest, sessionId: String, created: Bool,
+        record: SessionCreationRecord? = nil, now: Date
+    ) -> RemotePullRequestSessionOutcome {
+        guard let loc = locateIndex(sessionId) else { return .gone }
+        let keys = Set((projects[loc.p].sessions[loc.s].pullRequestKeys ?? [])
+            .compactMap(RemotePullRequestsContract.canonicalKey)).union(request.pullRequestKeys).sorted()
+        guard keys.count <= RemotePullRequestsContract.maximumKeys else {
+            return .invalid("This session already has the maximum number of associated pull requests.")
+        }
+        let binding = record ?? SessionCreationRecord(
+            requestId: request.requestId.uuidString, projectId: request.projectId, sessionId: sessionId,
+            createdAt: now, creationFingerprint: SessionCreationRecord.pullRequestFingerprint(request)
+        )
+        pendingPullRequestBindings[request.requestId] = binding
+        projects[loc.p].sessions[loc.s].pullRequestKeys = keys
+        do {
+            // For an existing tab, writing its binding first also makes a failed
+            // workspace save repairable after restart without changing its intent.
+            try sessionCreationLedger.remember(binding, now: now)
+            try persistWorkspace()
+            pendingPullRequestBindings[request.requestId] = nil
+        } catch {
+            return .persistenceUnavailable
+        }
+        let response = RemotePullRequestSessionResponse(
+            requestId: request.requestId, projectId: projects[loc.p].id, sessionId: sessionId
+        )
+        return created ? .created(response) : .existing(response)
+    }
+
     /// Starts a Copilot session for Copilot Pull Requests exactly as Start
     /// Session did inside the app: in the project's current folder, selected in
     /// its project. It shares the creation ledger, so a request id replayed even
     /// after a restart returns the same session (`existing`), `gone` once it
     /// ended, or `conflict` when the project or prompt differ.
     func startPullRequestsSession(
-        requestId: UUID, projectId: String, prompt: String, now: Date = Date()
+        requestId: UUID, projectId: String, prompt: String, selectOnMac: Bool = true,
+        fingerprintOverride: String? = nil, pullRequestKeys: [String]? = nil, now: Date = Date()
     ) -> ControlResponse {
         guard SessionInputValidation.isValidPrompt(prompt) else {
             return .failure(CopilotSessionStartError.invalidPrompt.localizedDescription, code: "bad-request")
@@ -4836,7 +4972,9 @@ final class AppModel: ObservableObject {
             kind: .copilot,
             title: "Copilot",
             initialPrompt: prompt,
-            placement: .local,
+            placement: selectOnMac ? .local : .project,
+            fingerprintOverride: fingerprintOverride,
+            pullRequestKeys: pullRequestKeys,
             now: now
         )
         switch outcome {
@@ -4875,7 +5013,8 @@ final class AppModel: ObservableObject {
     /// longer has the session, `in-use` when a running CLI holds it, `invalid`
     /// when its folder is gone.
     func resumePullRequestsSession(
-        requestId: UUID, projectId: String, copilotSessionId: String, now: Date = Date()
+        requestId: UUID, projectId: String, copilotSessionId: String, selectOnMac: Bool = true,
+        fingerprintOverride: String? = nil, pullRequestKeys: [String]? = nil, now: Date = Date()
     ) -> ControlResponse {
         guard !isTerminating else {
             return .failure(CopilotSessionStartError.shuttingDown.localizedDescription, code: "unavailable")
@@ -4886,7 +5025,8 @@ final class AppModel: ObservableObject {
         )
         guard !didFailToLoadWorkspaceState else { return unsaved }
         let copilotId = copilotSessionId.lowercased()
-        let fingerprint = SessionCreationRecord.resumeFingerprint(projectId: projectId, copilotSessionId: copilotId)
+        let fingerprint = fingerprintOverride
+            ?? SessionCreationRecord.resumeFingerprint(projectId: projectId, copilotSessionId: copilotId)
         let tabId = requestId.uuidString
         let record: SessionCreationRecord?
         do {
@@ -4946,10 +5086,11 @@ final class AppModel: ObservableObject {
         guard let pi = projectIndex(projectId) else {
             return .failure(CopilotSessionStartError.projectUnavailable.localizedDescription, code: "unknown-project")
         }
-        let session = Session(id: tabId, title: "Copilot", cwd: cwd, creationFingerprint: fingerprint)
+        let session = Session(id: tabId, title: "Copilot", cwd: cwd, creationFingerprint: fingerprint,
+                              pullRequestKeys: pullRequestKeys)
         let previousSelection = projects[pi].selectedSessionId
         projects[pi].sessions.append(session)
-        projects[pi].selectedSessionId = session.id
+        if selectOnMac { projects[pi].selectedSessionId = session.id }
         // No suspension between appending and creating the launch controller: a
         // view update must not lazily create a plain shell for this tab. The
         // marker isn't written here; Copilot writes it once it has resumed.
@@ -5031,7 +5172,7 @@ final class AppModel: ObservableObject {
                 WorkspaceSnapshot.Project(id: project.id, name: project.name, sessions: project.sessions.map {
                     WorkspaceSnapshot.Session(
                         id: $0.id, title: $0.title, status: $0.displayStatus, finishedUnseen: $0.finishedUnseen,
-                        hasPendingInput: $0.hasPendingInput
+                        hasPendingInput: $0.hasPendingInput, pullRequestKeys: $0.pullRequestKeys
                     )
                 })
             }

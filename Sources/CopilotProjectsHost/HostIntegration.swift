@@ -60,9 +60,20 @@ public protocol SessionHost: AnyObject, Sendable {
     var sessionSearchCapabilities: [String] { get }
     /// Cancelling the calling task stops the search, including a running Luna process.
     func searchSessions(_ request: RemoteSessionSearchRequest) async -> RemoteSessionSearchOutcome
+    var supportsPullRequests: Bool { get }
+    func pullRequestsOverview(refresh: Bool) async -> RemotePullRequestsOverviewOutcome
+    func performPullRequestSession(_ request: RemotePullRequestSessionRequest) async -> RemotePullRequestSessionOutcome
 }
 
 public extension SessionHost {
+    var supportsPullRequests: Bool { false }
+
+    func pullRequestsOverview(refresh: Bool) async -> RemotePullRequestsOverviewOutcome { .unsupported }
+
+    func performPullRequestSession(_ request: RemotePullRequestSessionRequest) async -> RemotePullRequestSessionOutcome {
+        .unsupported
+    }
+
     func createProject(_ request: RemoteCreateProjectRequest) -> RemoteProjectCreationOutcome {
         .unsupported
     }
