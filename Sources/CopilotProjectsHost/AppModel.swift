@@ -1491,6 +1491,7 @@ final class AppModel: ObservableObject {
 
         let session = Session(
             id: sessionId, title: title, cwd: cwd, creationFingerprint: fingerprint)
+        let previousSelection = projects[pi].selectedSessionId
         projects[pi].sessions.append(session)
         // A remote client must NOT steal the Mac's selected tab: only adopt the new
         // session when the project currently has no selection.
@@ -1504,6 +1505,15 @@ final class AppModel: ObservableObject {
             initialPrompt: initialPrompt,
             resumeRecordedSession: isLegacyRequest
         )
+        // Like Start Session in the app, never keep a tab whose terminal didn't
+        // start; nothing is recorded, so nothing was created.
+        if placement == .local, remoteSessionLauncher == nil,
+           controllers[sessionId]?.terminalView.process?.running != true {
+            controllers[sessionId] = nil
+            projects[pi].sessions.removeAll { $0.id == sessionId }
+            projects[pi].selectedSessionId = previousSelection
+            return .unavailable
+        }
         refreshSelectedTranscriptController()
 
         // Launch remains before persistence so a saved session cannot be stranded

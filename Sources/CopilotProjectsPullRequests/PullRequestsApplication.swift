@@ -182,7 +182,7 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
         // The hidden title bar leaves the drag strip to SwiftUI, which swallows
         // the native double-click; run the user's title-bar action from here.
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
-            guard event.clickCount == 2, let window = event.window,
+            guard event.clickCount == 2, let window = event.window, TitleStrip.applies(to: window),
                   TitleStrip.contains(event.locationInWindow, windowHeight: window.frame.height) else { return event }
             TitleStrip.performDoubleClickAction(window)
             return nil
@@ -204,7 +204,7 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     static func showWindowIfNoneVisible() {
-        let windows = NSApp.windows.filter(\.canBecomeMain)
+        let windows = NSApp.windows.filter(TitleStrip.applies(to:))
         guard !windows.contains(where: { $0.isVisible && !$0.isMiniaturized }),
               let window = windows.first(where: \.isMiniaturized) ?? windows.first else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
@@ -240,6 +240,12 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
 
 /// The 38pt strip at the top of the window, past the traffic lights.
 enum TitleStrip {
+    /// Only the Pull Requests window has the strip, on screen or minimized;
+    /// popovers, alerts, and sheets don't.
+    static func applies(to window: NSWindow) -> Bool {
+        window.styleMask.contains(.titled) && !(window is NSPanel) && window.sheetParent == nil
+    }
+
     /// Measured from the window frame's top: under the hidden title bar the
     /// content view doesn't span the full frame.
     static func contains(_ location: NSPoint, windowHeight: CGFloat) -> Bool {

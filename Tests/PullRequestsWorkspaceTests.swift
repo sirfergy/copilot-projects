@@ -78,10 +78,18 @@ final class HostRecorder {
 final class TestControlSocket {
     let path: String
     private let fd: Int32
-    private let lock = NSLock()
-    private var stopping = false
+    private let stop = StopFlag()
     private let finished = DispatchSemaphore(value: 0)
     private let serves: Bool
+
+    /// Shared with the server thread instead of the socket, so the thread never
+    /// keeps the socket alive and `deinit` can stop it.
+    private final class StopFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stopping = false
+        var isSet: Bool { lock.withLock { stopping } }
+        func set() { lock.withLock { stopping = true } }
+    }
 
     init(reply: (@Sendable (ControlRequest) -> ControlResponse)?) throws {
         path = FileManager.default.temporaryDirectory
@@ -111,9 +119,9 @@ final class TestControlSocket {
         serves = reply != nil
         guard let reply else { return }
         let listener = fd
-        Thread.detachNewThread { [self] in
+        Thread.detachNewThread { [stop, finished] in
             defer { finished.signal() }
-            while !lock.withLock({ stopping }) {
+            while !stop.isSet {
                 var ready = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
                 guard poll(&ready, 1, 50) > 0 else { continue }
                 let client = accept(listener, nil, nil)
@@ -136,7 +144,7 @@ final class TestControlSocket {
     }
 
     deinit {
-        lock.withLock { stopping = true }
+        stop.set()
         // The server thread must be gone before its descriptor can be reused.
         if serves { finished.wait() }
         close(fd)
@@ -542,6 +550,7 @@ final class PullRequestsAppSupportTests: XCTestCase {
         if finder.count == 1 {
             let live = finder[0].processIdentifier
             XCTAssertEqual(PullRequestsHostApp.runningHost(live, hostURL: nil)?.processIdentifier, live)
+            XCTAssertNil(PullRequestsHostApp.runningHost(live, hostURL: app), "a reused pid isn't Copilot Projects")
             XCTAssertEqual(
                 PullRequestsHostApp.runningHost(gone, hostURL: URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app"))?
                     .processIdentifier,
@@ -640,5 +649,25 @@ final class PullRequestsAppSupportTests: XCTestCase {
         XCTAssertTrue(TitleStrip.contains(NSPoint(x: 200, y: 740), windowHeight: 760))
         XCTAssertFalse(TitleStrip.contains(NSPoint(x: 40, y: 740), windowHeight: 760))
         XCTAssertFalse(TitleStrip.contains(NSPoint(x: 200, y: 700), windowHeight: 760))
+    }
+
+    @MainActor
+    func testTheTitleStripIsOnlyTheMainWindows() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: true
+        )
+        XCTAssertFalse(window.isVisible)
+        XCTAssertTrue(TitleStrip.applies(to: window), "a minimized or hidden window is still the app's")
+        let borderless = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.borderless],
+            backing: .buffered, defer: true
+        )
+        XCTAssertFalse(TitleStrip.applies(to: borderless))
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled], backing: .buffered, defer: true
+        )
+        XCTAssertFalse(TitleStrip.applies(to: panel), "an alert or popover keeps its double-clicks")
     }
 }

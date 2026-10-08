@@ -141,11 +141,16 @@ struct PullRequestsHostApp {
 
     /// The Copilot Projects at `processIdentifier`, or, when that process has
     /// gone because Copilot Projects restarted since the last snapshot, the
-    /// only running copy of the app this one is bundled in.
+    /// only running copy of the app this one is bundled in. A reused pid is
+    /// never taken for Copilot Projects.
     @MainActor
     static func runningHost(_ processIdentifier: Int32, hostURL: URL?) -> NSRunningApplication? {
-        if let host = NSRunningApplication(processIdentifier: processIdentifier), !host.isTerminated { return host }
-        guard let hostURL, let identifier = Bundle(url: hostURL)?.bundleIdentifier else { return nil }
+        let identifier = hostURL.flatMap { Bundle(url: $0)?.bundleIdentifier }
+        if let host = NSRunningApplication(processIdentifier: processIdentifier), !host.isTerminated,
+           identifier == nil || host.bundleIdentifier == identifier {
+            return host
+        }
+        guard let hostURL, let identifier else { return nil }
         let copies = NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
             .filter { !$0.isTerminated && $0.bundleURL?.standardizedFileURL.path == hostURL.standardizedFileURL.path }
         return copies.count == 1 ? copies[0] : nil
