@@ -8,6 +8,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import shlex
 import subprocess
@@ -17,7 +18,10 @@ from unittest import mock
 
 
 RELEASE = Path(__file__).with_name("release.sh")
+RELEASE_VERSION = RELEASE.with_name("release-version.sh")
+WORKFLOW = RELEASE.parent.parent / ".github/workflows/release.yml"
 REAL_GIT = shutil.which("git")
+REAL_DATE = shutil.which("date")
 KEYCHAIN_SPEC = importlib.util.spec_from_file_location("keychain_search", RELEASE.with_name("keychain-search.py"))
 keychain_search = importlib.util.module_from_spec(KEYCHAIN_SPEC)
 KEYCHAIN_SPEC.loader.exec_module(keychain_search)
@@ -38,11 +42,19 @@ if command == "git":
     if args[:1] == ["fetch"] or "push" in args:
         sys.exit(0)
     if args[:1] == ["ls-remote"]:
-        tag = os.environ.get("MOCK_LATEST_TAG")
-        if tag:
-            print(os.environ["MOCK_LATEST_SHA"] + "\trefs/tags/" + tag)
+        latest = os.environ.get("MOCK_LATEST_TAG")
+        tags = [tag for tag in os.environ.get("MOCK_REMOTE_TAGS", "").split(",") if tag]
+        wanted = [arg[len("refs/tags/"):] for arg in args if arg.startswith("refs/tags/")]
+        for tag in tags + ([latest] if latest else []):
+            if not wanted or tag in wanted:
+                print((os.environ["MOCK_LATEST_SHA"] if tag == latest else "1" * 40) + "\trefs/tags/" + tag)
         sys.exit(0)
     sys.exit(subprocess.call([os.environ["REAL_GIT"]] + args))
+if command == "date":
+    if not os.environ.get("MOCK_DATE"):
+        sys.exit(subprocess.call([os.environ["REAL_DATE"]] + args))
+    pacific = os.environ.get("TZ") == "America/Los_Angeles"
+    print(os.environ["MOCK_DATE"] if pacific else "1970 01 01 UTC")
 if command == "security":
     if not os.environ.get("MOCK_NO_IDENTITY"):
         print('1) TEST "Developer ID Application: Release Test"')
@@ -75,7 +87,12 @@ elif command == "hdiutil":
 elif command == "ditto":
     Path(args[-1]).write_text("test zip")
 elif command == "gh":
-    if args[:2] == ["release", "view"]:
+    if args[-1].endswith("/pulls"):
+        print(json.dumps([{
+            "merged_at": "2026-10-08T12:00:00Z", "base": {"ref": "main"},
+            "merge_commit_sha": os.environ.get("MOCK_MERGED_SHA"),
+        }]))
+    elif args[:2] == ["release", "view"]:
         if args[2] != os.environ.get("MOCK_LATEST_TAG"):
             sys.exit(1)
         assets = [{"name": "Copilot-Projects-" + args[2][1:] + ".dmg", "size": 1}]
@@ -110,6 +127,23 @@ esac
 """
 
 
+def workflow_step_script(step_id):
+    """Return the run block of the Release workflow step with this id."""
+    lines = WORKFLOW.read_text().splitlines()
+    run = lines.index("        run: |", lines.index("        id: " + step_id))
+    body = []
+    for line in lines[run + 1:]:
+        if line.strip() and not line.startswith(" " * 10):
+            break
+        body.append(line[10:])
+    return "\n".join(body) + "\n"
+
+
+def bundle_version_key(version):
+    """Order bundle versions numerically segment by segment (2026.10.8.3d2 < 2026.10.8.10)."""
+    return [int(part) if part.isdigit() else part for part in re.findall(r"\d+|\D+", version)]
+
+
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="release-test-")
@@ -135,6 +169,7 @@ class ReleaseTests(unittest.TestCase):
             "GIT_COMMITTER_EMAIL": "release@example.invalid",
             "GH_TOKEN": "offline-test-placeholder",
             "REAL_GIT": REAL_GIT,
+            "REAL_DATE": REAL_DATE,
             "COMMAND_LOG": str(self.log),
             "GITHUB_REPOSITORY": "example/integration",
             "CODESIGN_IDENTITY": "Developer ID Application: Release Test",
@@ -143,12 +178,13 @@ class ReleaseTests(unittest.TestCase):
         })
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for name in ("git", "security", "xcrun", "spctl", "codesign", "hdiutil", "ditto", "gh", "curl", "swift", "clang"):
+        for name in ("git", "security", "xcrun", "spctl", "codesign", "hdiutil", "ditto", "gh", "curl", "swift", "clang", "date"):
             self.executable(self.bin / name, MOCK)
         self.env["PATH"] = str(self.bin) + os.pathsep + self.env["PATH"]
         self.public = self.project("public", "https://github.com/sirfergy/copilot-projects.git")
         shutil.copyfile(RELEASE, self.public / "scripts/release.sh")
-        self.git(self.public, "add", "scripts/release.sh")
+        shutil.copyfile(RELEASE_VERSION, self.public / "scripts/release-version.sh")
+        self.git(self.public, "add", "scripts/release.sh", "scripts/release-version.sh")
         self.git(self.public, "commit", "-qm", "release entrypoint")
         self.git(self.public, "update-ref", "refs/remotes/origin/main", "HEAD")
         self.project_root = self.project("integration with spaces", "git@github.com:example/integration.git")
@@ -178,8 +214,8 @@ class ReleaseTests(unittest.TestCase):
         self.git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
         return root
 
-    def run_release(self, *args, publish=True, override=True):
-        command = ["bash", str(self.public / "scripts/release.sh"), "1.2.3"]
+    def run_release(self, *args, publish=True, override=True, version="2026.10.8.3"):
+        command = ["bash", str(self.public / "scripts/release.sh"), version]
         if override:
             command.append("--project-root=" + str(self.project_root))
         if publish:
@@ -203,11 +239,11 @@ class ReleaseTests(unittest.TestCase):
         self.env.update(GIT_DIR=str(self.public / ".git"), GIT_WORK_TREE=str(self.public))
         result = self.run_release()
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertTrue((self.project_root / "dist/Copilot-Projects-1.2.3.dmg").exists())
+        self.assertTrue((self.project_root / "dist/Copilot-Projects-2026.10.8.3.dmg").exists())
         self.assertFalse((self.public / "dist").exists())
         self.assertEqual(
             (self.project_root / "dist-build.txt").read_text().strip(),
-            f"{self.project_root}|1.2.3|Developer ID Application: Release Test|--release",
+            f"{self.project_root}|2026.10.8.3|Developer ID Application: Release Test|--release",
         )
         self.assertTrue(all(cwd == str(self.project_root) for cwd, _, _ in self.calls))
         api_args = [arg for _, cmd, args in self.calls if cmd == "gh" for arg in args]
@@ -222,7 +258,7 @@ class ReleaseTests(unittest.TestCase):
         del self.env["GITHUB_REPOSITORY"]
         result = self.run_release(override=False)
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertTrue((self.public / "dist/Copilot-Projects-1.2.3.dmg").exists())
+        self.assertTrue((self.public / "dist/Copilot-Projects-2026.10.8.3.dmg").exists())
         self.assertTrue(any("repos/sirfergy/copilot-projects/releases" in args for _, _, args in self.calls))
 
     def test_explicit_keychain_scopes_discovery_verification_build_and_dmg(self):
@@ -250,7 +286,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse((self.project_root / "dist-build.txt").exists())
         self.assertFalse(any(command == "codesign" for _, command, _ in self.calls))
 
-    def run_assembler(self, shader_source=True, pull_requests_icon=True):
+    def run_assembler(self, shader_source=True, pull_requests_icon=True, version="2026.10.8.3"):
         shutil.copyfile(RELEASE.with_name("build-app.sh"), self.public / "scripts/build-app.sh")
         shutil.copyfile(RELEASE.with_name("bundle-resources.sh"), self.public / "scripts/bundle-resources.sh")
         build = self.public / ".build/products"
@@ -275,7 +311,11 @@ class ReleaseTests(unittest.TestCase):
             (shaders / "Shaders.metal").write_text("// fixture\n")
         else:
             (shaders / "Shaders.metal").unlink(missing_ok=True)
-        self.env.update(VERSION="1.2.3", MOCK_BUILD_PATH=str(build))
+        self.env["MOCK_BUILD_PATH"] = str(build)
+        if version:
+            self.env["VERSION"] = version
+        else:
+            self.env.pop("VERSION", None)
         self.log.unlink(missing_ok=True)
         result = subprocess.run(
             ["bash", str(self.public / "scripts/build-app.sh"), "--release"],
@@ -327,7 +367,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(info["CFBundleIconFile"], "PullRequestsIcon")
         self.assertEqual(info["CFBundleShortVersionString"], host["CFBundleShortVersionString"])
         self.assertEqual(info["CFBundleVersion"], host["CFBundleVersion"])
-        self.assertEqual(info["CFBundleShortVersionString"], "1.2.3")
+        self.assertEqual(info["CFBundleShortVersionString"], "2026.10.8.3")
         self.assertEqual(info["LSMinimumSystemVersion"], "26.0")
         self.assertIs(info["NSHighResolutionCapable"], True)
         self.assertEqual(info["NSPrincipalClass"], "NSApplication")
@@ -376,6 +416,60 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("update build-app.sh for SwiftTerm's shader layout", result.stdout)
         self.assertFalse(any(cmd == "codesign" for _, cmd, _ in self.calls))
 
+    def test_actual_assembler_keeps_any_explicit_version(self):
+        # copilot-projects-remote's CI assembles with VERSION=0.0.0; only release.sh requires date versions.
+        for version in ("0.0.0", "2026.10.8.3"):
+            with self.subTest(version=version):
+                result = self.run_assembler(version=version)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                with open(self.public / "dist/Copilot Projects.app/Contents/Info.plist", "rb") as handle:
+                    info = plistlib.load(handle)
+                self.assertEqual((info["CFBundleShortVersionString"], info["CFBundleVersion"]), (version, version))
+
+    def test_dev_builds_describe_the_nearest_highest_release_tag(self):
+        # Commit the staged assembler inputs so only the steps below change the tree.
+        self.run_assembler()
+        self.git(self.public, "add", "-A")
+        self.git(self.public, "commit", "-qm", "assembler inputs")
+        built = []
+
+        def build(short, bundle):
+            result = self.run_assembler(version=None)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            for app in ("", "Contents/Helpers/Copilot Projects Link.app/", "Contents/Helpers/Copilot Pull Requests.app/"):
+                path = self.public / "dist/Copilot Projects.app" / app
+                with open(path / "Contents/Info.plist", "rb") as handle:
+                    info = plistlib.load(handle)
+                self.assertEqual((info["CFBundleShortVersionString"], info["CFBundleVersion"]), (short, bundle))
+            built.append(bundle)
+
+        def commit():
+            self.git(self.public, "commit", "--allow-empty", "-qm", "change")
+
+        self.git(self.public, "tag", "v0.9.121")
+        build("0.9.121", "0.9.121")
+        commit()
+        build("0.9.121", "0.9.121d1")
+        commit()
+        self.git(self.public, "tag", "v2026.10.8.3")
+        build("2026.10.8.3", "2026.10.8.3")
+        commit()
+        commit()
+        build("2026.10.8.3", "2026.10.8.3d2")
+        (self.public / "tracked").write_text("uncommitted\n")
+        build("2026.10.8.3", "2026.10.8.3d3")
+        self.git(self.public, "checkout", "--", "tracked")
+        # Releases of one commit tie on distance; the highest version describes it.
+        for tag in ("v0.9.122", "v2026.10.8.4", "v2026.10.8.10"):
+            self.git(self.public, "tag", tag)
+        build("2026.10.8.10", "2026.10.8.10")
+        commit()
+        build("2026.10.8.10", "2026.10.8.10d1")
+        self.git(self.public, "tag", "v2026.10.9.1")
+        commit()
+        build("2026.10.9.1", "2026.10.9.1d1")
+        self.assertEqual(built, sorted(built, key=bundle_version_key))
+
     def test_empty_explicit_keychain_never_silently_ad_hoc_signs(self):
         self.env.pop("CODESIGN_IDENTITY")
         self.env.update(CODESIGN_KEYCHAIN="/empty/job.keychain-db", MOCK_NO_IDENTITY="1")
@@ -392,7 +486,7 @@ class ReleaseTests(unittest.TestCase):
         handoff = next(line.strip() for line in result.stdout.splitlines() if line.startswith("    GITHUB_REPOSITORY="))
         self.assertEqual(shlex.split(handoff), [
             "GITHUB_REPOSITORY=example/integration",
-            str(self.public / "scripts/release.sh"), "1.2.3",
+            str(self.public / "scripts/release.sh"), "2026.10.8.3",
             "--project-root=" + str(self.project_root), "--publish",
         ])
 
@@ -563,8 +657,8 @@ class ReleaseTests(unittest.TestCase):
         pushes = [(cwd, args) for cwd, cmd, args in self.calls if cmd == "git" and "push" in args]
         self.assertEqual(len(pushes), 1)
         self.assertEqual(pushes[0][0], str(self.project_root))
-        self.assertIn("--force-with-lease=refs/tags/v1.2.3:" + self.git(self.project_root, "rev-parse", "HEAD"), pushes[0][1])
-        self.assertEqual(pushes[0][1][-2:], ["origin", ":refs/tags/v1.2.3"])
+        self.assertIn("--force-with-lease=refs/tags/v2026.10.8.3:" + self.git(self.project_root, "rev-parse", "HEAD"), pushes[0][1])
+        self.assertEqual(pushes[0][1][-2:], ["origin", ":refs/tags/v2026.10.8.3"])
 
     def test_bad_upload_response_still_cleans_up_owned_draft(self):
         self.env["MOCK_BAD_UPLOAD_URL"] = "1"
@@ -577,21 +671,21 @@ class ReleaseTests(unittest.TestCase):
         result = self.run_release()
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertFalse(any("repos/example/integration/releases/null" in args for _, _, args in self.calls))
-        self.assertTrue(any(cmd == "git" and args[-2:] == ["origin", ":refs/tags/v1.2.3"] for _, cmd, args in self.calls))
+        self.assertTrue(any(cmd == "git" and args[-2:] == ["origin", ":refs/tags/v2026.10.8.3"] for _, cmd, args in self.calls))
 
     def test_predecessor_must_be_unchanged_complete_and_in_selected_repository(self):
         sha = self.git(self.project_root, "rev-parse", "HEAD")
         self.env.update(
-            EXPECTED_PREVIOUS_TAG="v1.2.2", EXPECTED_PREVIOUS_SHA=sha,
-            MOCK_LATEST_TAG="v1.2.2", MOCK_LATEST_SHA=sha,
+            EXPECTED_PREVIOUS_TAG="v2026.10.8.2", EXPECTED_PREVIOUS_SHA=sha,
+            MOCK_LATEST_TAG="v2026.10.8.2", MOCK_LATEST_SHA=sha,
         )
         result = self.run_release()
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertTrue(any(args[:5] == ["release", "view", "v1.2.2", "--repo", "example/integration"] for _, cmd, args in self.calls if cmd == "gh"))
+        self.assertTrue(any(args[:5] == ["release", "view", "v2026.10.8.2", "--repo", "example/integration"] for _, cmd, args in self.calls if cmd == "gh"))
         self.env["EXPECTED_PREVIOUS_SHA"] = "0" * 40
         result = self.run_release()
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn("predecessor v1.2.2 moved", result.stdout)
+        self.assertIn("predecessor v2026.10.8.2 moved", result.stdout)
         self.env["EXPECTED_PREVIOUS_SHA"] = sha
         self.env["MOCK_RELEASE_INCOMPLETE"] = "1"
         result = self.run_release()
@@ -601,24 +695,260 @@ class ReleaseTests(unittest.TestCase):
     def test_complete_superseding_release_exits_without_publishing(self):
         sha = self.git(self.project_root, "rev-parse", "HEAD")
         self.env.update(
-            EXPECTED_PREVIOUS_TAG="v1.2.2", EXPECTED_PREVIOUS_SHA=sha,
-            MOCK_LATEST_TAG="v1.2.4", MOCK_LATEST_SHA=sha,
+            EXPECTED_PREVIOUS_TAG="v2026.10.8.2", EXPECTED_PREVIOUS_SHA=sha,
+            MOCK_LATEST_TAG="v2026.10.8.4", MOCK_LATEST_SHA=sha,
         )
         result = self.run_release()
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("superseded by complete descendant release v1.2.4", result.stdout)
+        self.assertIn("superseded by complete descendant release v2026.10.8.4", result.stdout)
         self.assertFalse(any(cmd == "gh" and "POST" in args for _, cmd, args in self.calls))
 
     def test_existing_version_or_tag_cannot_be_reused(self):
-        self.env["MOCK_LATEST_TAG"] = "v1.2.3"
+        self.env["MOCK_LATEST_TAG"] = "v2026.10.8.3"
         result = self.run_release()
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn("release v1.2.3 already exists", result.stdout)
+        self.assertIn("release v2026.10.8.3 already exists", result.stdout)
         del self.env["MOCK_LATEST_TAG"]
         self.env["MOCK_TAG_EXISTS"] = "1"
         result = self.run_release()
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn("tag v1.2.3 already exists", result.stdout)
+        self.assertIn("tag v2026.10.8.3 already exists", result.stdout)
+
+    def test_release_version_must_be_a_date_version(self):
+        for version in ("1.2.3", "v0.9.122", "2026.10.08.3", "2026.010.8.3", "2026.10.8.0",
+                        "2026.10.8.03", "26.10.8.3", "2026.13.8.3", "2026.2.30.3", "2026.10.8", "2026.10.8.3.1"):
+            with self.subTest(version=version):
+                self.log.unlink(missing_ok=True)
+                self.assert_rejected_before_side_effects("version must be YYYY.M.D.N", version=version)
+        self.log.unlink(missing_ok=True)
+        result = self.run_release(version="v2026.10.8.3")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue((self.project_root / "dist/Copilot-Projects-2026.10.8.3.dmg").exists())
+        api_args = [arg for _, cmd, args in self.calls if cmd == "gh" for arg in args]
+        self.assertIn("tag_name=v2026.10.8.3", api_args)
+        self.assertIn("name=Copilot Projects 2026.10.8.3", api_args)
+
+    def test_first_date_release_accepts_the_legacy_predecessor(self):
+        sha = self.git(self.project_root, "rev-parse", "HEAD")
+        # This repository's last legacy release, and the integration's (copilot-projects-remote).
+        for latest, older in (
+            ("v0.9.121", "v0.9.99,v0.9.120,v0.9.121-rc1,v0.9"),
+            ("v0.10.55", "v0.9.121,v0.10.9,v0.10.54"),
+        ):
+            with self.subTest(latest=latest):
+                self.env.update(
+                    EXPECTED_PREVIOUS_TAG=latest, EXPECTED_PREVIOUS_SHA=sha,
+                    MOCK_LATEST_TAG=latest, MOCK_LATEST_SHA=sha, MOCK_REMOTE_TAGS=older,
+                )
+                self.log.unlink(missing_ok=True)
+                result = self.run_release(version="2026.10.8.1")
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertTrue(any(args[:3] == ["release", "view", latest] for _, cmd, args in self.calls if cmd == "gh"))
+
+    def test_predecessor_lookup_orders_date_tags_above_legacy_tags(self):
+        sha = self.git(self.project_root, "rev-parse", "HEAD")
+        self.git(self.project_root, "commit", "--allow-empty", "-qm", "after the latest release")
+        self.git(self.project_root, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.env.update(
+            EXPECTED_PREVIOUS_TAG="v2026.10.8.10", EXPECTED_PREVIOUS_SHA=sha,
+            MOCK_LATEST_TAG="v2026.10.8.10", MOCK_LATEST_SHA=sha,
+            MOCK_REMOTE_TAGS="v0.9.121,v0.10.55,v9999.0.0,v2026.10.8.2,v2026.10.8.9,v2026.10.7.11,v2026.9.30.4",
+        )
+        result = self.run_release(version="2026.10.8.11")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.env["EXPECTED_PREVIOUS_TAG"] = "v2026.10.8.9"
+        result = self.run_release(version="2026.10.8.10")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("latest release changed from v2026.10.8.9 to v2026.10.8.10", result.stdout)
+
+    def release_checkout(self, name, tags):
+        root = self.project(name, "https://github.com/sirfergy/copilot-projects.git")
+        shutil.copyfile(RELEASE_VERSION, root / "scripts/release-version.sh")
+        self.git(root, "add", "scripts/release-version.sh")
+        self.git(root, "commit", "-qm", "release version rules")
+        for tag in tags:
+            self.git(root, "tag", tag)
+        self.git(root, "commit", "--allow-empty", "-qm", "merged pull request")
+        self.git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+        return root
+
+    def run_release_validation(self, root, date, event="push", version="", latest=""):
+        script = self.root / "validate-release.sh"
+        script.write_text(workflow_step_script("release"))
+        output = self.root / "github-output"
+        output.write_text("")
+        head = self.git(root, "rev-parse", "HEAD")
+        self.env.update(
+            GITHUB_REF="refs/heads/main", GITHUB_SHA=head, GITHUB_OUTPUT=str(output),
+            GITHUB_STEP_SUMMARY=str(self.root / "github-summary"), EVENT_NAME=event,
+            INPUT_VERSION=version, MOCK_DATE=date, MOCK_MERGED_SHA=head, MOCK_LATEST_TAG=latest,
+        )
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)], cwd=root, env=self.env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        return result, outputs
+
+    def test_workflow_numbers_releases_within_each_pacific_day(self):
+        cases = (
+            # Tags on the last release, its tag, the Pacific `date` output, and the next version.
+            (("v0.9.99", "v0.9.120", "v0.9.121"), "v0.9.121", "2026 10 08 PDT", "2026.10.8.1"),
+            (("v0.9.121", "v2026.10.8.1"), "v2026.10.8.1", "2026 10 08 PDT", "2026.10.8.2"),
+            (("v0.9.121", "v2026.10.8.9", "v2026.10.8.10"), "v2026.10.8.10", "2026 10 08 PDT", "2026.10.8.11"),
+            (("v2026.10.8.3", "v2026.10.7.12"), "v2026.10.8.3", "2026 10 09 PDT", "2026.10.9.1"),
+            (("v2026.10.9.2",), "v2026.10.9.2", "2026 10 10 PDT", "2026.10.10.1"),
+            (("v2026.12.31.2",), "v2026.12.31.2", "2027 01 01 PST", "2027.1.1.1"),
+            (("v0.9.121",), "v0.9.121", "2026 09 08 PDT", "2026.9.8.1"),
+        )
+        for index, (tags, latest, date, version) in enumerate(cases):
+            with self.subTest(tags=tags, date=date):
+                root = self.release_checkout(f"workflow-{index}", tags)
+                result, outputs = self.run_release_validation(root, date, latest=latest)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(outputs.get("should_release"), "true", result.stdout)
+                self.assertEqual(outputs["version"], version)
+                self.assertEqual(outputs["previous_tag"], latest)
+                self.assertEqual(outputs["previous_sha"], self.git(root, "rev-parse", latest))
+
+    def test_workflow_fails_closed_when_latest_release_is_dated_after_today(self):
+        for index, (tags, latest, date, today) in enumerate((
+            (("v0.9.121", "v2026.10.9.1"), "v2026.10.9.1", "2026 10 08 PDT", "2026.10.8"),
+            (("v2026.10.9.4", "v2026.10.10.1"), "v2026.10.10.1", "2026 10 09 PDT", "2026.10.9"),
+            (("v2027.1.1.1",), "v2027.1.1.1", "2026 12 31 PST", "2026.12.31"),
+        )):
+            with self.subTest(latest=latest):
+                root = self.release_checkout(f"future-{index}", tags)
+                result, outputs = self.run_release_validation(root, date, latest=latest)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(f"{latest} is dated after today ({today} in America/Los_Angeles)", result.stdout)
+                self.assertNotIn("should_release", outputs)
+                self.assertNotIn("version", outputs)
+
+    def test_workflow_dispatch_requires_a_date_version_through_today(self):
+        root = self.release_checkout("dispatch", ("v0.9.121",))
+        for version, published, message in (
+            ("v2026.10.8.2", "2026.10.8.2", None),
+            ("2026.10.7.1", "2026.10.7.1", None),
+            ("0.9.122", None, "Version must be YYYY.M.D.N"),
+            ("v2026.10.08.1", None, "Version must be YYYY.M.D.N"),
+            ("2026.10.8.0", None, "Version must be YYYY.M.D.N"),
+            ("2026.2.30.1", None, "Version must be YYYY.M.D.N"),
+            ("2026.10.9.1", None, "v2026.10.9.1 is dated after today (2026.10.8 in America/Los_Angeles)"),
+        ):
+            with self.subTest(version=version):
+                result, outputs = self.run_release_validation(
+                    root, "2026 10 08 PDT", event="workflow_dispatch", version=version)
+                if published:
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertEqual((outputs["should_release"], outputs["version"]), ("true", published))
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn(message, result.stdout)
+                    self.assertEqual(outputs, {})
+
+
+class ReleaseVersionTests(unittest.TestCase):
+    def call(self, function, *args, stdin="", env=None):
+        return subprocess.run(
+            ["bash", "-c", 'set -euo pipefail; source "$0"; "$@"', str(RELEASE_VERSION), function, *args],
+            input=stdin, text=True, capture_output=True, env=env,
+        )
+
+    def test_next_version_counts_releases_per_day_and_resets_on_a_new_day(self):
+        for latest, today, expected in (
+            ("v2026.10.8.3", "2026.10.8", "2026.10.8.4"),
+            ("v2026.10.8.9", "2026.10.8", "2026.10.8.10"),
+            ("v2026.10.8.3", "2026.10.9", "2026.10.9.1"),
+            ("v2026.10.9.7", "2026.10.10", "2026.10.10.1"),
+            ("v2026.12.31.5", "2027.1.1", "2027.1.1.1"),
+            ("v0.9.121", "2026.10.8", "2026.10.8.1"),
+            ("v9999.0.0", "2026.10.8", "2026.10.8.1"),
+        ):
+            with self.subTest(latest=latest, today=today):
+                result = self.call("next_release_version", latest, today)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected + "\n")
+
+    def test_next_version_fails_closed_for_future_latest_or_invalid_inputs(self):
+        for latest, today, message in (
+            ("v2026.10.9.1", "2026.10.8", "v2026.10.9.1 is dated after today (2026.10.8 in America/Los_Angeles)"),
+            ("v2026.10.10.1", "2026.10.9", "is dated after today"),
+            ("v2027.1.1.1", "2026.12.31", "is dated after today"),
+            ("v2026.10.08.1", "2026.10.8", "is not a release tag"),
+            ("2026.10.8.1", "2026.10.8", "is not a release tag"),
+            ("", "2026.10.8", "is not a release tag"),
+            ("v2026.10.8.1", "2026.10.08", "invalid release date"),
+            ("v2026.10.8.1", "", "invalid release date"),
+        ):
+            with self.subTest(latest=latest, today=today):
+                result = self.call("next_release_version", latest, today)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(message, result.stderr)
+
+    def test_date_versions_have_no_leading_zeros_and_real_dates(self):
+        for version in ("2026.10.8.1", "2026.1.1.1", "2026.12.31.12", "2028.2.29.3", "2000.2.29.1", "2026.10.8.100"):
+            with self.subTest(version=version):
+                self.assertEqual(self.call("is_date_release_version", version).returncode, 0)
+        for version in ("2026.10.08.1", "2026.010.8.1", "2026.10.8.0", "2026.10.8.01", "0026.10.8.1",
+                        "26.10.8.1", "2026.0.8.1", "2026.13.8.1", "2026.10.0.1", "2026.10.32.1", "2026.4.31.1",
+                        "2026.2.29.1", "2100.2.29.1", "2026.10.8", "2026.10.8.1.1", "v2026.10.8.1", "1.2.3",
+                        "2026.10.8.1-rc1", " 2026.10.8.1", ""):
+            with self.subTest(version=version):
+                self.assertNotEqual(self.call("is_date_release_version", version).returncode, 0)
+
+    def test_latest_tag_orders_date_tags_numerically_above_legacy_tags(self):
+        for tags, expected in (
+            (["v0.9.99", "v0.9.121", "v0.9.120"], "v0.9.121"),
+            (["v0.9.121", "v2026.10.8.2", "v9999.0.0", "v2026.10.8.10", "v2026.10.8.9"], "v2026.10.8.10"),
+            (["v2026.10.10.1", "v2026.10.9.7", "v2026.9.30.4"], "v2026.10.10.1"),
+            (["v2027.1.1.1", "v2026.12.31.9"], "v2027.1.1.1"),
+            (["v2026.10.08.1", "v2026.10.8.1-rc1", "2026.10.9.1", "v0.9", "latest", "v2026.10.7.1"], "v2026.10.7.1"),
+            (["nightly", "v1"], ""),
+            ([], ""),
+        ):
+            with self.subTest(tags=tags):
+                result = self.call("latest_release_tag", stdin="".join(tag + "\n" for tag in tags))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+        # A final tag without a trailing newline still counts.
+        result = self.call("latest_release_tag", stdin="v0.9.121\nv2026.10.8.1")
+        self.assertEqual(result.stdout.strip(), "v2026.10.8.1")
+
+    def test_pacific_date_reads_los_angeles_and_strips_leading_zeros(self):
+        with tempfile.TemporaryDirectory(prefix="release-date-test-") as temp:
+            fake = Path(temp) / "date"
+            fake.write_text('#!/bin/sh\n[ "$TZ" = America/Los_Angeles ] && echo "$MOCK_DATE" || echo "1970 01 01 UTC"\n')
+            fake.chmod(0o755)
+            env = dict(os.environ, PATH=temp + os.pathsep + os.environ["PATH"])
+            for stamp, expected in (
+                ("2026 10 08 PDT", "2026.10.8"),
+                ("2026 09 09 PDT", "2026.9.9"),
+                ("2027 01 01 PST", "2027.1.1"),
+                ("2026 12 31 PST", "2026.12.31"),
+            ):
+                with self.subTest(stamp=stamp):
+                    result = self.call("pacific_release_date", env=dict(env, MOCK_DATE=stamp))
+                    self.assertEqual((result.returncode, result.stdout), (0, expected + "\n"), result.stderr)
+            for stamp in ("2026 10 08 UTC", "2026 10 8 PDT", "", "Thu Oct  8 PDT 2026"):
+                with self.subTest(stamp=stamp):
+                    result = self.call("pacific_release_date", env=dict(env, MOCK_DATE=stamp))
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("could not read today's date in America/Los_Angeles", result.stderr)
+
+    def test_pacific_date_matches_the_los_angeles_calendar_day(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        def today():
+            now = datetime.now(ZoneInfo("America/Los_Angeles"))
+            return f"{now.year}.{now.month}.{now.day}"
+
+        before = today()
+        result = self.call("pacific_release_date")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(result.stdout.strip(), {before, today()})
 
 
 class KeychainSearchTests(unittest.TestCase):

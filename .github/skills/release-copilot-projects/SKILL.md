@@ -16,7 +16,10 @@ logic in ad hoc shell commands.
 - Primary publisher: `.github/workflows/release.yml`
 - Local fallback: `scripts/release.sh`
 - Release only a commit reachable from `origin/main`
-- Every release gets a new semantic version and immutable `vX.Y.Z` tag
+- Every release gets a new date version `YYYY.M.D.N` and immutable
+  `vYYYY.M.D.N` tag: the Pacific (`America/Los_Angeles`) date, then that day's
+  release ordinal, with no leading zeros. Legacy `vX.Y.Z` tags remain valid
+  predecessors and order below date tags.
 
 ## Workflow
 
@@ -41,7 +44,11 @@ gh release view --repo sirfergy/copilot-projects \
   --json tagName,publishedAt,url
 ```
 
-Default to a patch bump for fixes and a minor bump for a meaningful feature set.
+Eligible PR merges get their version from the Release workflow. For a manual
+dispatch, use today's Pacific date: the next `N` after today's latest release, or
+`.1` when the latest release is from an earlier day or is a legacy `vX.Y.Z` tag
+(for example, `2026.10.8.4` after `v2026.10.8.3`, `2026.10.9.1` after it on the
+next day). Never use a future date; it blocks automatic releases until that day.
 Never overwrite an existing tag or release asset.
 
 ### 3. Validate
@@ -74,7 +81,7 @@ LAST_RUN_ID="$(gh run list -R sirfergy/copilot-projects \
 gh workflow run release.yml \
   --repo sirfergy/copilot-projects \
   --ref main \
-  -f version=X.Y.Z
+  -f version=YYYY.M.D.N
 
 RUN_ID=""
 for _ in {1..12}; do
@@ -99,7 +106,7 @@ Use only when the Actions runner or signing configuration is unavailable:
 ```bash
 CODESIGN_IDENTITY="Developer ID Application: ..." \
 NOTARY_PROFILE="copilot-projects-notary" \
-./scripts/release.sh X.Y.Z --publish
+./scripts/release.sh YYYY.M.D.N --publish
 ```
 
 The script must fail closed for ad-hoc signing, notarization, stapling, or
@@ -107,7 +114,7 @@ Gatekeeper failures. Never put signing credentials in the repository, a PR, or
 shell history.
 
 Integration repositories may delegate to this maintained script with
-`GITHUB_REPOSITORY=owner/integration /absolute/public-checkout/scripts/release.sh X.Y.Z --project-root=/absolute/integration-checkout --publish`.
+`GITHUB_REPOSITORY=owner/integration /absolute/public-checkout/scripts/release.sh YYYY.M.D.N --project-root=/absolute/integration-checkout --publish`.
 The selected root must be a clean Git worktree with an executable
 `scripts/build-app.sh` that honors `VERSION` and `CODESIGN_IDENTITY` and emits
 `dist/Copilot Projects.app` with the existing app identity. Ignore build outputs;
