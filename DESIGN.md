@@ -279,7 +279,8 @@ never act on it. It reuses the main window's 38pt drag strip (80pt traffic-light
 inset, callout semibold title) and a 56pt header: a title3 semibold needs-you
 headline over a caption secondary summary (open, goals, nudge-only count, owners),
 then a trailing refresh note (spinner, "Updated" relative time, or a warning
-behind the native orange symbol), the owners filter popover, and Refresh
+behind the native orange symbol), the owners filter (a native token field in a
+popover; the button names two owners, then a count), and Refresh
 (Command-R). A sticky 28pt `chrome` stage row (caption semibold secondary, counts
 in monospaced digits) heads a 240pt Goals column and four equal stage columns
 (Draft, Checks, Review, Ready) split by native dividers; lanes are separated by

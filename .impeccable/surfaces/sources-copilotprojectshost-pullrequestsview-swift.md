@@ -10,8 +10,8 @@ related_targets: ["Sources/CopilotProjectsHost/PullRequests.swift","Sources/Copi
 Mode: Operate. A separate macOS window (Window ▸ Pull Requests, ⇧⌘P) showing the
 user's open pull requests grouped by goal: PRs working toward one outcome, inferred
 from the Copilot session that drives them (head-branch evidence in its transcript),
-merged by shared head branch, and reassignable by hand. Scope: PRs in chosen owners
-plus any PR linked to a live session. Attention: failing required checks, changes
+merged by shared head branch, and reassignable by hand. Scope: PRs in the chosen
+owners only (a token list; empty means every owner). Attention: failing required checks, changes
 requested, conflicts/behind, unresolved threads, ready to merge, linked session
 waiting, no live session, stale. Must not touch terminal behavior, the main window,
 or shared protocol packages.

@@ -156,10 +156,10 @@ holding it up.
   current project (or one you pick) with the pull request links as its prompt.
   Double-click a pull request, or press `⌘Return`, to open it on GitHub. Use `↑`/`↓` to
   move and Return to go to its session.
-- **Owners** limits the window to organizations or users you choose, such as
-  `github`. Pull requests elsewhere still appear when a session is working on them.
-  Leave it empty to include every owner, up to your hundred most recently
-  updated pull requests.
+- **Owners** limits the window to one or more organizations or users, such as
+  `github` and `my-org`; each is its own token in the Owners popover. Only pull
+  requests in those owners appear. Leave it empty to include every owner, up to
+  your hundred most recently updated pull requests.
 
 The window reads GitHub with the accounts you signed in to with the GitHub CLI
 (`gh auth login`); every signed-in github.com account is included. Tokens stay in

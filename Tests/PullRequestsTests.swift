@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import XCTest
 @testable import CopilotProjectsHost
 
@@ -382,21 +383,6 @@ final class PullRequestServiceTests: XCTestCase {
     }
 
     @MainActor
-    func testCandidatesComeFromRepeatedLinksOutsideTheChosenOwners() {
-        let model = PullRequestsModel(
-            appModel: nil, defaults: UserDefaults(suiteName: UUID().uuidString)!, stateDirectory: nil,
-            loadAccounts: { [] }, copilotSessionId: { _ in nil }
-        )
-        let inScope = PullRequestKey(owner: "github", repo: "github", number: 1)
-        let mine = PullRequestKey(owner: "sirfergy", repo: "copilot-projects", number: 173)
-        let rare = PullRequestKey(owner: "sirfergy", repo: "copilot-projects", number: 9)
-        let known = PullRequestKey(owner: "migueldeicaza", repo: "swiftterm", number: 673)
-        let evidence = ["s": TranscriptEvidence(urlMentions: [inScope: 50, mine: 98, rare: 2, known: 40])]
-        XCTAssertEqual(model.candidateKeys(evidence: evidence, known: [known], owners: ["GitHub"]), [mine])
-        XCTAssertEqual(model.candidateKeys(evidence: evidence, known: [], owners: []), [], "every owner is already searched")
-    }
-
-    @MainActor
     func testRefreshAskedForDuringARefreshRunsOnceMoreAndFailuresStayVisible() async throws {
         actor Calls { var count = 0; func bump() { count += 1 } }
         let calls = Calls()
@@ -418,6 +404,23 @@ final class PullRequestServiceTests: XCTestCase {
         let count = await calls.count
         XCTAssertEqual(count, 2, "requests during a refresh collapse into one more")
         XCTAssertEqual(model.phase, .failed(.notSignedIn))
+    }
+
+    @MainActor
+    func testChangingOwnersDropsRowsOutsideTheNewScopeAtOnce() {
+        let model = PullRequestsModel(
+            appModel: nil, defaults: UserDefaults(suiteName: UUID().uuidString)!, stateDirectory: nil,
+            loadAccounts: { [] }, copilotSessionId: { _ in nil }, sessions: { [:] }, projects: { [] }
+        )
+        model.show([makePR(1, repo: "github/github"), makePR(2, repo: "My-Org/tools")], links: [:])
+        model.owners = "MY-ORG"
+        XCTAssertEqual(model.pullRequests.map(\.key.description), ["my-org/tools#2"])
+        model.owners = ""
+        XCTAssertEqual(model.pullRequests.map(\.key.description), ["my-org/tools#2"], "widening waits for a refresh")
+        XCTAssertEqual(
+            PullRequestsModel.inScope([makePR(1), makePR(2, repo: "other/repo")], owners: ["GitHub"]).map(\.key.description),
+            ["github/github#1"]
+        )
     }
 
     func testShortReasonsAndGoalNames() {
@@ -503,6 +506,77 @@ final class PullRequestServiceRequestTests: XCTestCase {
         """
     }
 
+    @MainActor
+    func testOwnersAreStrictEvenForPullRequestsASessionKeepsNaming() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let copilotId = "abcdef12-0000-4000-8000-000000000001"
+        let log = root.appendingPathComponent("session-state/\(copilotId)/events.jsonl")
+        try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let elsewhere = String(repeating: "push me/elsewhere-branch https://github.com/someone/else/pull/9\n", count: 20)
+        try Data(elsewhere.utf8).write(to: log)
+        let previousHome = ProcessInfo.processInfo.environment["COPILOT_HOME"]
+        setenv("COPILOT_HOME", root.path, 1)
+        defer { if let previousHome { setenv("COPILOT_HOME", previousHome, 1) } else { unsetenv("COPILOT_HOME") } }
+
+        let search = """
+        {"data":{"viewer":{"login":"good"},"search":{"issueCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},
+         "nodes":[\(pullRequest(1, olderThreads: nil))]}}}
+        """
+        var queries: [String] = []
+        GraphQLStub.respond = { _, body in
+            let query = body["query"] as? String ?? ""
+            queries.append(query)
+            if query.contains("search(") {
+                XCTAssertEqual((body["variables"] as? [String: Any])?["q"] as? String,
+                               "is:pr is:open author:@me archived:false sort:updated-desc user:o user:other-org")
+                return (200, search)
+            }
+            if query.contains("mergeStateStatus") {
+                return (200, #"{"data":{"node":{"mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED"}}}"#)
+            }
+            return (500, "")
+        }
+        let session = Session(title: "Elsewhere - GitHub Copilot", cwd: "/tmp")
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        defaults.set("o, other-org", forKey: PullRequestsModel.ownersKey)
+        let model = PullRequestsModel(
+            appModel: nil, defaults: defaults, stateDirectory: root.appendingPathComponent("state"),
+            service: service, loadAccounts: { [GitHubAccount(login: "good", token: "good")] },
+            copilotSessionId: { _ in copilotId },
+            sessions: { [session.id: PullRequestSessionRef(session: session, projectId: "p", projectName: "P")] },
+            projects: { [] }
+        )
+        model.refresh()
+        for _ in 0..<250 where model.isRefreshing || model.lastUpdated == nil {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(model.pullRequests.map(\.key.description), ["o/r#1"])
+        XCTAssertFalse(queries.contains { $0.contains("repository(owner:") }, "nothing outside the owners is looked up")
+    }
+
+    func testOwnersButtonNamesTwoThenCounts() {
+        XCTAssertEqual(PullRequestsView.ownersLabel([]), "Every Owner")
+        XCTAssertEqual(PullRequestsView.ownersLabel(["github", "my-org"]), "github, my-org")
+        XCTAssertEqual(PullRequestsView.ownersLabel(["github", "my-org", "a", "b"]), "github, my-org +2")
+    }
+
+    @MainActor
+    func testReturnInTheOwnersFieldAppliesPendingText() {
+        var draft: [String] = []
+        var submitted: [String]?
+        let coordinator = OwnersTokenField.Coordinator(
+            owners: Binding(get: { draft }, set: { draft = $0 }), onSubmit: { submitted = $0 }
+        )
+        let field = NSTokenField()
+        field.stringValue = "github, @my-org"
+        XCTAssertFalse(coordinator.control(field, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertTab(_:))))
+        XCTAssertNil(submitted)
+        XCTAssertTrue(coordinator.control(field, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        XCTAssertEqual(submitted, ["github", "my-org"])
+        XCTAssertEqual(draft, ["github", "my-org"])
+    }
+
     func testSearchWarnsAboutAFailedAccountAndCountsOlderThreads() async throws {
         let search = """
         {"data":{"viewer":{"login":"good"},"search":{"issueCount":3,"pageInfo":{"hasNextPage":false,"endCursor":null},
@@ -548,26 +622,6 @@ final class PullRequestServiceRequestTests: XCTestCase {
         XCTAssertEqual(byNumber[1]?.isIncomplete, true, "an error inside a result marks only that result")
         XCTAssertEqual(byNumber[2]?.isIncomplete, false)
         XCTAssertFalse(PullRequestTriage.isReady(try XCTUnwrap(byNumber[1])))
-    }
-
-    func testLookupRetriesErroredAnswersAndTrustsSignedInAuthors() async throws {
-        let response = """
-        {"data":{"p0":null,"p1":null,"p2":{"pullRequest":\(pullRequest(13, olderThreads: nil, author: "other"))}},
-         "errors":[
-           {"message":"Resource protected by organization SAML enforcement.","type":"FORBIDDEN","path":["p0"]},
-           {"message":"Could not resolve to a PullRequest.","type":"NOT_FOUND","path":["p1","pullRequest"]},
-           {"message":"Something went wrong","path":["p2","pullRequest","reviewDecision"]}
-         ]}
-        """
-        GraphQLStub.respond = { _, _ in (200, response) }
-        let keys = [11, 12, 13].map { PullRequestKey(owner: "o", repo: "r", number: $0) }
-        // The search for "other" failed, so only its configured login says the pull request is its.
-        let lookup = await service.lookup(
-            keys, accounts: [GitHubAccount(login: "Other", token: "t")], logins: ["good"]
-        )
-        XCTAssertEqual(lookup.found.map(\.0.key), [keys[2]])
-        XCTAssertEqual(lookup.found.first?.0.isIncomplete, true)
-        XCTAssertEqual(lookup.missing, [keys[1]], "not found is an answer; a forbidden read isn't")
     }
 
     func testEnrichFailsClosedAndCountsStaleRequiredChecks() async throws {
