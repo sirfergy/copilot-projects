@@ -17,10 +17,6 @@ final class PullRequestsModel: ObservableObject {
     static let refreshInterval: TimeInterval = 300
     /// Data younger than this is fresh enough to show when the window reopens.
     static let reopenFreshness: TimeInterval = 60
-    /// URL mentions that make a pull request outside the chosen owners worth checking.
-    static let candidateMinimumMentions = 3
-    static let maximumCandidates = 30
-    static let declinedCandidateRetry: TimeInterval = 3_600
 
     @Published private(set) var pullRequests: [PullRequestSnapshot] = []
     @Published private(set) var links: [PullRequestKey: String] = [:]
@@ -32,7 +28,8 @@ final class PullRequestsModel: ObservableObject {
     @Published private(set) var warning: String?
     @Published private(set) var omitted = 0
     @Published private(set) var overrides: PullRequestGoalOverrides
-    /// Comma- or space-separated GitHub owners; empty means every owner.
+    /// Comma- or space-separated GitHub owners. Only pull requests they own are
+    /// shown; empty means every owner.
     @Published var owners: String {
         didSet { defaults.set(owners, forKey: Self.ownersKey) }
     }
@@ -51,13 +48,6 @@ final class PullRequestsModel: ObservableObject {
     private var refreshAgain = false
     /// When the last refresh started, successful or not.
     private var lastAttempt: Date?
-    private var declinedCandidates: [PullRequestKey: Date] = [:]
-    /// Head branches of pull requests found outside the chosen owners, kept so
-    /// the transcript index never drops and re-reads them between refreshes.
-    private var candidateBranches: [PullRequestKey: String] = [:]
-    /// Pull requests outside the chosen owners shown last refresh, kept when a
-    /// lookup fails rather than dropped for an hour.
-    private var linkedCandidates: [PullRequestKey: (PullRequestSnapshot, String)] = [:]
     private var workspaceChanges: AnyCancellable?
 
     init(
@@ -186,51 +176,15 @@ final class PullRequestsModel: ObservableObject {
         do {
             let accounts = try await loadAccounts()
             let owners = ownerList
-            var fetch = try await service.search(accounts: accounts, owners: owners)
+            let fetch = try await service.search(accounts: accounts, owners: owners)
             if firstLoad {
                 pullRequests = fetch.pullRequests
                 phase = .loaded
             }
 
             let sources = transcriptSources()
-            var branches = Set(fetch.pullRequests.map(\.headRefName).filter(PullRequestLinker.isDistinctiveBranch))
-            if !owners.isEmpty { branches.formUnion(candidateBranches.values) }
-            var evidence = await index.evidence(for: sources, branches: branches)
-            let candidates = candidateKeys(evidence: evidence, known: Set(fetch.tokens.keys), owners: owners)
-            if !candidates.isEmpty {
-                let lookup = await service.lookup(candidates, accounts: accounts, logins: fetch.logins)
-                let found = lookup.found
-                let now = Date()
-                for key in lookup.missing {
-                    declinedCandidates[key] = now
-                    candidateBranches[key] = nil
-                    linkedCandidates[key] = nil
-                }
-                for (pr, _) in found where PullRequestLinker.isDistinctiveBranch(pr.headRefName) {
-                    candidateBranches[pr.key] = pr.headRefName
-                }
-                let added = Set(found.map(\.0.headRefName).filter(PullRequestLinker.isDistinctiveBranch))
-                    .subtracting(branches)
-                if !added.isEmpty {
-                    branches.formUnion(added)
-                    evidence = await index.evidence(for: sources, branches: branches)
-                }
-                let foundLinks = PullRequestLinker.links(pullRequests: found.map(\.0), evidence: evidence)
-                for (pr, token) in found {
-                    if foundLinks[pr.key] != nil {
-                        fetch.add(pr, token: token)
-                        linkedCandidates[pr.key] = (pr, token)
-                    } else {
-                        declinedCandidates[pr.key] = now
-                        linkedCandidates[pr.key] = nil
-                    }
-                }
-                // A request that failed says nothing: keep what the last refresh showed.
-                let answered = Set(found.map(\.0.key)).union(lookup.missing)
-                for key in candidates where !answered.contains(key) {
-                    if let (pr, token) = linkedCandidates[key] { fetch.add(pr, token: token) }
-                }
-            }
+            let branches = Set(fetch.pullRequests.map(\.headRefName).filter(PullRequestLinker.isDistinctiveBranch))
+            let evidence = await index.evidence(for: sources, branches: branches)
             let newLinks = PullRequestLinker.links(pullRequests: fetch.pullRequests, evidence: evidence)
             if firstLoad {
                 pullRequests = fetch.pullRequests
@@ -279,28 +233,6 @@ final class PullRequestsModel: ObservableObject {
                   let path = PullRequestTranscriptIndex.transcriptPath(copilotSessionId: copilotId) else { return nil }
             return PullRequestTranscriptIndex.Source(sessionId: sessionId, path: path)
         }
-    }
-
-    /// Pull requests outside the chosen owners that a session keeps linking to.
-    func candidateKeys(
-        evidence: [String: TranscriptEvidence], known: Set<PullRequestKey>, owners: [String], now: Date = Date()
-    ) -> [PullRequestKey] {
-        guard !owners.isEmpty else { return [] }
-        let inScope = Set(owners.map { $0.lowercased() })
-        var mentions: [PullRequestKey: Int] = [:]
-        for session in evidence.values {
-            for (key, count) in session.urlMentions where count >= Self.candidateMinimumMentions {
-                mentions[key] = max(mentions[key] ?? 0, count)
-            }
-        }
-        return mentions
-            .filter { key, _ in
-                !known.contains(key) && !inScope.contains(key.owner)
-                    && (declinedCandidates[key].map { now.timeIntervalSince($0) >= Self.declinedCandidateRetry } ?? true)
-            }
-            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
-            .prefix(Self.maximumCandidates)
-            .map(\.key)
     }
 
     // MARK: Actions

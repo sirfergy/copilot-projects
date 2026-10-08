@@ -195,17 +195,27 @@ struct PullRequestsView: View {
         return Button {
             editingOwners.toggle()
         } label: {
-            Label(owners.isEmpty ? "Every Owner" : owners.joined(separator: ", "),
-                  systemImage: "line.3.horizontal.decrease.circle")
+            Label(Self.ownersLabel(owners), systemImage: "line.3.horizontal.decrease.circle")
                 .lineLimit(1)
         }
-        .help("Choose which organizations and users to include")
+        .help(owners.isEmpty
+              ? "Showing every owner. Choose organizations or users to narrow it."
+              : "Showing pull requests in \(owners.joined(separator: ", "))")
         .popover(isPresented: $editingOwners, arrowEdge: .bottom) {
             OwnersEditor(owners: $pullRequests.owners) {
                 editingOwners = false
                 pullRequests.refresh()
             }
             .background(AuxiliaryWindowMarker())
+        }
+    }
+
+    /// Two owners by name, then a count, so a long list doesn't crowd the header.
+    static func ownersLabel(_ owners: [String]) -> String {
+        switch owners.count {
+        case 0: return "Every Owner"
+        case 1, 2: return owners.joined(separator: ", ")
+        default: return "\(owners[0]), \(owners[1]) +\(owners.count - 2)"
         }
     }
 
@@ -267,7 +277,7 @@ struct PullRequestsView: View {
                 } description: {
                     Text(pullRequests.ownerList.isEmpty
                          ? "Pull requests you open appear here, grouped by the session working on them."
-                         : "Pull requests you open in \(pullRequests.ownerList.joined(separator: ", ")) appear here, plus any a session is working on.")
+                         : "Pull requests you open in \(pullRequests.ownerList.joined(separator: ", ")) appear here.")
                 }
             } else {
                 lanes(goals, placeholder: false)
@@ -745,19 +755,21 @@ struct PullRequestChip: View {
 private struct OwnersEditor: View {
     @Binding var owners: String
     let onDone: () -> Void
-    @State private var draft = ""
+    @State private var draft: [String] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Owners")
                 .font(.headline)
-            Text("Show your pull requests in these organizations or users, plus any a session is working on. Leave empty to include every owner.")
+            Text("Show only your pull requests in these organizations or users. Leave empty to include every owner.")
                 .font(.callout)
                 .foregroundStyle(StudioStyle.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
-            TextField("Owners", text: $draft, prompt: Text("github, my-org"))
-                .textFieldStyle(.roundedBorder)
-                .onSubmit(commit)
+            OwnersTokenField(owners: $draft)
+                .frame(minHeight: 24)
+            Text("Separate owners with commas or spaces; Return applies.")
+                .font(.caption)
+                .foregroundStyle(StudioStyle.secondaryText)
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onDone)
@@ -767,13 +779,65 @@ private struct OwnersEditor: View {
             }
         }
         .padding(14)
-        .frame(width: 320)
-        .onAppear { draft = owners }
+        .frame(width: 340)
+        .onAppear { draft = PullRequestsModel.ownerList(owners) }
     }
 
     private func commit() {
-        owners = PullRequestsModel.ownerList(draft).joined(separator: ", ")
+        owners = PullRequestsModel.ownerList(draft.joined(separator: ",")).joined(separator: ", ")
         onDone()
+    }
+}
+
+/// A native token field: each organization or user is its own token, removable
+/// on its own, so several owners read as a list rather than one string.
+private struct OwnersTokenField: NSViewRepresentable {
+    @Binding var owners: [String]
+
+    func makeCoordinator() -> Coordinator { Coordinator(owners: $owners) }
+
+    func makeNSView(context: Context) -> NSTokenField {
+        let field = NSTokenField()
+        field.tokenizingCharacterSet = CharacterSet(charactersIn: ",").union(.whitespacesAndNewlines)
+        field.placeholderString = "github, my-org"
+        field.objectValue = owners
+        field.delegate = context.coordinator
+        field.setAccessibilityLabel("Owners")
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }
+
+    func updateNSView(_ field: NSTokenField, context: Context) {
+        context.coordinator.owners = $owners
+        // Leave the field alone while someone is typing in it.
+        guard field.currentEditor() == nil, Coordinator.tokens(in: field) != owners else { return }
+        field.objectValue = owners
+    }
+
+    final class Coordinator: NSObject, NSTokenFieldDelegate {
+        var owners: Binding<[String]>
+
+        init(owners: Binding<[String]>) { self.owners = owners }
+
+        /// Every token, plus anything typed but not yet turned into one.
+        static func tokens(in field: NSTokenField) -> [String] {
+            PullRequestsModel.ownerList(field.stringValue)
+        }
+
+        /// Drops a leading @ and anything that can't be a GitHub owner.
+        func tokenField(_ tokenField: NSTokenField, shouldAdd tokens: [Any], at index: Int) -> [Any] {
+            PullRequestsModel.ownerList(tokens.compactMap { $0 as? String }.joined(separator: ","))
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTokenField else { return }
+            owners.wrappedValue = Self.tokens(in: field)
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            guard let field = notification.object as? NSTokenField else { return }
+            owners.wrappedValue = Self.tokens(in: field)
+        }
     }
 }
 
