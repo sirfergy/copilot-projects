@@ -367,6 +367,7 @@ struct PullRequestsView: View {
                                 animatesMoves: !reduceMotion && !placeholder,
                                 workspace: laneWorkspace,
                                 sessionsKnown: pullRequests.sessionsKnown,
+                                isMatchingSessions: pullRequests.isMatchingSessions,
                                 checkingStatus: checkingStatus,
                                 projects: pullRequests.projects,
                                 defaultProjectId: pullRequests.defaultProjectId,
@@ -428,7 +429,7 @@ struct PullRequestsView: View {
         proxy.scrollTo(next.id)
         if let goal = pullRequests.goals().first(where: { $0.items.contains { $0.id == next.id } }) {
             AccessibilityNotification.Announcement(
-                "\(next.pr.shortName), \(next.pr.title), \(goal.name). \(PullRequestChip.statusText(next))"
+                "\(next.pr.shortName), \(next.pr.title), \(goal.name). \(PullRequestChip.statusText(next, checkingStatus: checkingStatus))"
             ).post()
         }
         return .handled
@@ -546,6 +547,7 @@ private struct GoalLane: View {
     let animatesMoves: Bool
     let workspace: Workspace
     let sessionsKnown: Bool
+    let isMatchingSessions: Bool
     let checkingStatus: Bool
     let projects: [(id: String, name: String)]
     let defaultProjectId: String?
@@ -698,9 +700,10 @@ private struct GoalLane: View {
 
     /// Only a connected workspace can say a goal has no session.
     private var noSessionText: String {
-        guard workspace == .connected else { return "Session unknown" }
-        guard sessionsKnown else { return "Matching sessions…" }
-        return goal.kind == .manual ? "Your goal · no session" : "No session on this goal"
+        PullRequestsPresentation.sessionlessText(
+            isConnected: workspace == .connected, sessionsKnown: sessionsKnown,
+            isMatchingSessions: isMatchingSessions, isManualGoal: goal.kind == .manual
+        )
     }
 
     private var counts: some View {
@@ -843,10 +846,12 @@ struct PullRequestChip: View {
         PullRequestsPresentation.reasons(for: item, sessionStateInSummary: sessionStateInSummary)
     }
 
-    static func statusText(_ item: PullRequestItem) -> String {
-        item.assessment.reasons.isEmpty
+    static func statusText(_ item: PullRequestItem, checkingStatus: Bool = false) -> String {
+        let status = item.assessment.reasons.isEmpty
             ? item.assessment.status
             : item.assessment.reasons.map(\.label).joined(separator: ", ")
+        guard PullRequestsPresentation.hasPartialStatus(item.pr) else { return status }
+        return status + (checkingStatus ? ", checking status" : ", some status unavailable")
     }
 
     private var tint: Color {
@@ -911,8 +916,7 @@ struct PullRequestChip: View {
         .help(help)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(item.pr.shortName), \(item.pr.title)")
-        .accessibilityValue(Self.statusText(item) + (PullRequestsPresentation.hasPartialStatus(item.pr)
-                             ? (checkingStatus ? ", checking status" : ", some status unavailable") : ""))
+        .accessibilityValue(Self.statusText(item, checkingStatus: checkingStatus))
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction { onSelect() }
         .accessibilityAction(named: "Open on GitHub", onOpen)

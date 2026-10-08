@@ -72,6 +72,39 @@ final class PullRequestsPresentationTests: XCTestCase {
         XCTAssertTrue(PullRequestsPresentation.hasPartialStatus(pr))
     }
 
+    func testSessionlessTextOnlyClaimsAnActiveMatchIsMatching() {
+        for (connected, known, matching, manual, expected) in [
+            (false, false, true, false, "Session unknown"),
+            (true, false, true, false, "Matching sessions…"),
+            (true, false, false, false, "Sessions not matched"),
+            (true, true, false, false, "No session on this goal"),
+            (true, true, false, true, "Your goal · no session"),
+        ] {
+            XCTAssertEqual(PullRequestsPresentation.sessionlessText(
+                isConnected: connected, sessionsKnown: known, isMatchingSessions: matching, isManualGoal: manual
+            ), expected)
+        }
+    }
+
+    func testSpokenStatusIncludesPartialWarningAndEveryAttentionReason() {
+        var incomplete = makePR(review: .approved)
+        incomplete.isIncomplete = true
+        var uncounted = makePR(review: .approved)
+        uncounted.uncountedThreadsCursor = "more"
+        for pr in [incomplete, uncounted] {
+            let row = item(1, session: idle, pr: pr)
+            XCTAssertEqual(PullRequestChip.statusText(row), "Approved, some status unavailable")
+            XCTAssertEqual(PullRequestChip.statusText(row, checkingStatus: true), "Approved, checking status")
+        }
+        let waitingOnChecks = item(1, session: waiting, pr: makePR(checks: .failure, threads: 2))
+        XCTAssertEqual(
+            PullRequestChip.statusText(waitingOnChecks),
+            "Session needs your input, Checks failing, 2 unresolved threads, some status unavailable"
+        )
+        let complete = item(1, session: idle, pr: makePR(review: .approved))
+        XCTAssertEqual(PullRequestChip.statusText(complete, checkingStatus: true), "Approved")
+    }
+
     func testRefreshingCannotRedirectTheNextReturnToAnotherPullRequest() {
         let first = makePR(1).key
         let second = makePR(2).key

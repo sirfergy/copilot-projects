@@ -81,6 +81,8 @@ Changing the filter returns focus to the lanes. Keyboard actions resolve only
 against visible items: arrows move, Return goes to a connected session or GitHub,
 Command-Return opens GitHub, and Escape clears selection. Double-click and the
 existing chip context menu retain their destinations and manual goal assignment.
+Arrow-key announcements and chip accessibility values share the same spoken
+status, preserving every attention reason and any checking/unavailable qualifier.
 
 **Session context once, when truthful.** The goal summary carries shared session
 state. `sharesSessionState` compares every optional session ID, including nil.
@@ -113,8 +115,9 @@ The synthetic offline capture has no openable host and therefore no such button.
 
 **Unknown is not ready or sessionless.** `sessionsKnown` requires a completed
 match, a connected host, no match performed without live sessions, and no active
-matching pass. An unmatched connected goal says Matching sessions…; Start and
-Resume are withheld until matching and first-load status checking finish.
+matching pass. An unmatched connected goal says Matching sessions… only during
+an active pass, otherwise Sessions not matched (including after a failed rematch).
+Start and Resume are withheld until matching and first-load status checking finish.
 Ordinary refresh preserves known session actions/reasons; old PR links survive
 until the enriched list replaces them. Initial unenriched PRs are incomplete,
 not ready. Chips show Checking status… during initial enrichment and Some status
@@ -139,12 +142,13 @@ and do not turn Goal Lanes into an app-wide composition rule.
   `Sources/CopilotProjectsStyle/StudioStyle.swift`.
 - `Tests/PullRequestsPresentationTests.swift` covers whole-goal filtering with
   quiet siblings/nudges, shared versus mixed session reasons, all-reason
-  announcements, candidate-name suppression, partial status, and selection
+  announcements with partial-status qualifiers, candidate-name suppression,
+  active/inactive matching labels, partial status, and selection
   reconciliation. Its `PullRequestsDesignCaptureTests` also checks filtered
   empty states with complete/incomplete/uncounted status and ordinary
   refresh stability. `Tests/ResumableSessionsTests.swift` checks retention of
   old links through enrichment and first-load incomplete status, including
-  the checking-status empty state.
+  the checking-status empty state, and a failed rematch after reconnecting.
 - Native captures are outside the repository, under session
   `d550907b-ea83-42c8-81e0-5b459ea0eb06/files/pr-design-evidence/`:
   `mac-dark.png`, `mac-light.png`, `mac-compact.png`, and `mac-offline.png`.

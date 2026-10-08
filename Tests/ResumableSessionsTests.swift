@@ -677,6 +677,27 @@ final class ResumableRefreshTests: XCTestCase {
     }
 
     @MainActor
+    func testFailedRematchAfterReconnectDoesNotKeepSayingMatching() async throws {
+        let workspace = FakeWorkspace(fetches: [.unreachable])
+        let model = makeModel(workspace, finder: ScriptedResumableSearch([ResumableSearch()]))
+        try await refreshed(model)
+        XCTAssertFalse(model.isConnected)
+        XCTAssertFalse(model.sessionsKnown)
+        GraphQLStub.respond = { _, _ in (401, #"{"message":"Bad credentials"}"#) }
+        workspace.answer(fetches: [.snapshot(snapshot([]))])
+        await model.pollWorkspace()
+        try await waitUntil { !model.isRefreshing && model.warning != nil }
+        XCTAssertTrue(model.isConnected)
+        XCTAssertFalse(model.isMatchingSessions)
+        XCTAssertFalse(model.sessionsKnown)
+        XCTAssertEqual(PullRequestsPresentation.sessionlessText(
+            isConnected: model.isConnected, sessionsKnown: model.sessionsKnown,
+            isMatchingSessions: model.isMatchingSessions, isManualGoal: false
+        ), "Sessions not matched")
+        XCTAssertFalse(model.goals(now: testNow).flatMap(\.items).contains { $0.assessment.reasons.contains(.noSession) })
+    }
+
+    @MainActor
     func testARefreshOffersTheEndedSessionForAPullRequestNoLiveSessionDrives() async throws {
         let work = root.appendingPathComponent("work")
         let ended = try home.addSession(
