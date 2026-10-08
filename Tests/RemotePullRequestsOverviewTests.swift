@@ -561,6 +561,53 @@ final class RemotePullRequestsOverviewTests: XCTestCase {
         try await settle(model)
     }
 
+    func testExistingResumeRejectsOtherLiveClaimsButAllowsItsOwn() throws {
+        let pr = makePR()
+        let cid = UUID().uuidString.lowercased()
+        let candidate = ResumableSession(copilotSessionId: cid, name: "Previous", cwd: root.path, lastActive: now)
+        current?.projects[0].sessions = [
+            .init(id: "existing", title: "Existing", status: .idle, copilotSessionId: cid),
+            .init(id: "other", title: "Other", status: .running),
+        ]
+        let (provider, model) = make()
+        model.apply(.snapshot(current!))
+        model.show([pr], links: [:], resumable: [pr.key: candidate], updated: now)
+        let request = RemotePullRequestSessionRequest(
+            requestId: UUID(), kind: "resume", projectId: "p",
+            pullRequestKeys: [pr.key.description], copilotSessionId: cid
+        )
+        XCTAssertNil(provider.validate(request, workspace: current!, existingSessionId: "existing"))
+
+        current?.projects[0].sessions[1].pullRequestKeys = [pr.key.description]
+        XCTAssertEqual(provider.validate(request, workspace: current!, existingSessionId: "existing"), .conflict)
+        current?.projects[0].sessions[0].pullRequestKeys = [pr.key.description]
+        XCTAssertEqual(provider.validate(request, workspace: current!, existingSessionId: "existing"), .conflict,
+                       "A claim on this tab must not hide a second live claim")
+        current?.projects[0].sessions[1].pullRequestKeys = nil
+        XCTAssertNil(provider.validate(request, workspace: current!, existingSessionId: "existing"))
+        current?.projects[0].sessions[0].pullRequestKeys = nil
+
+        var overrides = PullRequestGoalOverrides()
+        overrides.assign(pr.key, to: "session:other")
+        let file = root.appendingPathComponent("goals.json")
+        try JSONEncoder().encode(overrides).write(to: file)
+        XCTAssertEqual(provider.validate(request, workspace: current!, existingSessionId: "existing"), .conflict)
+        try FileManager.default.removeItem(at: file)
+
+        model.show([pr], links: [pr.key: "other"], resumable: [pr.key: candidate], updated: now)
+        XCTAssertEqual(provider.validate(request, workspace: current!, existingSessionId: "existing"), .conflict)
+        model.show([pr], links: [pr.key: "existing"], resumable: [pr.key: candidate], updated: now)
+        XCTAssertNil(provider.validate(request, workspace: current!, existingSessionId: "existing"))
+
+        current?.projects[0].sessions[0].pullRequestKeys = [pr.key.description]
+        current?.projects[0].sessions[1].pullRequestKeys = [pr.key.description]
+        model.show([], links: [:], updated: now)
+        XCTAssertEqual(provider.validate(request, workspace: current!, existingSessionId: "existing"), .conflict,
+                       "Persisted claims still conflict when a PR leaves the open list")
+        current?.projects[0].sessions[1].pullRequestKeys = nil
+        XCTAssertNil(provider.validate(request, workspace: current!, existingSessionId: "existing"))
+    }
+
     func testExistingResumeRejectsTranscriptLinksFromAPreviousCopilotSessionInTheSameTab() {
         let pr = makePR()
         let previousId = UUID().uuidString.lowercased()

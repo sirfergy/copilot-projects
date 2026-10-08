@@ -105,12 +105,15 @@ public final class PullRequestsOverviewProvider {
             return .stale("Refresh pull requests; some requested pull requests are no longer in scope.")
         }
         let items = model.goals(now: clock()).flatMap(\.items)
+        let liveKeys = Set(model.liveSessions.values
+            .filter { $0.id != existingSessionId }.flatMap(\.pullRequestKeys))
+        guard keys.isDisjoint(with: liveKeys),
+              !items.contains(where: {
+                  keys.contains($0.pr.key.description) && $0.session != nil && $0.session?.id != existingSessionId
+              }) else {
+            return .conflict
+        }
         if request.kind == "start" || existingSessionId == nil {
-            let liveKeys = Set(model.liveSessions.values.flatMap(\.pullRequestKeys))
-            guard keys.isDisjoint(with: liveKeys),
-                  !items.contains(where: { keys.contains($0.pr.key.description) && $0.session != nil }) else {
-                return .conflict
-            }
             model.rematchHostedSessions()
             guard model.sessionsKnown else {
                 return .stale("Wait until pull request status and workspace sessions are ready.")
