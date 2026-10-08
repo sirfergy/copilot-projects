@@ -376,6 +376,12 @@ final class PullRequestsHostCommandTests: XCTestCase {
                        "another program searching for it")
         XCTAssertFalse(ProcessTree.resumes(["grep", "-r", "--resume=\(id)", "."], copilotSessionId: id))
         XCTAssertFalse(ProcessTree.resumes(["copilot", "--", "--resume=\(id)"], copilotSessionId: id))
+        XCTAssertFalse(ProcessTree.resumes(["rg", "-e", "copilot", "-e", "--resume=\(id)", "/work"], copilotSessionId: id))
+        XCTAssertFalse(ProcessTree.resumes(["rg", "-c", "x", "copilot", "--resume=\(id)"], copilotSessionId: id))
+        XCTAssertTrue(ProcessTree.resumes(["node", "/opt/homebrew/bin/copilot", "--resume=\(id)"], copilotSessionId: id))
+        XCTAssertTrue(ProcessTree.resumes(
+            ["/bin/sh", "-c", #"exec "$0" "$@""#, "/opt/copilot", "--no-remote", "--resume=\(id)"], copilotSessionId: id
+        ), "the wrapper that starts it")
 
         // A session started to talk about it, however its prompt quotes the command.
         for prompt in [

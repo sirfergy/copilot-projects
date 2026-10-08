@@ -226,32 +226,40 @@ public enum ProcessTree {
     /// Arguments that resume Copilot session `copilotSessionId`: the Copilot
     /// CLI's `--resume=<id>` or `--resume <id>` options, or the shell command
     /// Copilot Projects runs to resume it (`TerminalController.startupProgram`),
-    /// known by the fallback only it prints. A prompt never counts: neither the
-    /// value of a prompt option nor a command that merely quotes one; nor does
-    /// another program given the flag, as a search pattern say.
+    /// known by the fallback only it prints. Only Copilot's own options count:
+    /// not a prompt, a command that merely quotes one, or another program's
+    /// arguments, as when it searches for the flag.
     public static func resumes(_ arguments: [String], copilotSessionId: String) -> Bool {
         let id = copilotSessionId.lowercased()
         // Quoting a prompt escapes each `'`, so a prompt can never spell this.
         let fallback = "|| printf '\\n[copilot projects] could not resume copilot session \(id)\\n'"
+        let arguments = arguments.map { $0.lowercased() }
+        func name(_ path: String) -> String { (path as NSString).lastPathComponent }
+        guard let program = arguments.first else { return false }
+        // Where Copilot's own options start: after the CLI, after the `$0` a
+        // shell wrapper runs it as, or after the script its loader runs.
+        var options: Int?
+        if name(program) == "copilot" {
+            options = 1
+        } else if ["sh", "bash", "zsh", "dash", "ksh", "fish"].contains(name(program).trimmingCharacters(in: ["-"])),
+                  let shell = arguments.prefix(3).firstIndex(of: "-c"), shell + 1 < arguments.count {
+            if arguments[shell + 1].contains(fallback) { return true }
+            if shell + 2 < arguments.count, name(arguments[shell + 2]) == "copilot" { options = shell + 3 }
+        } else if name(program) == "node",
+                  let script = arguments.dropFirst().firstIndex(where: { !$0.hasPrefix("-") }),
+                  name(arguments[script]) == "copilot" || arguments[script].contains("/@github/copilot/") {
+            options = script + 1
+        }
+        guard var index = options else { return false }
         let promptOptions: Set<String> = ["--interactive", "-i", "--prompt", "-p"]
-        var copilot = false
-        var index = 0
-        while index < arguments.count {
-            let argument = arguments[index].lowercased()
-            let next = index + 1 < arguments.count ? arguments[index + 1].lowercased() : nil
-            if argument == "--" {
-                return false
-            } else if argument == "-c", let next {
-                if next.contains(fallback) { return true }
+        while index < arguments.count, arguments[index] != "--" {
+            let argument = arguments[index]
+            if promptOptions.contains(argument) {
                 index += 2
-            } else if promptOptions.contains(argument) {
-                index += 2
-            } else if copilot, argument == "--resume=" + id || (argument == "--resume" && next == id) {
+            } else if argument == "--resume=" + id
+                        || (argument == "--resume" && index + 1 < arguments.count && arguments[index + 1] == id) {
                 return true
             } else {
-                // The CLI, or the package a loader runs it from.
-                copilot = copilot || (argument as NSString).lastPathComponent == "copilot"
-                    || argument.contains("/@github/copilot/")
                 index += 1
             }
         }
