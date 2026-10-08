@@ -14,6 +14,12 @@ final class PullRequestsHostCommandTests: XCTestCase {
         let launches: () -> [(id: String, executable: String?, prompt: String?)]
         /// Another model over the same saved workspace and creation ledger, as after a restart.
         let restart: () -> AppModel
+        /// Stands in for the tabs whose shell is still bringing back a Copilot session.
+        let resuming: Resuming
+    }
+
+    private final class Resuming {
+        var tabs: [String: Set<String>] = [:]
     }
 
     private func withHost(
@@ -42,10 +48,12 @@ final class PullRequestsHostCommandTests: XCTestCase {
         try repository.save(PersistedState(projects: fixture, selectedProjectId: fixture[selectedProjectIndex].id))
         var launches: [(id: String, executable: String?, prompt: String?)] = []
         var models: [AppModel] = []
+        let resuming = Resuming()
         func makeModel() -> AppModel {
             let model = AppModel(
                 stateRepository: repository, isAppActive: { false },
                 agentActivityDirectory: root, resumeMarkerDirectory: root,
+                copilotResumeSessions: { resuming.tabs[$0] ?? [] },
                 remoteCopilotExecutable: { "/opt/copilot/bin/copilot" },
                 remoteReposDirectory: { root.path },
                 remoteSessionBackendAvailable: { true },
@@ -63,7 +71,7 @@ final class PullRequestsHostCommandTests: XCTestCase {
                 model.detachAllClients()
             }
         }
-        try body(Host(model: model, root: root, launches: { launches }, restart: makeModel))
+        try body(Host(model: model, root: root, launches: { launches }, restart: makeModel, resuming: resuming))
     }
 
     private func twoProjects(_ root: URL) -> [Project] {
@@ -279,8 +287,9 @@ final class PullRequestsHostCommandTests: XCTestCase {
             let copilotId = try home.addSession(cwd: folder.path, transcript: "")
             let other = try home.addSession(cwd: folder.path, transcript: "")
             let requestId = UUID().uuidString
-            @MainActor func resume(_ id: String = requestId, project: String = "A", copilot: String = copilotId) -> ControlResponse {
-                model.handle(request("resume-copilot-session", project: project, requestId: id, copilot: copilot))
+            @MainActor func resume(_ id: String = requestId, project: String = "A", copilot: String = copilotId,
+                                   on target: AppModel? = nil) -> ControlResponse {
+                (target ?? model).handle(request("resume-copilot-session", project: project, requestId: id, copilot: copilot))
             }
 
             let created = resume()
@@ -308,23 +317,122 @@ final class PullRequestsHostCommandTests: XCTestCase {
             XCTAssertEqual(resume(project: "B").code, "conflict")
             XCTAssertEqual(resume(copilot: other).code, "conflict")
 
-            // While it comes back, a new request finds the tab bringing it back.
-            try home.lock(copilotId)
+            // Before its shell has started the command that resumes it, a new request finds the tab.
             let starting = resume(UUID().uuidString, copilot: copilotId.uppercased())
             XCTAssertEqual(starting.code, "existing")
             XCTAssertEqual(starting.text, tab)
+            // Later, for as long as that command or the Copilot it started runs there, however
+            // long Copilot takes before it locks the session.
+            let later = Date().addingTimeInterval(AppModel.pullRequestsResumeStartupGrace + 60)
+            host.resuming.tabs[copilotId] = [tab]
+            let resuming = model.resumePullRequestsSession(
+                requestId: UUID(), projectId: "B", copilotSessionId: copilotId, now: later
+            )
+            XCTAssertEqual(resuming.code, "existing")
+            XCTAssertEqual(resuming.text, tab)
             // Once resumed, its marker names it wherever the request asks.
+            host.resuming.tabs = [:]
             try Data("\(copilotId)\n".utf8).write(to: host.root.appendingPathComponent("\(tab).copilot-session"))
             let marked = resume(UUID().uuidString, project: "B")
             XCTAssertEqual(marked.code, "existing")
             XCTAssertEqual(marked.text, tab)
             XCTAssertEqual(host.launches().count, 1)
 
-            model.closeSession(projectId: "A", sessionId: tab)
-            let ended = resume()
+            // A restart forgets nothing: an answer lost before it never opens a second tab.
+            let restarted = host.restart()
+            XCTAssertEqual(resume(on: restarted).code, "existing")
+            XCTAssertEqual(resume(on: restarted).text, tab)
+            XCTAssertEqual(resume(project: "B", on: restarted).code, "conflict")
+            XCTAssertEqual(resume(copilot: other, on: restarted).code, "conflict")
+            XCTAssertEqual(host.launches().count, 1)
+
+            restarted.closeSession(projectId: "A", sessionId: tab)
+            let ended = resume(on: restarted)
             XCTAssertFalse(ended.ok)
             XCTAssertEqual(ended.code, "gone", "an ended tab is never opened again for the same request")
+            XCTAssertEqual(resume(on: host.restart()).code, "gone", "nor after another restart")
             XCTAssertEqual(host.launches().count, 1)
+
+            try Data("{".utf8).write(to: host.root.appendingPathComponent("ledger.json"))
+            let unreadable = resume(UUID().uuidString, on: restarted)
+            XCTAssertEqual(unreadable.code, "persistence-unavailable", "an unreadable ledger never risks a second tab")
+            XCTAssertEqual(host.launches().count, 1)
+        }
+    }
+
+    func testOnlyTheCommandThatResumesASessionCountsAsBringingItBack() {
+        let id = "0f1e2d3c-4b5a-4000-8000-0000000000aa"
+        let resume = TerminalController.startupProgram(
+            shell: "/bin/zsh", copilotSessionId: id, resumeCopilotExecutable: "/opt/copilot", launchCopilotExecutable: nil
+        )
+        XCTAssertTrue(ProcessTree.resumes(resume, copilotSessionId: id.uppercased()), "the tab's shell while it runs")
+        XCTAssertTrue(ProcessTree.resumes(["/opt/copilot", "--no-remote", "--no-remote-export", "--resume=\(id)"],
+                                          copilotSessionId: id), "the Copilot it starts")
+
+        let prompt = "Explain why copilot --resume=\(id) failed"
+        let start = TerminalController.startupProgram(
+            shell: "/bin/zsh", copilotSessionId: nil, launchCopilotExecutable: "/opt/copilot",
+            launchCopilotInitialPrompt: prompt
+        )
+        XCTAssertFalse(ProcessTree.resumes(start, copilotSessionId: id), "a session started to talk about it")
+        XCTAssertFalse(ProcessTree.resumes(
+            ["/opt/copilot", "--no-remote", "--no-remote-export", "--interactive", prompt], copilotSessionId: id
+        ))
+    }
+
+    func testAResumeThatEndedWithoutResumingLetsTheNextRequestOpenItAgain() throws {
+        try withHost(projects: twoProjects) { host in
+            let model = host.model
+            let home = try CopilotHomeFixture(root: host.root.appendingPathComponent("copilot"))
+            let copilotId = try home.addSession(cwd: host.root.path, transcript: "")
+            let start = Date()
+            let first = model.resumePullRequestsSession(
+                requestId: UUID(), projectId: "A", copilotSessionId: copilotId, now: start
+            )
+            XCTAssertEqual(first.code, "created")
+            let failed = try XCTUnwrap(first.text)
+
+            // Copilot exited without resuming it: no marker, no lock, and its tab is a plain shell.
+            let later = start.addingTimeInterval(AppModel.pullRequestsResumeStartupGrace + 60)
+            let second = model.resumePullRequestsSession(
+                requestId: UUID(), projectId: "A", copilotSessionId: copilotId, now: later
+            )
+            XCTAssertEqual(second.code, "created")
+            let retried = try XCTUnwrap(second.text)
+            XCTAssertNotEqual(retried, failed)
+            XCTAssertEqual(host.launches().map(\.id), [failed, retried])
+
+            // Only the tab still bringing it back has it, not the one where it failed.
+            host.resuming.tabs[copilotId] = [retried]
+            let third = model.resumePullRequestsSession(
+                requestId: UUID(), projectId: "A", copilotSessionId: copilotId, now: later.addingTimeInterval(60)
+            )
+            XCTAssertEqual(third.code, "existing")
+            XCTAssertEqual(third.text, retried)
+            XCTAssertEqual(host.launches().count, 2)
+        }
+    }
+
+    func testAResumeThatCouldNotBeSavedKeepsItsTabForTheRetry() throws {
+        try withHost(projects: twoProjects) { host in
+            let model = host.model
+            let home = try CopilotHomeFixture(root: host.root.appendingPathComponent("copilot"))
+            let copilotId = try home.addSession(cwd: host.root.path, transcript: "")
+            try Data(#"{"records":[]}"#.utf8).write(to: host.root.appendingPathComponent("ledger.json"))
+            let requestId = UUID().uuidString
+            XCTAssertEqual(chmod(host.root.path, 0o500), 0)
+            let unsaved = model.handle(request("resume-copilot-session", project: "A", requestId: requestId, copilot: copilotId))
+            XCTAssertEqual(chmod(host.root.path, 0o700), 0)
+            XCTAssertEqual(unsaved.code, "persistence-unavailable")
+            XCTAssertEqual(host.launches().map(\.id), [requestId], "the tab stays open")
+
+            let retried = model.handle(request("resume-copilot-session", project: "A", requestId: requestId, copilot: copilotId))
+            XCTAssertEqual(retried.code, "existing")
+            XCTAssertEqual(retried.text, requestId)
+            XCTAssertEqual(host.launches().count, 1)
+            XCTAssertEqual(host.restart().handle(
+                request("resume-copilot-session", project: "A", requestId: requestId, copilot: copilotId)
+            ).text, requestId, "and is saved for good")
         }
     }
 

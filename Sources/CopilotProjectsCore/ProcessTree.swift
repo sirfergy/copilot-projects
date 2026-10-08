@@ -182,6 +182,65 @@ public enum ProcessTree {
         return sessions
     }
 
+    /// Tabs still bringing back Copilot session `copilotSessionId`: the command
+    /// that resumes it, or the Copilot CLI it started, runs in them. Once that CLI
+    /// exits, the tab's shell replaces the command and the tab no longer counts.
+    /// dtach keeps the command among its arguments for the tab's life, so it never counts.
+    public static func sessionsResuming(copilotSessionId: String, in snap: Snapshot) -> Set<String> {
+        sessionsResuming(
+            copilotSessionId: copilotSessionId,
+            in: snap,
+            argumentsOf: { inspect($0).args },
+            dtachProcesses: dtachProcesses(in: snap),
+            sessionsDirectory: Paths.sessionsDir
+        )
+    }
+
+    static func sessionsResuming(
+        copilotSessionId: String,
+        in snap: Snapshot,
+        argumentsOf: (pid_t) -> [String],
+        dtachProcesses: [DtachProcess],
+        sessionsDirectory: URL
+    ) -> Set<String> {
+        var sessions = Set<String>()
+        for dtach in dtachProcesses {
+            guard let socket = dtach.socketPath,
+                  let sessionId = sessionId(fromDtachSocket: socket, sessionsDirectory: sessionsDirectory),
+                  !sessions.contains(sessionId) else { continue }
+            var pending = snap.childrenOf[dtach.pid] ?? []
+            var seen = Set<pid_t>()
+            while let pid = pending.popLast() {
+                guard seen.insert(pid).inserted else { continue }
+                if snap.nameOf[pid] != "dtach",
+                   resumes(argumentsOf(pid), copilotSessionId: copilotSessionId) {
+                    sessions.insert(sessionId)
+                    break
+                }
+                pending.append(contentsOf: snap.childrenOf[pid] ?? [])
+            }
+        }
+        return sessions
+    }
+
+    /// Arguments that resume Copilot session `copilotSessionId`: the Copilot
+    /// CLI's `--resume=<id>` or `--resume <id>`, or the shell command Copilot
+    /// Projects runs to resume it, which quotes the flag and falls back after it
+    /// (`TerminalController.startupProgram`). A prompt that mentions it never counts.
+    public static func resumes(_ arguments: [String], copilotSessionId: String) -> Bool {
+        let id = copilotSessionId.lowercased()
+        let flag = "--resume=" + id
+        let command = "'\(flag)' ||"
+        for (index, argument) in arguments.enumerated() {
+            let argument = argument.lowercased()
+            if argument == flag || argument.contains(command) { return true }
+            if argument == "--resume", index + 1 < arguments.count, arguments[index + 1].lowercased() == id {
+                return true
+            }
+        }
+        return false
+    }
+
     /// Resolve the Copilot Projects tab that owns `pid`.
     ///
     /// Managed terminals run below a dtach process whose socket filename is the

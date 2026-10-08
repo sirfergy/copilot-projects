@@ -529,7 +529,9 @@ final class PullRequestsWorkspaceModelTests: XCTestCase {
         let copilotId = "0f1e2d3c-4b5a-4000-8000-0000000000bb"
         let workspace = FakeWorkspace(fetches: [.snapshot(fixtureSnapshot)])
         workspace.answer(resumes: [
-            .unreachable, .unreachable, .refused(code: "gone", message: "That Copilot session no longer exists."),
+            .unreachable, .unreachable,
+            .refused(code: "persistence-unavailable", message: "Copilot Projects couldn’t save the session."),
+            .refused(code: "gone", message: "That Copilot session no longer exists."),
         ])
         let recorder = HostRecorder()
         let model = makeModel(workspace, recorder: recorder)
@@ -548,6 +550,12 @@ final class PullRequestsWorkspaceModelTests: XCTestCase {
         model.resume(candidate, projectId: "p")
         try await waitUntil { model.resumingSessions.isEmpty }
         XCTAssertEqual(workspace.resumeCalls.count, 3)
+        XCTAssertEqual(recorder.alerts.last, "Could Not Resume Session: Copilot Projects couldn’t save the session.")
+        XCTAssertEqual(model.resumable[pr.key], candidate, "a resume it couldn't save is still offered")
+
+        model.resume(candidate, projectId: "p")
+        try await waitUntil { model.resumingSessions.isEmpty }
+        XCTAssertEqual(workspace.resumeCalls.count, 4)
         XCTAssertEqual(Set(workspace.resumeCalls.map(\.requestId)).count, 1, "trying again replays the same request")
         XCTAssertEqual(recorder.alerts.last, "Could Not Resume Session: That Copilot session no longer exists.")
         XCTAssertTrue(model.resumable.isEmpty)

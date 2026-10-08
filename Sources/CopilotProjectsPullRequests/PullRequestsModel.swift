@@ -681,7 +681,8 @@ final class PullRequestsModel: ObservableObject {
             resumingSessions.remove(copilotId)
             presentError(title, "Copilot Projects didn’t say which session it opened.")
         case .refused(let code, let message):
-            pendingResumes[copilotId] = nil
+            // An unsaved resume keeps its request id, so trying again opens it once.
+            if code != "persistence-unavailable" { pendingResumes[copilotId] = nil }
             resumingSessions.remove(copilotId)
             if let code, ["gone", "in-use", "invalid"].contains(code) {
                 resumable = resumable.filter { $0.value.copilotSessionId != copilotId }

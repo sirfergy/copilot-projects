@@ -125,6 +125,19 @@ enum TranscriptMentionScanner {
         return 0
     }
 
+    /// Where reading `count` bytes from `start` stops: after the last line within
+    /// them, or after the first line when that is longer. Never past `limit`.
+    static func lineEnd(_ bytes: UnsafeBufferPointer<UInt8>, from start: Int, after count: Int, limit: Int) -> Int {
+        let newline = UInt8(ascii: "\n")
+        let stop = min(start + count, limit)
+        var index = stop
+        while index > start, bytes[index - 1] != newline { index -= 1 }
+        guard index == start else { return index }
+        index = stop
+        while index < limit, bytes[index - 1] != newline { index += 1 }
+        return index
+    }
+
     static func count(in bytes: UnsafeBufferPointer<UInt8>, range: Range<Int>, patterns: Patterns) -> Counts {
         var counts = Counts()
         guard !patterns.isEmpty, !range.isEmpty else { return counts }
@@ -290,18 +303,42 @@ actor PullRequestTranscriptIndex {
     static func update(
         _ previous: Entry?, path: String, patterns: TranscriptMentionScanner.Patterns
     ) -> (Entry?, Date?) {
+        let result = scan(previous, path: path, patterns: patterns, limit: nil)
+        return (result.entry, result.modified)
+    }
+
+    struct Scan: Sendable {
+        /// Nil when the file is gone.
+        var entry: Entry?
+        var modified: Date?
+        /// Bytes read, including any read again for new branch names.
+        var read = 0
+        /// Every complete line has been read.
+        var finished = true
+    }
+
+    /// Like `update`, but reading whole lines of at most `limit` bytes, or the one
+    /// line it starts in when that is longer. A limited read never reads again
+    /// what was read before: given a branch `previous` wasn't read for, it starts over.
+    static func scan(
+        _ previous: Entry?, path: String, patterns: TranscriptMentionScanner.Patterns, limit: Int?
+    ) -> Scan {
         var info = stat()
-        guard stat(path, &info) == 0 else { return (nil, nil) }
+        guard stat(path, &info) == 0 else { return Scan() }
         let device = UInt64(bitPattern: Int64(info.st_dev))
         let inode = UInt64(info.st_ino)
         let modified = Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec))
-        var entry = previous ?? Entry(device: device, inode: inode, scannedBytes: 0, branchMentions: [:], urlMentions: [:])
-        if entry.device != device || entry.inode != inode || Int(info.st_size) < entry.scannedBytes {
-            entry = Entry(device: device, inode: inode, scannedBytes: 0, branchMentions: [:], urlMentions: [:])
+        let fresh = Entry(device: device, inode: inode, scannedBytes: 0, branchMentions: [:], urlMentions: [:])
+        var entry = previous ?? fresh
+        if entry.device != device || entry.inode != inode || Int(info.st_size) < entry.scannedBytes
+            || (limit != nil && entry.scannedBytes > 0 && patterns.branches.contains { entry.branchMentions[$0] == nil }) {
+            entry = fresh
         }
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .alwaysMapped) else {
-            return (previous, modified)
+            return Scan(entry: previous, modified: modified)
         }
+        var read = 0
+        var finished = true
         data.withUnsafeBytes { raw in
             let bytes = raw.bindMemory(to: UInt8.self)
             let complete = TranscriptMentionScanner.completeLength(bytes)
@@ -313,18 +350,25 @@ actor PullRequestTranscriptIndex {
                     patterns: TranscriptMentionScanner.Patterns(branches: added, includeURLs: false)
                 )
                 entry.branchMentions.merge(counts.branches, uniquingKeysWith: +)
+                read += scanned
             }
             for branch in added where entry.branchMentions[branch] == nil { entry.branchMentions[branch] = 0 }
-            if complete > scanned {
-                let counts = TranscriptMentionScanner.count(in: bytes, range: scanned..<complete, patterns: patterns)
+            var end = complete
+            if let limit, complete - scanned > max(limit, 1) {
+                end = TranscriptMentionScanner.lineEnd(bytes, from: scanned, after: max(limit, 1), limit: complete)
+                finished = end == complete
+            }
+            if end > scanned {
+                let counts = TranscriptMentionScanner.count(in: bytes, range: scanned..<end, patterns: patterns)
                 entry.branchMentions.merge(counts.branches, uniquingKeysWith: +)
                 for (key, count) in counts.urls { entry.urlMentions[key.description, default: 0] += count }
+                read += end - scanned
             }
-            entry.scannedBytes = complete
+            entry.scannedBytes = end
         }
         let wanted = Set(patterns.branches)
         entry.branchMentions = entry.branchMentions.filter { wanted.contains($0.key) }
-        return (entry, modified)
+        return Scan(entry: entry, modified: modified, read: read, finished: finished)
     }
 
     private func loadIfNeeded() {

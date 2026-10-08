@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 import XCTest
-import CopilotProjectsCore
+@testable import CopilotProjectsCore
 
 final class CopilotSessionStoreTests: XCTestCase {
     private var root: URL!
@@ -106,5 +106,50 @@ final class CopilotSessionStoreTests: XCTestCase {
             try FileManager.default.attributesOfItem(atPath: own.path)[.modificationDate] as? Date,
             Date(timeIntervalSince1970: 1_000_000), "the lock is never touched"
         )
+    }
+
+    func testATabIsBringingASessionBackOnlyWhileItsCommandOrCopilotRuns() {
+        let tab = "D7A1C176-B80F-4E6A-B0B5-378A70ACE162"
+        let done = "6780CCA3-92AF-4506-95F2-F018A195A1A1"
+        let id = "0f1e2d3c-4b5a-4000-8000-0000000000aa"
+        let sessions = URL(fileURLWithPath: "/tmp/state/sessions", isDirectory: true)
+        let command = "/bin/sh -c 'exec \"$0\" \"$@\"' '/opt/copilot' '--no-remote' '--resume=\(id)'"
+            + " || printf 'could not resume'; exec '/bin/zsh' -l"
+        func dtach(_ session: String, _ pid: pid_t) -> [String] {
+            ["dtach", "-A", sessions.appendingPathComponent("\(session).sock").path, "-r", "winch", "-z", "-E",
+             "/bin/zsh", "-l", "-c", command]
+        }
+        var snapshot = ProcessTree.Snapshot()
+        snapshot.childrenOf = [30: [20], 20: [10], 31: [21]]
+        snapshot.nameOf = [30: "dtach", 20: "zsh", 10: "copilot", 31: "dtach", 21: "zsh"]
+        var arguments: [pid_t: [String]] = [
+            30: dtach(tab, 30), 20: ["/bin/zsh", "-l", "-c", command], 10: ["/opt/copilot", "--no-remote", "--resume=\(id)"],
+            // Its Copilot exited without resuming: the shell replaced the command.
+            31: dtach(done, 31), 21: ["/bin/zsh", "-l"],
+        ]
+        let processes = [
+            ProcessTree.DtachProcess(pid: 30, parentPID: 1, socketPath: dtach(tab, 30)[2], isMaster: true),
+            ProcessTree.DtachProcess(pid: 31, parentPID: 1, socketPath: dtach(done, 31)[2], isMaster: true),
+        ]
+        func resuming() -> Set<String> {
+            ProcessTree.sessionsResuming(
+                copilotSessionId: id.uppercased(), in: snapshot, argumentsOf: { arguments[$0] ?? [] },
+                dtachProcesses: processes, sessionsDirectory: sessions
+            )
+        }
+        XCTAssertEqual(resuming(), [tab], "dtach's own copy of the command never counts")
+
+        snapshot.childrenOf[20] = nil
+        arguments[10] = nil
+        XCTAssertEqual(resuming(), [tab], "before the shell has started Copilot")
+
+        arguments[20] = ["/bin/zsh", "-l"]
+        XCTAssertEqual(resuming(), [])
+
+        arguments[20] = ["copilot", "--resume", id]
+        XCTAssertEqual(resuming(), [tab], "typed by hand")
+        XCTAssertFalse(ProcessTree.resumes(["copilot", "--resume=0f1e2d3c-4b5a-4000-8000-0000000000ab"],
+                                           copilotSessionId: id))
+        XCTAssertFalse(ProcessTree.resumes(["copilot", "--resume"], copilotSessionId: id))
     }
 }

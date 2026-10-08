@@ -188,9 +188,12 @@ final class ResumableSessionFinderTests: XCTestCase {
     func testSessionsThatNameThePullRequestAreReadFirstAndTheRestWaitForTheBudget() async throws {
         let home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
         let pr = makePR(9, repo: "o/r", branch: "me/budgeted-branch")
+        // As long as the other, so the budget fits exactly one of them.
         let named = try home.addSession(
             cwd: work, updated: Date(timeIntervalSince1970: 1_700_000_000),
-            transcript: transcript(mentioning: pr.headRefName, times: 3), said: ["see github.com/o/r/pull/9"]
+            transcript: transcript(mentioning: pr.headRefName, times: 3)
+                + transcript(mentioning: "me/unrelated-branc", times: 3),
+            said: ["see github.com/o/r/pull/9"]
         )
         let numbered = try home.addSession(
             cwd: work, updated: Date(timeIntervalSince1970: 1_800_000_000),
@@ -201,7 +204,8 @@ final class ResumableSessionFinderTests: XCTestCase {
             try Data(contentsOf: home.root.appendingPathComponent("session-state/\(id)/events.jsonl")).count
         }
 
-        let first = finder(home, budget: 1, cache: cache)
+        let first = finder(home, budget: try size(named), cache: cache)
+        XCTAssertEqual(try size(named), try size(numbered))
         var found = await first.find(for: [pr], liveCopilotSessionIds: [])
         XCTAssertEqual(found[pr.key]?.copilotSessionId, named, "the session naming the pull request is read first")
         var read = await first.lastBytesRead()
@@ -250,6 +254,86 @@ final class ResumableSessionFinderTests: XCTestCase {
         let found = await finder(home).find(for: [pr], liveCopilotSessionIds: [])
         XCTAssertNotNil(found[pr.key])
         XCTAssertNotEqual(found[pr.key]?.copilotSessionId, quiet, "only the twelve most recent are read")
+    }
+
+    func testMoreCandidatesThanTheCacheHoldsAreAllRead() async throws {
+        let home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
+        let count = ResumableTranscriptCache.capacity + 1
+        var pullRequests: [PullRequestSnapshot] = []
+        for number in 1...count {
+            let pr = makePR(number, repo: "o/r", branch: "me/one-of-many-\(number)")
+            try home.addSession(
+                cwd: work, transcript: transcript(mentioning: pr.headRefName, times: 3), said: ["github.com/o/r/pull/\(number)"]
+            )
+            pullRequests.append(pr)
+        }
+        let search = await finder(home, cache: root.appendingPathComponent("state/resumable-index.json"))
+            .search(for: pullRequests, liveCopilotSessionIds: [])
+        XCTAssertEqual(search.sessions.count, count, "the last one is read too, not left out every time")
+        XCTAssertNotNil(search.sessions[pullRequests[count - 1].key])
+        XCTAssertFalse(search.deferred)
+    }
+
+    func testATranscriptBiggerThanTheBudgetIsReadAPieceAtATime() async throws {
+        let home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
+        let pr = makePR(31, repo: "o/r", branch: "me/long-running-branch")
+        let line = transcript(mentioning: pr.headRefName, times: 1).utf8.count
+        let id = try home.addSession(
+            cwd: work, transcript: transcript(mentioning: pr.headRefName, times: 6), said: ["github.com/o/r/pull/31"]
+        )
+        let cache = root.appendingPathComponent("state/resumable-index.json")
+        var passes: [(found: String?, read: Int, deferred: Bool)] = []
+        for _ in 0..<4 {
+            // Each pass by a relaunched finder: what was read is kept.
+            let finder = finder(home, budget: 2 * line + 1, cache: cache)
+            let search = await finder.search(for: [pr], liveCopilotSessionIds: [])
+            let read = await finder.lastBytesRead()
+            passes.append((search.sessions[pr.key]?.copilotSessionId, read, search.deferred))
+        }
+        XCTAssertEqual(passes.map(\.read), [2 * line, 2 * line, 2 * line, 0], "whole lines, within the budget")
+        XCTAssertEqual(passes.map(\.deferred), [true, true, false, false])
+        XCTAssertEqual(passes.map(\.found), [nil, id, id, id], "found once enough of it is read")
+
+        // A line longer than the budget is still read, one line at a time.
+        let oneByte = self.finder(home, budget: 1)
+        let search = await oneByte.search(for: [pr], liveCopilotSessionIds: [])
+        let read = await oneByte.lastBytesRead()
+        XCTAssertEqual(read, line)
+        XCTAssertTrue(search.deferred)
+    }
+
+    func testANewBranchIsCountedOverSeveralPassesWithoutLosingWhatWasFound() async throws {
+        let home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
+        let first = makePR(41, repo: "o/r", branch: "me/first-branch-x")
+        let second = makePR(42, repo: "o/r", branch: "me/other-branch-y")
+        let half = transcript(mentioning: second.headRefName, times: 3)
+        let id = try home.addSession(
+            cwd: work, transcript: half + transcript(mentioning: first.headRefName, times: 3),
+            said: ["github.com/o/r/pull/41 and github.com/o/r/pull/42"]
+        )
+        let cache = root.appendingPathComponent("state/resumable-index.json")
+        let found = await finder(home, cache: cache).find(for: [first], liveCopilotSessionIds: [])
+        XCTAssertEqual(found[first.key]?.copilotSessionId, id)
+
+        var finder = finder(home, budget: half.utf8.count, cache: cache)
+        var search = await finder.search(for: [first, second], liveCopilotSessionIds: [])
+        var read = await finder.lastBytesRead()
+        XCTAssertEqual(read, half.utf8.count, "the new branch is counted from the start, a budget at a time")
+        XCTAssertTrue(search.deferred)
+        XCTAssertEqual(search.sessions.mapValues(\.copilotSessionId), [first.key: id, second.key: id],
+                       "what was found stays, and what the new branch has so far counts")
+
+        finder = self.finder(home, budget: half.utf8.count, cache: cache)
+        search = await finder.search(for: [first, second], liveCopilotSessionIds: [])
+        read = await finder.lastBytesRead()
+        XCTAssertEqual(read, half.utf8.count, "a relaunch picks up where it stopped")
+        XCTAssertFalse(search.deferred)
+        XCTAssertEqual(search.sessions.mapValues(\.copilotSessionId), [first.key: id, second.key: id])
+
+        search = await finder.search(for: [first, second], liveCopilotSessionIds: [])
+        read = await finder.lastBytesRead()
+        XCTAssertEqual(read, 0)
+        XCTAssertEqual(search.sessions.count, 2)
     }
 }
 
@@ -525,7 +609,8 @@ final class ResumableRefreshTests: XCTestCase {
             transcript: transcript(mentioning: branch, times: 6), refs: [1]
         )
         let workspace = FakeWorkspace(snapshot: snapshot([]))
-        let model = makeModel(workspace, finder: ResumableSessionFinder(store: home.store, cacheURL: nil, byteBudget: 1))
+        let budget = try Data(contentsOf: home.root.appendingPathComponent("session-state/\(numbered)/events.jsonl")).count
+        let model = makeModel(workspace, finder: ResumableSessionFinder(store: home.store, cacheURL: nil, byteBudget: budget))
         try await refreshed(model)
         try await waitUntil { model.resumable[self.key]?.copilotSessionId == numbered }
         let loads = await accountLoads.value

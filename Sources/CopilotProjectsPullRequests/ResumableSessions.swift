@@ -121,7 +121,8 @@ actor ResumableSessionFinder: ResumableSessionSearching {
                 }
             }
         }
-        let requests = order.prefix(ResumableTranscriptCache.capacity).compactMap { id in
+        // All of them: the budget, not the cache's capacity, decides what waits.
+        let requests = order.compactMap { id in
             store.transcriptPath(for: id).map {
                 ResumableTranscriptCache.Request(copilotSessionId: id, path: $0, branches: branches[id] ?? [])
             }
@@ -211,8 +212,9 @@ actor ResumableSessionFinder: ResumableSessionSearching {
 }
 
 /// Mention counts for ended sessions' transcripts, kept on disk. Ended
-/// transcripts stop growing, so once read they cost nothing. Entries stay
-/// until the least recently used make room; one just used never does.
+/// transcripts stop growing, so once read they cost nothing. A transcript too
+/// big for one budget is read over several, picking up where the last stopped.
+/// Entries stay until the least recently used make room; one just used never does.
 actor ResumableTranscriptCache {
     struct Request: Sendable {
         let copilotSessionId: String
@@ -222,6 +224,9 @@ actor ResumableTranscriptCache {
 
     private struct Item: Codable {
         var entry: PullRequestTranscriptIndex.Entry
+        /// The transcript read again from the start for branches `entry` wasn't
+        /// read for; it replaces `entry` once it has caught up.
+        var rescan: PullRequestTranscriptIndex.Entry?
         var lastUsed: Date
     }
 
@@ -257,51 +262,56 @@ actor ResumableTranscriptCache {
             let request: Request
             let previous: PullRequestTranscriptIndex.Entry?
             let patterns: TranscriptMentionScanner.Patterns
-            let backfills: Bool
+            let rescans: Bool
+            let limit: Int
         }
         var scans: [Scan] = []
-        var current: [String: (entry: PullRequestTranscriptIndex.Entry, modified: Date)] = [:]
+        var current: [String: (item: Item, modified: Date)] = [:]
         var spent = 0
-        var skipped = false
+        var unread = false
         for request in requests {
             var info = stat()
             guard stat(request.path, &info) == 0 else { continue }
             let modified = Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec))
             let size = Int(info.st_size)
-            var previous = items[request.path]?.entry
-            if let entry = previous, entry.device != UInt64(bitPattern: Int64(info.st_dev))
-                || entry.inode != UInt64(info.st_ino) || size < entry.scannedBytes {
-                previous = nil
+            func reads(_ entry: PullRequestTranscriptIndex.Entry) -> Bool {
+                entry.device == UInt64(bitPattern: Int64(info.st_dev)) && entry.inode == UInt64(info.st_ino)
+                    && size >= entry.scannedBytes
             }
+            var item = items[request.path]
+            if let known = item, !reads(known.entry) { item = nil }
+            if let rescan = item?.rescan, !reads(rescan) { item?.rescan = nil }
             // Branches it was read for before stay, so a pull request that comes
             // back never costs a second read.
-            let branches = request.branches.union(previous.map { Array($0.branchMentions.keys) } ?? [])
-            let backfills = previous.map { entry in branches.contains { entry.branchMentions[$0] == nil } } ?? false
-            let cost = previous.map { (size - $0.scannedBytes) + (backfills ? $0.scannedBytes : 0) } ?? size
-            if let previous { current[request.copilotSessionId] = (previous, modified) }
-            guard cost > 0 else { continue }
-            if spent > 0, spent + cost > budget {
-                skipped = true
+            var branches = request.branches
+            for entry in [item?.entry, item?.rescan].compactMap({ $0 }) { branches.formUnion(entry.branchMentions.keys) }
+            if let item { current[request.copilotSessionId] = (item, modified) }
+            let rescans = item.map { known in branches.contains { known.entry.branchMentions[$0] == nil } } ?? false
+            let previous = rescans ? item?.rescan : item?.entry
+            let remaining = size - (previous?.scannedBytes ?? 0)
+            guard remaining > 0 else { continue }
+            guard spent < budget else {
+                unread = true
                 continue
             }
-            spent += cost
+            let limit = min(remaining, budget - spent)
+            spent += limit
             scans.append(Scan(
                 request: request, previous: previous,
                 patterns: TranscriptMentionScanner.Patterns(branches: branches.sorted(), includeURLs: true),
-                backfills: backfills
+                rescans: rescans, limit: limit
             ))
         }
 
-        let results = await withTaskGroup(of: (Scan, PullRequestTranscriptIndex.Entry?, Date?).self) { group in
-            var results: [(Scan, PullRequestTranscriptIndex.Entry?, Date?)] = []
+        let results = await withTaskGroup(of: (Scan, PullRequestTranscriptIndex.Scan).self) { group in
+            var results: [(Scan, PullRequestTranscriptIndex.Scan)] = []
             var pending = scans.makeIterator()
             func addNext() -> Bool {
                 guard !Task.isCancelled, let scan = pending.next() else { return false }
                 group.addTask(priority: .utility) {
-                    let (entry, modified) = PullRequestTranscriptIndex.update(
-                        scan.previous, path: scan.request.path, patterns: scan.patterns
-                    )
-                    return (scan, entry, modified)
+                    (scan, PullRequestTranscriptIndex.scan(
+                        scan.previous, path: scan.request.path, patterns: scan.patterns, limit: scan.limit
+                    ))
                 }
                 return true
             }
@@ -314,22 +324,23 @@ actor ResumableTranscriptCache {
         }
 
         var read = 0
-        for (scan, entry, modified) in results {
+        for (scan, result) in results {
             let path = scan.request.path
-            guard let entry else {
+            read += result.read
+            guard let entry = result.entry else {
                 items[path] = nil
                 current[scan.request.copilotSessionId] = nil
                 continue
             }
-            if let previous = scan.previous, previous.device == entry.device, previous.inode == entry.inode,
-               entry.scannedBytes >= previous.scannedBytes {
-                read += entry.scannedBytes - previous.scannedBytes + (scan.backfills ? previous.scannedBytes : 0)
-            } else {
-                read += entry.scannedBytes
+            if !result.finished { unread = true }
+            var item = Item(entry: entry, rescan: nil, lastUsed: now)
+            if scan.rescans, !result.finished, let known = items[path] {
+                item = Item(entry: known.entry, rescan: entry, lastUsed: now)
             }
-            items[path] = Item(entry: entry, lastUsed: now)
-            current[scan.request.copilotSessionId] = (entry, modified ?? now)
+            items[path] = item
+            current[scan.request.copilotSessionId] = (item, result.modified ?? now)
         }
+        if scans.count > results.count { unread = true }
         bytesRead = read
         for request in requests where items[request.path] != nil {
             items[request.path]?.lastUsed = now
@@ -345,16 +356,19 @@ actor ResumableTranscriptCache {
 
         var evidence: [String: TranscriptEvidence] = [:]
         for (id, value) in current {
+            var branches = value.item.entry.branchMentions
+            // A rescan's partial counts for branches the entry wasn't read for.
+            for (branch, count) in value.item.rescan?.branchMentions ?? [:] where branches[branch] == nil {
+                branches[branch] = count
+            }
             var urls: [PullRequestKey: Int] = [:]
-            for (text, count) in value.entry.urlMentions {
+            for (text, count) in value.item.entry.urlMentions {
                 if let key = PullRequestKey(text) { urls[key, default: 0] += count }
             }
-            evidence[id] = TranscriptEvidence(
-                branchMentions: value.entry.branchMentions, urlMentions: urls, lastModified: value.modified
-            )
+            evidence[id] = TranscriptEvidence(branchMentions: branches, urlMentions: urls, lastModified: value.modified)
         }
         // A pass that read nothing would leave the same candidates every time.
-        return (evidence, skipped && read > 0)
+        return (evidence, unread && read > 0)
     }
 
     private func loadIfNeeded() {
