@@ -1,0 +1,7 @@
+{
+  "requestId": "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+  "kind": "resume",
+  "projectId": "requested-project",
+  "pullRequestKeys": ["example/api#12"],
+  "copilotSessionId": "11111111-2222-4333-8444-555555555555"
+}
