@@ -667,6 +667,9 @@ final class ResumableRefreshTests: XCTestCase {
         let pr = try XCTUnwrap(model.pullRequests.first)
         XCTAssertTrue(pr.isIncomplete)
         XCTAssertFalse(PullRequestTriage.isReady(pr))
+        let emptyState = PullRequestsView(pullRequests: model).needsYouEmptyState
+        XCTAssertEqual(emptyState.title, "Checking PR status…")
+        XCTAssertEqual(emptyState.systemImage, "questionmark.circle")
         gate.release()
         try await waitUntil { !model.isRefreshing }
         XCTAssertNotNil(model.lastUpdated)

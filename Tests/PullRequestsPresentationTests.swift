@@ -96,6 +96,37 @@ final class PullRequestsDesignCaptureTests: XCTestCase {
         }
     }
 
+    func testNeedsYouEmptyStateDoesNotClaimUnknownGoalsAreClear() async {
+        let model = PullRequestsModel(
+            workspace: FakeWorkspace(snapshot: WorkspaceSnapshot(
+                hostProcessIdentifier: 4242, selectedProjectId: "p", projects: [
+                    .init(id: "p", name: "Features", sessions: [
+                        .init(id: "idle", title: "Feature", status: .idle),
+                    ]),
+                ]
+            )),
+            defaults: UserDefaults(suiteName: "pr-design-\(UUID().uuidString)")!,
+            stateDirectory: nil, resumableFinder: NoHistoricalSessions(),
+            isVisible: { false }, presentError: { _, _ in }
+        )
+        await model.pollWorkspace()
+        let complete = makePR()
+        var incomplete = complete
+        incomplete.isIncomplete = true
+        var uncounted = complete
+        uncounted.uncountedThreadsCursor = "more"
+        for pr in [complete, incomplete, uncounted] {
+            model.show([pr], links: [pr.key: "idle"])
+            let goals = model.goals(now: testNow)
+            XCTAssertEqual(goals.count, 1)
+            XCTAssertTrue(PullRequestsFilter.needsYou.goals(in: goals).isEmpty)
+            let state = PullRequestsView(pullRequests: model).needsYouEmptyState
+            let isPartial = PullRequestsPresentation.hasPartialStatus(pr)
+            XCTAssertEqual(state.title, isPartial ? "Some PR status is unknown" : "Nothing needs you")
+            XCTAssertEqual(state.systemImage, isPartial ? "questionmark.circle" : "checkmark.circle")
+        }
+    }
+
     func testOrdinaryRefreshKeepsKnownSessionActionsAndReasonsStable() async throws {
         let model = PullRequestsModel(
             workspace: FakeWorkspace(snapshot: WorkspaceSnapshot(

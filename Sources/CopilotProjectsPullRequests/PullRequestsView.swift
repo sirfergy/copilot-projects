@@ -308,6 +308,14 @@ struct PullRequestsView: View {
 
     // MARK: Content
 
+    var needsYouEmptyState: (title: String, systemImage: String) {
+        (
+            headline(needsYou: 0, total: pullRequests.pullRequests.count),
+            pullRequests.pullRequests.contains(where: PullRequestsPresentation.hasPartialStatus)
+                ? "questionmark.circle" : "checkmark.circle"
+        )
+    }
+
     @ViewBuilder
     private func content(_ goals: [PullRequestGoal], allGoals: [PullRequestGoal]) -> some View {
         switch pullRequests.phase {
@@ -323,8 +331,9 @@ struct PullRequestsView: View {
             lanes(SkeletonLanes.goals, allGoals: [], placeholder: true)
         default:
             if goals.isEmpty, !allGoals.isEmpty {
+                let emptyState = needsYouEmptyState
                 ContentUnavailableView {
-                    Label("Nothing needs you", systemImage: "checkmark.circle")
+                    Label(emptyState.title, systemImage: emptyState.systemImage)
                 } description: {
                     Text("Your other goals are still here.")
                 } actions: {

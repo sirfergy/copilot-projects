@@ -69,7 +69,9 @@ and keeps every PR in that goal. It does not change triage, grouping, urgency, o
 the header's all-fetched-PR counts. The status row reports visible/total goals;
 stage counts follow visible lanes. The native segmented picker is 180pt wide
 and disabled before the loaded phase. An empty filtered result says
-"Nothing needs you" with Show All Goals, distinct from having no open PRs.
+"Nothing needs you" with Show All Goals only when status is complete. Otherwise
+it repeats the header's "Checking PR status…" or "Some PR status is unknown"
+with a question-mark icon, distinct from having no open PRs.
 
 **Selection stays intentional.** `SelectionInputs` observes filter and visible
 keys. A still-visible selection survives. If it disappears after a deliberate
@@ -138,9 +140,11 @@ and do not turn Goal Lanes into an app-wide composition rule.
 - `Tests/PullRequestsPresentationTests.swift` covers whole-goal filtering with
   quiet siblings/nudges, shared versus mixed session reasons, all-reason
   announcements, candidate-name suppression, partial status, and selection
-  reconciliation. Its `PullRequestsDesignCaptureTests` also checks ordinary
+  reconciliation. Its `PullRequestsDesignCaptureTests` also checks filtered
+  empty states with complete/incomplete/uncounted status and ordinary
   refresh stability. `Tests/ResumableSessionsTests.swift` checks retention of
-  old links through enrichment and first-load incomplete status.
+  old links through enrichment and first-load incomplete status, including
+  the checking-status empty state.
 - Native captures are outside the repository, under session
   `d550907b-ea83-42c8-81e0-5b459ea0eb06/files/pr-design-evidence/`:
   `mac-dark.png`, `mac-light.png`, `mac-compact.png`, and `mac-offline.png`.
