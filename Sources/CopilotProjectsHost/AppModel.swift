@@ -4995,8 +4995,14 @@ final class AppModel: ObservableObject {
     /// longer has it.
     private func tabHoldingCopilotSession(_ copilotId: String, now: Date) -> String? {
         let sessions = projects.flatMap(\.sessions).map(\.id)
-        if let marked = sessions.first(where: {
-            resumeMarkerValue(sessionId: $0, suffix: "copilot-session")?.lowercased() == copilotId
+        // Only a marker the tab's own Copilot wrote, as a relaunch requires before resuming it.
+        if let marked = sessions.first(where: { sessionId in
+            guard let marker = resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session"),
+                  marker.lowercased() == copilotId else { return false }
+            return TranscriptController.transcriptOwnerAllowsRead(sessionId: sessionId, directory: resumeMarkerDirectory)
+                && !TranscriptController.isCopilotSessionQuarantined(
+                    sessionId: sessionId, copilotSessionId: marker, directory: resumeMarkerDirectory
+                )
         }) {
             return marked
         }

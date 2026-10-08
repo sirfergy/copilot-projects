@@ -469,6 +469,19 @@ final class PullRequestsHostCommandTests: XCTestCase {
             XCTAssertEqual(response.code, "existing")
             XCTAssertEqual(response.text, "b1")
             XCTAssertTrue(host.launches().isEmpty)
+
+            // Not one another tab's Copilot wrote: that tab never had it.
+            let foreign = try home.addSession(cwd: host.root.path, transcript: "")
+            try Data(foreign.utf8).write(to: host.root.appendingPathComponent("a2.copilot-session"))
+            try JSONSerialization.data(withJSONObject: [
+                "appSessionId": "b1", "copilotSessionId": foreign, "pid": ProcessInfo.processInfo.processIdentifier,
+            ]).write(to: host.root.appendingPathComponent("a2.transcript-owner.json"))
+            let resumed = host.model.handle(request(
+                "resume-copilot-session", project: "A", requestId: UUID().uuidString, copilot: foreign
+            ))
+            XCTAssertEqual(resumed.code, "created")
+            XCTAssertNotEqual(resumed.text, "a2")
+            XCTAssertEqual(host.launches().count, 1)
         }
     }
 
