@@ -351,45 +351,13 @@ enum LunaProcess {
         }
     }
 
-    /// A process as it was when seen. The start time tells it apart from a later
-    /// process that reuses its pid, so a delayed signal never reaches the wrong one.
-    struct ProcessIdentity: Hashable, Sendable {
-        let pid: pid_t
-        let started: UInt64
-
-        init?(_ pid: pid_t) {
-            guard let started = Self.startTime(of: pid) else { return nil }
-            self.pid = pid
-            self.started = started
-        }
-
-        var isCurrent: Bool { Self.startTime(of: pid) == started }
-
-        func signal(_ signal: Int32) {
-            if isCurrent { kill(pid, signal) }
-        }
-
-        private static func startTime(of pid: pid_t) -> UInt64? {
-            var info = proc_bsdinfo()
-            let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-            guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
-            return info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec
-        }
-    }
+    /// A process as it was when seen, shared with Copilot Pull Requests' `gh` runner.
+    typealias ProcessIdentity = ProcessTree.Identity
 
     /// Every process descended from `root`, read before it is signalled because
     /// orphans are re-parented and can no longer be traced back to it.
     static func descendants(of root: pid_t) -> [ProcessIdentity] {
-        let tree = ProcessTree.snapshot()
-        var seen = Set<pid_t>()
-        var found: [ProcessIdentity] = []
-        var pending = tree.childrenOf[root] ?? []
-        while let pid = pending.popLast() {
-            guard seen.insert(pid).inserted else { continue }
-            if let identity = ProcessIdentity(pid) { found.append(identity) }
-            pending.append(contentsOf: tree.childrenOf[pid] ?? [])
-        }
-        return found
+        ProcessTree.descendants(of: root)
     }
 
     /// Drains a pipe on a dispatch thread so the blocking read never occupies the

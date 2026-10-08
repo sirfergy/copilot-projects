@@ -412,6 +412,20 @@ final class PullRequestsWorkspaceModelTests: XCTestCase {
         try await waitUntil { model.startingGoals.isEmpty }
         XCTAssertNotEqual(workspace.startCalls.last?.requestId, calls[0].requestId)
         XCTAssertEqual(recorder.alerts.last, "Could Not Start Copilot: Install the Copilot CLI")
+
+        // Copilot Projects couldn't save a session it may have started: trying again replays it.
+        workspace.answer(starts: [
+            .refused(code: "persistence-unavailable", message: "could not persist the session"),
+            .done(code: "existing", text: "s2"),
+        ])
+        model.startSession(for: goal, projectId: "q")
+        try await waitUntil { model.startingGoals.isEmpty }
+        let unsaved = try XCTUnwrap(workspace.startCalls.last?.requestId)
+        XCTAssertNotEqual(unsaved, calls[0].requestId)
+        model.startSession(for: goal, projectId: "q")
+        try await waitUntil { model.startingGoals.isEmpty }
+        XCTAssertEqual(workspace.startCalls.last?.requestId, unsaved)
+        XCTAssertEqual(model.overrides.sessionLinks[pr.key.description], "s2")
     }
 
     func testSessionLinksArePrunedOnlyWhileConnected() async throws {
@@ -469,16 +483,69 @@ final class PullRequestsAppSupportTests: XCTestCase {
         let lockPath = root.appendingPathComponent("pull-requests/app.lock").path
         let pidPath = root.appendingPathComponent("pull-requests/app.pid").path
         let first = PullRequestsAppLock(lockPath: lockPath, pidPath: pidPath)
-        XCTAssertTrue(first.acquire())
+        XCTAssertEqual(first.acquire(), .acquired)
         XCTAssertEqual(PullRequestsAppLock.recordedProcessIdentifier(at: pidPath), getpid())
         let second = PullRequestsAppLock(lockPath: lockPath, pidPath: pidPath)
-        XCTAssertFalse(second.acquire(), "a second copy must not write the state")
+        XCTAssertEqual(second.acquire(), .heldElsewhere, "a second copy must not write the state")
         second.release()
         XCTAssertEqual(PullRequestsAppLock.recordedProcessIdentifier(at: pidPath), getpid())
         first.release()
         XCTAssertNil(PullRequestsAppLock.recordedProcessIdentifier(at: pidPath))
-        XCTAssertTrue(second.acquire())
+        XCTAssertEqual(second.acquire(), .acquired)
         second.release()
+    }
+
+    func testALockThatCannotBeOpenedIsAFailureNotAnotherCopy() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        // A file where the state folder should be: nothing can be locked, and no copy holds it.
+        try Data().write(to: root.appendingPathComponent("pull-requests"))
+        let lock = PullRequestsAppLock(
+            lockPath: root.appendingPathComponent("pull-requests/app.lock").path,
+            pidPath: root.appendingPathComponent("pull-requests/app.pid").path
+        )
+        XCTAssertEqual(lock.acquire(), .failed(errno: ENOTDIR))
+        XCTAssertFalse(lock.isHeld)
+        XCTAssertTrue(PullRequestsAppLock.failureNote(errno: ENOTDIR).contains("Not a directory"))
+    }
+
+    func testATimedOutGhTakesEverythingItStartedWithIt() async throws {
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: "/usr/bin/perl"))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let pids = root.appendingPathComponent("pids")
+        // Both children ignore SIGTERM and hold the output open; one has left gh's process group.
+        let script = """
+        trap '' TERM
+        /bin/sleep 30 &
+        echo $! >> "$1"
+        /usr/bin/perl -e 'setpgrp(0, 0); exec "/bin/sleep", "30"' &
+        echo $! >> "$1"
+        /bin/sleep 30
+        """
+        let started = Date()
+        do {
+            _ = try await GitHubCLIProcess.run(
+                executable: "/bin/sh", arguments: ["-c", script, "sh", pids.path], environment: [:],
+                directory: root, timeout: 0.5, terminationGrace: 0.3
+            )
+            XCTFail("Expected a timeout")
+        } catch {
+            XCTAssertTrue(error is GitHubCLIProcess.TimedOut, "\(error)")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        let children = try String(contentsOf: pids, encoding: .utf8)
+            .split(separator: "\n").compactMap { pid_t($0) }
+        XCTAssertEqual(children.count, 2)
+        let deadline = Date().addingTimeInterval(3)
+        while children.contains(where: { kill($0, 0) == 0 }), Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        for pid in children {
+            XCTAssertNotEqual(kill(pid, 0), 0, "pid \(pid) outlived the timed-out gh")
+        }
     }
 
     func testOwnersLiveInCopilotProjectsDefaultsAndAMissingKeyIsVisible() {

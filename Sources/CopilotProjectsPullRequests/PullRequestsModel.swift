@@ -45,6 +45,8 @@ final class PullRequestsModel: ObservableObject {
 
     /// Why Owners can't be shared with Copilot Projects, when it can't.
     let settingsNote: String?
+    /// Why this copy saves nothing, when it can't.
+    let storageNote: String?
 
     private let defaults: UserDefaults
     private let service: PullRequestService
@@ -81,6 +83,7 @@ final class PullRequestsModel: ObservableObject {
         host: PullRequestsHostApp = .none,
         defaults: UserDefaults = .standard,
         settingsNote: String? = nil,
+        storageNote: String? = nil,
         stateDirectory: URL? = Paths.pullRequestsStateDir,
         service: PullRequestService = PullRequestService(),
         loadAccounts: @escaping @Sendable () async throws -> [GitHubAccount] = { try await PullRequestsModel.signedInAccounts() },
@@ -91,6 +94,7 @@ final class PullRequestsModel: ObservableObject {
         self.host = host
         self.defaults = defaults
         self.settingsNote = settingsNote
+        self.storageNote = storageNote
         self.service = service
         self.loadAccounts = loadAccounts
         self.isVisible = isVisible
@@ -476,8 +480,10 @@ final class PullRequestsModel: ObservableObject {
         case .done:
             pendingStarts[goalId] = nil
             presentError("Could Not Start Copilot", "Copilot Projects didn’t say which session it started.")
-        case .refused(_, let message):
-            pendingStarts[goalId] = nil
+        case .refused(let code, let message):
+            // Copilot Projects couldn't save what it did; only the same request id
+            // finds a session that did start.
+            if code != "persistence-unavailable" { pendingStarts[goalId] = nil }
             await pollWorkspace()
             presentError("Could Not Start Copilot", message)
         case .unreachable:

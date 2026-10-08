@@ -9,13 +9,26 @@ import CopilotProjectsCore
 public enum PullRequestsApplication {
     /// Held for the process's lifetime by the one copy that writes the state.
     static var lock: PullRequestsAppLock?
+    /// Why the lock couldn't be taken when no other copy holds it. This copy
+    /// still opens, but saves nothing.
+    static var lockFailure: String?
 
     static var isPrimary: Bool { lock != nil }
+    /// Another copy holds the lock, so this one only brings it forward.
+    static var handsOff: Bool { lock == nil && lockFailure == nil }
 
     public static func run() {
         signal(SIGPIPE, SIG_IGN)
         let candidate = PullRequestsAppLock()
-        if candidate.acquire() { lock = candidate }
+        switch candidate.acquire() {
+        case .acquired:
+            lock = candidate
+        case .heldElsewhere:
+            break
+        case .failed(let code):
+            NSLog("copilot-pull-requests: could not lock \(candidate.lockPath), errno \(code); saving nothing")
+            lockFailure = PullRequestsAppLock.failureNote(errno: code)
+        }
         CopilotPullRequestsApp.main()
     }
 }
@@ -24,6 +37,14 @@ public enum PullRequestsApplication {
 /// lock writes goals.json and transcript-index.json. Its pid is in `app.pid`
 /// so Copilot Projects and later copies can bring it forward.
 final class PullRequestsAppLock {
+    enum Acquisition: Equatable {
+        case acquired
+        /// Another copy holds it.
+        case heldElsewhere
+        /// The lock file couldn't be opened or locked, so no copy may hold it.
+        case failed(errno: Int32)
+    }
+
     let lockPath: String
     let pidPath: String
     private var fd: Int32 = -1
@@ -35,20 +56,24 @@ final class PullRequestsAppLock {
 
     var isHeld: Bool { fd >= 0 }
 
-    func acquire() -> Bool {
-        guard fd < 0 else { return true }
+    static func failureNote(errno code: Int32) -> String {
+        "Goals aren’t saved in this copy: its state folder can’t be locked (\(String(cString: strerror(code))))"
+    }
+
+    func acquire() -> Acquisition {
+        guard fd < 0 else { return .acquired }
         let directory = (lockPath as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(
             atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
         )
         let candidate = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-        guard candidate >= 0 else {
-            NSLog("copilot-pull-requests: could not open \(lockPath), errno \(errno)")
-            return false
-        }
-        guard flock(candidate, LOCK_EX | LOCK_NB) == 0 else {
+        guard candidate >= 0 else { return .failed(errno: errno) }
+        var locked = flock(candidate, LOCK_EX | LOCK_NB)
+        while locked != 0, errno == EINTR { locked = flock(candidate, LOCK_EX | LOCK_NB) }
+        guard locked == 0 else {
+            let code = errno
             close(candidate)
-            return false
+            return code == EWOULDBLOCK ? .heldElsewhere : .failed(errno: code)
         }
         fd = candidate
         let pid = Data("\(getpid())\n".utf8)
@@ -58,7 +83,7 @@ final class PullRequestsAppLock {
         } catch {
             NSLog("copilot-pull-requests: could not record its pid: \(error)")
         }
-        return true
+        return .acquired
     }
 
     /// The pid of the copy holding the lock, as it recorded it.
@@ -116,7 +141,7 @@ struct CopilotPullRequestsApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1200, height: 760)
         // A second copy only hands off to the first, so it never shows a window.
-        .defaultLaunchBehavior(PullRequestsApplication.isPrimary ? .presented : .suppressed)
+        .defaultLaunchBehavior(PullRequestsApplication.handsOff ? .suppressed : .presented)
         .restorationBehavior(PullRequestsApplication.isPrimary ? .automatic : .disabled)
         .commands {
             CommandGroup(replacing: .newItem) {}
@@ -136,6 +161,7 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
             host: .system(),
             defaults: settings.defaults,
             settingsNote: settings.note,
+            storageNote: PullRequestsApplication.lockFailure,
             // Only the lock holder writes goals and match counts.
             stateDirectory: PullRequestsApplication.isPrimary ? Paths.pullRequestsStateDir : nil
         )
@@ -148,7 +174,7 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard PullRequestsApplication.isPrimary else {
+        if PullRequestsApplication.handsOff {
             bringRunningCopyForward()
             NSApp.terminate(nil)
             return
@@ -168,7 +194,7 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
     /// Activation alone (⇧⌘P in Copilot Projects, ⌘Tab, a second copy handing
     /// off) doesn't un-minimize a window, and this app has nothing else to show.
     func applicationDidBecomeActive(_ notification: Notification) {
-        guard PullRequestsApplication.isPrimary else { return }
+        guard !PullRequestsApplication.handsOff else { return }
         Self.showWindowIfNoneVisible()
     }
 

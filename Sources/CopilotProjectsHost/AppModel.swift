@@ -399,14 +399,6 @@ final class AppModel: ObservableObject {
                 ?? .failure("This build does not include a remote integration.")
         }
     ))
-    /// Sessions started for Copilot Pull Requests, by request id, for as long as
-    /// this app runs, so a retried request never starts a second session.
-    private var pullRequestsSessionStarts: [UUID: PullRequestsSessionStart] = [:]
-    private struct PullRequestsSessionStart {
-        let projectId: String
-        let prompt: String
-        let sessionId: String
-    }
     private var stateLoadFailure: String?
     private var didFailToLoadWorkspaceState = false
     private var stateRecoveryMessage: String?
@@ -1364,12 +1356,22 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// Where a created session starts, and whether it takes its project's selection.
+    private enum CreatedSessionPlacement {
+        /// Remote clients: in ~/Repos, never stealing the Mac's selected tab.
+        case remote
+        /// Copilot Pull Requests: like Start Session in the app, in the project's
+        /// current folder and selected in its project.
+        case local
+    }
+
     private func createRemoteSession(
         _ request: RemoteCreateSessionRequest,
         isLegacyRequest: Bool,
         kind: RemoteSessionKind,
         title: String,
         initialPrompt: String?,
+        placement: CreatedSessionPlacement = .remote,
         now: Date
     ) -> RemoteSessionCreationOutcome {
         // A failed startup load leaves the in-memory workspace empty, so neither
@@ -1462,7 +1464,18 @@ final class AppModel: ObservableObject {
         } else {
             copilotExecutable = nil
         }
-        guard let cwd = remoteReposDirectory() else { return .invalid }
+        let cwd: String
+        switch placement {
+        case .remote:
+            guard let repos = remoteReposDirectory() else { return .invalid }
+            cwd = repos
+        case .local:
+            let folder = Paths.normalizedDirectory(defaultCwd(forProjectIndex: pi))
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: folder, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { return .invalid }
+            cwd = folder
+        }
 
         if !isLegacyRequest {
             let marker = resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session")
@@ -1479,9 +1492,9 @@ final class AppModel: ObservableObject {
         let session = Session(
             id: sessionId, title: title, cwd: cwd, creationFingerprint: fingerprint)
         projects[pi].sessions.append(session)
-        // Do NOT steal the Mac's selected tab: only adopt the new session when the
-        // project currently has no selection.
-        if (projects[pi].selectedSessionId ?? "").isEmpty {
+        // A remote client must NOT steal the Mac's selected tab: only adopt the new
+        // session when the project currently has no selection.
+        if placement == .local || (projects[pi].selectedSessionId ?? "").isEmpty {
             projects[pi].selectedSessionId = sessionId
         }
 
@@ -4760,39 +4773,41 @@ final class AppModel: ObservableObject {
 
     /// Starts a Copilot session for Copilot Pull Requests exactly as Start
     /// Session did inside the app: in the project's current folder, selected in
-    /// its project. A request id replayed while this app runs returns the same
-    /// session (`existing`), `gone` once it ended, or `conflict` when the
-    /// project or prompt differ.
-    func startPullRequestsSession(requestId: UUID, projectId: String, prompt: String) -> ControlResponse {
-        if let start = pullRequestsSessionStarts[requestId] {
-            guard start.projectId == projectId, start.prompt == prompt else {
-                return .failure("request id is bound to a different session", code: "conflict")
-            }
-            guard locateIndex(start.sessionId) != nil else {
-                return .failure("request id already started a session that has since ended", code: "gone")
-            }
-            return .success(start.sessionId, code: "existing")
-        }
+    /// its project. It shares the creation ledger, so a request id replayed even
+    /// after a restart returns the same session (`existing`), `gone` once it
+    /// ended, or `conflict` when the project or prompt differ.
+    func startPullRequestsSession(
+        requestId: UUID, projectId: String, prompt: String, now: Date = Date()
+    ) -> ControlResponse {
         guard SessionInputValidation.isValidPrompt(prompt) else {
             return .failure(CopilotSessionStartError.invalidPrompt.localizedDescription, code: "bad-request")
         }
-        do {
-            let sessionId = try addCopilotSession(toProjectId: projectId, initialPrompt: prompt)
-            pullRequestsSessionStarts[requestId] = PullRequestsSessionStart(
-                projectId: projectId, prompt: prompt, sessionId: sessionId
-            )
-            return .success(sessionId, code: "created")
-        } catch let error as CopilotSessionStartError {
-            let code: String
-            switch error {
-            case .projectUnavailable: code = "unknown-project"
-            case .invalidPrompt: code = "bad-request"
-            case .workingDirectoryUnavailable: code = "invalid"
-            case .shuttingDown, .backendUnavailable, .copilotUnavailable, .terminalUnavailable: code = "unavailable"
-            }
-            return .failure(error.localizedDescription, code: code)
-        } catch {
-            return .failure(error.localizedDescription, code: "unavailable")
+        guard !isTerminating else {
+            return .failure(CopilotSessionStartError.shuttingDown.localizedDescription, code: "unavailable")
+        }
+        let prompt = prompt
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let outcome = createRemoteSession(
+            RemoteCreateSessionRequest(
+                requestId: requestId, projectId: projectId, kind: .copilot, initialPrompt: prompt),
+            isLegacyRequest: false,
+            kind: .copilot,
+            title: "Copilot",
+            initialPrompt: prompt,
+            placement: .local,
+            now: now
+        )
+        switch outcome {
+        case .unknownProject:
+            return .failure(CopilotSessionStartError.projectUnavailable.localizedDescription, code: "unknown-project")
+        case .invalid:
+            return .failure("This project’s working directory no longer exists.", code: "invalid")
+        case .persistenceUnavailable:
+            return .failure("Copilot Projects couldn’t save the session. Try again; it won’t start twice.",
+                            code: "persistence-unavailable")
+        default:
+            return Self.controlResponse(for: outcome)
         }
     }
 
