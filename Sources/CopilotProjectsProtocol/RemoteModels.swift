@@ -1,7 +1,7 @@
 import Foundation
 
 public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
-    public let projects: [RemoteProjectSnapshot]
+    public fileprivate(set) var projects: [RemoteProjectSnapshot]
     public let selectedProjectId: String?
     public let protocolInfo: RemoteProtocolInfo?
     /// When the gateway served this snapshot, in Unix milliseconds on the Mac's
@@ -28,11 +28,30 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
         self.servedAtMilliseconds = servedAtMilliseconds
     }
 }
+extension RemoteWorkspaceSnapshot {
+    /// This snapshot with `availableModels` kept only for `sessionId`, for an
+    /// event stream whose client selected that session. Clients only read the
+    /// selected session's catalog, and every session otherwise repeats a list of
+    /// dozens of models in each streamed workspace. A `nil` or unknown
+    /// `sessionId` keeps none. Everything else, including
+    /// `servedAtMilliseconds`, is unchanged.
+    public func keepingAvailableModels(for sessionId: String?) -> RemoteWorkspaceSnapshot {
+        var snapshot = self
+        for projectIndex in snapshot.projects.indices {
+            for sessionIndex in snapshot.projects[projectIndex].sessions.indices
+            where snapshot.projects[projectIndex].sessions[sessionIndex].id != sessionId {
+                snapshot.projects[projectIndex].sessions[sessionIndex].availableModels = nil
+            }
+        }
+        return snapshot
+    }
+}
+
 public struct RemoteProjectSnapshot: Codable, Equatable, Sendable {
     public let id: String
     public let name: String
     public let selectedSessionId: String?
-    public let sessions: [RemoteSessionSnapshot]
+    public fileprivate(set) var sessions: [RemoteSessionSnapshot]
 
     public init(
         id: String,
@@ -71,7 +90,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     /// Models the session can switch to, ordered with the preferred default first.
     /// Optional (omitted when absent) so older clients decode without this field
     /// and so a session that hasn't reported its catalog yet simply has no picker.
-    public let availableModels: [RemoteAvailableModel]?
+    public fileprivate(set) var availableModels: [RemoteAvailableModel]?
     public let conversationEpoch: String?
     public let operationSupport: RemoteOperationSupport?
     public let operationReceipts: [RemoteOperationReceipt]?
