@@ -325,6 +325,16 @@ final class PullRequestsWorkspaceModelTests: XCTestCase {
         model.refresh()
         try await waitUntil { !model.isRefreshing && model.lastUpdated != nil }
         XCTAssertEqual(try Data(contentsOf: index), saved, "matching against no sessions must not empty the index")
+
+        // A host that answered once and then can't be understood: its sessions are unknown again.
+        let incompatible = FakeWorkspace(fetches: [.snapshot(fixtureSnapshot), .incompatibleHost])
+        let later = makeModel(incompatible)
+        await later.pollWorkspace()
+        await later.pollWorkspace()
+        XCTAssertEqual(later.workspace, .incompatibleHost)
+        later.refresh()
+        try await waitUntil { !later.isRefreshing && later.lastUpdated != nil }
+        XCTAssertEqual(try Data(contentsOf: index), saved, "an incompatible host must not empty the index")
     }
 
     func testGoToSessionDoesNotActivateForAnEndedSessionAndRereadsIt() async throws {
@@ -508,6 +518,29 @@ final class PullRequestsAppSupportTests: XCTestCase {
         XCTAssertEqual(lock.acquire(), .failed(errno: ENOTDIR))
         XCTAssertFalse(lock.isHeld)
         XCTAssertTrue(PullRequestsAppLock.failureNote(errno: ENOTDIR).contains("Not a directory"))
+    }
+
+    func testAMissingPidStillHandsOffToTheOnlyOtherCopyOfThisApp() {
+        let bring = PullRequestsAppDelegate.copyToBringForward
+        XCTAssertEqual(bring(7, [(7, false), (8, true)]), 7, "the recorded lock holder wins, wherever it lives")
+        XCTAssertEqual(bring(nil, [(7, false), (8, true)]), 8)
+        XCTAssertEqual(bring(99, [(8, true)]), 8, "a stale pid falls back too")
+        XCTAssertNil(bring(nil, [(7, true), (8, true)]), "never guess between two copies")
+        XCTAssertNil(bring(nil, [(7, false)]))
+        XCTAssertNil(bring(nil, []))
+    }
+
+    func testASocketMovedOutOfItsStateDirectoryGetsItsOwnPullRequestsState() {
+        let state = URL(fileURLWithPath: "/Users/me/.local/state/copilot-projects", isDirectory: true)
+        let base = state.appendingPathComponent("pull-requests").path
+        let state1 = Paths.pullRequestsStateDir(stateDir: state, socketPath: state.appendingPathComponent("control.sock").path)
+        XCTAssertEqual(state1.path, base)
+        XCTAssertEqual(Paths.pullRequestsStateDir(stateDir: state, socketPath: state.path + "/./control.sock").path, base)
+        let moved = Paths.pullRequestsStateDir(stateDir: state, socketPath: "/Users/me/isolated.sock")
+        XCTAssertEqual(moved.deletingLastPathComponent().path, base)
+        XCTAssertTrue(moved.lastPathComponent.hasPrefix("socket-"), moved.path)
+        XCTAssertEqual(moved, Paths.pullRequestsStateDir(stateDir: state, socketPath: "/Users/me/isolated.sock"))
+        XCTAssertNotEqual(moved, Paths.pullRequestsStateDir(stateDir: state, socketPath: "/Users/me/other.sock"))
     }
 
     func testATimedOutGhTakesEverythingItStartedWithIt() async throws {

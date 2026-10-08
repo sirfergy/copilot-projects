@@ -216,14 +216,25 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func bringRunningCopyForward() {
-        guard let pid = PullRequestsAppLock.recordedProcessIdentifier(),
-              pid != getpid(),
-              let running = NSRunningApplication(processIdentifier: pid),
-              running.bundleIdentifier == Bundle.main.bundleIdentifier else {
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .filter { $0.processIdentifier != getpid() && !$0.isTerminated }
+        guard let pid = Self.copyToBringForward(
+                recorded: PullRequestsAppLock.recordedProcessIdentifier(),
+                others: others.map { ($0.processIdentifier, $0.bundleURL == Bundle.main.bundleURL) }
+              ),
+              let running = others.first(where: { $0.processIdentifier == pid }) else {
             NSLog("copilot-pull-requests: another copy holds the lock but couldn't be found")
             return
         }
         _ = running.activate(from: .current, options: [])
+    }
+
+    /// The copy holding the lock: the one that recorded its pid, or, when that
+    /// record is missing or stale, the only other copy of this very app.
+    nonisolated static func copyToBringForward(recorded: pid_t?, others: [(pid: pid_t, isThisApp: Bool)]) -> pid_t? {
+        if let recorded, others.contains(where: { $0.pid == recorded }) { return recorded }
+        let candidates = others.filter(\.isThisApp)
+        return candidates.count == 1 ? candidates[0].pid : nil
     }
 }
 

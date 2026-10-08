@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// The workspace as `list-sessions` reports it to the Copilot Pull Requests app:
@@ -102,7 +103,23 @@ public enum PullRequestsAppBundle {
 extension Paths {
     /// Goal names, transcript match counts, and the Pull Requests app's lock.
     public static var pullRequestsStateDir: URL {
-        stateDir.appendingPathComponent("pull-requests", isDirectory: true)
+        pullRequestsStateDir(stateDir: stateDir, socketPath: socketPath)
+    }
+
+    /// A socket moved out of its state directory belongs to another Copilot
+    /// Projects, so its Pull Requests app keeps its own state, lock, and pid.
+    public static func pullRequestsStateDir(stateDir: URL, socketPath: String) -> URL {
+        let base = stateDir.appendingPathComponent("pull-requests", isDirectory: true)
+        func normalized(_ path: String) -> String {
+            URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+                .path
+        }
+        let socket = normalized(socketPath)
+        guard socket != normalized(stateDir.appendingPathComponent("control.sock").path) else { return base }
+        let digest = SHA256.hash(data: Data(socket.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+        return base.appendingPathComponent("socket-\(digest)", isDirectory: true)
     }
 
     /// Held by the one Copilot Pull Requests instance that writes its state.

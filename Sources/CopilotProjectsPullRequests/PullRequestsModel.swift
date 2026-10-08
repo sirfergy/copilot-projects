@@ -164,6 +164,15 @@ final class PullRequestsModel: ObservableObject {
         }
     }
 
+    /// Whether `liveSessions` holds the sessions Copilot Projects reports now or
+    /// last reported, rather than nothing because they're unknown.
+    private var knowsSessions: Bool {
+        switch workspace {
+        case .connected, .disconnected(lastGood: _?): return true
+        case .connecting, .disconnected, .incompatibleHost: return false
+        }
+    }
+
     /// Projects a session can start in; only while Copilot Projects answers.
     var projects: [(id: String, name: String)] {
         connectedSnapshot?.projects.map { ($0.id, $0.name) } ?? []
@@ -305,13 +314,13 @@ final class PullRequestsModel: ObservableObject {
             await waitForFirstWorkspaceAnswer()
             let matchedLive = isConnected
             let newLinks: [PullRequestKey: String]
-            if matchedLive || lastGoodSnapshot != nil {
+            if knowsSessions {
                 let sources = transcriptSources()
                 let branches = Set(fetch.pullRequests.map(\.headRefName).filter(PullRequestLinker.isDistinctiveBranch))
                 let evidence = await index.evidence(for: sources, branches: branches)
                 newLinks = PullRequestLinker.links(pullRequests: fetch.pullRequests, evidence: evidence)
             } else {
-                // No sessions known yet: matching against none would empty the
+                // No sessions known: matching against none would empty the
                 // on-disk index, and every session would be read from the start
                 // again once Copilot Projects answers.
                 newLinks = links
