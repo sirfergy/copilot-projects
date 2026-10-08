@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version to publish (for example, 0.3.1 or v0.3.1)
+        description: Date version to publish as YYYY.M.D.N (for example, 2026.10.8.1 or v2026.10.8.1)
         required: true
         type: string
 
@@ -45,10 +45,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          source scripts/release-version.sh
           if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
             echo "Releases must be dispatched from main (got $GITHUB_REF)." >&2
             exit 1
           fi
+          today="$(pacific_release_date)"
           if [[ "$EVENT_NAME" == "push" ]]; then
             if ! triggering_pull_requests="$(
               gh api \
@@ -71,13 +73,9 @@ jobs:
               echo "Refusing to release $GITHUB_SHA because it is no longer on main." >&2
               exit 1
             fi
-            latest_tag="$(
-              git tag --list 'v*' --sort=-version:refname \
-                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-                | head -1 || true
-            )"
+            latest_tag="$(git tag --list 'v*' | latest_release_tag)"
             if [[ -z "$latest_tag" ]]; then
-              echo "No semantic-version release tag exists to increment." >&2
+              echo "No release tag exists to increment." >&2
               exit 1
             fi
             expected_asset="Copilot-Projects-${latest_tag#v}.dmg"
@@ -115,15 +113,27 @@ jobs:
             fi
             echo "previous_sha=$latest_sha" >> "$GITHUB_OUTPUT"
             echo "previous_tag=$latest_tag" >> "$GITHUB_OUTPUT"
-            current="${latest_tag#v}"
-            IFS=. read -r major minor patch <<< "$current"
-            version="$major.$minor.$((10#$patch + 1))"
+            version="$(next_release_version "$latest_tag" "$today")"
           else
             version="${INPUT_VERSION#v}"
           fi
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Version must be X.Y.Z (optionally prefixed with v)." >&2
+          if ! is_date_release_version "$version"; then
+            echo "Version must be YYYY.M.D.N without leading zeros (optionally prefixed with v)." >&2
             exit 1
+          fi
+          check_release_version_date "$version" "$today"
+          if [[ "$EVENT_NAME" != "push" ]]; then
+            # A dispatched version must be the one an automatic release would pick.
+            latest_tag="$(git tag --list 'v*' | latest_release_tag)"
+            if [[ -z "$latest_tag" ]]; then
+              echo "No release tag exists to increment." >&2
+              exit 1
+            fi
+            expected="$(next_release_version "$latest_tag" "$today")"
+            if [[ "$version" != "$expected" ]]; then
+              echo "Version must be the next release, $expected (after $latest_tag)." >&2
+              exit 1
+            fi
           fi
           tag="v$version"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
