@@ -5,9 +5,11 @@ import UniformTypeIdentifiers
 
 // Renders the Copilot Projects app icon to a 1024x1024 PNG: the official GitHub
 // Copilot mascot (primer/octicons `copilot-48`, MIT) in white on a teal
-// squircle. The octicon path data is embedded and rasterized by the small
-// SVG-path parser below, then composited; no external tools required.
-// Usage: swift make-icon.swift <out.png> [--opaque]
+// squircle. With --pull-requests it renders the Copilot Pull Requests icon
+// instead: the same squircle with primer/octicons `git-pull-request-24` (MIT).
+// The octicon path data is embedded and rasterized by the small SVG-path
+// parser below, then composited; no external tools required.
+// Usage: swift make-icon.swift <out.png> [--opaque] [--pull-requests]
 
 
 // Minimal SVG path-data -> CGPath (supports M m L l H h V v C c S s Q q T t A a Z z).
@@ -128,6 +130,9 @@ func parseSVGPath(_ d: String) -> CGPath {
     return path
 }
 let copilotBodyPath = "M47.801 34.003c-1.72 2.988-11.706 10.037-23.82 10.037S1.881 36.991.161 34.003a1.309 1.309 0 0 1-.161-.57v-5.615c.012-.17.047-.338.11-.498.744-1.867 2.692-4.58 5.206-5.308.333-.855.826-2.106 1.287-3.029a20.112 20.112 0 0 1-.104-2.171c0-2.659.563-4.992 2.262-6.729.793-.811 1.777-1.433 2.945-1.901C14.502 5.911 18.483 4 23.938 4c5.455 0 9.523 1.911 12.319 4.182 1.167.468 2.151 1.09 2.944 1.901 1.699 1.737 2.263 4.07 2.263 6.729 0 .736-.027 1.465-.105 2.171.461.923.954 2.174 1.288 3.029 2.513.728 4.461 3.441 5.205 5.308.081.205.115.424.115.645v5.318c0 .252-.04.502-.166.72ZM24.325 22.031h-.688a8.52 8.52 0 0 1-.709 1.016c-1.537 1.892-3.833 2.98-7.008 2.98-3.447 0-5.972-.717-7.557-2.514a4.408 4.408 0 0 1-.171-.21l-.195.21v13.155c2.867 1.558 9.02 4.353 15.984 4.353s13.117-2.795 15.984-4.353V23.513l-.195-.21s-.066.091-.171.21c-1.584 1.797-4.11 2.514-7.557 2.514-3.175 0-5.47-1.088-7.008-2.98a8.637 8.637 0 0 1-.709-1.016h-.033.033Zm-1.969-5.864a14.31 14.31 0 0 0 .127-1.785v-.042c-.003-1.537-.339-2.538-.876-3.152-.681-.78-2.09-1.378-5.06-1.057-3.008.326-4.69 1.073-5.643 2.048-.923.944-1.408 2.356-1.408 4.633 0 2.42.348 3.849 1.115 4.719.729.827 2.165 1.499 5.309 1.499 2.417 0 3.799-.786 4.683-1.873.948-1.168 1.482-2.878 1.753-4.99Zm3.25 0c.271 2.112.805 3.822 1.754 4.99.883 1.087 2.265 1.873 4.682 1.873 3.145 0 4.58-.672 5.309-1.499.767-.87 1.116-2.299 1.116-4.719 0-2.277-.485-3.689-1.408-4.633-.954-.975-2.635-1.722-5.644-2.048-2.969-.321-4.378.277-5.06 1.057-.537.614-.873 1.615-.876 3.152v.042c.002.53.042 1.123.127 1.785Z"
+// primer/octicons git-pull-request-24 (MIT): rings (even-odd), then branch line and arrow.
+let pullRequestRingsPath = "M16 19.25a3.25 3.25 0 1 1 6.5 0 3.25 3.25 0 0 1-6.5 0Zm-14.5 0a3.25 3.25 0 1 1 6.5 0 3.25 3.25 0 0 1-6.5 0Zm0-14.5a3.25 3.25 0 1 1 6.5 0 3.25 3.25 0 0 1-6.5 0ZM4.75 3a1.75 1.75 0 1 0 .001 3.501A1.75 1.75 0 0 0 4.75 3Zm0 14.5a1.75 1.75 0 1 0 .001 3.501A1.75 1.75 0 0 0 4.75 17.5Zm14.5 0a1.75 1.75 0 1 0 .001 3.501 1.75 1.75 0 0 0-.001-3.501Z"
+let pullRequestStrokesPath = "M13.405 1.72a.75.75 0 0 1 0 1.06L12.185 4h4.065A3.75 3.75 0 0 1 20 7.75v8.75a.75.75 0 0 1-1.5 0V7.75a2.25 2.25 0 0 0-2.25-2.25h-4.064l1.22 1.22a.75.75 0 0 1-1.061 1.06l-2.5-2.5a.75.75 0 0 1 0-1.06l2.5-2.5a.75.75 0 0 1 1.06 0ZM4.75 7.25A.75.75 0 0 1 5.5 8v8A.75.75 0 0 1 4 16V8a.75.75 0 0 1 .75-.75Z"
 let copilotMouthPath = "M28.998 28.516c1.104 0 1.999.895 1.999 1.999v3.998a2 2 0 1 1-3.998 0v-3.998c0-1.104.895-1.999 1.999-1.999Zm-9.996 0c1.104 0 1.999.895 1.999 1.999v3.998a2 2 0 1 1-3.998 0v-3.998c0-1.104.895-1.999 1.999-1.999Z"
 
 // MARK: - Render
@@ -135,6 +140,7 @@ let copilotMouthPath = "M28.998 28.516c1.104 0 1.999.895 1.999 1.999v3.998a2 2 0
 let S = 1024.0
 let arguments = CommandLine.arguments.dropFirst()
 let opaque = arguments.contains("--opaque")
+let pullRequests = arguments.contains("--pull-requests")
 let out = arguments.first { !$0.hasPrefix("--") } ?? "icon-1024.png"
 let cs = CGColorSpaceCreateDeviceRGB()
 func col(_ r: Double, _ g: Double, _ b: Double, _ a: Double = 1) -> CGColor {
@@ -175,23 +181,35 @@ ctx.drawLinearGradient(sheen, start: CGPoint(x: bg.midX, y: bg.maxY),
                        end: CGPoint(x: bg.midX, y: bg.midY), options: [])
 ctx.restoreGState()
 
-// Copilot octicon: scale its 48x48 viewBox into a centered box, flipping y
-// (SVG is y-down, CoreGraphics is y-up). Eyes + mouth are even-odd knockouts.
-let target = 660.0
-let scale = target / 48.0
-let ox = (S - target) / 2.0
-let oy = (S - target) / 2.0
-var xform = CGAffineTransform(a: scale, b: 0, c: 0, d: -scale, tx: ox, ty: oy + 48 * scale)
-let mark = CGMutablePath()
-mark.addPath(parseSVGPath(copilotBodyPath))
-mark.addPath(parseSVGPath(copilotMouthPath))
-let placed = mark.copy(using: &xform)!
+/// Scales an octicon's square viewBox into a centered box, flipping y (SVG is
+/// y-down, CoreGraphics is y-up).
+func placed(_ data: [String], viewBox: Double, size: Double) -> CGPath {
+    let scale = size / viewBox
+    let origin = (S - size) / 2.0
+    var xform = CGAffineTransform(a: scale, b: 0, c: 0, d: -scale, tx: origin, ty: origin + viewBox * scale)
+    let mark = CGMutablePath()
+    for path in data { mark.addPath(parseSVGPath(path)) }
+    return mark.copy(using: &xform)!
+}
 
 ctx.saveGState()
 ctx.setShadow(offset: CGSize(width: 0, height: -10), blur: 38, color: col(4, 47, 46, 0.5))
-ctx.addPath(placed)
 ctx.setFillColor(col(255, 255, 255))
-ctx.fillPath(using: .evenOdd)
+if pullRequests {
+    // The 24pt glyph has thinner strokes than the 48pt mascot, so it sits a
+    // little smaller to keep the same visual weight. Rings knock out even-odd;
+    // the branch line and arrow fill on their own so their overlap stays solid.
+    ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+    ctx.addPath(placed([pullRequestRingsPath], viewBox: 24, size: 600))
+    ctx.fillPath(using: .evenOdd)
+    ctx.addPath(placed([pullRequestStrokesPath], viewBox: 24, size: 600))
+    ctx.fillPath(using: .winding)
+    ctx.endTransparencyLayer()
+} else {
+    // Eyes + mouth are even-odd knockouts.
+    ctx.addPath(placed([copilotBodyPath, copilotMouthPath], viewBox: 48, size: 660))
+    ctx.fillPath(using: .evenOdd)
+}
 ctx.restoreGState()
 
 guard let image = ctx.makeImage() else { exit(1) }

@@ -13,6 +13,10 @@ struct ControlCommandRouter {
         let closeSession: (ControlRequest) -> ControlResponse
         let renameProject: (String, ControlRequest) -> ControlResponse
         let focus: (ControlRequest) -> ControlResponse
+        /// Copilot Pull Requests: the workspace as `WorkspaceSnapshot` JSON.
+        let listSessions: () -> ControlResponse
+        let revealSession: (ControlRequest) -> ControlResponse
+        let startCopilotSession: (ControlRequest) -> ControlResponse
         let screenshot: (String?) -> ControlResponse
         let diagnostics: () -> String
         let remote: (String) -> ControlResponse
@@ -63,6 +67,23 @@ struct ControlCommandRouter {
             return actions.renameProject(name, request)
         case "focus":
             return actions.focus(request)
+        case "list-sessions":
+            return actions.listSessions()
+        case "reveal-session":
+            guard let sessionId = request.sessionId, !sessionId.isEmpty,
+                  request.projectId.map({ !$0.isEmpty }) ?? true else {
+                return .failure("reveal-session requires a session id", code: "bad-request")
+            }
+            return actions.revealSession(request)
+        case "start-copilot-session":
+            guard let projectId = request.projectId, !projectId.isEmpty,
+                  let requestId = request.requestId, UUID(uuidString: requestId) != nil,
+                  request.prompt != nil else {
+                return .failure(
+                    "start-copilot-session requires a project, a UUID request id, and a prompt",
+                    code: "bad-request")
+            }
+            return actions.startCopilotSession(request)
         case "screenshot":
             return actions.screenshot(request.path)
         case "diagnostics":

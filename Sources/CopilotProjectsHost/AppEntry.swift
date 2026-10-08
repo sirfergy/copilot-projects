@@ -19,28 +19,17 @@ struct CopilotProjectsApp: App {
             WorkspaceCommands(model: appDelegate.model, input: appDelegate.input,
                               keepRunning: $keepRunning, showsProjects: $showsProjects)
         }
-        Window(PullRequestsWindow.title, id: PullRequestsWindow.id) {
-            PullRequestsView(pullRequests: appDelegate.pullRequests)
-                .frame(minWidth: 880, minHeight: 480)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1200, height: 760)
         MenuBarExtra("Copilot Projects", systemImage: "terminal", isInserted: $keepRunning) {
             HostStatusMenu(keepRunning: $keepRunning)
         }
     }
 }
 
-/// Opens (or brings forward) the Pull Requests window.
+/// Opens (or brings forward) Copilot Pull Requests.
 struct OpenPullRequestsButton: View {
-    @Environment(\.openWindow) private var openWindow
-
     var body: some View {
-        Button("Pull Requests") {
-            openWindow(id: PullRequestsWindow.id)
-            NSApp.activate(ignoringOtherApps: true)
-        }
-        .keyboardShortcut("p", modifiers: [.command, .shift])
+        Button("Pull Requests") { PullRequestsAppLauncher.open() }
+            .keyboardShortcut("p", modifiers: [.command, .shift])
     }
 }
 
@@ -95,7 +84,6 @@ private struct WorkspaceCommands: Commands {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let model: AppModel
     let input: WorkspaceInputController
-    let pullRequests: PullRequestsModel
     private let nativeNotifications: NotificationManager
     private let integration: (any HostIntegration)?
     private let notifications: HostNotificationPoster
@@ -114,7 +102,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notifications = HostNotificationPoster(native: native, integration: integration)
         self.model = model
         input = WorkspaceInputController(model: model)
-        pullRequests = PullRequestsModel(appModel: model)
         model.attach(integration: integration)
         super.init()
     }
@@ -193,27 +180,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // When the app is activated (clicked / ⌘-Tab'd back), put keyboard focus
-        // on the visible terminal instead of the sidebar list. With the Pull
-        // Requests window in front, the workspace's session hasn't been seen.
+        // on the visible terminal instead of the sidebar list.
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard !AuxiliaryWindows.contains(NSApp.keyWindow) else { return }
                 self?.model.markActiveSessionSeen()
                 if self?.input.hasWorkspaceSheet == false {
                     self?.model.focusActiveTerminal()
                 }
-            }
-        }
-
-        // Coming back to the workspace from another window of this app shows its session.
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard NSApp.isActive, let key = NSApp.keyWindow, !AuxiliaryWindows.contains(key) else { return }
-                self?.model.markActiveSessionSeen()
             }
         }
     }
@@ -254,14 +229,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleKeyEvent(_ event: NSEvent) -> NSEvent? {
         if event.type == .keyDown {
             return input.handleKeyDown(event) { hintWork?.cancel() }
-        }
-        // Auxiliary windows keep the native title-strip double-click; nothing else
-        // below applies to them.
-        if event.type == .leftMouseDown, event.clickCount == 2,
-           let window = event.window, AuxiliaryWindows.contains(window),
-           isInTitleStrip(event, window: window) {
-            performTitleBarDoubleClick(window)
-            return nil
         }
         guard input.allowsWorkspaceEvents(event) else {
             hintWork?.cancel()

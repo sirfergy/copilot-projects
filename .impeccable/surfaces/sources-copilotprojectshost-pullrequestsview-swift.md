@@ -1,20 +1,24 @@
 ---
 version: 1
 slug: "sources-copilotprojectshost-pullrequestsview-swift"
-primary_target: "Sources/CopilotProjectsHost/PullRequestsView.swift"
-related_targets: ["Sources/CopilotProjectsHost/PullRequests.swift","Sources/CopilotProjectsHost/AppEntry.swift"]
+primary_target: "Sources/CopilotProjectsPullRequests/PullRequestsView.swift"
+related_targets: ["Sources/CopilotProjectsPullRequests/PullRequests.swift","Sources/CopilotProjectsPullRequests/PullRequestsModel.swift","Sources/CopilotProjectsPullRequests/PullRequestsWorkspace.swift","Sources/CopilotProjectsPullRequests/PullRequestsApplication.swift","Sources/CopilotProjectsHost/PullRequestsAppLauncher.swift","Sources/CopilotProjectsStyle/StudioStyle.swift"]
 ---
 
 # Pull Requests: Goal Lanes
 
-Mode: Operate. A separate macOS window (Window ▸ Pull Requests, ⇧⌘P) showing the
-user's open pull requests grouped by goal: PRs working toward one outcome, inferred
+Mode: Operate. The one window of Copilot Pull Requests, a separate macOS app
+nested in Copilot Projects with its own Dock icon and ⌘Tab entry (opened or
+brought forward by Window ▸ Pull Requests, ⇧⌘P), showing the user's open pull
+requests grouped by goal: PRs working toward one outcome, inferred
 from the Copilot session that drives them (head-branch evidence in its transcript),
 merged by shared head branch, and reassignable by hand. Scope: PRs in the chosen
 owners only (a token list; empty means every owner). Attention: failing required checks, changes
 requested, conflicts/behind, unresolved threads, ready to merge, linked session
-waiting, no live session, stale. Must not touch terminal behavior, the main window,
-or shared protocol packages.
+waiting, no live session, stale. Reaches the workspace only through the host's
+control socket (list-sessions, reveal-session, start-copilot-session); while the
+host is away, lanes keep its last known sessions with unknown states. Must not
+touch terminal behavior, the main window, or CopilotProjectsProtocol.
 
 ## Direction contract
 

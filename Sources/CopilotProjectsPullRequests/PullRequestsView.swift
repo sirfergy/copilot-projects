@@ -1,45 +1,22 @@
 import AppKit
 import SwiftUI
+import CopilotProjectsCore
+import CopilotProjectsStyle
 
 enum PullRequestsWindow {
     static let id = "pull-requests"
     static let title = "Pull Requests"
+    /// The drag strip's height and the traffic lights' inset, as in the workspace window.
+    static let titleStripHeight: CGFloat = 38
+    static let trafficLightInset: CGFloat = 80
 }
 
-/// Windows other than the workspace. Workspace shortcuts (⌘W ends a session,
-/// ⌘1–9, ⌃Tab) and terminal input must never act on them.
-@MainActor
-enum AuxiliaryWindows {
-    private static let windows = NSHashTable<NSWindow>.weakObjects()
-
-    static func register(_ window: NSWindow) { windows.add(window) }
-
-    static func contains(_ window: NSWindow?) -> Bool {
-        var current = window
-        // Popovers, sheets, and child windows belong to the window that opened them.
-        while let candidate = current {
-            if windows.contains(candidate) { return true }
-            current = candidate.parent ?? candidate.sheetParent
-        }
-        return false
-    }
-
-    static func contains(windowNumber: Int) -> Bool {
-        guard windowNumber > 0 else { return false }
-        if windows.allObjects.contains(where: { $0.windowNumber == windowNumber }) { return true }
-        return contains(NSApp.window(withWindowNumber: windowNumber))
-    }
-}
-
-/// Registers its window as auxiliary and drops the title bar separator, as the
-/// workspace window does.
-private struct AuxiliaryWindowMarker: NSViewRepresentable {
+/// Drops the title bar separator, as the workspace window does.
+private struct TitlebarSeparatorRemover: NSViewRepresentable {
     final class MarkerView: NSView {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            guard let window else { return }
-            AuxiliaryWindows.register(window)
-            window.titlebarSeparatorStyle = .none
+            window?.titlebarSeparatorStyle = .none
         }
     }
 
@@ -57,7 +34,6 @@ struct PullRequestsView: View {
     @State private var scrollerStyle = NSScroller.preferredScrollerStyle
     @FocusState private var lanesFocused: Bool
 
-    private let titleStripHeight: CGFloat = 38
     static let goalColumnWidth: CGFloat = 240
 
     var body: some View {
@@ -73,8 +49,9 @@ struct PullRequestsView: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .background(StudioStyle.chrome)
-        .background(AuxiliaryWindowMarker())
+        .background(TitlebarSeparatorRemover())
         .task { await pullRequests.runRefreshLoop() }
+        .task { await pullRequests.runWorkspaceLoop() }
     }
 
     private var titleStrip: some View {
@@ -85,9 +62,9 @@ struct PullRequestsView: View {
                 .allowsHitTesting(false)
             Spacer(minLength: 0)
         }
-        .padding(.leading, 80)
+        .padding(.leading, PullRequestsWindow.trafficLightInset)
         .padding(.trailing, 12)
-        .frame(height: titleStripHeight)
+        .frame(height: PullRequestsWindow.titleStripHeight)
         .frame(maxWidth: .infinity)
         .background(StudioStyle.chrome)
     }
@@ -202,11 +179,10 @@ struct PullRequestsView: View {
               ? "Showing every owner. Choose organizations or users to narrow it."
               : "Showing pull requests in \(owners.joined(separator: ", "))")
         .popover(isPresented: $editingOwners, arrowEdge: .bottom) {
-            OwnersEditor(owners: $pullRequests.owners) {
+            OwnersEditor(owners: $pullRequests.owners, note: pullRequests.settingsNote) {
                 editingOwners = false
                 pullRequests.refresh()
             }
-            .background(AuxiliaryWindowMarker())
         }
     }
 
@@ -224,16 +200,18 @@ struct PullRequestsView: View {
     private func footer(_ goals: [PullRequestGoal]) -> some View {
         let lanesShown = pullRequests.phase == .loaded && !goals.isEmpty
         let selected = goals.lazy.flatMap(\.items).first { $0.id == selection }
+        let canGoToSession = selected?.session != nil && pullRequests.isConnected
         return HStack(spacing: 14) {
             if lanesShown {
                 keyHint("↑↓", "Move")
-                if let selected {
-                    keyHint("↩", selected.session == nil ? "Open on GitHub" : "Go to Session")
-                    if selected.session != nil { keyHint("⌘↩", "Open on GitHub") }
+                if selected != nil {
+                    keyHint("↩", canGoToSession ? "Go to Session" : "Open on GitHub")
+                    if canGoToSession { keyHint("⌘↩", "Open on GitHub") }
                 }
             }
             keyHint("⌘R", "Refresh")
             Spacer(minLength: 12)
+            workspaceNote
             if pullRequests.omitted > 0 {
                 Text("\(pullRequests.omitted) older pull requests not shown; choose owners to narrow")
                     .lineLimit(1)
@@ -245,6 +223,40 @@ struct PullRequestsView: View {
         .padding(.horizontal, 14)
         .frame(height: 32)
         .background(StudioStyle.sidebar)
+    }
+
+    /// Whether the lanes know the workspace's sessions, said quietly: secondary
+    /// ink while Copilot Projects is away, the orange warning only when it must
+    /// be updated.
+    @ViewBuilder
+    private var workspaceNote: some View {
+        switch pullRequests.workspace {
+        case .disconnected(let lastGood):
+            Text(lastGood == nil
+                 ? "Copilot Projects isn’t open, so sessions aren’t matched"
+                 : "Copilot Projects isn’t open; session states are unknown")
+                .lineLimit(1)
+                .truncationMode(.tail)
+        case .incompatibleHost:
+            Label {
+                Text("Update Copilot Projects to match sessions")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            }
+            .help("This version of Copilot Projects can’t list its sessions, so pull requests aren’t matched to them.")
+        case .connecting, .connected:
+            EmptyView()
+        }
+        ForEach([pullRequests.storageNote, pullRequests.settingsNote].compactMap { $0 }, id: \.self) { note in
+            Label {
+                Text(note).lineLimit(1).truncationMode(.tail)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            }
+            .help(note)
+        }
     }
 
     private func keyHint(_ key: String, _ action: String) -> some View {
@@ -297,8 +309,10 @@ struct PullRequestsView: View {
                                 selection: selection,
                                 chips: chips,
                                 animatesMoves: !reduceMotion && !placeholder,
+                                workspace: laneWorkspace,
                                 projects: pullRequests.projects,
                                 defaultProjectId: pullRequests.defaultProjectId,
+                                isStarting: pullRequests.startingGoals.contains(goal.id),
                                 goalChoices: goalChoices(goals),
                                 actions: laneActions
                             )
@@ -319,10 +333,10 @@ struct PullRequestsView: View {
             .onKeyPress(.upArrow) { move(-1, in: order, proxy: proxy) }
             .onKeyPress(.return, phases: .down) { press in
                 guard let item = order.first(where: { $0.id == selection }) else { return .ignored }
-                if press.modifiers.contains(.command) || item.session == nil {
-                    pullRequests.openOnGitHub(item.pr)
-                } else if let session = item.session {
+                if let session = item.session, pullRequests.isConnected, !press.modifiers.contains(.command) {
                     pullRequests.goToSession(session)
+                } else {
+                    pullRequests.openOnGitHub(item.pr)
                 }
                 return .handled
             }
@@ -395,6 +409,15 @@ struct PullRequestsView: View {
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
+    /// What a lane's session button can do with the workspace right now.
+    private var laneWorkspace: GoalLane.Workspace {
+        switch pullRequests.workspace {
+        case .connected: return .connected
+        case .disconnected: return pullRequests.canOpenHost ? .openable : .unavailable
+        case .connecting, .incompatibleHost: return .unavailable
+        }
+    }
+
     private var laneActions: GoalLane.Actions {
         GoalLane.Actions(
             select: { key in
@@ -405,6 +428,7 @@ struct PullRequestsView: View {
             copyLink: { pullRequests.copyLink($0) },
             goToSession: { pullRequests.goToSession($0) },
             startSession: { goal, projectId in pullRequests.startSession(for: goal, projectId: projectId) },
+            openHost: { pullRequests.openHost() },
             move: { key, goalId in pullRequests.move(key, toGoal: goalId) },
             moveToNewGoal: { item in
                 if let name = Self.promptForGoalName(suggested: item.pr.title) {
@@ -436,22 +460,34 @@ private struct GoalLane: View {
         let select: (PullRequestKey) -> Void
         let openPullRequest: (PullRequestSnapshot) -> Void
         let copyLink: (PullRequestSnapshot) -> Void
-        let goToSession: (PullRequestSessionRef) -> Void
+        let goToSession: (PullRequestSession) -> Void
         let startSession: (PullRequestGoal, String) -> Void
+        let openHost: () -> Void
         let move: (PullRequestKey, String?) -> Void
         let moveToNewGoal: (PullRequestItem) -> Void
+    }
+
+    enum Workspace {
+        /// Sessions can be shown and started.
+        case connected
+        /// Copilot Projects isn't answering; the lane offers to open it.
+        case openable
+        /// Nothing to offer: still connecting, or Copilot Projects is too old.
+        case unavailable
     }
 
     let goal: PullRequestGoal
     let selection: PullRequestKey?
     let chips: Namespace.ID
     let animatesMoves: Bool
+    let workspace: Workspace
     let projects: [(id: String, name: String)]
     let defaultProjectId: String?
+    let isStarting: Bool
     let goalChoices: [(id: String, name: String)]
     let actions: Actions
 
-    private var laneSession: PullRequestSessionRef? {
+    private var laneSession: PullRequestSession? {
         goal.session ?? goal.items.lazy.compactMap(\.session).first
     }
 
@@ -501,7 +537,7 @@ private struct GoalLane: View {
     @ViewBuilder
     private func menu(_ item: PullRequestItem) -> some View {
         Button("Open on GitHub") { actions.openPullRequest(item.pr) }
-        if let session = item.session {
+        if let session = item.session, workspace == .connected {
             Button("Go to Session") { actions.goToSession(session) }
         }
         Button("Copy Link") { actions.copyLink(item.pr) }
@@ -538,11 +574,11 @@ private struct GoalLane: View {
     private var context: some View {
         if let session = laneSession {
             HStack(spacing: 6) {
-                if session.session.displayStatus != .idle || session.session.finishedUnseen {
-                    SessionStateIndicator(session: session.session)
+                if PullRequestSessionIndicator.shows(session) {
+                    PullRequestSessionIndicator(session: session)
                         .frame(width: 9, height: 9)
                 }
-                Text("\(session.projectName) · \(session.session.attentionLabel)")
+                Text("\(session.projectName) · \(session.attentionLabel)")
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -551,13 +587,19 @@ private struct GoalLane: View {
             .accessibilityElement(children: .combine)
         } else {
             Label {
-                Text(goal.kind == .manual ? "Your goal · no session" : "No session on this goal")
+                Text(noSessionText)
             } icon: {
                 Image(systemName: "terminal")
             }
             .font(.caption)
             .foregroundStyle(StudioStyle.secondaryText)
         }
+    }
+
+    /// Only a connected workspace can say a goal has no session.
+    private var noSessionText: String {
+        guard workspace == .connected else { return "Session unknown" }
+        return goal.kind == .manual ? "Your goal · no session" : "No session on this goal"
     }
 
     private var counts: some View {
@@ -572,10 +614,24 @@ private struct GoalLane: View {
 
     @ViewBuilder
     private var sessionAction: some View {
+        switch workspace {
+        case .connected:
+            connectedSessionAction
+        case .openable:
+            Button("Open Copilot Projects", action: actions.openHost)
+                .controlSize(.small)
+                .help("Open Copilot Projects to match sessions and go to them from here")
+        case .unavailable:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var connectedSessionAction: some View {
         if let session = laneSession {
             Button("Go to Session") { actions.goToSession(session) }
                 .controlSize(.small)
-                .help("Show \(PullRequestGrouping.goalName(sessionTitle: session.session.title)) in the workspace")
+                .help("Show \(PullRequestGrouping.goalName(sessionTitle: session.title)) in the workspace")
         } else if !projects.isEmpty {
             let target = defaultProjectId ?? projects[0].id
             Menu {
@@ -590,7 +646,53 @@ private struct GoalLane: View {
             .menuStyle(.button)
             .controlSize(.small)
             .fixedSize()
+            .disabled(isStarting)
             .help("Start a Copilot session on \(goal.items.count == 1 ? "this pull request" : "these pull requests") in \(projects.first { $0.id == target }?.name ?? "the current project"); choose another project from the menu")
+        }
+    }
+}
+
+/// A session's state beside its project, as the workspace's session list shows
+/// it: a small spinner while running, orange while waiting, blue once finished
+/// unseen, and nothing otherwise or while its state is unknown.
+struct PullRequestSessionIndicator: View {
+    let session: PullRequestSession
+
+    static func shows(_ session: PullRequestSession) -> Bool {
+        (session.status != nil && session.status != .idle) || session.finishedUnseen
+    }
+
+    var body: some View {
+        Group {
+            switch session.status {
+            case .running:
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.6)
+            case .waiting:
+                dot(.orange)
+            case .idle where session.finishedUnseen:
+                dot(.blue)
+            case .idle, nil:
+                Color.clear
+            }
+        }
+        .frame(width: 9, height: 9)
+        .help(help)
+    }
+
+    private func dot(_ color: Color) -> some View {
+        Circle()
+            .fill(color)
+            .overlay(Circle().stroke(.black.opacity(0.15), lineWidth: 0.5))
+    }
+
+    private var help: String {
+        switch session.status {
+        case .running: return "running"
+        case .waiting: return "waiting for input"
+        case .idle: return session.finishedUnseen ? "finished — ready for you" : "idle"
+        case nil: return "status unknown"
         }
     }
 }
@@ -754,6 +856,8 @@ struct PullRequestChip: View {
 
 private struct OwnersEditor: View {
     @Binding var owners: String
+    /// Why these owners stay in this app rather than Copilot Projects' settings.
+    let note: String?
     let onDone: () -> Void
     @State private var draft: [String] = []
 
@@ -770,6 +874,14 @@ private struct OwnersEditor: View {
             Text("Separate owners with commas or spaces; Return applies.")
                 .font(.caption)
                 .foregroundStyle(StudioStyle.secondaryText)
+            if let note {
+                Label {
+                    Text(note).fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
+                .font(.caption)
+            }
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onDone)

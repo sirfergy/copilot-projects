@@ -75,8 +75,8 @@ enum GitHubCLI {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) async throws -> [GitHubAccount] {
         let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-        func run(_ arguments: [String]) async throws -> LunaProcess.Result {
-            try await LunaProcess.run(
+        func run(_ arguments: [String]) async throws -> GitHubCLIProcess.Result {
+            try await GitHubCLIProcess.run(
                 executable: executable, arguments: arguments, environment: environment,
                 directory: home, timeout: 20
             )

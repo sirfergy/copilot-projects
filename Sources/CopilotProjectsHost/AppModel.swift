@@ -374,6 +374,22 @@ final class AppModel: ObservableObject {
             self.focus(projectId: request.projectId, sessionId: request.sessionId)
             return .success()
         },
+        listSessions: { [unowned self] in
+            Self.listSessionsResponse(self.workspaceSnapshot())
+        },
+        revealSession: { [unowned self] request in
+            self.revealSession(projectId: request.projectId, sessionId: request.sessionId ?? "")
+        },
+        startCopilotSession: { [unowned self] request in
+            guard let projectId = request.projectId,
+                  let rawRequestId = request.requestId,
+                  let requestId = UUID(uuidString: rawRequestId),
+                  let prompt = request.prompt else {
+                return .failure("start-copilot-session requires a project, request id, and prompt",
+                                code: "bad-request")
+            }
+            return self.startPullRequestsSession(requestId: requestId, projectId: projectId, prompt: prompt)
+        },
         screenshot: { _ in
             .failure("screenshot must be handled by the control server")
         },
@@ -556,8 +572,7 @@ final class AppModel: ObservableObject {
                 promptStatusTimestamp: promptStatusTimestamp
             )
         },
-        // The workspace is on screen: the app is active and no other window of it has the keyboard.
-        isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive && !AuxiliaryWindows.contains(NSApp.keyWindow) },
+        isAppActive: @escaping @MainActor () -> Bool = { NSApp.isActive },
         agentActivityDirectory: URL = Paths.sessionsDir,
         resumeMarkerDirectory: URL = Paths.sessionsDir,
         remotePromptLiveSessions: ((Set<String>) -> Set<String>)? = nil,
@@ -669,6 +684,18 @@ final class AppModel: ObservableObject {
     func startServer() -> Bool {
         let server = ControlServer { [weak self] req in
             guard let self else { return .failure("app shutting down") }
+            if req.command == "list-sessions" {
+                // Resume markers are read here, off the main thread: the Pull
+                // Requests app asks every two seconds.
+                let (snapshot, markers) = DispatchQueue.main.sync {
+                    MainActor.assumeIsolated {
+                        (self.workspaceSnapshotWithoutCopilotSessions(), self.resumeMarkerDirectory)
+                    }
+                }
+                return Self.listSessionsResponse(
+                    Self.recordingCopilotSessions(in: snapshot, markerDirectory: markers)
+                )
+            }
             if req.command == "screenshot" {
                 let path = req.path ?? FileManager.default.homeDirectoryForCurrentUser
                     .appendingPathComponent("Downloads/copilot-projects.png").path
@@ -1329,12 +1356,22 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// Where a created session starts, and whether it takes its project's selection.
+    private enum CreatedSessionPlacement {
+        /// Remote clients: in ~/Repos, never stealing the Mac's selected tab.
+        case remote
+        /// Copilot Pull Requests: like Start Session in the app, in the project's
+        /// current folder and selected in its project.
+        case local
+    }
+
     private func createRemoteSession(
         _ request: RemoteCreateSessionRequest,
         isLegacyRequest: Bool,
         kind: RemoteSessionKind,
         title: String,
         initialPrompt: String?,
+        placement: CreatedSessionPlacement = .remote,
         now: Date
     ) -> RemoteSessionCreationOutcome {
         // A failed startup load leaves the in-memory workspace empty, so neither
@@ -1427,7 +1464,18 @@ final class AppModel: ObservableObject {
         } else {
             copilotExecutable = nil
         }
-        guard let cwd = remoteReposDirectory() else { return .invalid }
+        let cwd: String
+        switch placement {
+        case .remote:
+            guard let repos = remoteReposDirectory() else { return .invalid }
+            cwd = repos
+        case .local:
+            let folder = Paths.normalizedDirectory(defaultCwd(forProjectIndex: pi))
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: folder, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { return .invalid }
+            cwd = folder
+        }
 
         if !isLegacyRequest {
             let marker = resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session")
@@ -1443,10 +1491,11 @@ final class AppModel: ObservableObject {
 
         let session = Session(
             id: sessionId, title: title, cwd: cwd, creationFingerprint: fingerprint)
+        let previousSelection = projects[pi].selectedSessionId
         projects[pi].sessions.append(session)
-        // Do NOT steal the Mac's selected tab: only adopt the new session when the
-        // project currently has no selection.
-        if (projects[pi].selectedSessionId ?? "").isEmpty {
+        // A remote client must NOT steal the Mac's selected tab: only adopt the new
+        // session when the project currently has no selection.
+        if placement == .local || (projects[pi].selectedSessionId ?? "").isEmpty {
             projects[pi].selectedSessionId = sessionId
         }
 
@@ -1456,6 +1505,15 @@ final class AppModel: ObservableObject {
             initialPrompt: initialPrompt,
             resumeRecordedSession: isLegacyRequest
         )
+        // Like Start Session in the app, never keep a tab whose terminal didn't
+        // start; nothing is recorded, so nothing was created.
+        if placement == .local, remoteSessionLauncher == nil,
+           controllers[sessionId]?.terminalView.process?.running != true {
+            controllers[sessionId] = nil
+            projects[pi].sessions.removeAll { $0.id == sessionId }
+            projects[pi].selectedSessionId = previousSelection
+            return .unavailable
+        }
         refreshSelectedTranscriptController()
 
         // Launch remains before persistence so a saved session cannot be stranded
@@ -4674,6 +4732,15 @@ final class AppModel: ObservableObject {
     }
 
     func focus(projectId: String?, sessionId: String?) {
+        show(projectId: projectId, sessionId: sessionId)
+        requestMainWindow?()
+        NSApp.activate(ignoringOtherApps: true)
+        // An already-visible session may not trigger activation or reveal callbacks.
+        focusActiveTerminal()
+    }
+
+    /// Selects a session, or a project's shown session, and marks it read.
+    private func show(projectId: String?, sessionId: String?) {
         if let sessionId, let loc = locateIndex(sessionId) {
             selectedProjectId = projects[loc.p].id
             projects[loc.p].selectedSessionId = sessionId
@@ -4692,10 +4759,112 @@ final class AppModel: ObservableObject {
         if let sid = currentSelectedSessionId { controller(for: sid) }
         refreshSelectedTranscriptController()
         updateDockBadge()
+    }
+
+    // MARK: - Copilot Pull Requests
+
+    /// Shows a session for Copilot Pull Requests. Strict, unlike `focus`: a
+    /// session that ended is `gone`, one that moved to another project is a
+    /// `conflict`. It never activates the app; the caller already yielded
+    /// activation to it.
+    func revealSession(projectId: String?, sessionId: String) -> ControlResponse {
+        guard let loc = locateIndex(sessionId) else {
+            return .failure("the session has ended", code: "gone")
+        }
+        let owner = projects[loc.p].id
+        if let projectId, projectId != owner {
+            return .failure("the session is in another project", code: "conflict")
+        }
+        show(projectId: owner, sessionId: sessionId)
         requestMainWindow?()
-        NSApp.activate(ignoringOtherApps: true)
-        // An already-visible session may not trigger activation or reveal callbacks.
         focusActiveTerminal()
+        return .success(sessionId, code: "revealed")
+    }
+
+    /// Starts a Copilot session for Copilot Pull Requests exactly as Start
+    /// Session did inside the app: in the project's current folder, selected in
+    /// its project. It shares the creation ledger, so a request id replayed even
+    /// after a restart returns the same session (`existing`), `gone` once it
+    /// ended, or `conflict` when the project or prompt differ.
+    func startPullRequestsSession(
+        requestId: UUID, projectId: String, prompt: String, now: Date = Date()
+    ) -> ControlResponse {
+        guard SessionInputValidation.isValidPrompt(prompt) else {
+            return .failure(CopilotSessionStartError.invalidPrompt.localizedDescription, code: "bad-request")
+        }
+        guard !isTerminating else {
+            return .failure(CopilotSessionStartError.shuttingDown.localizedDescription, code: "unavailable")
+        }
+        let prompt = prompt
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let outcome = createRemoteSession(
+            RemoteCreateSessionRequest(
+                requestId: requestId, projectId: projectId, kind: .copilot, initialPrompt: prompt),
+            isLegacyRequest: false,
+            kind: .copilot,
+            title: "Copilot",
+            initialPrompt: prompt,
+            placement: .local,
+            now: now
+        )
+        switch outcome {
+        case .unknownProject:
+            return .failure(CopilotSessionStartError.projectUnavailable.localizedDescription, code: "unknown-project")
+        case .invalid:
+            return .failure("This project’s working directory no longer exists.", code: "invalid")
+        case .persistenceUnavailable:
+            return .failure("Copilot Projects couldn’t save the session. Try again; it won’t start twice.",
+                            code: "persistence-unavailable")
+        default:
+            return Self.controlResponse(for: outcome)
+        }
+    }
+
+    /// Every project and live session with the state the workspace shows, for `list-sessions`.
+    func workspaceSnapshot() -> WorkspaceSnapshot {
+        Self.recordingCopilotSessions(
+            in: workspaceSnapshotWithoutCopilotSessions(), markerDirectory: resumeMarkerDirectory
+        )
+    }
+
+    private func workspaceSnapshotWithoutCopilotSessions() -> WorkspaceSnapshot {
+        WorkspaceSnapshot(
+            hostProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+            selectedProjectId: selectedProjectId,
+            projects: projects.map { project in
+                WorkspaceSnapshot.Project(id: project.id, name: project.name, sessions: project.sessions.map {
+                    WorkspaceSnapshot.Session(
+                        id: $0.id, title: $0.title, status: $0.displayStatus, finishedUnseen: $0.finishedUnseen,
+                        hasPendingInput: $0.hasPendingInput
+                    )
+                })
+            }
+        )
+    }
+
+    /// Fills in each session's Copilot CLI session from its resume marker.
+    nonisolated static func recordingCopilotSessions(
+        in snapshot: WorkspaceSnapshot, markerDirectory: URL
+    ) -> WorkspaceSnapshot {
+        var snapshot = snapshot
+        for p in snapshot.projects.indices {
+            for s in snapshot.projects[p].sessions.indices {
+                let id = snapshot.projects[p].sessions[s].id
+                let marker = (try? String(
+                    contentsOf: markerDirectory.appendingPathComponent("\(id).copilot-session"), encoding: .utf8
+                ))?.trimmingCharacters(in: .whitespacesAndNewlines)
+                snapshot.projects[p].sessions[s].copilotSessionId = marker?.isEmpty == false ? marker : nil
+            }
+        }
+        return snapshot
+    }
+
+    nonisolated static func listSessionsResponse(_ snapshot: WorkspaceSnapshot) -> ControlResponse {
+        guard let data = try? JSONEncoder().encode(snapshot), let text = String(data: data, encoding: .utf8) else {
+            return .failure("could not encode the workspace")
+        }
+        return .success(text)
     }
 
     /// Mark a session read on behalf of a remote client that is now viewing it (iOS

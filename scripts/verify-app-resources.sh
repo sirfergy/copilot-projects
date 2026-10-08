@@ -2,7 +2,7 @@
 # Smoke-test an assembled Copilot Projects.app: prove the SwiftPM resource
 # bundles the runtime loads are actually inside the app, resolvable from the
 # exact paths PackagedResource searches, and byte-identical to the reviewed
-# sources.
+# sources, and that the nested Copilot Pull Requests app is intact and signed.
 #
 #   scripts/verify-app-resources.sh ["/path/to/Copilot Projects.app"]
 #
@@ -68,6 +68,39 @@ if command -v node >/dev/null 2>&1; then
 else
   echo "note: node not found; skipped the packaged JavaScript syntax check" >&2
 fi
+
+# Copilot Pull Requests ships nested in the app, with its own identity and icon.
+plist_value() {
+  /usr/libexec/PlistBuddy -c "Print :$2" "$1" 2>/dev/null
+}
+PR_APP="$APP/Contents/Helpers/Copilot Pull Requests.app"
+PR_INFO="$PR_APP/Contents/Info.plist"
+if [ ! -f "$PR_INFO" ]; then
+  echo "error: missing nested app $PR_APP" >&2
+  exit 1
+fi
+HOST_ID="$(plist_value "$APP/Contents/Info.plist" CFBundleIdentifier)"
+PR_ID="$(plist_value "$PR_INFO" CFBundleIdentifier)"
+if [ -z "$HOST_ID" ] || [ "$PR_ID" != "$HOST_ID.pull-requests" ]; then
+  echo "error: Copilot Pull Requests has bundle id '$PR_ID', expected '$HOST_ID.pull-requests'" >&2
+  exit 1
+fi
+if [ "$(plist_value "$PR_INFO" CopilotProjectsHostBundleIdentifier)" != "$HOST_ID" ]; then
+  echo "error: Copilot Pull Requests doesn't name its host's bundle id" >&2
+  exit 1
+fi
+PR_EXE="$PR_APP/Contents/MacOS/$(plist_value "$PR_INFO" CFBundleExecutable)"
+if [ "$PR_EXE" = "$PR_APP/Contents/MacOS/" ] || [ ! -x "$PR_EXE" ]; then
+  echo "error: Copilot Pull Requests executable is missing or not executable: $PR_EXE" >&2
+  exit 1
+fi
+PR_ICON="$PR_APP/Contents/Resources/$(plist_value "$PR_INFO" CFBundleIconFile).icns"
+if [ ! -s "$PR_ICON" ]; then
+  echo "error: Copilot Pull Requests icon is missing: $PR_ICON" >&2
+  exit 1
+fi
+codesign --verify --strict "$PR_APP"
+echo "ok: $PR_APP"
 
 "$APP/Contents/MacOS/copilot-projects" check-assets
 
