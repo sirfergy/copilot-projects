@@ -315,6 +315,8 @@ actor PullRequestTranscriptIndex {
         var read = 0
         /// Every complete line has been read.
         var finished = true
+        /// The file's size when it was read.
+        var size = 0
     }
 
     /// Like `update`, but reading whole lines of at most `limit` bytes, or the one
@@ -335,7 +337,7 @@ actor PullRequestTranscriptIndex {
             entry = fresh
         }
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .alwaysMapped) else {
-            return Scan(entry: previous, modified: modified)
+            return Scan(entry: previous, modified: modified, finished: false)
         }
         var read = 0
         var finished = true
@@ -368,7 +370,7 @@ actor PullRequestTranscriptIndex {
         }
         let wanted = Set(patterns.branches)
         entry.branchMentions = entry.branchMentions.filter { wanted.contains($0.key) }
-        return Scan(entry: entry, modified: modified, read: read, finished: finished)
+        return Scan(entry: entry, modified: modified, read: read, finished: finished, size: data.count)
     }
 
     private func loadIfNeeded() {

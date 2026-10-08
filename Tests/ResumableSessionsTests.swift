@@ -302,6 +302,31 @@ final class ResumableSessionFinderTests: XCTestCase {
         XCTAssertTrue(search.deferred)
     }
 
+    func testAnUnfinishedLastLineNeverHoldsUpTheCandidatesAfterIt() async throws {
+        let home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
+        let pr = makePR(51, repo: "o/r", branch: "me/after-the-tail")
+        let valid = transcript(mentioning: pr.headRefName, times: 3)
+        // Newer, so read first: Copilot stopped partway through writing its only line.
+        try home.addSession(
+            cwd: work, updated: Date(timeIntervalSince1970: 1_800_000_000),
+            transcript: String(repeating: "x", count: valid.utf8.count * 2), said: ["github.com/o/r/pull/51"]
+        )
+        let id = try home.addSession(
+            cwd: work, updated: Date(timeIntervalSince1970: 1_700_000_000), transcript: valid,
+            said: ["github.com/o/r/pull/51"]
+        )
+        let finder = finder(home, budget: valid.utf8.count, cache: root.appendingPathComponent("state/resumable-index.json"))
+        var search = await finder.search(for: [pr], liveCopilotSessionIds: [])
+        XCTAssertNil(search.sessions[pr.key])
+        XCTAssertTrue(search.deferred, "it learned that only an unfinished line is left there")
+
+        search = await finder.search(for: [pr], liveCopilotSessionIds: [])
+        XCTAssertEqual(search.sessions[pr.key]?.copilotSessionId, id)
+        let read = await finder.lastBytesRead()
+        XCTAssertEqual(read, valid.utf8.count, "the unfinished line isn't read again until it changes")
+        XCTAssertFalse(search.deferred)
+    }
+
     func testANewBranchIsCountedOverSeveralPassesWithoutLosingWhatWasFound() async throws {
         let home = try CopilotHomeFixture(root: root.appendingPathComponent("copilot"))
         let first = makePR(41, repo: "o/r", branch: "me/first-branch-x")

@@ -227,6 +227,9 @@ actor ResumableTranscriptCache {
         /// The transcript read again from the start for branches `entry` wasn't
         /// read for; it replaces `entry` once it has caught up.
         var rescan: PullRequestTranscriptIndex.Entry?
+        /// The transcript's size when `entry` had read every complete line: until
+        /// it changes, all that is left is an unfinished last line.
+        var size: Int?
         var lastUsed: Date
     }
 
@@ -287,6 +290,7 @@ actor ResumableTranscriptCache {
             for entry in [item?.entry, item?.rescan].compactMap({ $0 }) { branches.formUnion(entry.branchMentions.keys) }
             if let item { current[request.copilotSessionId] = (item, modified) }
             let rescans = item.map { known in branches.contains { known.entry.branchMentions[$0] == nil } } ?? false
+            if !rescans, item?.size == size { continue }
             let previous = rescans ? item?.rescan : item?.entry
             let remaining = size - (previous?.scannedBytes ?? 0)
             guard remaining > 0 else { continue }
@@ -324,6 +328,7 @@ actor ResumableTranscriptCache {
         }
 
         var read = 0
+        var progressed = false
         for (scan, result) in results {
             let path = scan.request.path
             read += result.read
@@ -333,10 +338,12 @@ actor ResumableTranscriptCache {
                 continue
             }
             if !result.finished { unread = true }
-            var item = Item(entry: entry, rescan: nil, lastUsed: now)
+            var item = Item(entry: entry, rescan: nil, size: result.finished ? result.size : nil, lastUsed: now)
             if scan.rescans, !result.finished, let known = items[path] {
-                item = Item(entry: known.entry, rescan: entry, lastUsed: now)
+                item = Item(entry: known.entry, rescan: entry, size: known.size, lastUsed: now)
             }
+            // Learning that only an unfinished line is left lets the next pass skip it.
+            progressed = progressed || item.size != items[path]?.size
             items[path] = item
             current[scan.request.copilotSessionId] = (item, result.modified ?? now)
         }
@@ -367,8 +374,8 @@ actor ResumableTranscriptCache {
             }
             evidence[id] = TranscriptEvidence(branchMentions: branches, urlMentions: urls, lastModified: value.modified)
         }
-        // A pass that read nothing would leave the same candidates every time.
-        return (evidence, unread && read > 0)
+        // A pass that learned nothing would leave the same candidates every time.
+        return (evidence, unread && (read > 0 || progressed))
     }
 
     private func loadIfNeeded() {

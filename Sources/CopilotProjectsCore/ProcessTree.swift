@@ -224,18 +224,28 @@ public enum ProcessTree {
     }
 
     /// Arguments that resume Copilot session `copilotSessionId`: the Copilot
-    /// CLI's `--resume=<id>` or `--resume <id>`, or the shell command Copilot
-    /// Projects runs to resume it, which quotes the flag and falls back after it
-    /// (`TerminalController.startupProgram`). A prompt that mentions it never counts.
+    /// CLI's `--resume=<id>` or `--resume <id>` options, or the shell command
+    /// Copilot Projects runs to resume it (`TerminalController.startupProgram`),
+    /// known by the fallback only it prints. A prompt never counts: neither the
+    /// value of a prompt option nor a command that merely quotes one.
     public static func resumes(_ arguments: [String], copilotSessionId: String) -> Bool {
         let id = copilotSessionId.lowercased()
-        let flag = "--resume=" + id
-        let command = "'\(flag)' ||"
-        for (index, argument) in arguments.enumerated() {
-            let argument = argument.lowercased()
-            if argument == flag || argument.contains(command) { return true }
-            if argument == "--resume", index + 1 < arguments.count, arguments[index + 1].lowercased() == id {
+        // Quoting a prompt escapes each `'`, so a prompt can never spell this.
+        let fallback = "|| printf '\\n[copilot projects] could not resume copilot session \(id)\\n'"
+        let promptOptions: Set<String> = ["--interactive", "-i", "--prompt", "-p"]
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index].lowercased()
+            let next = index + 1 < arguments.count ? arguments[index + 1].lowercased() : nil
+            if argument == "-c", let next {
+                if next.contains(fallback) { return true }
+                index += 2
+            } else if promptOptions.contains(argument) {
+                index += 2
+            } else if argument == "--resume=" + id || (argument == "--resume" && next == id) {
                 return true
+            } else {
+                index += 1
             }
         }
         return false

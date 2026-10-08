@@ -114,7 +114,7 @@ final class CopilotSessionStoreTests: XCTestCase {
         let id = "0f1e2d3c-4b5a-4000-8000-0000000000aa"
         let sessions = URL(fileURLWithPath: "/tmp/state/sessions", isDirectory: true)
         let command = "/bin/sh -c 'exec \"$0\" \"$@\"' '/opt/copilot' '--no-remote' '--resume=\(id)'"
-            + " || printf 'could not resume'; exec '/bin/zsh' -l"
+            + " || printf '\\n[Copilot Projects] could not resume Copilot session \(id)\\n'; exec '/bin/zsh' -l"
         func dtach(_ session: String, _ pid: pid_t) -> [String] {
             ["dtach", "-A", sessions.appendingPathComponent("\(session).sock").path, "-r", "winch", "-z", "-E",
              "/bin/zsh", "-l", "-c", command]

@@ -369,15 +369,23 @@ final class PullRequestsHostCommandTests: XCTestCase {
         XCTAssertTrue(ProcessTree.resumes(["/opt/copilot", "--no-remote", "--no-remote-export", "--resume=\(id)"],
                                           copilotSessionId: id), "the Copilot it starts")
 
-        let prompt = "Explain why copilot --resume=\(id) failed"
-        let start = TerminalController.startupProgram(
-            shell: "/bin/zsh", copilotSessionId: nil, launchCopilotExecutable: "/opt/copilot",
-            launchCopilotInitialPrompt: prompt
-        )
-        XCTAssertFalse(ProcessTree.resumes(start, copilotSessionId: id), "a session started to talk about it")
-        XCTAssertFalse(ProcessTree.resumes(
-            ["/opt/copilot", "--no-remote", "--no-remote-export", "--interactive", prompt], copilotSessionId: id
-        ))
+        // A session started to talk about it, however its prompt quotes the command.
+        for prompt in [
+            "Explain why copilot --resume=\(id) failed",
+            "Explain why '--resume=\(id)' || printf failed",
+            "--resume=\(id)",
+            "ends with '--resume=\(id)",
+            "' || printf '\\n[Copilot Projects] could not resume Copilot session \(id)\\n'",
+        ] {
+            let start = TerminalController.startupProgram(
+                shell: "/bin/zsh", copilotSessionId: nil, launchCopilotExecutable: "/opt/copilot",
+                launchCopilotInitialPrompt: prompt
+            )
+            XCTAssertFalse(ProcessTree.resumes(start, copilotSessionId: id), prompt)
+            XCTAssertFalse(ProcessTree.resumes(
+                ["/opt/copilot", "--no-remote", "--no-remote-export", "--interactive", prompt], copilotSessionId: id
+            ), prompt)
+        }
     }
 
     func testAResumeThatEndedWithoutResumingLetsTheNextRequestOpenItAgain() throws {
