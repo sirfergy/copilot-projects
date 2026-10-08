@@ -247,25 +247,39 @@ copilot-projects ping            # -> pong
 ### Cutting a release
 
 The [Release workflow](../.github/workflows/release.yml) is the primary publisher.
-It automatically publishes the next patch version for eligible PR merges to `main`.
-To publish a specific new version, dispatch the workflow from `main`:
+It automatically publishes the next version for eligible PR merges to `main`.
+
+Versions are `YYYY.M.D.N`, tagged `vYYYY.M.D.N`: the date in Pacific time
+(`America/Los_Angeles`) when the workflow computes the version, then the release's
+ordinal that day. Month, day, and `N` have no leading zeros, so `v2026.10.8.3` is
+the third release on October 8, 2026. The next release on the same Pacific day
+increments `N`; the first release of a later day, or the first after a legacy
+`vX.Y.Z` tag, is `.1`. Legacy tags remain valid predecessors and always order
+below date tags. If the latest release tag is dated after today, the workflow
+fails instead of publishing a lower version. The rules live in
+[`scripts/release-version.sh`](../scripts/release-version.sh).
+
+To publish the next version manually, dispatch the workflow from `main`:
 
 ```bash
 gh workflow run release.yml \
   --repo sirfergy/copilot-projects \
   --ref main \
-  -f version=X.Y.Z
+  -f version=YYYY.M.D.N
 ```
 
-Replace `X.Y.Z` with an unused semantic version. The workflow runs validation and
-tests before entering the protected `release` environment for signing and publishing.
+Replace `YYYY.M.D.N` with the version an automatic release would pick now; the
+workflow rejects any other version and names the expected one. Publishing with
+`scripts/release.sh --publish` likewise refuses a version dated after today. The
+workflow runs validation and tests before entering the protected `release`
+environment for signing and publishing.
 
 #### Local builds and fallback publishing
 
 `scripts/release.sh` builds an Apple Silicon optimized app and drag-to-Applications DMG.
 
 ```bash
-./scripts/release.sh 0.1.0             # -> dist/Copilot-Projects-0.1.0.dmg (local only)
+./scripts/release.sh 2026.10.8.1       # -> dist/Copilot-Projects-2026.10.8.1.dmg (local only)
 ```
 
 Use direct script publishing only as a fallback when the Actions runner or signing
@@ -276,7 +290,7 @@ It requires a Developer ID identity and a `notarytool` Keychain profile:
 ```bash
 CODESIGN_IDENTITY="Developer ID Application: …" \
 NOTARY_PROFILE="copilot-projects-notary" \
-./scripts/release.sh 0.1.0 --publish
+./scripts/release.sh 2026.10.8.1 --publish
 ```
 
 On shared build machines, set `CODESIGN_KEYCHAIN` to the job's signing keychain
@@ -312,7 +326,7 @@ An integration can reuse the same pipeline without copying release logic:
 GITHUB_REPOSITORY=owner/integration \
 CODESIGN_IDENTITY="Developer ID Application: …" \
 NOTARY_PROFILE="copilot-projects-notary" \
-/absolute/public-checkout/scripts/release.sh 0.1.0 \
+/absolute/public-checkout/scripts/release.sh 2026.10.8.1 \
   --project-root=/absolute/integration-checkout --publish
 ```
 

@@ -9,6 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 source "$ROOT/scripts/bundle-resources.sh"
+source "$ROOT/scripts/release-version.sh"
 
 CONFIG="debug"
 LAUNCH=0
@@ -41,23 +42,29 @@ export "GIT_CONFIG_VALUE_$GIT_CONFIG_INDEX=all"
 export GIT_CONFIG_COUNT="$((GIT_CONFIG_INDEX + 1))"
 
 git_describe_version_tag() {
-  local tag describe commits best_describe="" best_commits=""
+  local tag describe commits best_tags="" best_commits=""
 
+  # Release tags are vYYYY.M.D.N or legacy vX.Y.Z.
   while IFS= read -r tag; do
-    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    is_release_tag "$tag" || continue
     describe="$(git describe --tags --long --match "$tag" 2>/dev/null)" || continue
     commits="${describe#*-}"
     commits="${commits%%-*}"
     [[ "$commits" =~ ^[0-9]+$ ]] || continue
 
     if [ -z "$best_commits" ] || [ "$commits" -lt "$best_commits" ]; then
-      best_describe="$describe"
+      best_tags="$tag"
       best_commits="$commits"
+    elif [ "$commits" -eq "$best_commits" ]; then
+      best_tags="$best_tags"$'\n'"$tag"
     fi
   done < <(git for-each-ref --merged HEAD --sort=-creatordate --format='%(refname:short)' refs/tags 2>/dev/null)
 
-  [ -n "$best_describe" ] || return 1
-  printf '%s\n' "$best_describe"
+  [ -n "$best_tags" ] || return 1
+  # Equally near tags (e.g. two releases of one commit) describe from the highest,
+  # so a dev build never orders below a release it contains.
+  tag="$(printf '%s\n' "$best_tags" | latest_release_tag)"
+  git describe --tags --long --match "$tag" 2>/dev/null
 }
 
 git_worktree_is_dirty() {
@@ -68,13 +75,16 @@ git_worktree_is_dirty() {
 # Otherwise derive from the latest git tag so local/dev builds are versioned
 # correctly instead of silently falling back to 0.1.0. The marketing string is
 # the tag; the build string uses Apple's development suffix so a dev build off
-# a release is distinguishable from the tagged release itself.
+# a release is distinguishable from the tagged release itself. Compared
+# numerically segment by segment, 2026.10.8.3d2 orders after v2026.10.8.3 and
+# before any later release (2026.10.8.4, 2026.10.9.1), and legacy 0.9.121dN
+# builds order below every date version.
 if [ -n "${VERSION:-}" ]; then
   SHORT_VERSION="$VERSION"
   BUILD_VERSION="$VERSION"
 elif DESCRIBE="$(git_describe_version_tag)"; then
-  SHORT_VERSION="${DESCRIBE#v}"; SHORT_VERSION="${SHORT_VERSION%%-*}"   # e.g. 0.8.3
-  COMMITS="${DESCRIBE#*-}"; COMMITS="${COMMITS%%-*}"                    # e.g. 3
+  SHORT_VERSION="${DESCRIBE#v}"; SHORT_VERSION="${SHORT_VERSION%%-*}"   # e.g. 2026.10.8.3
+  COMMITS="${DESCRIBE#*-}"; COMMITS="${COMMITS%%-*}"                    # e.g. 2
   DIRTY_OFFSET=0
   if git_worktree_is_dirty; then
     DIRTY_OFFSET=1
@@ -85,7 +95,7 @@ elif DESCRIBE="$(git_describe_version_tag)"; then
       echo "error: $DEV_COUNT development versions since v$SHORT_VERSION exceeds CFBundleVersion's development suffix limit; set VERSION explicitly." >&2
       exit 1
     fi
-    BUILD_VERSION="${SHORT_VERSION}d${DEV_COUNT}"                      # e.g. 0.8.3d3
+    BUILD_VERSION="${SHORT_VERSION}d${DEV_COUNT}"                      # e.g. 2026.10.8.3d2
   else
     BUILD_VERSION="$SHORT_VERSION"
   fi
