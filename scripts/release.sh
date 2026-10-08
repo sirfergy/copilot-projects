@@ -2,14 +2,16 @@
 # Build a distributable Copilot Projects.app and (optionally) publish a GitHub
 # release with a drag-to-Applications DMG.
 #
-#   scripts/release.sh 0.1.0            # build dist/Copilot-Projects-0.1.0.dmg locally
-#   scripts/release.sh 0.1.0 --publish  # also create the GitHub release + tag
-#   GITHUB_REPOSITORY=owner/repo scripts/release.sh 0.1.0 --project-root=/absolute/repo --publish
+#   scripts/release.sh 2026.10.8.1            # build dist/Copilot-Projects-2026.10.8.1.dmg locally
+#   scripts/release.sh 2026.10.8.1 --publish  # also create the GitHub release + tag
+#   GITHUB_REPOSITORY=owner/repo scripts/release.sh 2026.10.8.1 --project-root=/absolute/repo --publish
 #
+# Versions are YYYY.M.D.N (see scripts/release-version.sh).
 # --publish uses the active `gh` account; run it as the account that owns $REPO.
 set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+source "$SCRIPT_ROOT/scripts/release-version.sh"
 
 REPO="${GITHUB_REPOSITORY:-sirfergy/copilot-projects}"
 APP_NAME="Copilot Projects"
@@ -36,9 +38,9 @@ for arg in "$@"; do
   esac
 done
 [ -n "$VERSION" ] || { echo "usage: scripts/release.sh <version> [--project-root=/absolute/repo] [--publish]" >&2; exit 1; }
-VERSION="${VERSION#v}"   # accept either 0.1.0 or v0.1.0
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-  echo "error: version must be X.Y.Z (optionally prefixed with v)" >&2
+VERSION="${VERSION#v}"   # accept either 2026.10.8.1 or v2026.10.8.1
+is_date_release_version "$VERSION" || {
+  echo "error: version must be YYYY.M.D.N without leading zeros (optionally prefixed with v)" >&2
   exit 1
 }
 TAG="v$VERSION"
@@ -129,6 +131,9 @@ if [ "$PUBLISH" = "1" ]; then
     echo "error: refusing to publish $SHA because it is not on origin/main" >&2
     exit 1
   }
+  # A future-dated release would stop automatic releases until that date.
+  TODAY="$(pacific_release_date)" || exit 1
+  check_release_version_date "$VERSION" "$TODAY" || exit 1
 fi
 
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
@@ -354,18 +359,11 @@ cleanup_partial_release() {
   fi
 }
 
-latest_semver_tag() {
-  local refs version
+# Legacy vX.Y.Z tags remain predecessors; date tags always order above them.
+latest_remote_release_tag() {
+  local refs
   refs="$(git ls-remote --tags --refs origin 'v*')" || return 1
-  version="$(
-    awk '{
-        sub("^refs/tags/v", "", $2)
-        if ($2 ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print $2
-      }' <<< "$refs" \
-      | sort -t. -k1,1nr -k2,2nr -k3,3nr \
-      | head -1 || true
-  )"
-  [ -z "$version" ] || printf 'v%s\n' "$version"
+  awk '{ sub("^refs/tags/", "", $2); print $2 }' <<< "$refs" | latest_release_tag
 }
 
 remote_tag_commit() {
@@ -398,7 +396,7 @@ release_is_complete() {
 verify_expected_predecessor() {
   if [ -n "${EXPECTED_PREVIOUS_TAG:-}" ]; then
     local latest_tag latest_sha expected_sha
-    latest_tag="$(latest_semver_tag)" || {
+    latest_tag="$(latest_remote_release_tag)" || {
       echo "error: could not list remote release tags" >&2
       return 1
     }
