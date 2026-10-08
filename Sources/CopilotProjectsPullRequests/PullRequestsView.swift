@@ -249,7 +249,7 @@ struct PullRequestsView: View {
         case .connecting, .connected:
             EmptyView()
         }
-        if let note = pullRequests.settingsNote {
+        ForEach([pullRequests.storageNote, pullRequests.settingsNote].compactMap { $0 }, id: \.self) { note in
             Label {
                 Text(note).lineLimit(1).truncationMode(.tail)
             } icon: {

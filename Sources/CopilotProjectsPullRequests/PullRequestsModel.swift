@@ -53,6 +53,8 @@ final class PullRequestsModel: ObservableObject {
 
     /// Why Owners can't be shared with Copilot Projects, when it can't.
     let settingsNote: String?
+    /// Why this copy saves nothing, when it can't.
+    let storageNote: String?
 
     private let defaults: UserDefaults
     private let service: PullRequestService
@@ -105,6 +107,7 @@ final class PullRequestsModel: ObservableObject {
         host: PullRequestsHostApp = .none,
         defaults: UserDefaults = .standard,
         settingsNote: String? = nil,
+        storageNote: String? = nil,
         stateDirectory: URL? = Paths.pullRequestsStateDir,
         service: PullRequestService = PullRequestService(),
         loadAccounts: @escaping @Sendable () async throws -> [GitHubAccount] = { try await PullRequestsModel.signedInAccounts() },
@@ -116,6 +119,7 @@ final class PullRequestsModel: ObservableObject {
         self.host = host
         self.defaults = defaults
         self.settingsNote = settingsNote
+        self.storageNote = storageNote
         self.service = service
         self.loadAccounts = loadAccounts
         self.isVisible = isVisible
@@ -185,6 +189,15 @@ final class PullRequestsModel: ObservableObject {
             return PullRequestSession.sessions(in: lastGood).mapValues(\.withUnknownState)
         case .connecting, .disconnected, .incompatibleHost:
             return [:]
+        }
+    }
+
+    /// Whether `liveSessions` holds the sessions Copilot Projects reports now or
+    /// last reported, rather than nothing because they're unknown.
+    private var knowsSessions: Bool {
+        switch workspace {
+        case .connected, .disconnected(lastGood: _?): return true
+        case .connecting, .disconnected, .incompatibleHost: return false
         }
     }
 
@@ -393,19 +406,21 @@ final class PullRequestsModel: ObservableObject {
 
             await waitForFirstWorkspaceAnswer()
             let matchedLive = isConnected
+            // Set before matching, so Copilot Projects answering while it runs
+            // queues another refresh instead of being missed.
+            matchedWithoutSessions = !matchedLive
             let newLinks: [PullRequestKey: String]
-            if matchedLive || lastGoodSnapshot != nil {
+            if knowsSessions {
                 let sources = transcriptSources()
                 let branches = Set(fetch.pullRequests.map(\.headRefName).filter(PullRequestLinker.isDistinctiveBranch))
                 let evidence = await index.evidence(for: sources, branches: branches)
                 newLinks = PullRequestLinker.links(pullRequests: fetch.pullRequests, evidence: evidence)
             } else {
-                // No sessions known yet: matching against none would empty the
+                // No sessions known: matching against none would empty the
                 // on-disk index, and every session would be read from the start
                 // again once Copilot Projects answers.
                 newLinks = links
             }
-            matchedWithoutSessions = !matchedLive
             if firstLoad {
                 pullRequests = Self.inScope(fetch.pullRequests, owners: ownerList)
                 links = newLinks
@@ -608,8 +623,10 @@ final class PullRequestsModel: ObservableObject {
         case .done:
             pendingStarts[goalId] = nil
             presentError("Could Not Start Copilot", "Copilot Projects didn’t say which session it started.")
-        case .refused(_, let message):
-            pendingStarts[goalId] = nil
+        case .refused(let code, let message):
+            // Copilot Projects couldn't save what it did; only the same request id
+            // finds a session that did start.
+            if code != "persistence-unavailable" { pendingStarts[goalId] = nil }
             await pollWorkspace()
             presentError("Could Not Start Copilot", message)
         case .unreachable:

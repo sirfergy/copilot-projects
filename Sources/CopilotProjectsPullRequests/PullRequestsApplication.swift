@@ -9,13 +9,26 @@ import CopilotProjectsCore
 public enum PullRequestsApplication {
     /// Held for the process's lifetime by the one copy that writes the state.
     static var lock: PullRequestsAppLock?
+    /// Why the lock couldn't be taken when no other copy holds it. This copy
+    /// still opens, but saves nothing.
+    static var lockFailure: String?
 
     static var isPrimary: Bool { lock != nil }
+    /// Another copy holds the lock, so this one only brings it forward.
+    static var handsOff: Bool { lock == nil && lockFailure == nil }
 
     public static func run() {
         signal(SIGPIPE, SIG_IGN)
         let candidate = PullRequestsAppLock()
-        if candidate.acquire() { lock = candidate }
+        switch candidate.acquire() {
+        case .acquired:
+            lock = candidate
+        case .heldElsewhere:
+            break
+        case .failed(let code):
+            NSLog("copilot-pull-requests: could not lock \(candidate.lockPath), errno \(code); saving nothing")
+            lockFailure = PullRequestsAppLock.failureNote(errno: code)
+        }
         CopilotPullRequestsApp.main()
     }
 }
@@ -24,6 +37,14 @@ public enum PullRequestsApplication {
 /// lock writes goals.json and transcript-index.json. Its pid is in `app.pid`
 /// so Copilot Projects and later copies can bring it forward.
 final class PullRequestsAppLock {
+    enum Acquisition: Equatable {
+        case acquired
+        /// Another copy holds it.
+        case heldElsewhere
+        /// The lock file couldn't be opened or locked, so no copy may hold it.
+        case failed(errno: Int32)
+    }
+
     let lockPath: String
     let pidPath: String
     private var fd: Int32 = -1
@@ -35,20 +56,24 @@ final class PullRequestsAppLock {
 
     var isHeld: Bool { fd >= 0 }
 
-    func acquire() -> Bool {
-        guard fd < 0 else { return true }
+    static func failureNote(errno code: Int32) -> String {
+        "Goals aren’t saved in this copy: its state folder can’t be locked (\(String(cString: strerror(code))))"
+    }
+
+    func acquire() -> Acquisition {
+        guard fd < 0 else { return .acquired }
         let directory = (lockPath as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(
             atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
         )
         let candidate = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-        guard candidate >= 0 else {
-            NSLog("copilot-pull-requests: could not open \(lockPath), errno \(errno)")
-            return false
-        }
-        guard flock(candidate, LOCK_EX | LOCK_NB) == 0 else {
+        guard candidate >= 0 else { return .failed(errno: errno) }
+        var locked = flock(candidate, LOCK_EX | LOCK_NB)
+        while locked != 0, errno == EINTR { locked = flock(candidate, LOCK_EX | LOCK_NB) }
+        guard locked == 0 else {
+            let code = errno
             close(candidate)
-            return false
+            return code == EWOULDBLOCK ? .heldElsewhere : .failed(errno: code)
         }
         fd = candidate
         let pid = Data("\(getpid())\n".utf8)
@@ -58,7 +83,7 @@ final class PullRequestsAppLock {
         } catch {
             NSLog("copilot-pull-requests: could not record its pid: \(error)")
         }
-        return true
+        return .acquired
     }
 
     /// The pid of the copy holding the lock, as it recorded it.
@@ -116,7 +141,7 @@ struct CopilotPullRequestsApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1200, height: 760)
         // A second copy only hands off to the first, so it never shows a window.
-        .defaultLaunchBehavior(PullRequestsApplication.isPrimary ? .presented : .suppressed)
+        .defaultLaunchBehavior(PullRequestsApplication.handsOff ? .suppressed : .presented)
         .restorationBehavior(PullRequestsApplication.isPrimary ? .automatic : .disabled)
         .commands {
             CommandGroup(replacing: .newItem) {}
@@ -136,6 +161,7 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
             host: .system(),
             defaults: settings.defaults,
             settingsNote: settings.note,
+            storageNote: PullRequestsApplication.lockFailure,
             // Only the lock holder writes goals and match counts.
             stateDirectory: PullRequestsApplication.isPrimary ? Paths.pullRequestsStateDir : nil
         )
@@ -148,7 +174,7 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard PullRequestsApplication.isPrimary else {
+        if PullRequestsApplication.handsOff {
             bringRunningCopyForward()
             NSApp.terminate(nil)
             return
@@ -156,7 +182,7 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
         // The hidden title bar leaves the drag strip to SwiftUI, which swallows
         // the native double-click; run the user's title-bar action from here.
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
-            guard event.clickCount == 2, let window = event.window,
+            guard event.clickCount == 2, let window = event.window, TitleStrip.applies(to: window),
                   TitleStrip.contains(event.locationInWindow, windowHeight: window.frame.height) else { return event }
             TitleStrip.performDoubleClickAction(window)
             return nil
@@ -168,7 +194,7 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
     /// Activation alone (⇧⌘P in Copilot Projects, ⌘Tab, a second copy handing
     /// off) doesn't un-minimize a window, and this app has nothing else to show.
     func applicationDidBecomeActive(_ notification: Notification) {
-        guard PullRequestsApplication.isPrimary else { return }
+        guard !PullRequestsApplication.handsOff else { return }
         Self.showWindowIfNoneVisible()
     }
 
@@ -178,7 +204,7 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     static func showWindowIfNoneVisible() {
-        let windows = NSApp.windows.filter(\.canBecomeMain)
+        let windows = NSApp.windows.filter(TitleStrip.applies(to:))
         guard !windows.contains(where: { $0.isVisible && !$0.isMiniaturized }),
               let window = windows.first(where: \.isMiniaturized) ?? windows.first else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
@@ -190,19 +216,36 @@ final class PullRequestsAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func bringRunningCopyForward() {
-        guard let pid = PullRequestsAppLock.recordedProcessIdentifier(),
-              pid != getpid(),
-              let running = NSRunningApplication(processIdentifier: pid),
-              running.bundleIdentifier == Bundle.main.bundleIdentifier else {
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .filter { $0.processIdentifier != getpid() && !$0.isTerminated }
+        guard let pid = Self.copyToBringForward(
+                recorded: PullRequestsAppLock.recordedProcessIdentifier(),
+                others: others.map { ($0.processIdentifier, $0.bundleURL == Bundle.main.bundleURL) }
+              ),
+              let running = others.first(where: { $0.processIdentifier == pid }) else {
             NSLog("copilot-pull-requests: another copy holds the lock but couldn't be found")
             return
         }
         _ = running.activate(from: .current, options: [])
     }
+
+    /// The copy holding the lock: the one that recorded its pid, or, when that
+    /// record is missing or stale, the only other copy of this very app.
+    nonisolated static func copyToBringForward(recorded: pid_t?, others: [(pid: pid_t, isThisApp: Bool)]) -> pid_t? {
+        if let recorded, others.contains(where: { $0.pid == recorded }) { return recorded }
+        let candidates = others.filter(\.isThisApp)
+        return candidates.count == 1 ? candidates[0].pid : nil
+    }
 }
 
 /// The 38pt strip at the top of the window, past the traffic lights.
 enum TitleStrip {
+    /// Only the Pull Requests window has the strip, on screen or minimized;
+    /// popovers, alerts, and sheets don't.
+    static func applies(to window: NSWindow) -> Bool {
+        window.styleMask.contains(.titled) && !(window is NSPanel) && window.sheetParent == nil
+    }
+
     /// Measured from the window frame's top: under the hidden title bar the
     /// content view doesn't span the full frame.
     static func contains(_ location: NSPoint, windowHeight: CGFloat) -> Bool {

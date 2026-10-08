@@ -91,10 +91,18 @@ final class HostRecorder {
 final class TestControlSocket {
     let path: String
     private let fd: Int32
-    private let lock = NSLock()
-    private var stopping = false
+    private let stop = StopFlag()
     private let finished = DispatchSemaphore(value: 0)
     private let serves: Bool
+
+    /// Shared with the server thread instead of the socket, so the thread never
+    /// keeps the socket alive and `deinit` can stop it.
+    private final class StopFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stopping = false
+        var isSet: Bool { lock.withLock { stopping } }
+        func set() { lock.withLock { stopping = true } }
+    }
 
     init(reply: (@Sendable (ControlRequest) -> ControlResponse)?) throws {
         path = FileManager.default.temporaryDirectory
@@ -124,9 +132,9 @@ final class TestControlSocket {
         serves = reply != nil
         guard let reply else { return }
         let listener = fd
-        Thread.detachNewThread { [self] in
+        Thread.detachNewThread { [stop, finished] in
             defer { finished.signal() }
-            while !lock.withLock({ stopping }) {
+            while !stop.isSet {
                 var ready = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
                 guard poll(&ready, 1, 50) > 0 else { continue }
                 let client = accept(listener, nil, nil)
@@ -149,7 +157,7 @@ final class TestControlSocket {
     }
 
     deinit {
-        lock.withLock { stopping = true }
+        stop.set()
         // The server thread must be gone before its descriptor can be reused.
         if serves { finished.wait() }
         close(fd)
@@ -355,6 +363,16 @@ final class PullRequestsWorkspaceModelTests: XCTestCase {
         model.refresh()
         try await waitUntil { !model.isRefreshing && model.lastUpdated != nil }
         XCTAssertEqual(try Data(contentsOf: index), saved, "matching against no sessions must not empty the index")
+
+        // A host that answered once and then can't be understood: its sessions are unknown again.
+        let incompatible = FakeWorkspace(fetches: [.snapshot(fixtureSnapshot), .incompatibleHost])
+        let later = makeModel(incompatible)
+        await later.pollWorkspace()
+        await later.pollWorkspace()
+        XCTAssertEqual(later.workspace, .incompatibleHost)
+        later.refresh()
+        try await waitUntil { !later.isRefreshing && later.lastUpdated != nil }
+        XCTAssertEqual(try Data(contentsOf: index), saved, "an incompatible host must not empty the index")
     }
 
     func testGoToSessionDoesNotActivateForAnEndedSessionAndRereadsIt() async throws {
@@ -442,6 +460,20 @@ final class PullRequestsWorkspaceModelTests: XCTestCase {
         try await waitUntil { model.startingGoals.isEmpty }
         XCTAssertNotEqual(workspace.startCalls.last?.requestId, calls[0].requestId)
         XCTAssertEqual(recorder.alerts.last, "Could Not Start Copilot: Install the Copilot CLI")
+
+        // Copilot Projects couldn't save a session it may have started: trying again replays it.
+        workspace.answer(starts: [
+            .refused(code: "persistence-unavailable", message: "could not persist the session"),
+            .done(code: "existing", text: "s2"),
+        ])
+        model.startSession(for: goal, projectId: "q")
+        try await waitUntil { model.startingGoals.isEmpty }
+        let unsaved = try XCTUnwrap(workspace.startCalls.last?.requestId)
+        XCTAssertNotEqual(unsaved, calls[0].requestId)
+        model.startSession(for: goal, projectId: "q")
+        try await waitUntil { model.startingGoals.isEmpty }
+        XCTAssertEqual(workspace.startCalls.last?.requestId, unsaved)
+        XCTAssertEqual(model.overrides.sessionLinks[pr.key.description], "s2")
     }
 
     func testResumeSessionShowsTheTabItOpenedAndItsPullRequestsFollowItOnceLive() async throws {
@@ -586,16 +618,124 @@ final class PullRequestsAppSupportTests: XCTestCase {
         let lockPath = root.appendingPathComponent("pull-requests/app.lock").path
         let pidPath = root.appendingPathComponent("pull-requests/app.pid").path
         let first = PullRequestsAppLock(lockPath: lockPath, pidPath: pidPath)
-        XCTAssertTrue(first.acquire())
+        XCTAssertEqual(first.acquire(), .acquired)
         XCTAssertEqual(PullRequestsAppLock.recordedProcessIdentifier(at: pidPath), getpid())
         let second = PullRequestsAppLock(lockPath: lockPath, pidPath: pidPath)
-        XCTAssertFalse(second.acquire(), "a second copy must not write the state")
+        XCTAssertEqual(second.acquire(), .heldElsewhere, "a second copy must not write the state")
         second.release()
         XCTAssertEqual(PullRequestsAppLock.recordedProcessIdentifier(at: pidPath), getpid())
         first.release()
         XCTAssertNil(PullRequestsAppLock.recordedProcessIdentifier(at: pidPath))
-        XCTAssertTrue(second.acquire())
+        XCTAssertEqual(second.acquire(), .acquired)
         second.release()
+    }
+
+    func testALockThatCannotBeOpenedIsAFailureNotAnotherCopy() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        // A file where the state folder should be: nothing can be locked, and no copy holds it.
+        try Data().write(to: root.appendingPathComponent("pull-requests"))
+        let lock = PullRequestsAppLock(
+            lockPath: root.appendingPathComponent("pull-requests/app.lock").path,
+            pidPath: root.appendingPathComponent("pull-requests/app.pid").path
+        )
+        XCTAssertEqual(lock.acquire(), .failed(errno: ENOTDIR))
+        XCTAssertFalse(lock.isHeld)
+        XCTAssertTrue(PullRequestsAppLock.failureNote(errno: ENOTDIR).contains("Not a directory"))
+    }
+
+    @MainActor
+    func testActivationFollowsARestartedCopilotProjectsOnlyToItsOwnBundle() throws {
+        let ended = Process()
+        ended.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try ended.run()
+        ended.waitUntilExit()
+        let gone = ended.processIdentifier
+        XCTAssertNil(PullRequestsHostApp.runningHost(gone, hostURL: nil), "a development build has no bundle to look for")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = root.appendingPathComponent("Copilot Projects.app")
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        let plist: [String: Any] = ["CFBundleIdentifier": "com.example.not-running.\(UUID().uuidString)"]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            .write(to: app.appendingPathComponent("Contents/Info.plist"))
+        XCTAssertNil(PullRequestsHostApp.runningHost(gone, hostURL: app))
+
+        let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
+        if finder.count == 1 {
+            let live = finder[0].processIdentifier
+            XCTAssertEqual(PullRequestsHostApp.runningHost(live, hostURL: nil)?.processIdentifier, live)
+            XCTAssertNil(PullRequestsHostApp.runningHost(live, hostURL: app), "a reused pid isn't Copilot Projects")
+            XCTAssertEqual(
+                PullRequestsHostApp.runningHost(gone, hostURL: URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app"))?
+                    .processIdentifier,
+                finder[0].processIdentifier,
+                "a host that restarted is found again by its bundle"
+            )
+        }
+    }
+
+    func testAMissingPidStillHandsOffToTheOnlyOtherCopyOfThisApp() {
+        let bring = PullRequestsAppDelegate.copyToBringForward
+        XCTAssertEqual(bring(7, [(7, false), (8, true)]), 7, "the recorded lock holder wins, wherever it lives")
+        XCTAssertEqual(bring(nil, [(7, false), (8, true)]), 8)
+        XCTAssertEqual(bring(99, [(8, true)]), 8, "a stale pid falls back too")
+        XCTAssertNil(bring(nil, [(7, true), (8, true)]), "never guess between two copies")
+        XCTAssertNil(bring(nil, [(7, false)]))
+        XCTAssertNil(bring(nil, []))
+    }
+
+    func testASocketMovedOutOfItsStateDirectoryGetsItsOwnPullRequestsState() {
+        let state = URL(fileURLWithPath: "/Users/me/.local/state/copilot-projects", isDirectory: true)
+        let base = state.appendingPathComponent("pull-requests").path
+        let state1 = Paths.pullRequestsStateDir(stateDir: state, socketPath: state.appendingPathComponent("control.sock").path)
+        XCTAssertEqual(state1.path, base)
+        XCTAssertEqual(Paths.pullRequestsStateDir(stateDir: state, socketPath: state.path + "/./control.sock").path, base)
+        let moved = Paths.pullRequestsStateDir(stateDir: state, socketPath: "/Users/me/isolated.sock")
+        XCTAssertEqual(moved.deletingLastPathComponent().path, base)
+        XCTAssertTrue(moved.lastPathComponent.hasPrefix("socket-"), moved.path)
+        XCTAssertEqual(moved, Paths.pullRequestsStateDir(stateDir: state, socketPath: "/Users/me/isolated.sock"))
+        XCTAssertNotEqual(moved, Paths.pullRequestsStateDir(stateDir: state, socketPath: "/Users/me/other.sock"))
+    }
+
+    func testATimedOutGhTakesEverythingItStartedWithIt() async throws {
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: "/usr/bin/perl"))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let pids = root.appendingPathComponent("pids")
+        // Both children ignore SIGTERM and hold the output open; one has left gh's process group.
+        let script = """
+        trap '' TERM
+        /bin/sleep 30 &
+        echo $! >> "$1"
+        /usr/bin/perl -e 'setpgrp(0, 0); exec "/bin/sleep", "30"' &
+        echo $! >> "$1"
+        /bin/sleep 30
+        """
+        let started = Date()
+        do {
+            _ = try await GitHubCLIProcess.run(
+                executable: "/bin/sh", arguments: ["-c", script, "sh", pids.path], environment: [:],
+                directory: root, timeout: 0.5, terminationGrace: 0.3
+            )
+            XCTFail("Expected a timeout")
+        } catch {
+            XCTAssertTrue(error is GitHubCLIProcess.TimedOut, "\(error)")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        let children = try String(contentsOf: pids, encoding: .utf8)
+            .split(separator: "\n").compactMap { pid_t($0) }
+        XCTAssertEqual(children.count, 2)
+        let deadline = Date().addingTimeInterval(3)
+        while children.contains(where: { kill($0, 0) == 0 }), Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        for pid in children {
+            XCTAssertNotEqual(kill(pid, 0), 0, "pid \(pid) outlived the timed-out gh")
+        }
     }
 
     func testOwnersLiveInCopilotProjectsDefaultsAndAMissingKeyIsVisible() {
@@ -626,5 +766,25 @@ final class PullRequestsAppSupportTests: XCTestCase {
         XCTAssertTrue(TitleStrip.contains(NSPoint(x: 200, y: 740), windowHeight: 760))
         XCTAssertFalse(TitleStrip.contains(NSPoint(x: 40, y: 740), windowHeight: 760))
         XCTAssertFalse(TitleStrip.contains(NSPoint(x: 200, y: 700), windowHeight: 760))
+    }
+
+    @MainActor
+    func testTheTitleStripIsOnlyTheMainWindows() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: true
+        )
+        XCTAssertFalse(window.isVisible)
+        XCTAssertTrue(TitleStrip.applies(to: window), "a minimized or hidden window is still the app's")
+        let borderless = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.borderless],
+            backing: .buffered, defer: true
+        )
+        XCTAssertFalse(TitleStrip.applies(to: borderless))
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled], backing: .buffered, defer: true
+        )
+        XCTAssertFalse(TitleStrip.applies(to: panel), "an alert or popover keeps its double-clicks")
     }
 }

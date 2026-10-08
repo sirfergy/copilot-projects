@@ -12,6 +12,8 @@ final class PullRequestsHostCommandTests: XCTestCase {
         let model: AppModel
         let root: URL
         let launches: () -> [(id: String, executable: String?, prompt: String?)]
+        /// Another model over the same saved workspace and creation ledger, as after a restart.
+        let restart: () -> AppModel
     }
 
     private func withHost(
@@ -39,21 +41,29 @@ final class PullRequestsHostCommandTests: XCTestCase {
         let repository = StateRepository(path: root.appendingPathComponent("state.json"))
         try repository.save(PersistedState(projects: fixture, selectedProjectId: fixture[selectedProjectIndex].id))
         var launches: [(id: String, executable: String?, prompt: String?)] = []
-        let model = AppModel(
-            stateRepository: repository, isAppActive: { false },
-            agentActivityDirectory: root, resumeMarkerDirectory: root,
-            remoteCopilotExecutable: { "/opt/copilot/bin/copilot" },
-            remoteReposDirectory: { root.path },
-            remoteSessionBackendAvailable: { true },
-            remoteSessionLauncher: { launches.append(($0, $1, $2)) },
-            sessionCreationLedger: SessionCreationLedger(url: root.appendingPathComponent("ledger.json")),
-            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
-        )
-        defer {
-            model.forcePendingSessionDestroys()
-            model.detachAllClients()
+        var models: [AppModel] = []
+        func makeModel() -> AppModel {
+            let model = AppModel(
+                stateRepository: repository, isAppActive: { false },
+                agentActivityDirectory: root, resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/opt/copilot/bin/copilot" },
+                remoteReposDirectory: { root.path },
+                remoteSessionBackendAvailable: { true },
+                remoteSessionLauncher: { launches.append(($0, $1, $2)) },
+                sessionCreationLedger: SessionCreationLedger(url: root.appendingPathComponent("ledger.json")),
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
+            )
+            models.append(model)
+            return model
         }
-        try body(Host(model: model, root: root, launches: { launches }))
+        let model = makeModel()
+        defer {
+            for model in models {
+                model.forcePendingSessionDestroys()
+                model.detachAllClients()
+            }
+        }
+        try body(Host(model: model, root: root, launches: { launches }, restart: makeModel))
     }
 
     private func twoProjects(_ root: URL) -> [Project] {
@@ -202,7 +212,9 @@ final class PullRequestsHostCommandTests: XCTestCase {
             let model = host.model
             let requestId = UUID().uuidString
             let prompt = "Help me move this pull request forward:\r\n\r\n- https://github.com/o/r/pull/1"
-            @MainActor func start(_ id: String = requestId, project: String = "A", prompt: String = prompt) -> ControlResponse {
+            @MainActor func start(
+                _ id: String = requestId, project: String = "A", prompt: String = prompt, on model: AppModel = model
+            ) -> ControlResponse {
                 model.handle(request("start-copilot-session", project: project, requestId: id, prompt: prompt))
             }
 
@@ -235,10 +247,25 @@ final class PullRequestsHostCommandTests: XCTestCase {
             XCTAssertEqual(start(UUID().uuidString, project: "missing").code, "unknown-project")
             XCTAssertEqual(host.launches().count, 1)
 
-            model.closeSession(projectId: "A", sessionId: sessionId)
-            let ended = start()
+            // A restart forgets nothing: an answer lost before it must not start a second session.
+            let restarted = host.restart()
+            let replayed = start(on: restarted)
+            XCTAssertEqual(replayed.code, "existing")
+            XCTAssertEqual(replayed.text, sessionId)
+            XCTAssertEqual(start(prompt: "something else", on: restarted).code, "conflict")
+            XCTAssertEqual(start(project: "B", on: restarted).code, "conflict")
+            XCTAssertEqual(host.launches().count, 1)
+
+            restarted.closeSession(projectId: "A", sessionId: sessionId)
+            let ended = start(on: restarted)
             XCTAssertFalse(ended.ok)
             XCTAssertEqual(ended.code, "gone", "an ended session is never started again for the same request")
+            XCTAssertEqual(start(on: host.restart()).code, "gone", "nor after another restart")
+            XCTAssertEqual(host.launches().count, 1)
+
+            try Data("{".utf8).write(to: host.root.appendingPathComponent("ledger.json"))
+            let unreadable = start(UUID().uuidString, on: restarted)
+            XCTAssertEqual(unreadable.code, "persistence-unavailable", "an unreadable ledger never risks a duplicate")
             XCTAssertEqual(host.launches().count, 1)
         }
     }

@@ -672,7 +672,8 @@ watchdogs, automatic retries, or recovery policy.
 
 Override locations with `COPILOT_PROJECTS_SOCKET` and `COPILOT_PROJECTS_STATE_DIR` to run an isolated
 instance. An app launched with either override does not replace the global CLI symlink or Copilot
-hooks.
+hooks. It opens its own Copilot Pull Requests; when only the socket moves out of the state
+directory, that copy keeps its goals and lock under `pull-requests/socket-<hash>/`.
 
 ## License
 

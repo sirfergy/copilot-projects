@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CopilotProjectsCore
 
 /// Runs a short `gh` command with a deadline. Output stays in memory; nothing
 /// secret is ever passed on the command line.
@@ -45,6 +46,7 @@ enum GitHubCLIProcess {
         }
 
         let run = Run(process: process, collectors: [output, errorOutput], grace: terminationGrace)
+        run.recordLaunch()
         let watchdog = Task.detached {
             try? await Task.sleep(nanoseconds: UInt64(max(timeout, 0) * 1_000_000_000))
             guard !Task.isCancelled else { return }
@@ -57,6 +59,7 @@ enum GitHubCLIProcess {
         } onCancel: {
             run.stop(timedOut: false)
         }
+        run.markDrained()
         try Task.checkCancellation()
         if run.timedOut { throw TimedOut() }
         return Result(status: status, output: stdout, errorOutput: stderr)
@@ -128,6 +131,8 @@ enum GitHubCLIProcess {
         private let grace: TimeInterval
         private var didTimeOut = false
         private var isStopping = false
+        private var isDrained = false
+        private var root: ProcessTree.Identity?
 
         init(process: Process, collectors: [Collector], grace: TimeInterval) {
             self.process = process
@@ -137,20 +142,52 @@ enum GitHubCLIProcess {
 
         var timedOut: Bool { lock.withLock { didTimeOut } }
 
-        /// Asks gh to stop, kills it after the grace period, and then stops
-        /// waiting for output that something it started may still hold open.
+        func recordLaunch() {
+            let identity = ProcessTree.Identity(process.processIdentifier)
+            lock.withLock { root = identity }
+        }
+
+        /// gh has exited and closed its output, so there is nothing left to kill.
+        func markDrained() { lock.withLock { isDrained = true } }
+
+        /// The group's id is gh's pid, so the group is only signalled while that
+        /// pid is still gh's or belongs to no process at all.
+        private func signalGroup(_ pid: pid_t, _ signal: Int32) {
+            let root = lock.withLock { self.root }
+            if let current = ProcessTree.Identity(pid), current != root { return }
+            kill(-pid, signal)
+        }
+
+        /// Asks gh and everything it started to stop, kills whatever is left
+        /// after the grace period, and then stops waiting for output that
+        /// something out of reach may still hold open. `Process` starts gh as
+        /// the leader of its own process group, and the group still reaches
+        /// subprocesses gh left behind when it exited.
         func stop(timedOut: Bool) {
             let first: Bool = lock.withLock {
                 if timedOut { didTimeOut = true }
                 defer { isStopping = true }
                 return !isStopping
             }
-            guard first else { return }
-            if process.isRunning { process.terminate() }
+            let pid = process.processIdentifier
+            guard first, pid > 0 else { return }
+            let rootRunning = process.isRunning
+            let started = rootRunning ? ProcessTree.descendants(of: pid) : []
+            if rootRunning { process.terminate() }
+            signalGroup(pid, SIGTERM)
+            started.forEach { $0.signal(SIGTERM) }
             let process = self.process
             let collectors = self.collectors
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + grace) {
-                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + grace) { [self] in
+                // A drained run is over, and its ids may belong to other processes by now.
+                if !lock.withLock({ isDrained }) {
+                    let stillRunning = process.isRunning
+                    var survivors = Set(started)
+                    if stillRunning { survivors.formUnion(ProcessTree.descendants(of: pid)) }
+                    survivors.forEach { $0.signal(SIGKILL) }
+                    signalGroup(pid, SIGKILL)
+                    if stillRunning { kill(pid, SIGKILL) }
+                }
                 collectors.forEach { $0.finish() }
             }
         }

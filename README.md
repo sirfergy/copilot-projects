@@ -186,7 +186,9 @@ Copilot CLI event log once, then only what was added since. Looking for an ended
 session reads, in the background and 1 GB at a time, only the event logs of
 sessions the Copilot CLI's session store ties to a pull request, each once. The
 match counts and any goals you name are kept under
-`~/.local/state/copilot-projects/pull-requests/`.
+`~/.local/state/copilot-projects/pull-requests/`. Only one copy of the app writes
+there; opening another brings the first forward. If that folder can't be locked,
+the window opens anyway and says that it saves nothing.
 
 VoiceOver exposes each session's selection and attention state, with separate
 select and end actions. The session-details drawer uses a fade instead of
