@@ -31,7 +31,10 @@ final class PullRequestsModel: ObservableObject {
     /// Comma- or space-separated GitHub owners. Only pull requests they own are
     /// shown; empty means every owner.
     @Published var owners: String {
-        didSet { defaults.set(owners, forKey: Self.ownersKey) }
+        didSet {
+            defaults.set(owners, forKey: Self.ownersKey)
+            pullRequests = Self.inScope(pullRequests, owners: ownerList)
+        }
     }
 
     private weak var appModel: AppModel?
@@ -99,6 +102,14 @@ final class PullRequestsModel: ObservableObject {
     }
 
     var ownerList: [String] { Self.ownerList(owners) }
+
+    /// Only pull requests in `owners`, so rows from an earlier scope never
+    /// linger while a refresh runs or after one fails.
+    nonisolated static func inScope(_ prs: [PullRequestSnapshot], owners: [String]) -> [PullRequestSnapshot] {
+        guard !owners.isEmpty else { return prs }
+        let scope = Set(owners.map { $0.lowercased() })
+        return prs.filter { scope.contains($0.key.owner) }
+    }
 
     static func sessions(in projects: [Project]) -> [String: PullRequestSessionRef] {
         var sessions: [String: PullRequestSessionRef] = [:]
@@ -178,7 +189,7 @@ final class PullRequestsModel: ObservableObject {
             let owners = ownerList
             let fetch = try await service.search(accounts: accounts, owners: owners)
             if firstLoad {
-                pullRequests = fetch.pullRequests
+                pullRequests = Self.inScope(fetch.pullRequests, owners: ownerList)
                 phase = .loaded
             }
 
@@ -187,13 +198,14 @@ final class PullRequestsModel: ObservableObject {
             let evidence = await index.evidence(for: sources, branches: branches)
             let newLinks = PullRequestLinker.links(pullRequests: fetch.pullRequests, evidence: evidence)
             if firstLoad {
-                pullRequests = fetch.pullRequests
+                pullRequests = Self.inScope(fetch.pullRequests, owners: ownerList)
                 links = newLinks
                 sessionsMatched = true
             }
 
             let enriched = await service.enrich(fetch.pullRequests, tokens: fetch.tokens)
-            apply(enriched, links: newLinks, animated: !firstLoad)
+            // Owners may have changed while this ran; a later refresh fills in the rest.
+            apply(Self.inScope(enriched, owners: ownerList), links: newLinks, animated: !firstLoad)
             omitted = fetch.omitted
             warning = fetch.warnings.first
             lastUpdated = Date()

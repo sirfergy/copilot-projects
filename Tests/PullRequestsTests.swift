@@ -406,6 +406,23 @@ final class PullRequestServiceTests: XCTestCase {
         XCTAssertEqual(model.phase, .failed(.notSignedIn))
     }
 
+    @MainActor
+    func testChangingOwnersDropsRowsOutsideTheNewScopeAtOnce() {
+        let model = PullRequestsModel(
+            appModel: nil, defaults: UserDefaults(suiteName: UUID().uuidString)!, stateDirectory: nil,
+            loadAccounts: { [] }, copilotSessionId: { _ in nil }, sessions: { [:] }, projects: { [] }
+        )
+        model.show([makePR(1, repo: "github/github"), makePR(2, repo: "My-Org/tools")], links: [:])
+        model.owners = "MY-ORG"
+        XCTAssertEqual(model.pullRequests.map(\.key.description), ["my-org/tools#2"])
+        model.owners = ""
+        XCTAssertEqual(model.pullRequests.map(\.key.description), ["my-org/tools#2"], "widening waits for a refresh")
+        XCTAssertEqual(
+            PullRequestsModel.inScope([makePR(1), makePR(2, repo: "other/repo")], owners: ["GitHub"]).map(\.key.description),
+            ["github/github#1"]
+        )
+    }
+
     func testShortReasonsAndGoalNames() {
         XCTAssertEqual(PullRequestAttention.sessionWaiting.shortLabel, "Needs input")
         XCTAssertEqual(PullRequestAttention.stale(days: 9).shortLabel, "Quiet 9d")
