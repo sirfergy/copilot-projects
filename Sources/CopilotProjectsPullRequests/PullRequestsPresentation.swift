@@ -17,9 +17,9 @@ enum PullRequestsPresentation {
         let keys: [PullRequestKey]
     }
 
-    /// Draft readiness is independent of checks, approval, and merge readiness.
-    static func reviewReadiness(_ pr: PullRequestSnapshot) -> String? {
-        pr.isDraft ? nil : "Ready for review"
+    /// Checks can continue after a PR leaves draft, regardless of review approval.
+    static func reviewReadiness(_ item: PullRequestItem) -> String? {
+        !item.pr.isDraft && item.assessment.stage == .checks ? "Ready for review" : nil
     }
 
     static func hasPartialStatus(_ pr: PullRequestSnapshot) -> Bool {

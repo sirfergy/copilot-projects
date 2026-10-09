@@ -51,9 +51,10 @@ column: two-line goal, session/project context or previous-session identity and
 activity, then Go to Session, Resume in <project>, or Start Session.
 Session goals that need you lead.
 Chips: repo#number with age, up to two title lines (omitted when the goal is named
-after that pull request), a neutral eye icon and Ready for review for non-drafts,
-PR-specific reason with a 1pt orange edge (green when
+after that pull request), PR-specific reason with a 1pt orange edge (green when
 ready, quiet for nudges), and an explicit qualifier for partial status.
+Non-draft chips in Checks also show a neutral eye and Ready for review after
+their reason; Review and Ready omit this extra cue.
 Signature: the most urgent chip is initially selected so Return
 opens its session; refresh slides an advancing chip into its new stage (0.2s
 ease-out); Reduce Motion changes lanes in place.
@@ -64,13 +65,14 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 ## Implemented surface behavior
 
-**Review readiness is independent of stage.** Every non-draft chip shows
-Ready for review with the native eye symbol in secondary ink. Draft chips omit
-it. The label means only that the PR is no longer a draft, not approval or merge
-readiness, and appears alongside Checks running without moving the chip out of
-Checks. It also appears in tooltip text, keyboard announcements, and the chip's
-accessibility value. Triage, attention counts, goal sorting, and stage assignment
-are unchanged; no protocol or companion-client changes are involved.
+**Review readiness without moving columns.** Non-draft chips in Checks show
+Ready for review with the native eye symbol in secondary ink, after the blocker
+or check status. Draft, Review, and Ready chips omit the extra cue. The label
+means only that the PR is no longer a draft, not approval or merge readiness.
+Tooltip text, keyboard announcements, and accessibility values put the action
+reason first, then readiness. Triage, attention counts, goal sorting, and stage
+assignment are unchanged. Companion views use the existing checks-stage field
+for the same cue; no protocol change is required.
 
 **Whole-goal filtering.** `PullRequestsFilter` defaults to All. Needs you retains
 each goal whose `needsYouCount` is positive, including no-session/stale nudges,
