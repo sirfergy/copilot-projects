@@ -184,3 +184,61 @@ Not canonized or repaired: the root DESIGN.md still describes earlier PR
 freshness placement/labels, and the context loader does not recognize
 PRODUCT.md's existing platform spelling. Both remain untouched under the
 surface-only boundary; neither is a new system rule or a claim of final approval.
+
+## Final review-readiness handoff — October 9, 2026
+
+This dated addendum records the narrow indicator extension, not a redesign or a
+replacement for the October 8 evidence above. Binding choices were
+`ready_for_review` (no longer a draft, not already approved), `checks_only`, and
+`all_clients` (Mac, iOS, and web/PWA). Operate remains the mode: expose review
+availability during checks without moving PRs or giving it priority over blockers.
+
+**Artifact and preserved system.** Source HEAD
+`856f8ccec33d0b00a14c8bed8da24569a685b57b` was checked against
+`pr-review-readiness-final-review/manifest.json` and its immutable `mac.patch`
+(5 changed files; 155 patch lines; 9,605 bytes). The patch hash and complete
+base-to-head diff match. Paths here are relative to the session evidence root
+`/Users/obvioussean/.copilot/session-state/d550907b-ea83-42c8-81e0-5b459ea0eb06/files/`.
+Inspected `PullRequestsPresentation.reviewReadiness`, `PullRequestChip` rendering,
+spoken status and tooltip, focused tests, and shared `StudioStyle.swift` against
+the incumbent PRODUCT.md, DESIGN.md, and sidecar. The production diff is limited
+to presentation and the view: triage, attention counts, grouping, sorting, stage
+assignment, and actions are unchanged, with no API, protocol, pin, or token change.
+Studio Console (`207346d7`) and Goal Lanes (`50c9b438`) remain authoritative;
+no new comp, world, or shipping raster asset was introduced.
+
+The helper requires both non-draft and Checks. Its native eye plus Ready for
+review uses caption and existing secondary ink after the check/blocker reason.
+Tooltip and spoken status preserve that ordering. Draft, Review, and Ready omit
+it; an unknown stage is not a new readiness category. The same Checks-only
+contract on companion clients omits unknown stages. This is informational,
+neither an approval signal nor a new action or merge-ready treatment.
+
+**Final evidence, separate from the older integration run.**
+
+- `pr-review-readiness-mac-final.log` records 26 passing focused tests and zero
+  failures. The helper matrix covers pending/expected/failing/error checks
+  across review-required/approved/changes-requested/absent decisions; status
+  tests cover blocker-first speech, running checks with empty reasons, and draft
+  omission. These are focused assertions, not full UI branch coverage.
+- Required native captures are
+  `pr-review-readiness-final-captures/{mac-dark,mac-light,mac-compact,mac-offline}.png`.
+  Dark/light are 2560×1600 pixels; compact/offline are 1760×1600 pixels.
+  They use synthetic native fixtures, not production GitHub or live-host facts.
+- The supplied final finish handoff reports **SHIP**, with no material fixes,
+  for the full revised three-client indicator scope. All eight required captures
+  across Mac, iOS, and web were valid and opened by the parent and reviewer.
+  This is distinct from the older five-fix Mac verdict and is not whole-product
+  certification, merge authorization, or release/deployment approval.
+
+No tests, detector, or captures were rerun for this documentation handoff.
+Native Swift has no detector evidence. Hardware, complete VoiceOver traversal,
+high-contrast runtime, installed-PWA behavior, and live-host/GitHub actions remain
+uncertified; the shared cross-client verdict does not expand those limits.
+PRODUCT.md, DESIGN.md, and `.impeccable/design.json` remain unchanged.
+Source, README, tests, pins, cache/auth behavior, and git index/HEAD are outside
+this surface-only write; no commit, push, or merge is part of the handoff.
+
+Not canonized or repaired by this addendum: the previously recorded freshness
+and platform-context drift, and the context loader's stale-sidecar warning,
+remain out of scope rather than becoming new visual rules.
