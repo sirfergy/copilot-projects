@@ -18,6 +18,32 @@ final class PullRequestsPresentationTests: XCTestCase {
     )
     private let idle = PullRequestSession(id: "idle", title: "Other", projectId: "p", projectName: "Features")
 
+    func testReviewReadinessDependsOnlyOnDraftState() {
+        XCTAssertNil(PullRequestsPresentation.reviewReadiness(makePR(draft: true, checks: .pending)))
+        let reviews: [PullRequestSnapshot.ReviewDecision?] = [.reviewRequired, .approved, .changesRequested, nil]
+        let checks: [PullRequestSnapshot.CheckState?] = [.pending, .success, .failure, nil]
+        for review in reviews {
+            for check in checks {
+                let pr = makePR(review: review, checks: check)
+                XCTAssertEqual(PullRequestsPresentation.reviewReadiness(pr), "Ready for review")
+            }
+        }
+    }
+
+    func testReadyForReviewRemainsVisibleWhileChecksDetermineTheColumn() {
+        let reviews: [PullRequestSnapshot.ReviewDecision?] = [.reviewRequired, .approved, nil]
+        for review in reviews {
+            let row = item(1, session: idle, pr: makePR(review: review, checks: .pending))
+            XCTAssertEqual(row.assessment.stage, .checks)
+            XCTAssertEqual(row.assessment.status, "Checks running")
+            XCTAssertEqual(row.assessment.reasons, [])
+            XCTAssertEqual(PullRequestChip.statusText(row), "Ready for review, Checks running")
+        }
+        let draft = item(1, session: idle, pr: makePR(draft: true, checks: .pending))
+        XCTAssertEqual(draft.assessment.stage, .draft)
+        XCTAssertEqual(PullRequestChip.statusText(draft), "Draft")
+    }
+
     func testFilterPreservesQuietSiblingsAndUsesAllAttentionIncludingNudges() {
         let active = PullRequestGoal(
             id: "active", kind: .manual, name: "Feature", session: nil,
@@ -38,7 +64,7 @@ final class PullRequestsPresentationTests: XCTestCase {
         XCTAssertEqual(PullRequestsPresentation.reasons(for: row, sessionStateInSummary: true), [.readyToMerge])
         XCTAssertEqual(row.assessment.urgency, 0)
         XCTAssertTrue(row.assessment.needsYou)
-        XCTAssertEqual(PullRequestChip.statusText(row), "Session needs your input, Ready to merge")
+        XCTAssertEqual(PullRequestChip.statusText(row), "Ready for review, Session needs your input, Ready to merge")
     }
 
     func testMixedManualGoalsRetainEachItemsSessionReasonIncludingNoSession() {
@@ -93,16 +119,16 @@ final class PullRequestsPresentationTests: XCTestCase {
         uncounted.uncountedThreadsCursor = "more"
         for pr in [incomplete, uncounted] {
             let row = item(1, session: idle, pr: pr)
-            XCTAssertEqual(PullRequestChip.statusText(row), "Approved, some status unavailable")
-            XCTAssertEqual(PullRequestChip.statusText(row, checkingStatus: true), "Approved, checking status")
+            XCTAssertEqual(PullRequestChip.statusText(row), "Ready for review, Approved, some status unavailable")
+            XCTAssertEqual(PullRequestChip.statusText(row, checkingStatus: true), "Ready for review, Approved, checking status")
         }
         let waitingOnChecks = item(1, session: waiting, pr: makePR(checks: .failure, threads: 2))
         XCTAssertEqual(
             PullRequestChip.statusText(waitingOnChecks),
-            "Session needs your input, Checks failing, 2 unresolved threads, some status unavailable"
+            "Ready for review, Session needs your input, Checks failing, 2 unresolved threads, some status unavailable"
         )
         let complete = item(1, session: idle, pr: makePR(review: .approved))
-        XCTAssertEqual(PullRequestChip.statusText(complete, checkingStatus: true), "Approved")
+        XCTAssertEqual(PullRequestChip.statusText(complete, checkingStatus: true), "Ready for review, Approved")
     }
 
     func testRefreshingCannotRedirectTheNextReturnToAnotherPullRequest() {

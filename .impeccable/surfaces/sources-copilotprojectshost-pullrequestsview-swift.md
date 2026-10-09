@@ -51,7 +51,8 @@ column: two-line goal, session/project context or previous-session identity and
 activity, then Go to Session, Resume in <project>, or Start Session.
 Session goals that need you lead.
 Chips: repo#number with age, up to two title lines (omitted when the goal is named
-after that pull request), PR-specific reason with a 1pt orange edge (green when
+after that pull request), a neutral eye icon and Ready for review for non-drafts,
+PR-specific reason with a 1pt orange edge (green when
 ready, quiet for nudges), and an explicit qualifier for partial status.
 Signature: the most urgent chip is initially selected so Return
 opens its session; refresh slides an advancing chip into its new stage (0.2s
@@ -62,6 +63,14 @@ FORM: Goal Lanes, candidate 3 of 7 on the ordered list, surface seed 50c9b438.
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
 
 ## Implemented surface behavior
+
+**Review readiness is independent of stage.** Every non-draft chip shows
+Ready for review with the native eye symbol in secondary ink. Draft chips omit
+it. The label means only that the PR is no longer a draft, not approval or merge
+readiness, and appears alongside Checks running without moving the chip out of
+Checks. It also appears in tooltip text, keyboard announcements, and the chip's
+accessibility value. Triage, attention counts, goal sorting, and stage assignment
+are unchanged; no protocol or companion-client changes are involved.
 
 **Whole-goal filtering.** `PullRequestsFilter` defaults to All. Needs you retains
 each goal whose `needsYouCount` is positive, including no-session/stale nudges,

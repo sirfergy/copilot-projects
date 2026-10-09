@@ -17,6 +17,11 @@ enum PullRequestsPresentation {
         let keys: [PullRequestKey]
     }
 
+    /// Draft readiness is independent of checks, approval, and merge readiness.
+    static func reviewReadiness(_ pr: PullRequestSnapshot) -> String? {
+        pr.isDraft ? nil : "Ready for review"
+    }
+
     static func hasPartialStatus(_ pr: PullRequestSnapshot) -> Bool {
         pr.isIncomplete || pr.uncountedThreadsCursor != nil
             || (pr.checksFailing && pr.failingRequiredChecks == nil)
