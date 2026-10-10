@@ -198,7 +198,7 @@ final class RemoteModelBridge: SessionHost {
         let images = retainedImageMetadata(sessionId: sessionId) ?? []
         return await Task.detached {
             TranscriptResponse.encodedResponse(
-                snapshot: TranscriptController.loadRemoteSnapshot(sessionId: sessionId),
+                sessionId: sessionId,
                 images: images,
                 limit: limit,
                 after: cursor

@@ -174,43 +174,56 @@ final class TranscriptController: ObservableObject {
         )
     }
 
-    /// How many times `loadRemoteSnapshot` reads a transcript that keeps
-    /// changing underneath it before settling for the empty snapshot.
+    /// How many times a remote read rereads a transcript that keeps changing
+    /// underneath it before giving up.
     nonisolated static let maximumRemoteSnapshotReadAttempts = 3
 
     /// The transcript as remote clients see it, or an empty snapshot (no
-    /// conversation id) when there is none to show. Clients treat that empty
-    /// response as authoritative and clear what they had, so a read that came
-    /// back empty only because the files moved underneath it (the tracker
-    /// rewrote or rotated the transcript mid-read) is retried, up to
-    /// `maximumRemoteSnapshotReadAttempts` reads in all. An empty result whose
-    /// files did not change is final.
+    /// conversation id) when there is none to show; `nil` only when the read
+    /// could not settle. Clients treat the empty response as authoritative and
+    /// clear what they had, so a read that came back empty only because the
+    /// files moved underneath it (the tracker rewrote or rotated the transcript
+    /// mid-read) is retried, up to `maximumRemoteSnapshotReadAttempts` reads in
+    /// all. An empty result whose files did not change is final. When every
+    /// read came back empty and the files changed after the last one too, the
+    /// answer is unknown rather than empty, so this returns `nil` and the
+    /// `/transcript` endpoint fails transiently instead.
     ///
     /// `duringRead` runs inside each attempt, after the transcript bytes are
     /// read and before they are validated, with the 1-based attempt number;
     /// tests use it to land a rewrite mid-read. It is `nil` in production.
-    nonisolated static func loadRemoteSnapshot(
+    nonisolated static func loadRemoteSnapshotIfSettled(
         sessionId: String,
         duringRead: ((_ attempt: Int) -> Void)? = nil
-    ) -> TranscriptSnapshot {
+    ) -> TranscriptSnapshot? {
         let path = Paths.transcriptSnapshotPath(sessionId: sessionId)
-        var latest: TranscriptSnapshot?
         for attempt in 1...maximumRemoteSnapshotReadAttempts {
             let signature = loadSignature(sessionId: sessionId, transcriptPath: path)
-            latest = readRemoteSnapshot(
+            let snapshot = readRemoteSnapshot(
                 sessionId: sessionId,
                 path: path,
                 signature: signature,
                 duringRead: duringRead.map { hook in { hook(attempt) } }
             )
-            if let latest, !latest.copilotSessionId.isEmpty {
-                return latest
+            if let snapshot, !snapshot.copilotSessionId.isEmpty {
+                return snapshot
             }
             guard loadSignature(sessionId: sessionId, transcriptPath: path) != signature else {
-                break
+                return snapshot ?? emptyRemoteSnapshot()
             }
         }
-        return latest ?? emptyRemoteSnapshot()
+        return nil
+    }
+
+    /// `loadRemoteSnapshotIfSettled`, with a read that never settled reported
+    /// as the empty snapshot, for local readers (notifications, the session
+    /// finder, search) that have no transient failure to report.
+    nonisolated static func loadRemoteSnapshot(
+        sessionId: String,
+        duringRead: ((_ attempt: Int) -> Void)? = nil
+    ) -> TranscriptSnapshot {
+        loadRemoteSnapshotIfSettled(sessionId: sessionId, duringRead: duringRead)
+            ?? emptyRemoteSnapshot()
     }
 
     /// One read of the transcript against the signature sampled just before

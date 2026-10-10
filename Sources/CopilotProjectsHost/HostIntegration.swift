@@ -38,6 +38,9 @@ public protocol SessionHost: AnyObject, Sendable {
     func screenRevision(sessionId: String) -> RemoteTerminalRevision?
     func screen(sessionId: String, revision: RemoteTerminalRevision, afterLine: Int?) -> RemoteTerminalScreen?
     func transcriptRevision(sessionId: String) -> RemoteTranscriptRevision
+    /// The encoded `/transcript` response, or `nil` when it can't be served
+    /// right now. A gateway must answer `nil` with an error status, never an
+    /// empty success: clients replace their transcript with an empty one.
     func transcript(sessionId: String, limit: Int?) async -> Data?
     /// The transcript response for a client that sent a `TranscriptCursor`.
     func transcript(sessionId: String, limit: Int?, after cursor: TranscriptCursor?) async -> Data?

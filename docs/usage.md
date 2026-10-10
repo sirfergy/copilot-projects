@@ -547,9 +547,10 @@ The extension keeps the turns its 200-turn cap evicted most recently (at most 10
 or after the cursor into the response, so a turn added and evicted between two fetches still
 reaches the client. That buffer is never sent as its own field.
 A response with an empty `copilotSessionId` means the host has no transcript it may show for
-the tab, and clients replace what they have with it; the host rereads (up to three reads in all)
-a transcript that came back empty only because it was being rewritten mid-read, so such a race
-does not clear clients.
+the tab, and clients replace what they have with it. The host rereads (up to three reads in all)
+a transcript that came back empty only because it was being rewritten mid-read; if it is still
+changing after the last read, the request fails with an error status instead, so such a race
+never clears clients.
 
 The app also installs a read-only Copilot extension at
 `~/.copilot/extensions/copilot-projects-tracker/extension.mjs`. It uses Copilot's session event

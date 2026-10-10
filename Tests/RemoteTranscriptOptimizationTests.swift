@@ -486,6 +486,14 @@ final class RemoteTranscriptOptimizationTests: XCTestCase {
         let sessionId = UUID().uuidString
         defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
 
+        // The endpoint answers a settled "no transcript" with the authoritative
+        // empty snapshot.
+        let served = try decode(try XCTUnwrap(TranscriptResponse.encodedResponse(
+            sessionId: sessionId, images: [], limit: nil, after: nil
+        )))
+        XCTAssertEqual(served.copilotSessionId, "")
+        XCTAssertEqual(served.turns, [])
+
         // No transcript at all: nothing to read, nothing to retry.
         var attempts: [Int] = []
         let missing = TranscriptController.loadRemoteSnapshot(sessionId: sessionId) {
@@ -505,25 +513,61 @@ final class RemoteTranscriptOptimizationTests: XCTestCase {
         XCTAssertEqual(unreadable.turns, [])
     }
 
-    func testRemoteSnapshotRetriesARacingRewriteAtMostThreeTimes() throws {
+    /// When every read raced another rewrite, the answer is unknown rather than
+    /// "no transcript": the endpoint fails (the gateway answers with an error
+    /// status) so clients keep their history, while local readers still get
+    /// the empty snapshot.
+    func testRemoteSnapshotThatNeverSettlesIsATransientFailure() throws {
         Paths.ensureStateDir()
         let sessionId = UUID().uuidString
         defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
         try writeTranscript(Data("torn".utf8), sessionId: sessionId)
 
         var attempts: [Int] = []
-        let loaded = TranscriptController.loadRemoteSnapshot(sessionId: sessionId) { attempt in
+        var rewrites = 0
+        // Every read races yet another torn rewrite.
+        let racingRewrite: (Int) -> Void = { attempt in
             attempts.append(attempt)
-            // Every read races yet another torn rewrite.
+            rewrites += 1
             try? self.writeTranscript(
-                Data(("torn" + String(repeating: "!", count: attempt)).utf8),
+                Data(("torn" + String(repeating: "!", count: rewrites)).utf8),
                 sessionId: sessionId
             )
         }
+
         XCTAssertEqual(TranscriptController.maximumRemoteSnapshotReadAttempts, 3)
+        XCTAssertNil(TranscriptController.loadRemoteSnapshotIfSettled(
+            sessionId: sessionId, duringRead: racingRewrite
+        ))
         XCTAssertEqual(attempts, [1, 2, 3])
-        XCTAssertEqual(loaded.copilotSessionId, "")
-        XCTAssertEqual(loaded.turns, [])
+
+        attempts = []
+        XCTAssertNil(TranscriptResponse.encodedResponse(
+            sessionId: sessionId, images: [], limit: nil, after: nil, duringRead: racingRewrite
+        ))
+        XCTAssertEqual(attempts, [1, 2, 3])
+
+        attempts = []
+        let local = TranscriptController.loadRemoteSnapshot(sessionId: sessionId, duringRead: racingRewrite)
+        XCTAssertEqual(attempts, [1, 2, 3])
+        XCTAssertEqual(local.copilotSessionId, "")
+        XCTAssertEqual(local.turns, [])
+
+        // A race that settles by the last read is served normally.
+        let published = fixtureSnapshot(turnCount: 2)
+        attempts = []
+        let settled = try decode(try XCTUnwrap(TranscriptResponse.encodedResponse(
+            sessionId: sessionId, images: [], limit: nil, after: nil
+        ) { attempt in
+            attempts.append(attempt)
+            if attempt == 1 {
+                try? self.writeTranscript(Data("torn again".utf8), sessionId: sessionId)
+            } else if attempt == 2 {
+                try? self.writeTranscript(try self.encoded(published), sessionId: sessionId)
+            }
+        }))
+        XCTAssertEqual(attempts, [1, 2, 3])
+        XCTAssertEqual(settled, published)
     }
 
 }
