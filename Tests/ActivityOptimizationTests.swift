@@ -150,15 +150,25 @@ final class ActivityOptimizationTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let sessionId = UUID().uuidString
+        let path = root.appendingPathComponent("\(sessionId).agent-activity.json")
+        func publish(generation: Int) {
+            var activity = snapshot(at: Date())
+            activity.idleGeneration = generation
+            try? JSONEncoder().encode(activity).write(to: path, options: .atomic)
+        }
         let requestTime = Date()
         let clock = advancingClock(from: requestTime)
         // The tracker publishes between the request taking the time and the read.
         Thread.sleep(forTimeInterval: 0.02)
-        try JSONEncoder().encode(snapshot(at: Date())).write(
-            to: root.appendingPathComponent("\(sessionId).agent-activity.json"), options: .atomic
-        )
+        publish(generation: 1)
         let adapter = CLIOperationAdapter(activityDirectory: root, resumeMarkerDirectory: root)
-        XCTAssertNotNil(adapter.loadFreshSnapshot(sessionId: sessionId, now: clock))
+        // The clock is consulted only after the read, so a publish from inside
+        // it can't be the snapshot that was read.
+        let loaded = adapter.loadFreshSnapshot(sessionId: sessionId, now: {
+            publish(generation: 2)
+            return clock()
+        })
+        XCTAssertEqual(loaded?.idleGeneration, 1)
         XCTAssertNil(adapter.loadFreshSnapshot(sessionId: sessionId, now: { requestTime }))
     }
 

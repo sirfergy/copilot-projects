@@ -2508,6 +2508,7 @@ final class AppModel: ObservableObject {
         operation: CLIOperationRequest? = nil,
         now: Date = Date()
     ) -> RemoteUserInputResult {
+        let clock = advancingClock(from: now)
         guard locateIndex(sessionId) != nil else { return .invalid }
         guard !answer.requestId.isEmpty,
               answer.requestId.utf8.count <= 200,
@@ -2524,7 +2525,7 @@ final class AppModel: ObservableObject {
             operation: operation,
             fingerprintPayload: answer,
             handoffSuffix: "user-input-response.json",
-            now: advancingClock(from: now),
+            now: clock,
             validate: { snapshot in
                 guard let request = snapshot.trackedUserInputs?
                     .first(where: { $0.requestId == answer.requestId }) else {
@@ -2561,6 +2562,7 @@ final class AppModel: ObservableObject {
         operation: CLIOperationRequest? = nil,
         now: Date = Date()
     ) -> RemoteUserInputResult {
+        let clock = advancingClock(from: now)
         guard let location = locateIndex(sessionId) else { return .invalid }
         let adapter = CLIOperationAdapter(
             activityDirectory: agentActivityDirectory,
@@ -2612,7 +2614,6 @@ final class AppModel: ObservableObject {
             }
         }
 
-        let clock = advancingClock(from: now)
         let initialSnapshot = adapter.loadFreshSnapshot(
             sessionId: sessionId,
             now: clock
@@ -2778,6 +2779,7 @@ final class AppModel: ObservableObject {
         operation: CLIOperationRequest? = nil,
         now: Date = Date()
     ) -> RemoteUserInputResult {
+        let clock = advancingClock(from: now)
         guard locateIndex(sessionId) != nil else { return .invalid }
         guard !selection.modelId.isEmpty,
               selection.modelId.utf8.count <= 200,
@@ -2800,7 +2802,7 @@ final class AppModel: ObservableObject {
             operation: operation,
             fingerprintPayload: selection,
             handoffSuffix: "set-model-request.json",
-            now: advancingClock(from: now),
+            now: clock,
             validate: { snapshot in
                 guard let target = snapshot.availableModels?
                     .first(where: { $0.id == selection.modelId }),
@@ -2841,6 +2843,7 @@ final class AppModel: ObservableObject {
         operation: CLIOperationRequest,
         now: Date = Date()
     ) -> RemoteUserInputResult {
+        let clock = advancingClock(from: now)
         guard locateIndex(sessionId) != nil, action.isValid,
               let kind = CLISDKOperationKind(rawValue: action.kind.rawValue) else {
             return .invalid
@@ -2849,7 +2852,6 @@ final class AppModel: ObservableObject {
             activityDirectory: agentActivityDirectory,
             resumeMarkerDirectory: resumeMarkerDirectory
         )
-        let clock = advancingClock(from: now)
         return adapter.submit(
             sessionId: sessionId,
             kind: kind,
@@ -3789,6 +3791,7 @@ final class AppModel: ObservableObject {
         isFinalAttempt: Bool,
         now: Date = Date()
     ) -> Bool {
+        let clock = advancingClock(from: now)
         guard elicitationNotificationTokens[sessionId] == token else { return true }
         guard let loc = locateIndex(sessionId),
               projects[loc.p].sessions[loc.s].status == .waiting else {
@@ -3802,7 +3805,6 @@ final class AppModel: ObservableObject {
         var question: NotificationReplyResolver.PendingQuestion?
         var questionObservedAt: Int64?
         var questionListWasFull = false
-        let clock = advancingClock(from: now)
         if let snapshot = adapter.loadReceiptBoundSnapshot(sessionId: sessionId, now: clock),
            let root = snapshot.copilotSessionId,
            let epoch = snapshot.conversationEpoch {
