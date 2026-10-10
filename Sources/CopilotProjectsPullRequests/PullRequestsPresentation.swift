@@ -17,6 +17,11 @@ enum PullRequestsPresentation {
         let keys: [PullRequestKey]
     }
 
+    /// Checks can continue after a PR leaves draft, regardless of review approval.
+    static func reviewReadiness(_ item: PullRequestItem) -> String? {
+        !item.pr.isDraft && item.assessment.stage == .checks ? "Ready for review" : nil
+    }
+
     static func hasPartialStatus(_ pr: PullRequestSnapshot) -> Bool {
         pr.isIncomplete || pr.uncountedThreadsCursor != nil
             || (pr.checksFailing && pr.failingRequiredChecks == nil)

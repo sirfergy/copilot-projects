@@ -847,9 +847,11 @@ struct PullRequestChip: View {
     }
 
     static func statusText(_ item: PullRequestItem, checkingStatus: Bool = false) -> String {
-        let status = item.assessment.reasons.isEmpty
+        let assessment = item.assessment.reasons.isEmpty
             ? item.assessment.status
             : item.assessment.reasons.map(\.label).joined(separator: ", ")
+        let status = [assessment, PullRequestsPresentation.reviewReadiness(item)]
+            .compactMap { $0 }.joined(separator: ", ")
         guard PullRequestsPresentation.hasPartialStatus(item.pr) else { return status }
         return status + (checkingStatus ? ", checking status" : ", some status unavailable")
     }
@@ -886,6 +888,12 @@ struct PullRequestChip: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             reason
+            if let readiness = PullRequestsPresentation.reviewReadiness(item) {
+                Label(readiness, systemImage: "eye")
+                    .font(.caption)
+                    .foregroundStyle(StudioStyle.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if PullRequestsPresentation.hasPartialStatus(item.pr) {
                 Label(checkingStatus ? "Checking status…" : "Some status unavailable", systemImage: "questionmark.circle")
                     .font(.caption)
@@ -994,6 +1002,9 @@ struct PullRequestChip: View {
         var lines = ["\(item.pr.repository)#\(item.pr.key.number): \(item.pr.title)"]
         lines += item.assessment.reasons.map { "• \($0.label)" }
         if item.assessment.reasons.isEmpty { lines.append(item.assessment.status) }
+        if let readiness = PullRequestsPresentation.reviewReadiness(item) {
+            lines.append("\(readiness) · no longer a draft")
+        }
         if let failing = item.pr.failingRequiredChecks, !failing.isEmpty {
             lines.append("Failing: " + failing.prefix(5).joined(separator: ", "))
         }

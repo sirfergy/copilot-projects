@@ -145,6 +145,10 @@ Dock**. Closing its window quits it; that never ends a session.
 It shows your open pull requests. Each row is a goal: a set of pull requests
 working toward one outcome. Its columns are the stages Draft, Checks, Review, and
 Ready, so one row shows how far a goal has got and what is holding it up.
+Non-draft PRs in **Checks** also show an eye icon and **Ready for review** below
+their check status or blocker. This means reviews can start, not approval or
+merge readiness. It does not change the column, and avoids repeating readiness
+in **Review** and **Ready**.
 
 - **Goals come from your sessions.** A pull request belongs to the live Copilot
   session whose conversation keeps naming its head branch: the session that pushes
