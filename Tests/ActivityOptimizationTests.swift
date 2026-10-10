@@ -106,6 +106,73 @@ final class ActivityOptimizationTests: XCTestCase {
     }
 
     @MainActor
+    func testSnapshotPublishedDuringScanIsJudgedWhenRead() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = Session(title: "mid-scan", cwd: root.path)
+        let project = Project(name: "mid-scan", cwd: root.path, sessions: [session])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        let path = root.appendingPathComponent("\(session.id).agent-activity.json")
+        var publishDuringScan = false
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: root,
+            agentActivityScanObserver: {
+                guard publishDuringScan else { return }
+                // The tracker publishes after the scan took its `now`.
+                Thread.sleep(forTimeInterval: 0.02)
+                let published = Date()
+                var activity = self.snapshot(at: published)
+                activity.copilotSessionId = "copilot-session"
+                activity.conversationEpoch = "epoch"
+                activity.operationReceiptVersion = 1
+                activity.workflow = RemoteSessionWorkflow(
+                    observedAtMilliseconds: Int64(published.timeIntervalSince1970 * 1_000),
+                    capabilities: [RemoteSessionActionKind.send.rawValue],
+                    sendReady: true
+                )
+                try? JSONEncoder().encode(activity).write(to: path, options: .atomic)
+            }
+        )
+        publishDuringScan = true
+        model.refreshAgentActivitySnapshots()
+        XCTAssertNotNil(model.projects[0].sessions[0].agentActivity)
+        let remote = model.remoteWorkspaceSnapshot().projects[0].sessions[0]
+        XCTAssertEqual(remote.operationSupport, .receipts)
+        XCTAssertNotNil(remote.workflow)
+    }
+
+    func testOperationReadJudgesSnapshotPublishedAfterTheCallerTookTheTime() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionId = UUID().uuidString
+        let path = root.appendingPathComponent("\(sessionId).agent-activity.json")
+        func publish(generation: Int) {
+            var activity = snapshot(at: Date())
+            activity.idleGeneration = generation
+            try? JSONEncoder().encode(activity).write(to: path, options: .atomic)
+        }
+        let requestTime = Date()
+        let clock = advancingClock(from: requestTime)
+        // The tracker publishes between the request taking the time and the read.
+        Thread.sleep(forTimeInterval: 0.02)
+        publish(generation: 1)
+        let adapter = CLIOperationAdapter(activityDirectory: root, resumeMarkerDirectory: root)
+        // The clock is consulted only after the read, so a publish from inside
+        // it can't be the snapshot that was read.
+        let loaded = adapter.loadFreshSnapshot(sessionId: sessionId, now: {
+            publish(generation: 2)
+            return clock()
+        })
+        XCTAssertEqual(loaded?.idleGeneration, 1)
+        XCTAssertNil(adapter.loadFreshSnapshot(sessionId: sessionId, now: { requestTime }))
+    }
+
+    @MainActor
     func testActivityScanPublishesOneBatchAndDoesNotSuppressCausalChanges() throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

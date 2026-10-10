@@ -2508,6 +2508,7 @@ final class AppModel: ObservableObject {
         operation: CLIOperationRequest? = nil,
         now: Date = Date()
     ) -> RemoteUserInputResult {
+        let clock = advancingClock(from: now)
         guard locateIndex(sessionId) != nil else { return .invalid }
         guard !answer.requestId.isEmpty,
               answer.requestId.utf8.count <= 200,
@@ -2524,7 +2525,7 @@ final class AppModel: ObservableObject {
             operation: operation,
             fingerprintPayload: answer,
             handoffSuffix: "user-input-response.json",
-            now: now,
+            now: clock,
             validate: { snapshot in
                 guard let request = snapshot.trackedUserInputs?
                     .first(where: { $0.requestId == answer.requestId }) else {
@@ -2561,6 +2562,7 @@ final class AppModel: ObservableObject {
         operation: CLIOperationRequest? = nil,
         now: Date = Date()
     ) -> RemoteUserInputResult {
+        let clock = advancingClock(from: now)
         guard let location = locateIndex(sessionId) else { return .invalid }
         let adapter = CLIOperationAdapter(
             activityDirectory: agentActivityDirectory,
@@ -2614,7 +2616,7 @@ final class AppModel: ObservableObject {
 
         let initialSnapshot = adapter.loadFreshSnapshot(
             sessionId: sessionId,
-            now: now
+            now: clock
         )
         let initialRequest = initialSnapshot?.trackedElicitations?
             .first(where: { $0.requestId == answer.requestId })
@@ -2649,7 +2651,7 @@ final class AppModel: ObservableObject {
             } else {
                 terminalTarget = nil
             }
-            guard snapshot.isFresh(at: now, ttl: 10),
+            guard snapshot.isFresh(at: clock(), ttl: 10),
                   snapshot.pendingPermissionRequestIds?.isEmpty == true,
                   projects[location.p].sessions[location.s].status == .waiting,
                   let terminalTarget,
@@ -2677,7 +2679,7 @@ final class AppModel: ObservableObject {
             operation: operation,
             fingerprintPayload: answer,
             handoffSuffix: "elicitation-response.json",
-            now: now,
+            now: clock,
             validate: { freshSnapshot in
                 guard let freshRequest = freshSnapshot.trackedElicitations?
                     .first(where: { $0.requestId == answer.requestId }) else {
@@ -2777,6 +2779,7 @@ final class AppModel: ObservableObject {
         operation: CLIOperationRequest? = nil,
         now: Date = Date()
     ) -> RemoteUserInputResult {
+        let clock = advancingClock(from: now)
         guard locateIndex(sessionId) != nil else { return .invalid }
         guard !selection.modelId.isEmpty,
               selection.modelId.utf8.count <= 200,
@@ -2799,7 +2802,7 @@ final class AppModel: ObservableObject {
             operation: operation,
             fingerprintPayload: selection,
             handoffSuffix: "set-model-request.json",
-            now: now,
+            now: clock,
             validate: { snapshot in
                 guard let target = snapshot.availableModels?
                     .first(where: { $0.id == selection.modelId }),
@@ -2840,6 +2843,7 @@ final class AppModel: ObservableObject {
         operation: CLIOperationRequest,
         now: Date = Date()
     ) -> RemoteUserInputResult {
+        let clock = advancingClock(from: now)
         guard locateIndex(sessionId) != nil, action.isValid,
               let kind = CLISDKOperationKind(rawValue: action.kind.rawValue) else {
             return .invalid
@@ -2854,10 +2858,10 @@ final class AppModel: ObservableObject {
             operation: operation,
             fingerprintPayload: action,
             handoffSuffix: "\(kind.rawValue).json",
-            now: now,
+            now: clock,
             validate: { snapshot in
                 guard let workflow = snapshot.workflow,
-                      workflow.supports(action.kind, at: now) else { return false }
+                      workflow.supports(action.kind, at: clock()) else { return false }
                 switch action.kind {
                 case .send:
                     if action.attachmentIds != nil {
@@ -2916,7 +2920,7 @@ final class AppModel: ObservableObject {
             activityDirectory: agentActivityDirectory,
             resumeMarkerDirectory: resumeMarkerDirectory
         )
-        guard let snapshot = adapter.loadFreshSnapshot(sessionId: sessionId, now: Date()),
+        guard let snapshot = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
               let epoch = snapshot.remoteOperationProjection().conversationEpoch else {
             return RemoteWorkflowActionResult(state: .rejected, message: "Native session controls are unavailable.")
         }
@@ -2927,7 +2931,7 @@ final class AppModel: ObservableObject {
         for _ in 0..<40 {
             do { try await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(500))) }
             catch { break }
-            guard let fresh = adapter.loadFreshSnapshot(sessionId: sessionId, now: Date()),
+            guard let fresh = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
                   fresh.conversationEpoch == epoch else { break }
             if let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
                 $0.operationId == operation.operationId && $0.kind == action.kind.rawValue
@@ -3787,6 +3791,7 @@ final class AppModel: ObservableObject {
         isFinalAttempt: Bool,
         now: Date = Date()
     ) -> Bool {
+        let clock = advancingClock(from: now)
         guard elicitationNotificationTokens[sessionId] == token else { return true }
         guard let loc = locateIndex(sessionId),
               projects[loc.p].sessions[loc.s].status == .waiting else {
@@ -3800,7 +3805,7 @@ final class AppModel: ObservableObject {
         var question: NotificationReplyResolver.PendingQuestion?
         var questionObservedAt: Int64?
         var questionListWasFull = false
-        if let snapshot = adapter.loadReceiptBoundSnapshot(sessionId: sessionId, now: now),
+        if let snapshot = adapter.loadReceiptBoundSnapshot(sessionId: sessionId, now: clock),
            let root = snapshot.copilotSessionId,
            let epoch = snapshot.conversationEpoch {
             let observed = conversation ?? ElicitationConversation(
@@ -3812,7 +3817,7 @@ final class AppModel: ObservableObject {
             // without a reply rather than keep waiting for it.
             if observed.rootSessionId.lowercased() == root.lowercased(),
                observed.conversationEpoch == epoch {
-                question = NotificationReplyResolver.pendingQuestion(in: snapshot, now: now)
+                question = NotificationReplyResolver.pendingQuestion(in: snapshot, now: clock())
                 questionObservedAt = snapshot.updatedAtMilliseconds
                 questionListWasFull = AnsweredQuestionNotifications.mayOmitQuestions(snapshot)
                 // Only an empty snapshot can still be missing this hook's
@@ -4123,6 +4128,9 @@ final class AppModel: ObservableObject {
     }
 
     func refreshAgentActivitySnapshots(now: Date = Date()) {
+        // Trackers keep publishing while the scan runs, so each snapshot is
+        // judged when its file was read rather than when the scan started.
+        let readTime = advancingClock(from: now)
         agentActivityScanObserver?()
         let decoder = JSONDecoder()
         let fm = FileManager.default
@@ -4139,8 +4147,9 @@ final class AppModel: ObservableObject {
                 let snapshot = loadAgentActivitySnapshot(
                     sessionId: sessionId, path: path, decoder: decoder, fm: fm
                 )
-                let fresh = snapshot?.isFresh(at: now) == true ? snapshot : nil
-                if let workflow = fresh?.workflow, workflow.isFresh(at: now),
+                let readAt = readTime()
+                let fresh = snapshot?.isFresh(at: readAt) == true ? snapshot : nil
+                if let workflow = fresh?.workflow, workflow.isFresh(at: readAt),
                    let request = workflow.budgetRequest,
                    let epoch = fresh?.conversationEpoch {
                     let key = "\(epoch):\(request.requestId)"
@@ -4199,7 +4208,7 @@ final class AppModel: ObservableObject {
             .filter { seenSessionIds.contains($0.key) }
         runtimeTrackedOwners = runtimeTrackedOwners.filter { seenSessionIds.contains($0.key) }
         budgetNotificationKeys = budgetNotificationKeys.filter { seenSessionIds.contains($0.key) }
-        reconcileRuntimeActivity(now: now)
+        reconcileRuntimeActivity(now: readTime())
         for target in budgetNotifications {
             postNotification(
                 projectId: target.projectId, sessionId: target.sessionId, kind: .permission,
@@ -4620,7 +4629,7 @@ final class AppModel: ObservableObject {
         let completionClock = sessionSemantics.statusClock.timestamp(for: sessionId)
         // The status clock can't see a conversation rotating, so the reply
         // read after the load must still belong to the finished turn's epoch.
-        let completionEpoch = receiptBoundSnapshot(sessionId: sessionId, now: Date())?
+        let completionEpoch = receiptBoundSnapshot(sessionId: sessionId, now: { Date() })?
             .conversationEpoch
         let loadSnapshot = completionTranscriptLoader
         Task { @MainActor [weak self] in
@@ -4656,14 +4665,14 @@ final class AppModel: ObservableObject {
     /// Read from disk at post time: the cached snapshot can lag the turn that
     /// just finished by a heartbeat.
     private func completionReply(sessionId: String) -> RemoteNotificationReply? {
-        let now = Date()
-        guard let snapshot = receiptBoundSnapshot(sessionId: sessionId, now: now) else {
+        let clock = advancingClock(from: Date())
+        guard let snapshot = receiptBoundSnapshot(sessionId: sessionId, now: clock) else {
             return nil
         }
-        return NotificationReplyResolver.completionReply(snapshot: snapshot, now: now)
+        return NotificationReplyResolver.completionReply(snapshot: snapshot, now: clock())
     }
 
-    private func receiptBoundSnapshot(sessionId: String, now: Date) -> AgentActivitySnapshot? {
+    private func receiptBoundSnapshot(sessionId: String, now: () -> Date) -> AgentActivitySnapshot? {
         CLIOperationAdapter(
             activityDirectory: agentActivityDirectory,
             resumeMarkerDirectory: resumeMarkerDirectory

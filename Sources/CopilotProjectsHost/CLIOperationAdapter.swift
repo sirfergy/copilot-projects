@@ -103,10 +103,20 @@ struct CLIOperationAdapter {
     let activityDirectory: URL
     let resumeMarkerDirectory: URL
 
+    /// The snapshot if it is fresh when read. `now` is consulted only after the
+    /// read, so a snapshot published after the caller first took the time
+    /// isn't judged future-dated.
     func loadFreshSnapshot(
         sessionId: String,
-        now: Date
+        now: () -> Date
     ) -> AgentActivitySnapshot? {
+        loadFresh(sessionId: sessionId, now: now)?.snapshot
+    }
+
+    private func loadFresh(
+        sessionId: String,
+        now: () -> Date
+    ) -> (snapshot: AgentActivitySnapshot, readAt: Date)? {
         let url = SessionArtifacts.cliAgentActivityURL(
             sessionId: sessionId,
             sessionsDirectory: activityDirectory
@@ -116,11 +126,12 @@ struct CLIOperationAdapter {
               let snapshot = try? JSONDecoder().decode(
                 AgentActivitySnapshot.self,
                 from: data
-              ),
-              snapshot.isFresh(at: now) else {
+              ) else {
             return nil
         }
-        return snapshot
+        let readAt = now()
+        guard snapshot.isFresh(at: readAt) else { return nil }
+        return (snapshot, readAt)
     }
 
     func submit<Payload: Encodable, Handoff: Encodable>(
@@ -129,7 +140,7 @@ struct CLIOperationAdapter {
         operation: CLIOperationRequest?,
         fingerprintPayload: Payload,
         handoffSuffix: String,
-        now: Date,
+        now: () -> Date,
         validate: (AgentActivitySnapshot) -> Bool,
         makeHandoff: (CLIOperationHandoffMetadata) -> Handoff
     ) -> RemoteUserInputResult {
@@ -216,15 +227,16 @@ struct CLIOperationAdapter {
     /// now, or nil when one would be refused before its payload is validated.
     func loadReceiptBoundSnapshot(
         sessionId: String,
-        now: Date
+        now: () -> Date
     ) -> AgentActivitySnapshot? {
-        guard let snapshot = loadFreshSnapshot(sessionId: sessionId, now: now),
-              let epoch = snapshot.remoteOperationProjection(at: now).conversationEpoch,
+        guard let loaded = loadFresh(sessionId: sessionId, now: now),
+              let epoch = loaded.snapshot.remoteOperationProjection(at: loaded.readAt)
+                .conversationEpoch,
               case .ready(let bound) = bind(
-                snapshot,
+                loaded.snapshot,
                 sessionId: sessionId,
                 correlatedEpoch: epoch,
-                now: now
+                now: loaded.readAt
               ) else {
             return nil
         }
@@ -234,16 +246,16 @@ struct CLIOperationAdapter {
     private func loadBoundSnapshot(
         sessionId: String,
         operation: CLIOperationRequest?,
-        now: Date
+        now: () -> Date
     ) -> BoundSnapshotResult {
-        guard let snapshot = loadFreshSnapshot(sessionId: sessionId, now: now) else {
+        guard let loaded = loadFresh(sessionId: sessionId, now: now) else {
             return .invalid
         }
         return bind(
-            snapshot,
+            loaded.snapshot,
             sessionId: sessionId,
             correlatedEpoch: operation?.conversationEpoch,
-            now: now
+            now: loaded.readAt
         )
     }
 
