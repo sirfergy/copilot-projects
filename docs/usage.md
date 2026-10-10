@@ -539,7 +539,13 @@ event API. It atomically writes a bounded per-tab transcript snapshot after each
 stopped turns and compact tool summaries but excluding raw tool arguments and results. Copilot
 Projects renders that snapshot in the drawer without parsing private CLI session files or
 changing the terminal's PTY size. The host API supports full or bounded transcript windows
-for optional integrations; image association always precedes windowing.
+for optional integrations; image association always precedes windowing. A client can also send
+`after=<epoch milliseconds>&copilotSessionId=<id>` (the start of its newest completed turn) to
+receive only the turns from that point on, merging each response into what it has by turn id.
+A response with an empty `copilotSessionId` means the host has no transcript it may show for
+the tab, and clients replace what they have with it; the host rereads (up to three reads in all)
+a transcript that came back empty only because it was being rewritten mid-read, so such a race
+does not clear clients.
 
 The app also installs a read-only Copilot extension at
 `~/.copilot/extensions/copilot-projects-tracker/extension.mjs`. It uses Copilot's session event

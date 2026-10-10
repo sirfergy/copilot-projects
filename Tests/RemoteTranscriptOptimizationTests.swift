@@ -293,4 +293,94 @@ final class RemoteTranscriptOptimizationTests: XCTestCase {
         XCTAssertNil(TranscriptCursor(startedAt: Date(timeIntervalSince1970: -1), copilotSessionId: "abc"))
     }
 
+    // MARK: - Reads that race a rewrite
+
+    private func writeTranscript(_ data: Data, sessionId: String) throws {
+        try data.write(
+            to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)),
+            options: .atomic
+        )
+    }
+
+    private func encoded(_ snapshot: TranscriptSnapshot) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(snapshot)
+    }
+
+    /// Clients treat a response with no conversation id as authoritative and
+    /// clear what they have, so an empty read caused only by the tracker
+    /// rewriting the transcript mid-read must be retried.
+    func testRemoteSnapshotRetriesAnEmptyReadThatRacedARewrite() throws {
+        Paths.ensureStateDir()
+        let published = fixtureSnapshot(turnCount: 3)
+        let scenarios: [(String, Data)] = [
+            // The bytes read are the previous, valid snapshot, but the files
+            // moved before they were validated.
+            ("stale", try encoded(fixtureSnapshot(turnCount: 2))),
+            // The bytes read do not decode at all.
+            ("torn", Data(#"{"schemaVersion":3,"#.utf8)),
+        ]
+        for (name, initial) in scenarios {
+            let sessionId = UUID().uuidString
+            defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
+            try writeTranscript(initial, sessionId: sessionId)
+
+            var attempts: [Int] = []
+            let loaded = TranscriptController.loadRemoteSnapshot(sessionId: sessionId) { attempt in
+                attempts.append(attempt)
+                if attempt == 1 {
+                    try? self.writeTranscript(try self.encoded(published), sessionId: sessionId)
+                }
+            }
+            XCTAssertEqual(attempts, [1, 2], name)
+            XCTAssertEqual(loaded, published, name)
+        }
+    }
+
+    func testRemoteSnapshotReturnsAStableEmptyReadAtOnce() throws {
+        Paths.ensureStateDir()
+        let sessionId = UUID().uuidString
+        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
+
+        // No transcript at all: nothing to read, nothing to retry.
+        var attempts: [Int] = []
+        let missing = TranscriptController.loadRemoteSnapshot(sessionId: sessionId) {
+            attempts.append($0)
+        }
+        XCTAssertEqual(attempts, [])
+        XCTAssertEqual(missing.copilotSessionId, "")
+        XCTAssertEqual(missing.turns, [])
+
+        // An unreadable transcript that nobody is rewriting is read once.
+        try writeTranscript(Data("not json".utf8), sessionId: sessionId)
+        let unreadable = TranscriptController.loadRemoteSnapshot(sessionId: sessionId) {
+            attempts.append($0)
+        }
+        XCTAssertEqual(attempts, [1])
+        XCTAssertEqual(unreadable.copilotSessionId, "")
+        XCTAssertEqual(unreadable.turns, [])
+    }
+
+    func testRemoteSnapshotRetriesARacingRewriteAtMostThreeTimes() throws {
+        Paths.ensureStateDir()
+        let sessionId = UUID().uuidString
+        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
+        try writeTranscript(Data("torn".utf8), sessionId: sessionId)
+
+        var attempts: [Int] = []
+        let loaded = TranscriptController.loadRemoteSnapshot(sessionId: sessionId) { attempt in
+            attempts.append(attempt)
+            // Every read races yet another torn rewrite.
+            try? self.writeTranscript(
+                Data(("torn" + String(repeating: "!", count: attempt)).utf8),
+                sessionId: sessionId
+            )
+        }
+        XCTAssertEqual(TranscriptController.maximumRemoteSnapshotReadAttempts, 3)
+        XCTAssertEqual(attempts, [1, 2, 3])
+        XCTAssertEqual(loaded.copilotSessionId, "")
+        XCTAssertEqual(loaded.turns, [])
+    }
+
 }
