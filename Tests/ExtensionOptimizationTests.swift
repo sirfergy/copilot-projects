@@ -358,6 +358,7 @@ extension ExtensionOptimizationTests {
     const MAX_RECENTLY_DROPPED_BYTES = 256 * 1024;
     const recentlyDroppedTurns = [];
     let recentlyDroppedTurnBytes = 0;
+    const DROPPED_TURNS_SECTION_BYTES = Buffer.byteLength(',"droppedTurns":[]');
     const RESUME_TRANSCRIPT_TURN_PREFIX = "session-resume-";
 
     const realStringify = JSON.stringify;
@@ -659,21 +660,70 @@ extension ExtensionOptimizationTests {
     equal(ids(transcriptTurns), "fg1,fg2", "the budget dropped the scheduled turn");
     equal(recentlyDroppedTurns.length, 0, "byte-budget drops are never buffered");
 
-    // The buffer rides along while it fits…
-    const gone = [small("gone-1"), small("gone-2")];
+    // ------------------------------------------------------------ buffer room
+    const entries = (turns) => turns.map((entry) => ({ turn: entry, bytes: itemBytes(entry) }));
+    // Bytes the buffer adds to a document: `,"droppedTurns":` plus its array.
+    const section = (turns) => Buffer.byteLength(',"droppedTurns":') + itemBytes(turns);
+    const gone = [small("gone-1"), small("gone-2"), small("gone-3")];
+
+    // The buffer rides along while it fits, at no extra encode…
     MAX_TRANSCRIPT_BYTES = Number.MAX_SAFE_INTEGER;
     load(budgetTurns);
-    const roomy = JSON.parse(encodedTranscriptWithinBudget(null, clone(gone)));
-    equal(ids(roomy.droppedTurns), "gone-1,gone-2", "the buffer is published");
+    resetCounters();
+    const roomy = JSON.parse(encodedTranscriptWithinBudget(null, entries(clone(gone))));
+    equal(stringifyCalls, 1, "a buffer that fits costs one encode");
+    equal(ids(roomy.droppedTurns), "gone-1,gone-2,gone-3", "the buffer is published");
     equal(ids(roomy.turns), "scheduled,fg1,fg2", "next to every live turn");
 
-    // …and is shed before any live turn when it doesn't.
+    // …and near the budget keeps the newest buffered turns that fit in the
+    // room the live transcript leaves, with one more encode.
+    MAX_TRANSCRIPT_BYTES = fullBytes + section(gone.slice(1));
+    load(budgetTurns);
+    resetCounters();
+    const twoFit = encodedTranscriptWithinBudget(null, entries(clone(gone)));
+    equal(Buffer.byteLength(twoFit), MAX_TRANSCRIPT_BYTES, "the newest two fill the room exactly");
+    equal(ids(JSON.parse(twoFit).droppedTurns), "gone-2,gone-3", "the newest turns that fit are kept");
+    equal(ids(transcriptTurns), "scheduled,fg1,fg2", "no live turn made room for them");
+    equal(stringifyCalls, 2, "keeping part of the buffer costs one re-encode");
+
+    MAX_TRANSCRIPT_BYTES = fullBytes + section(gone.slice(1)) - 1;
+    load(budgetTurns);
+    const oneFits = JSON.parse(encodedTranscriptWithinBudget(null, entries(clone(gone))));
+    equal(ids(oneFits.droppedTurns), "gone-3", "one byte less keeps only the newest");
+
+    // With no room left, the buffer is omitted and nothing else changes.
     MAX_TRANSCRIPT_BYTES = fullBytes;
     load(budgetTurns);
-    const tight = encodedTranscriptWithinBudget(null, clone(gone));
+    const tight = encodedTranscriptWithinBudget(null, entries(clone(gone)));
     equal(Buffer.byteLength(tight), fullBytes, "only the buffer was shed");
     equal("droppedTurns" in JSON.parse(tight), false, "the buffer is omitted");
     equal(ids(transcriptTurns), "scheduled,fg1,fg2", "no live turn made room for it");
+
+    // A re-encode that misses the budget (sizes that no longer match their
+    // turns: the oldest overstated, so the room looks bigger, and the newest
+    // understated, so they look like they fit it) falls back to no buffer
+    // rather than an oversized document.
+    MAX_TRANSCRIPT_BYTES = fullBytes + 64;
+    load(budgetTurns);
+    // Count only whole-document encodes.
+    resetCounters(fullBytes);
+    const misjudged = encodedTranscriptWithinBudget(null, [
+        { turn: clone(gone[0]), bytes: itemBytes(gone[0]) + 1_000 },
+        { turn: clone(gone[1]), bytes: 1 },
+        { turn: clone(gone[2]), bytes: 1 },
+    ]);
+    equal(largeEncodes, 3, "probe, the partial buffer's re-encode, then the fallback");
+    equal(Buffer.byteLength(misjudged), fullBytes, "the fallback is the live transcript alone");
+    equal("droppedTurns" in JSON.parse(misjudged), false, "the misjudged buffer is omitted");
+
+    // A live transcript over the budget drops the buffer and trims exactly as
+    // it would without one.
+    MAX_TRANSCRIPT_BYTES = fullBytes - 1;
+    load(budgetTurns);
+    const over = encodedTranscriptWithinBudget(null, entries(clone(gone)));
+    check(Buffer.byteLength(over) <= MAX_TRANSCRIPT_BYTES, "the trimmed document honors the budget");
+    equal("droppedTurns" in JSON.parse(over), false, "no buffer beside a trimmed transcript");
+    equal(ids(transcriptTurns), "fg1,fg2", "trimming is unchanged by the buffer");
 
     // ----------------------------------------------------------- resume markers
     // Once a user message clears `latestResumeTranscriptTurnId`, an old resume

@@ -281,6 +281,9 @@ if (validSessionId && socketPath) {
     const MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024;
     const MAX_RECENTLY_DROPPED_TURNS = 10;
     const MAX_RECENTLY_DROPPED_BYTES = 256 * 1024;
+    // `,"droppedTurns":[]` — the buffer's section of an encoded snapshot,
+    // around its members and their separating commas.
+    const DROPPED_TURNS_SECTION_BYTES = Buffer.byteLength(',"droppedTurns":[]');
     const RESUME_TRANSCRIPT_TURN_PREFIX = "session-resume-";
     const MAX_TRANSCRIPT_TEXT = 50_000;
     const MAX_TRANSCRIPT_METADATA_TEXT = 512;
@@ -2893,6 +2896,9 @@ if (validSessionId && socketPath) {
     // plus the separating comma it takes with it, so the running total
     // tracks the final encoding byte for byte.
     function encodedTranscriptWithinBudget(pending, droppedTurns = []) {
+        // `droppedTurns` holds `{ turn, bytes }` entries, oldest first, each
+        // `bytes` the turn's own encoded UTF-8 size.
+        //
         // The envelope, `updatedAt` included, is captured once: all the
         // accounting below is anchored to this exact prefix, and a
         // timestamp that drifted mid-trim would invalidate it.
@@ -2903,14 +2909,40 @@ if (validSessionId && socketPath) {
             ownerPid: process.pid,
             turns: pending ? [...transcriptTurns, pending] : transcriptTurns.slice(),
         };
-        if (droppedTurns.length > 0) snapshot.droppedTurns = droppedTurns;
+        if (droppedTurns.length > 0) {
+            snapshot.droppedTurns = droppedTurns.map(({ turn }) => turn);
+        }
         let encoded = JSON.stringify(snapshot);
         // Overwhelmingly common case: one encode, exactly as before.
-        if (Buffer.byteLength(encoded) <= MAX_TRANSCRIPT_BYTES) return encoded;
-        // Already-evicted turns only help a client catch up, so they are the
-        // first thing a tight budget sheds; the accounting below never sees
-        // them.
-        delete snapshot.droppedTurns;
+        const documentBytes = Buffer.byteLength(encoded);
+        if (documentBytes <= MAX_TRANSCRIPT_BYTES) return encoded;
+        if (droppedTurns.length > 0) {
+            // Already-evicted turns only help a client catch up, so they get
+            // only the room the live transcript leaves: the newest of them
+            // that fit, and none when the live transcript itself is over (the
+            // accounting below never sees them).
+            const sectionBytes = (count, memberBytes) => (count === 0
+                ? 0
+                : DROPPED_TURNS_SECTION_BYTES + memberBytes + count - 1);
+            const room = MAX_TRANSCRIPT_BYTES - documentBytes + sectionBytes(
+                droppedTurns.length,
+                droppedTurns.reduce((carry, { bytes }) => carry + bytes, 0)
+            );
+            let kept = 0;
+            let keptBytes = 0;
+            while (kept < droppedTurns.length) {
+                const { bytes } = droppedTurns[droppedTurns.length - 1 - kept];
+                if (sectionBytes(kept + 1, keptBytes + bytes) > room) break;
+                kept += 1;
+                keptBytes += bytes;
+            }
+            if (kept > 0) {
+                snapshot.droppedTurns = snapshot.droppedTurns.slice(-kept);
+                encoded = JSON.stringify(snapshot);
+                if (Buffer.byteLength(encoded) <= MAX_TRANSCRIPT_BYTES) return encoded;
+            }
+            delete snapshot.droppedTurns;
+        }
 
         // `n` array members carry `n - 1` separating commas.
         const separators = (count) => (count > 0 ? count - 1 : 0);
@@ -3034,7 +3066,7 @@ if (validSessionId && socketPath) {
         try {
             const encoded = encodedTranscriptWithinBudget(
                 pending,
-                recentlyDroppedTurns.map(({ turn }) => turn)
+                recentlyDroppedTurns
             );
             writeFileSync(temporaryPath, encoded, { mode: 0o600 });
             renameSync(temporaryPath, transcriptPath);
