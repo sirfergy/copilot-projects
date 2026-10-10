@@ -623,6 +623,13 @@ final class RemoteSessionSearchTests: XCTestCase {
         }
     }
 
+    func testOlderHostsAnswerCursorRequestsWithTheirUsualTranscript() async throws {
+        let host: any SessionHost = MinimalSessionHost()
+        let cursor = try XCTUnwrap(TranscriptCursor(afterMilliseconds: 1, copilotSessionId: "c"))
+        let data = await host.transcript(sessionId: "s", limit: 5, after: cursor)
+        XCTAssertEqual(data.map { String(decoding: $0, as: UTF8.self) }, "legacy s 5")
+    }
+
     func testBridgeSearchesTheModelsLiveSessions() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -703,7 +710,9 @@ private final class MinimalSessionHost: SessionHost {
     func transcriptRevision(sessionId: String) -> RemoteTranscriptRevision {
         RemoteTranscriptRevision(sessionId: sessionId, generation: "")
     }
-    func transcript(sessionId: String, limit: Int?) async -> Data? { nil }
+    func transcript(sessionId: String, limit: Int?) async -> Data? {
+        Data("legacy \(sessionId) \(limit.map(String.init) ?? "all")".utf8)
+    }
     func terminalImageData(sessionId: String, imageId: UInt32, version: UInt64) -> Data? { nil }
     func isRestoringImages(sessionId: String) -> Bool { false }
     func performControl(_ message: RemoteClientMessage, perform: () -> RemoteControlResult) -> RemoteControlResult {

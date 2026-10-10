@@ -120,4 +120,177 @@ final class RemoteTranscriptOptimizationTests: XCTestCase {
         )
     }
 
+    // MARK: - Incremental cursor
+
+    private func cursor(
+        at date: Date,
+        copilotSessionId: String = "copilot-session"
+    ) throws -> TranscriptCursor {
+        try XCTUnwrap(TranscriptCursor(startedAt: date, copilotSessionId: copilotSessionId))
+    }
+
+    func testTranscriptResponseReturnsTurnsFromTheCursorWithFullCount() throws {
+        let snapshot = fixtureSnapshot(turnCount: 6)
+        let images = fixtureImages(forTurnIndexes: [1, 4])
+        let full = try decode(try XCTUnwrap(TranscriptResponse.encodedResponse(
+            snapshot: snapshot, images: images, limit: nil
+        )))
+
+        let delta = try decode(try XCTUnwrap(TranscriptResponse.encodedResponse(
+            snapshot: snapshot, images: images, limit: nil,
+            after: try cursor(at: snapshot.turns[3].startedAt)
+        )))
+        // The cursor's own turn is resent (it may still be changing) with
+        // everything after it, tagged with the whole transcript's size.
+        XCTAssertEqual(delta.turns.map(\.id), ["turn-3", "turn-4", "turn-5"])
+        XCTAssertEqual(delta.totalTurns, 6)
+        // Images were associated against the full transcript first.
+        for turn in delta.turns {
+            XCTAssertEqual(turn, try XCTUnwrap(full.turns.first { $0.id == turn.id }))
+        }
+
+        // A cursor whose turn the host has since evicted still lands on the
+        // next turn that started after it.
+        let evicted = snapshot.turns[3].startedAt.addingTimeInterval(-1)
+        let afterEviction = TranscriptSnapshot(
+            schemaVersion: 3,
+            updatedAt: snapshot.updatedAt,
+            copilotSessionId: snapshot.copilotSessionId,
+            turns: snapshot.turns.filter { $0.id != "turn-3" }
+        ).remoteWindow(limit: nil, after: try cursor(at: evicted))
+        XCTAssertEqual(afterEviction.turns.map(\.id), ["turn-4", "turn-5"])
+        XCTAssertEqual(afterEviction.totalTurns, 5)
+
+        // Past the newest turn, nothing is new — but the response is still
+        // tagged, so "nothing new" is distinguishable from "no transcript".
+        let caughtUp = snapshot.remoteWindow(
+            limit: nil,
+            after: try cursor(at: snapshot.turns[5].startedAt.addingTimeInterval(1))
+        )
+        XCTAssertEqual(caughtUp.turns, [])
+        XCTAssertEqual(caughtUp.totalTurns, 6)
+    }
+
+    func testTranscriptCursorSurvivesTheWiresWholeSecondDates() throws {
+        // The CLI writes millisecond timestamps, but `/transcript` encodes dates
+        // with `.iso8601`, so clients only ever see whole seconds. A cursor built
+        // from that truncated date must still include the turn it came from.
+        let precise = Self.epoch.addingTimeInterval(300.293)
+        let turn = TranscriptTurn(
+            id: "precise", startedAt: precise, endedAt: precise, kind: "scheduled",
+            userContent: "", assistantMessages: [], tools: [], isAborted: false
+        )
+        let snapshot = TranscriptSnapshot(
+            schemaVersion: 3, updatedAt: Self.epoch, copilotSessionId: "copilot-session",
+            turns: fixtureSnapshot(turnCount: 3).turns + [turn]
+        )
+        let wire = try decode(try XCTUnwrap(TranscriptResponse.encodedResponse(
+            snapshot: snapshot, images: [], limit: nil
+        )))
+        let truncated = try XCTUnwrap(wire.turns.last).startedAt
+        XCTAssertLessThan(truncated, precise)
+
+        let delta = snapshot.remoteWindow(limit: nil, after: try cursor(at: truncated))
+        XCTAssertEqual(delta.turns.map(\.id), ["precise"])
+        // Rounding down also covers a fractional date that isn't exactly
+        // representable in binary.
+        XCTAssertEqual(
+            snapshot.remoteWindow(limit: nil, after: try cursor(at: precise)).turns.map(\.id),
+            ["precise"]
+        )
+    }
+
+    func testTranscriptCursorIsASuffixThenAWindow() throws {
+        let snapshot = fixtureSnapshot(turnCount: 6)
+        let fromTurnOne = try cursor(at: snapshot.turns[1].startedAt)
+
+        let windowed = snapshot.remoteWindow(limit: 2, after: fromTurnOne)
+        XCTAssertEqual(windowed.turns.map(\.id), ["turn-4", "turn-5"])
+        // The window doesn't replace the whole-transcript count with the
+        // suffix's size.
+        XCTAssertEqual(windowed.totalTurns, 6)
+
+        // A turn positioned after the match is returned even if its own start
+        // were earlier: positions, not timestamps, define "after".
+        var turns = snapshot.turns
+        let late = turns.remove(at: 0)
+        turns.append(late)
+        let reordered = TranscriptSnapshot(
+            schemaVersion: 3, updatedAt: Self.epoch, copilotSessionId: "copilot-session",
+            turns: turns
+        ).remoteWindow(limit: nil, after: try cursor(at: snapshot.turns[4].startedAt))
+        XCTAssertEqual(reordered.turns.map(\.id), ["turn-4", "turn-5", "turn-0"])
+    }
+
+    func testTranscriptCursorForAnotherConversationGetsTheUsualResponse() throws {
+        let snapshot = fixtureSnapshot(turnCount: 4)
+        // After `/new` or `/resume` (even of an older conversation whose turns
+        // all predate the cursor) the client needs everything.
+        let other = try cursor(at: snapshot.turns[3].startedAt, copilotSessionId: "previous")
+        let fullData = try XCTUnwrap(TranscriptResponse.encodedResponse(
+            snapshot: snapshot, images: [], limit: nil, after: other
+        ))
+        XCTAssertEqual(try decode(fullData).turns.map(\.id), snapshot.turns.map(\.id))
+        XCTAssertFalse(String(decoding: fullData, as: UTF8.self).contains("totalTurns"))
+        XCTAssertEqual(try decode(fullData), try decode(try XCTUnwrap(TranscriptResponse.encodedResponse(
+            snapshot: snapshot, images: [], limit: nil
+        ))))
+        // With a window, it's the usual window.
+        XCTAssertEqual(
+            snapshot.remoteWindow(limit: 2, after: other),
+            snapshot.limitedToMostRecentTurns(2)
+        )
+
+        // An unreadable transcript is served as an empty snapshot with no
+        // conversation id; a cursor never matches it.
+        let unavailable = TranscriptSnapshot(
+            schemaVersion: 3, updatedAt: Self.epoch, copilotSessionId: "", turns: []
+        )
+        XCTAssertEqual(
+            unavailable.remoteWindow(limit: nil, after: try cursor(at: Self.epoch)),
+            unavailable
+        )
+    }
+
+    func testTranscriptCursorQueryParsingIsStrict() throws {
+        XCTAssertEqual(TranscriptCursor.parse(after: nil, copilotSessionId: nil), .absent)
+        XCTAssertEqual(
+            TranscriptCursor.parse(after: "1700000000293", copilotSessionId: "abc"),
+            .cursor(try XCTUnwrap(TranscriptCursor(afterMilliseconds: 1_700_000_000_293, copilotSessionId: "abc")))
+        )
+        XCTAssertEqual(
+            TranscriptCursor.parse(after: "0", copilotSessionId: "abc"),
+            .cursor(try XCTUnwrap(TranscriptCursor(afterMilliseconds: 0, copilotSessionId: "abc")))
+        )
+        XCTAssertEqual(
+            TranscriptCursor.parse(after: "9999999999999999", copilotSessionId: "abc"),
+            .cursor(try XCTUnwrap(TranscriptCursor(afterMilliseconds: 9_999_999_999_999_999, copilotSessionId: "abc")))
+        )
+        let longest = String(repeating: "s", count: TranscriptCursor.maximumCopilotSessionIdBytes)
+        XCTAssertNotEqual(TranscriptCursor.parse(after: "1", copilotSessionId: longest), .invalid)
+
+        let invalid: [(String?, String?)] = [
+            ("1", nil),
+            (nil, "abc"),
+            ("", "abc"),
+            ("1", ""),
+            ("-1", "abc"),
+            ("+1", "abc"),
+            ("1.5", "abc"),
+            ("1e3", "abc"),
+            (" 1", "abc"),
+            ("١٢", "abc"),
+            ("10000000000000000", "abc"),
+            ("1", longest + "s"),
+        ]
+        for (after, copilotSessionId) in invalid {
+            XCTAssertEqual(
+                TranscriptCursor.parse(after: after, copilotSessionId: copilotSessionId),
+                .invalid,
+                "after=\(after ?? "nil") copilotSessionId=\(copilotSessionId ?? "nil")"
+            )
+        }
+        XCTAssertNil(TranscriptCursor(startedAt: Date(timeIntervalSince1970: -1), copilotSessionId: "abc"))
+    }
+
 }

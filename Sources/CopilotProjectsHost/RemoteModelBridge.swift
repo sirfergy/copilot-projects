@@ -184,12 +184,21 @@ final class RemoteModelBridge: SessionHost {
     }
 
     func transcript(sessionId: String, limit: Int?) async -> Data? {
+        await transcript(sessionId: sessionId, limit: limit, after: nil)
+    }
+
+    func transcript(
+        sessionId: String,
+        limit: Int?,
+        after cursor: TranscriptCursor?
+    ) async -> Data? {
         let images = retainedImageMetadata(sessionId: sessionId) ?? []
         return await Task.detached {
             TranscriptResponse.encodedResponse(
                 snapshot: TranscriptController.loadRemoteSnapshot(sessionId: sessionId),
                 images: images,
-                limit: limit
+                limit: limit,
+                after: cursor
             )
         }.value
     }
