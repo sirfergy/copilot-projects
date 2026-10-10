@@ -145,6 +145,23 @@ final class ActivityOptimizationTests: XCTestCase {
         XCTAssertNotNil(remote.workflow)
     }
 
+    func testOperationReadJudgesSnapshotPublishedAfterTheCallerTookTheTime() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionId = UUID().uuidString
+        let requestTime = Date()
+        let clock = advancingClock(from: requestTime)
+        // The tracker publishes between the request taking the time and the read.
+        Thread.sleep(forTimeInterval: 0.02)
+        try JSONEncoder().encode(snapshot(at: Date())).write(
+            to: root.appendingPathComponent("\(sessionId).agent-activity.json"), options: .atomic
+        )
+        let adapter = CLIOperationAdapter(activityDirectory: root, resumeMarkerDirectory: root)
+        XCTAssertNotNil(adapter.loadFreshSnapshot(sessionId: sessionId, now: clock))
+        XCTAssertNil(adapter.loadFreshSnapshot(sessionId: sessionId, now: { requestTime }))
+    }
+
     @MainActor
     func testActivityScanPublishesOneBatchAndDoesNotSuppressCausalChanges() throws {
         _ = NSApplication.shared
