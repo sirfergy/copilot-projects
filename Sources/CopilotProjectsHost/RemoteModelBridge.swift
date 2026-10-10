@@ -159,11 +159,14 @@ final class RemoteModelBridge: SessionHost {
     }
 
     /// The transcript revision, folded together with the session's current
-    /// image-availability generation so that capturing, displaying, evicting, or
+    /// image-availability token so that capturing, displaying, evicting, or
     /// restoring an inline image (none of which touch the transcript file) still
     /// changes the revision and prompts clients to re-fetch `/transcript` — where
     /// the per-turn image associations are computed. Without this, conversation
     /// images would only refresh when the CLI happened to rewrite the transcript.
+    /// Clients read the part after the last `#img` as an opaque value: when it
+    /// differs from the one their transcript reflects, images may have changed
+    /// on any turn, so they fetch everything rather than only newer turns.
     func transcriptRevision(sessionId: String) -> RemoteTranscriptRevision {
         let base = TranscriptController.remoteRevision(sessionId: sessionId)
         guard let view = model?.controller(for: sessionId)?.terminalView else {
@@ -171,7 +174,7 @@ final class RemoteModelBridge: SessionHost {
         }
         return RemoteTranscriptRevision(
             sessionId: base.sessionId,
-            generation: "\(base.generation)#img\(view.kittyImageCapture.imageAvailabilityGeneration)"
+            generation: "\(base.generation)#img\(view.kittyImageCapture.imageAvailabilityToken)"
         )
     }
 

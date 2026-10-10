@@ -985,6 +985,13 @@ final class RemoteKittyImageCapture: ObservableObject {
     /// layout. Not used by any production call site.
     var epochForTesting: UInt32 { epoch }
 
+    /// `imageAvailabilityGeneration` qualified by this instance's random
+    /// epoch, for transcript revisions. The generation restarts at 0 with
+    /// every capture (a relaunch or a restarted session view), so a remote
+    /// client comparing values across a gap could otherwise mistake a new
+    /// capture's state for one it already saw.
+    var imageAvailabilityToken: String { "\(epoch)-\(imageAvailabilityGeneration)" }
+
     /// Total count of every placement-lifecycle-activity entry currently
     /// tracked (wildcard-active ids, exact-active placements, and scoped
     /// deletion exceptions combined) — exposed only so tests can assert this
