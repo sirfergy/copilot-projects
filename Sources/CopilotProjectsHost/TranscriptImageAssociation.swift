@@ -18,8 +18,8 @@ import CopilotProjectsProtocol
 /// The snapshot's recoverable dropped turns take part on the same timeline (see
 /// `TranscriptSnapshot.interleaving(dropped:into:)`) and keep their own refs, so
 /// an image displayed during a turn the writer since evicted stays with that
-/// turn — which a cursor response may still serve — rather than moving to
-/// whichever live turn preceded it.
+/// turn — which remote responses still serve — rather than moving to whichever
+/// live turn preceded it.
 enum TranscriptImageAssociation {
     static func attach(
         images: [RemoteKittyImageCapture.RetainedImageInfo],

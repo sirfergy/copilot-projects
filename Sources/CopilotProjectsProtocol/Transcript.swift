@@ -18,11 +18,11 @@ public struct TranscriptSnapshot: Codable, Equatable, Sendable {
     /// encoding omits the key entirely rather than emitting `null`.
     public let totalTurns: Int?
     /// Turns the CLI writer recently evicted to stay under its turn cap, kept
-    /// (bounded) in the transcript file so a client whose cursor is newer than
-    /// an eviction can still receive a turn it never saw. Host-internal: it is
-    /// merged into cursor responses by `remoteWindow` and never sent to a
-    /// client as its own field. Optional with a `nil` default, like
-    /// `totalTurns`, so older snapshots decode and encoding omits the key.
+    /// (bounded) in the transcript file so a client that never saw one of them
+    /// can still receive it. Host-internal: `remoteWindow` weaves it into every
+    /// response's turns and never sends it to a client as its own field.
+    /// Optional with a `nil` default, like `totalTurns`, so older snapshots
+    /// decode and encoding omits the key.
     public let droppedTurns: [TranscriptTurn]?
 
     public init(
@@ -75,38 +75,41 @@ public struct TranscriptSnapshot: Codable, Equatable, Sendable {
     /// moved on with `/new` or `/resume`) is ignored, so the client gets a
     /// complete response for the conversation it now has to show.
     ///
-    /// The cursor selects a positional suffix rather than filtering by
-    /// timestamp, so a turn positioned after the match is returned even if its
-    /// own `startedAt` were earlier. The recoverable dropped turns that started
-    /// at or after the cursor are woven into that suffix by start time (see
-    /// `interleaving(dropped:into:)`), so a turn the writer evicted between two
-    /// of the client's fetches still reaches it; `limit` applies after that
-    /// merge. Whenever a cursor or limit applies, `totalTurns` reports the
-    /// whole live transcript, exactly as `limitedToMostRecentTurns` does; with
-    /// neither, this is the unchanged legacy response. `droppedTurns` itself
-    /// is never part of a response.
+    /// Every response is drawn from one timeline: the live turns with the
+    /// recoverable dropped turns woven in by start time (see
+    /// `interleaving(dropped:into:)`), so a turn the writer evicted before a
+    /// client saw it still reaches that client, whichever kind of fetch it
+    /// makes next. The cursor selects a positional suffix of the live turns
+    /// rather than filtering them by timestamp (a turn positioned after the
+    /// match is returned even if its own `startedAt` were earlier), plus the
+    /// dropped turns that started at or after it; `limit` then keeps the most
+    /// recent turns of the result. Whenever a cursor or limit applies,
+    /// `totalTurns` counts the whole timeline, so a client's withheld count
+    /// (`totalTurns` minus the turns returned) stays consistent; with neither,
+    /// `totalTurns` is left as it was (absent, in the legacy shape).
+    /// `droppedTurns` itself is never part of a response.
     public func remoteWindow(limit: Int?, after cursor: TranscriptCursor?) -> TranscriptSnapshot {
         let applicableCursor = cursor.flatMap {
             $0.copilotSessionId == copilotSessionId ? $0 : nil
         }
+        let recoverable = recoverableDroppedTurns
+        var live = turns[...]
+        var dropped = recoverable
+        if let applicableCursor {
+            let start = applicableCursor.startedAt
+            live = turns.firstIndex { $0.startedAt >= start }
+                .map { turns[$0...] } ?? []
+            dropped = dropped.filter { $0.startedAt >= start }
+        }
+        var selected = Self.interleaving(dropped: dropped, into: live).map(\.turn)
         guard limit != nil || applicableCursor != nil else {
             return TranscriptSnapshot(
                 schemaVersion: schemaVersion,
                 updatedAt: updatedAt,
                 copilotSessionId: copilotSessionId,
-                turns: turns,
+                turns: selected,
                 totalTurns: totalTurns
             )
-        }
-        var selected = turns
-        if let applicableCursor {
-            let start = applicableCursor.startedAt
-            let suffix = turns.firstIndex { $0.startedAt >= start }
-                .map { turns[$0...] } ?? []
-            selected = Self.interleaving(
-                dropped: recoverableDroppedTurns.filter { $0.startedAt >= start },
-                into: suffix
-            ).map(\.turn)
         }
         if let limit {
             selected = Array(selected.suffix(max(0, limit)))
@@ -116,7 +119,7 @@ public struct TranscriptSnapshot: Codable, Equatable, Sendable {
             updatedAt: updatedAt,
             copilotSessionId: copilotSessionId,
             turns: selected,
-            totalTurns: turns.count
+            totalTurns: turns.count + recoverable.count
         )
     }
 

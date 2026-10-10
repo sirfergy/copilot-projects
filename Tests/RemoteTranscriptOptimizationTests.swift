@@ -332,8 +332,9 @@ final class RemoteTranscriptOptimizationTests: XCTestCase {
         )
         // The live copy of a turn wins over a dropped one with the same id.
         XCTAssertEqual(delta.turns.first { $0.id == "turn-4" }, all[4])
-        // The count still describes the live transcript.
-        XCTAssertEqual(delta.totalTurns, 5)
+        // The count describes the whole timeline: five live turns and the four
+        // recoverable dropped ones.
+        XCTAssertEqual(delta.totalTurns, 9)
         XCTAssertNil(delta.droppedTurns)
 
         // The limit applies after the merge.
@@ -352,13 +353,48 @@ final class RemoteTranscriptOptimizationTests: XCTestCase {
             ["turn-6", "turn-7"]
         )
 
-        // A response is never padded with dropped turns without a cursor, and
-        // nothing older than the cursor sneaks in through the buffer.
-        XCTAssertEqual(snapshot.remoteWindow(limit: 2, after: nil).turns.map(\.id), ["turn-6", "turn-7"])
+        // From the oldest live turn, every recoverable dropped turn is due.
         XCTAssertEqual(
             snapshot.remoteWindow(limit: nil, after: try cursor(at: all[0].startedAt)).turns.map(\.id),
             ["turn-0", "turn-1", "turn-2", "turn-3", "tie", "turn-4", "turn-5", "turn-6", "turn-7"]
         )
+    }
+
+    /// Full and window fetches carry the dropped turns too: a client that held
+    /// an in-progress turn the writer then evicted, and whose next fetch has no
+    /// cursor, would otherwise move its cursor past that turn for good.
+    func testFullAndWindowResponsesCarryTheRecoverableDroppedTurns() throws {
+        let snapshot = snapshotWithDroppedTurns()
+        let all = fixtureSnapshot(turnCount: 8).turns
+        let timeline = ["turn-0", "turn-1", "turn-2", "turn-3", "tie", "turn-4", "turn-5", "turn-6", "turn-7"]
+
+        let legacy = snapshot.remoteWindow(limit: nil, after: nil)
+        XCTAssertEqual(legacy.turns.map(\.id), timeline)
+        XCTAssertEqual(legacy.turns.first { $0.id == "turn-4" }, all[4])
+        XCTAssertEqual(legacy.turns.first { $0.id == "turn-5" }, all[5])
+        // Still the legacy shape: no window metadata.
+        XCTAssertNil(legacy.totalTurns)
+        // A cursor for another conversation gets that same full response.
+        XCTAssertEqual(
+            snapshot.remoteWindow(
+                limit: nil,
+                after: try cursor(at: all[3].startedAt, copilotSessionId: "previous")
+            ),
+            legacy
+        )
+
+        // A window is the most recent turns of the timeline, counted against
+        // the whole timeline.
+        for limit in [1, 2, 4, 6, 9, 200] {
+            let window = snapshot.remoteWindow(limit: limit, after: nil)
+            XCTAssertEqual(window.turns.map(\.id), Array(timeline.suffix(limit)), "limit \(limit)")
+            XCTAssertEqual(window.totalTurns, timeline.count, "limit \(limit)")
+        }
+
+        // Without dropped turns, every shape is exactly what it was.
+        let plain = fixtureSnapshot(turnCount: 4)
+        XCTAssertEqual(plain.remoteWindow(limit: nil, after: nil), plain)
+        XCTAssertEqual(plain.remoteWindow(limit: 2, after: nil), plain.limitedToMostRecentTurns(2))
     }
 
     func testDroppedTurnsNeverLeaveTheHost() throws {
@@ -384,18 +420,6 @@ final class RemoteTranscriptOptimizationTests: XCTestCase {
             XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("droppedTurns"), name)
         }
 
-        // Without a cursor or window the response is otherwise the unchanged
-        // legacy shape: the live turns, no window metadata.
-        let legacy = snapshot.remoteWindow(limit: nil, after: nil)
-        XCTAssertEqual(legacy.turns, snapshot.turns)
-        XCTAssertNil(legacy.totalTurns)
-        XCTAssertEqual(
-            legacy,
-            TranscriptSnapshot(
-                schemaVersion: 3, updatedAt: Self.epoch, copilotSessionId: "copilot-session",
-                turns: snapshot.turns
-            )
-        )
     }
 
     func testDroppedTurnsKeepTheImagesDisplayedDuringThem() throws {
@@ -428,12 +452,25 @@ final class RemoteTranscriptOptimizationTests: XCTestCase {
         XCTAssertEqual(refs["turn-4"], [5])
         XCTAssertEqual(refs["turn-5"], [6])
 
-        // A response without the dropped turn doesn't re-anchor its image onto
-        // the live turn before it.
+        // Full and window fetches carry the dropped turn with its image, which
+        // never moves onto the live turn before it.
         let legacy = try decode(try XCTUnwrap(TranscriptResponse.encodedResponse(
             snapshot: snapshot, images: images, limit: nil
         )))
-        XCTAssertEqual(legacy.turns.flatMap { $0.images?.map(\.imageId) ?? [] }, [5])
+        XCTAssertEqual(
+            legacy.turns.map(\.id),
+            ["turn-0", "turn-1", "turn-2", "turn-3", "turn-4", "turn-5", "turn-6", "turn-7"]
+        )
+        XCTAssertNil(legacy.totalTurns)
+        XCTAssertEqual(legacy.turns.first { $0.id == "turn-4" }?.images?.map(\.imageId), [5])
+        XCTAssertEqual(legacy.turns.first { $0.id == "turn-5" }?.images?.map(\.imageId), [6])
+        XCTAssertNil(legacy.turns.first { $0.id == "turn-1" }?.images)
+        let window = try decode(try XCTUnwrap(TranscriptResponse.encodedResponse(
+            snapshot: snapshot, images: images, limit: 3
+        )))
+        XCTAssertEqual(window.turns.map(\.id), ["turn-5", "turn-6", "turn-7"])
+        XCTAssertEqual(window.turns.first?.images?.map(\.imageId), [6])
+        XCTAssertEqual(window.totalTurns, 8)
     }
 
     // MARK: - Reads that race a rewrite
