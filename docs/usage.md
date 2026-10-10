@@ -539,7 +539,21 @@ event API. It atomically writes a bounded per-tab transcript snapshot after each
 stopped turns and compact tool summaries but excluding raw tool arguments and results. Copilot
 Projects renders that snapshot in the drawer without parsing private CLI session files or
 changing the terminal's PTY size. The host API supports full or bounded transcript windows
-for optional integrations; image association always precedes windowing.
+for optional integrations; image association always precedes windowing. A client can also send
+`after=<epoch milliseconds>&copilotSessionId=<id>` (the start of its newest completed turn) to
+receive only the turns from that point on, merging each response into what it has by turn id.
+The extension keeps the turns its 200-turn cap evicted most recently (at most 10 turns and
+256 KB, written as the snapshot's `droppedTurns`), and the host weaves them into every response
+by start time (for a cursor, only those that started at or after it), so a turn added and
+evicted between two fetches still reaches the client whatever it fetches next. A window's
+`limit` and `totalTurns` count those turns too. That buffer is never sent as its own field.
+Turns the 5 MB byte budget drops are not buffered, and the buffer only uses the room the live
+transcript leaves under that budget, keeping its newest turns that fit.
+A response with an empty `copilotSessionId` means the host has no transcript it may show for
+the tab, and clients replace what they have with it. The host rereads (up to three reads in all)
+a transcript that came back empty only because it was being rewritten mid-read; if it is still
+changing after the last read, the request fails with an error status instead, so such a race
+never clears clients.
 
 The app also installs a read-only Copilot extension at
 `~/.copilot/extensions/copilot-projects-tracker/extension.mjs`. It uses Copilot's session event

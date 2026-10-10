@@ -14,19 +14,32 @@ import CopilotProjectsProtocol
 /// Images displayed before the first turn began are dropped (nothing to attach
 /// them to). Only currently-retained images are ever passed in, so an attached
 /// ref's exact `(imageId, version)` is always fetchable — no 404 tombstones.
+///
+/// The snapshot's recoverable dropped turns take part on the same timeline (see
+/// `TranscriptSnapshot.interleaving(dropped:into:)`) and keep their own refs, so
+/// an image displayed during a turn the writer since evicted stays with that
+/// turn — which remote responses still serve — rather than moving to whichever
+/// live turn preceded it.
 enum TranscriptImageAssociation {
     static func attach(
         images: [RemoteKittyImageCapture.RetainedImageInfo],
         to snapshot: TranscriptSnapshot
     ) -> TranscriptSnapshot {
-        if images.isEmpty, snapshot.turns.allSatisfy({ $0.images == nil }) {
+        if images.isEmpty,
+           snapshot.turns.allSatisfy({ $0.images == nil }),
+           (snapshot.droppedTurns ?? []).allSatisfy({ $0.images == nil }) {
             return snapshot
         }
+        let timeline = TranscriptSnapshot.interleaving(
+            dropped: snapshot.recoverableDroppedTurns,
+            into: snapshot.turns
+        )
+        let turns = timeline.map(\.turn)
         // turnIndex -> imageId -> chosen (newest) info for that turn.
         var byTurn: [Int: [UInt32: RemoteKittyImageCapture.RetainedImageInfo]] = [:]
-        if !snapshot.turns.isEmpty {
+        if !turns.isEmpty {
             for image in images {
-                guard let turnIndex = Self.activeTurnIndex(snapshot.turns, at: image.displayedAt)
+                guard let turnIndex = Self.activeTurnIndex(turns, at: image.displayedAt)
                 else { continue }
                 var perImage = byTurn[turnIndex] ?? [:]
                 if let existing = perImage[image.imageId] {
@@ -41,7 +54,10 @@ enum TranscriptImageAssociation {
         // any `images` that were on the decoded snapshot: the CLI writer owns
         // the transcript file but must not be trusted to supply image refs, so
         // the host is the sole authority for this field.
-        let newTurns = snapshot.turns.enumerated().map { index, turn -> TranscriptTurn in
+        var liveTurns: [TranscriptTurn] = []
+        var droppedTurns: [TranscriptTurn] = []
+        for (index, entry) in timeline.enumerated() {
+            let turn = entry.turn
             let refs: [TranscriptImageRef]? = byTurn[index].map { perImage in
                 perImage.values
                     .sorted {
@@ -50,7 +66,7 @@ enum TranscriptImageAssociation {
                     }
                     .map { TranscriptImageRef(imageId: $0.imageId, contentVersion: $0.version) }
             }
-            return TranscriptTurn(
+            let rebuilt = TranscriptTurn(
                 id: turn.id,
                 startedAt: turn.startedAt,
                 endedAt: turn.endedAt,
@@ -61,13 +77,19 @@ enum TranscriptImageAssociation {
                 isAborted: turn.isAborted,
                 images: refs
             )
+            if entry.isDropped {
+                droppedTurns.append(rebuilt)
+            } else {
+                liveTurns.append(rebuilt)
+            }
         }
         return TranscriptSnapshot(
             schemaVersion: snapshot.schemaVersion,
             updatedAt: snapshot.updatedAt,
             copilotSessionId: snapshot.copilotSessionId,
-            turns: newTurns,
-            totalTurns: snapshot.totalTurns
+            turns: liveTurns,
+            totalTurns: snapshot.totalTurns,
+            droppedTurns: droppedTurns.isEmpty ? nil : droppedTurns
         )
     }
 

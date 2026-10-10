@@ -17,19 +17,39 @@ public struct TranscriptSnapshot: Codable, Equatable, Sendable {
     /// default so every existing constructor and decoder keeps working, and so
     /// encoding omits the key entirely rather than emitting `null`.
     public let totalTurns: Int?
+    /// Turns the CLI writer recently evicted to stay under its turn cap, kept
+    /// (bounded) in the transcript file so a client that never saw one of them
+    /// can still receive it. Host-internal: `remoteWindow` weaves it into every
+    /// response's turns and never sends it to a client as its own field.
+    /// Optional with a `nil` default, like `totalTurns`, so older snapshots
+    /// decode and encoding omits the key.
+    public let droppedTurns: [TranscriptTurn]?
 
     public init(
         schemaVersion: Int,
         updatedAt: Date,
         copilotSessionId: String,
         turns: [TranscriptTurn],
-        totalTurns: Int? = nil
+        totalTurns: Int? = nil,
+        droppedTurns: [TranscriptTurn]? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.updatedAt = updatedAt
         self.copilotSessionId = copilotSessionId
         self.turns = turns
         self.totalTurns = totalTurns
+        self.droppedTurns = droppedTurns
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        copilotSessionId = try container.decode(String.self, forKey: .copilotSessionId)
+        turns = try container.decode([TranscriptTurn].self, forKey: .turns)
+        totalTurns = try container.decodeIfPresent(Int.self, forKey: .totalTurns)
+        // A malformed recovery buffer must never cost the transcript itself.
+        droppedTurns = try? container.decodeIfPresent([TranscriptTurn].self, forKey: .droppedTurns)
     }
 
     /// The most recent `limit` turns, tagged with the full turn count so a
@@ -47,6 +67,176 @@ public struct TranscriptSnapshot: Codable, Equatable, Sendable {
             turns: dropped > 0 ? Array(turns.suffix(bounded)) : turns,
             totalTurns: turns.count
         )
+    }
+
+    /// The part of the transcript a remote client asked for: every turn from
+    /// the first one that started at or after `cursor`, then at most the most
+    /// recent `limit` of those. A cursor for a different conversation (the tab
+    /// moved on with `/new` or `/resume`) is ignored, so the client gets a
+    /// complete response for the conversation it now has to show.
+    ///
+    /// Every response is drawn from one timeline: the live turns with the
+    /// recoverable dropped turns woven in by start time (see
+    /// `interleaving(dropped:into:)`), so a turn the writer evicted before a
+    /// client saw it still reaches that client, whichever kind of fetch it
+    /// makes next. The cursor selects a positional suffix of the live turns
+    /// rather than filtering them by timestamp (a turn positioned after the
+    /// match is returned even if its own `startedAt` were earlier), plus the
+    /// dropped turns that started at or after it; `limit` then keeps the most
+    /// recent turns of the result. Whenever a cursor or limit applies,
+    /// `totalTurns` counts the whole timeline, so a client's withheld count
+    /// (`totalTurns` minus the turns returned) stays consistent; with neither,
+    /// `totalTurns` is left as it was (absent, in the legacy shape).
+    /// `droppedTurns` itself is never part of a response.
+    public func remoteWindow(limit: Int?, after cursor: TranscriptCursor?) -> TranscriptSnapshot {
+        let applicableCursor = cursor.flatMap {
+            $0.copilotSessionId == copilotSessionId ? $0 : nil
+        }
+        let recoverable = recoverableDroppedTurns
+        var live = turns[...]
+        var dropped = recoverable
+        if let applicableCursor {
+            let start = applicableCursor.startedAt
+            live = turns.firstIndex { $0.startedAt >= start }
+                .map { turns[$0...] } ?? []
+            dropped = dropped.filter { $0.startedAt >= start }
+        }
+        var selected = Self.interleaving(dropped: dropped, into: live).map(\.turn)
+        guard limit != nil || applicableCursor != nil else {
+            return TranscriptSnapshot(
+                schemaVersion: schemaVersion,
+                updatedAt: updatedAt,
+                copilotSessionId: copilotSessionId,
+                turns: selected,
+                totalTurns: totalTurns
+            )
+        }
+        if let limit {
+            selected = Array(selected.suffix(max(0, limit)))
+        }
+        return TranscriptSnapshot(
+            schemaVersion: schemaVersion,
+            updatedAt: updatedAt,
+            copilotSessionId: copilotSessionId,
+            turns: selected,
+            totalTurns: turns.count + recoverable.count
+        )
+    }
+
+    /// The dropped turns a client could still be missing, in start order: one
+    /// per id (the latest eviction wins) and none that the live transcript
+    /// also carries, because the live copy is authoritative.
+    public var recoverableDroppedTurns: [TranscriptTurn] {
+        guard let droppedTurns, !droppedTurns.isEmpty else { return [] }
+        let liveIds = Set(turns.map(\.id))
+        var seen = Set<String>()
+        let unique = droppedTurns.reversed().filter {
+            !liveIds.contains($0.id) && seen.insert($0.id).inserted
+        }.reversed()
+        return unique.enumerated()
+            .sorted { ($0.element.startedAt, $0.offset) < ($1.element.startedAt, $1.offset) }
+            .map(\.element)
+    }
+
+    /// Weaves `dropped` (already in start order) into `live` without
+    /// reordering `live`: each dropped turn goes just before the first live
+    /// turn that started after it, so it precedes a live turn it ties with.
+    /// Each entry records which list its turn came from.
+    public static func interleaving<Live: Sequence>(
+        dropped: [TranscriptTurn],
+        into live: Live
+    ) -> [(turn: TranscriptTurn, isDropped: Bool)] where Live.Element == TranscriptTurn {
+        var timeline: [(turn: TranscriptTurn, isDropped: Bool)] = []
+        timeline.reserveCapacity(dropped.count + live.underestimatedCount)
+        var next = dropped.startIndex
+        for turn in live {
+            while next < dropped.endIndex, dropped[next].startedAt <= turn.startedAt {
+                timeline.append((dropped[next], true))
+                next += 1
+            }
+            timeline.append((turn, false))
+        }
+        timeline.append(contentsOf: dropped[next...].map { ($0, true) })
+        return timeline
+    }
+}
+
+/// Where a remote client's transcript stands, sent as
+/// `/transcript?after=<epoch milliseconds>&copilotSessionId=<id>` so the host
+/// returns only the turns that started at or after that point instead of the
+/// whole transcript on every revision.
+///
+/// Clients keep the turns they already have and merge each response in by
+/// turn id, so a host or gateway that ignores the cursor (and sends
+/// everything) stays correct: the cursor only saves bandwidth. Clients derive
+/// it from the start of their newest completed turn, rounded down to the
+/// millisecond, so the host's comparison always includes that turn.
+public struct TranscriptCursor: Equatable, Sendable {
+    public static let afterQueryItem = "after"
+    public static let copilotSessionIdQueryItem = "copilotSessionId"
+    /// Matches the CLI writer's bound on transcript metadata text, which
+    /// includes the snapshot's `copilotSessionId`.
+    public static let maximumCopilotSessionIdBytes = 512
+
+    public enum Parsed: Equatable, Sendable {
+        /// Neither query item was sent: a full or windowed request.
+        case absent
+        case cursor(TranscriptCursor)
+        /// Malformed, or only one of the two items was sent.
+        case invalid
+    }
+
+    public let afterMilliseconds: Int64
+    public let copilotSessionId: String
+
+    public init?(afterMilliseconds: Int64, copilotSessionId: String) {
+        guard afterMilliseconds >= 0,
+              !copilotSessionId.isEmpty,
+              copilotSessionId.utf8.count <= Self.maximumCopilotSessionIdBytes else {
+            return nil
+        }
+        self.afterMilliseconds = afterMilliseconds
+        self.copilotSessionId = copilotSessionId
+    }
+
+    /// The cursor for a turn that started at `startedAt`, rounded down so the
+    /// host's `>=` comparison can never skip that turn.
+    public init?(startedAt: Date, copilotSessionId: String) {
+        let milliseconds = (startedAt.timeIntervalSince1970 * 1_000).rounded(.down)
+        guard milliseconds.isFinite,
+              milliseconds >= 0,
+              milliseconds < Double(Int64.max) else {
+            return nil
+        }
+        self.init(afterMilliseconds: Int64(milliseconds), copilotSessionId: copilotSessionId)
+    }
+
+    public var startedAt: Date {
+        Date(timeIntervalSince1970: Double(afterMilliseconds) / 1_000)
+    }
+
+    /// Parses the raw (already percent-decoded) query values. Strict like the
+    /// `limit` window: a malformed cursor is a client bug, not something to
+    /// silently widen into a full response.
+    public static func parse(after: String?, copilotSessionId: String?) -> Parsed {
+        switch (after, copilotSessionId) {
+        case (nil, nil):
+            return .absent
+        case let (after?, copilotSessionId?):
+            guard !after.isEmpty,
+                  after.utf8.count <= 16,
+                  after.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let milliseconds = Int64(after),
+                  let cursor = TranscriptCursor(
+                      afterMilliseconds: milliseconds,
+                      copilotSessionId: copilotSessionId
+                  ) else {
+                return .invalid
+            }
+            return .cursor(cursor)
+        default:
+            return .invalid
+        }
     }
 }
 

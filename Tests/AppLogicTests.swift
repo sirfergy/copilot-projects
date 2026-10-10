@@ -9772,6 +9772,34 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(capture.imageData(imageId: 20, version: 1))
     }
 
+    /// Transcript revisions carry the availability token, which a restarted
+    /// capture (generation back at 0) never repeats even when it drew the
+    /// same content-version epoch, while one capture's token changes exactly
+    /// when its generation does.
+    @MainActor
+    func testRemoteKittyImageAvailabilityTokenIsUniquePerCapture() {
+        let first = remoteKittyTestCapture(epoch: 1)
+        let restarted = remoteKittyTestCapture(epoch: 1)
+        XCTAssertEqual(first.epochForTesting, restarted.epochForTesting)
+        XCTAssertEqual(first.imageAvailabilityGeneration, restarted.imageAvailabilityGeneration)
+        XCTAssertNotEqual(first.imageAvailabilityToken, restarted.imageAvailabilityToken)
+
+        let initialToken = first.imageAvailabilityToken
+        let generationSuffix = "-\(first.imageAvailabilityGeneration)"
+        XCTAssertTrue(initialToken.hasSuffix(generationSuffix))
+        let identity = String(initialToken.dropLast(generationSuffix.count))
+
+        let png = remoteKittyTestPNGBytes(width: 2, height: 2)
+        first.ingest(remoteKittyFrameBytes(
+            control: "a=T,f=100,t=d,U=1,i=20", base64Payload: png.base64EncodedString()
+        )[...])
+        let before = first.imageAvailabilityToken
+        XCTAssertEqual(first.imageAvailabilityToken, before)
+        first.ingest(remoteKittyFrameBytes(control: "a=d,d=i,i=20")[...])
+        XCTAssertNotEqual(first.imageAvailabilityToken, before)
+        XCTAssertEqual(first.imageAvailabilityToken, "\(identity)-\(first.imageAvailabilityGeneration)")
+    }
+
     @MainActor
     func testRemoteKittyImageCaptureRetainsGraceVersionsAfterRetransmit() {
         let capture = remoteKittyTestCapture()

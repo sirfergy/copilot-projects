@@ -638,6 +638,10 @@ final class RemoteKittyImageCapture: ObservableObject {
     // the old instance accidentally resolve against the new one's data.
     private let epoch: UInt32
     private var nextCounter: UInt64 = 1
+    /// Qualifies `imageAvailabilityToken`. A 128-bit value rather than the
+    /// 32-bit `epoch`, so a later capture can't plausibly repeat an earlier
+    /// capture's token and leave a client on stale image associations.
+    private let availabilityIdentity = UUID().uuidString
     private let budget: RemoteKittyImageCaptureBudget
     private let maxAccumulatedBase64Bytes: Int
 
@@ -984,6 +988,13 @@ final class RemoteKittyImageCapture: ObservableObject {
     /// assert distinct/random epochs without duplicating the version-bit
     /// layout. Not used by any production call site.
     var epochForTesting: UInt32 { epoch }
+
+    /// `imageAvailabilityGeneration` qualified by this instance's random
+    /// identity, for transcript revisions. The generation restarts at 0 with
+    /// every capture (a relaunch or a restarted session view), so a remote
+    /// client comparing values across a gap could otherwise mistake a new
+    /// capture's state for one it already saw.
+    var imageAvailabilityToken: String { "\(availabilityIdentity)-\(imageAvailabilityGeneration)" }
 
     /// Total count of every placement-lifecycle-activity entry currently
     /// tracked (wildcard-active ids, exact-active placements, and scoped

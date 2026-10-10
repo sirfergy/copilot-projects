@@ -174,39 +174,93 @@ final class TranscriptController: ObservableObject {
         )
     }
 
-    nonisolated static func loadRemoteSnapshot(sessionId: String) -> TranscriptSnapshot {
+    /// How many times a remote read rereads a transcript that keeps changing
+    /// underneath it before giving up.
+    nonisolated static let maximumRemoteSnapshotReadAttempts = 3
+
+    /// The transcript as remote clients see it, or an empty snapshot (no
+    /// conversation id) when there is none to show; `nil` only when the read
+    /// could not settle. Clients treat the empty response as authoritative and
+    /// clear what they had, so a read that came back empty only because the
+    /// files moved underneath it (the tracker rewrote or rotated the transcript
+    /// mid-read) is retried, up to `maximumRemoteSnapshotReadAttempts` reads in
+    /// all. An empty result whose files did not change is final. When every
+    /// read came back empty and the files changed after the last one too, the
+    /// answer is unknown rather than empty, so this returns `nil` and the
+    /// `/transcript` endpoint fails transiently instead.
+    ///
+    /// `duringRead` runs inside each attempt, after the transcript bytes are
+    /// read and before they are validated, with the 1-based attempt number;
+    /// tests use it to land a rewrite mid-read. It is `nil` in production.
+    nonisolated static func loadRemoteSnapshotIfSettled(
+        sessionId: String,
+        duringRead: ((_ attempt: Int) -> Void)? = nil
+    ) -> TranscriptSnapshot? {
         let path = Paths.transcriptSnapshotPath(sessionId: sessionId)
-        guard let signature = loadSignature(
-            sessionId: sessionId,
-            transcriptPath: path
-        ) else {
-            return emptyRemoteSnapshot()
+        for attempt in 1...maximumRemoteSnapshotReadAttempts {
+            let signature = loadSignature(sessionId: sessionId, transcriptPath: path)
+            let snapshot = readRemoteSnapshot(
+                sessionId: sessionId,
+                path: path,
+                signature: signature,
+                duringRead: duringRead.map { hook in { hook(attempt) } }
+            )
+            if let snapshot, !snapshot.copilotSessionId.isEmpty {
+                return snapshot
+            }
+            guard loadSignature(sessionId: sessionId, transcriptPath: path) != signature else {
+                return snapshot ?? emptyRemoteSnapshot()
+            }
         }
+        return nil
+    }
+
+    /// `loadRemoteSnapshotIfSettled`, with a read that never settled reported
+    /// as the empty snapshot, for local readers (notifications, the session
+    /// finder, search) that have no transient failure to report.
+    nonisolated static func loadRemoteSnapshot(
+        sessionId: String,
+        duringRead: ((_ attempt: Int) -> Void)? = nil
+    ) -> TranscriptSnapshot {
+        loadRemoteSnapshotIfSettled(sessionId: sessionId, duringRead: duringRead)
+            ?? emptyRemoteSnapshot()
+    }
+
+    /// One read of the transcript against the signature sampled just before
+    /// it, or `nil` when there is nothing a remote client may see.
+    nonisolated private static func readRemoteSnapshot(
+        sessionId: String,
+        path: String,
+        signature: LoadSignature?,
+        duringRead: (() -> Void)?
+    ) -> TranscriptSnapshot? {
+        guard let signature else { return nil }
         guard transcriptOwnerAllowsRead(sessionId: sessionId) else {
-            return emptyRemoteSnapshot()
+            return nil
         }
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              data.count <= 6 * 1_024 * 1_024 else {
-            return emptyRemoteSnapshot()
+        let data = try? Data(contentsOf: URL(fileURLWithPath: path))
+        duringRead?()
+        guard let data, data.count <= 6 * 1_024 * 1_024 else {
+            return nil
         }
         let decoder = transcriptDecoder()
         guard let snapshot = try? decoder.decode(TranscriptSnapshot.self, from: data),
               snapshot.schemaVersion == 3 else {
-            return emptyRemoteSnapshot()
+            return nil
         }
         guard transcriptOwnerAllowsSnapshot(
             sessionId: sessionId,
             copilotSessionId: snapshot.copilotSessionId,
             expectedSignature: signature
         ) else {
-            return emptyRemoteSnapshot()
+            return nil
         }
         guard transcriptQuarantineAllowsRead(
             sessionId: sessionId,
             snapshot: snapshot,
             expectedSignature: signature
         ) else {
-            return emptyRemoteSnapshot()
+            return nil
         }
         return snapshot
     }

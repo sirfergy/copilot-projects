@@ -38,7 +38,12 @@ public protocol SessionHost: AnyObject, Sendable {
     func screenRevision(sessionId: String) -> RemoteTerminalRevision?
     func screen(sessionId: String, revision: RemoteTerminalRevision, afterLine: Int?) -> RemoteTerminalScreen?
     func transcriptRevision(sessionId: String) -> RemoteTranscriptRevision
+    /// The encoded `/transcript` response, or `nil` when it can't be served
+    /// right now. A gateway must answer `nil` with an error status, never an
+    /// empty success: clients replace their transcript with an empty one.
     func transcript(sessionId: String, limit: Int?) async -> Data?
+    /// The transcript response for a client that sent a `TranscriptCursor`.
+    func transcript(sessionId: String, limit: Int?, after cursor: TranscriptCursor?) async -> Data?
     func terminalImageData(sessionId: String, imageId: UInt32, version: UInt64) -> Data?
     func isRestoringImages(sessionId: String) -> Bool
     func performControl(_ message: RemoteClientMessage, perform: () -> RemoteControlResult) -> RemoteControlResult
@@ -67,6 +72,12 @@ public protocol SessionHost: AnyObject, Sendable {
 
 public extension SessionHost {
     var supportsPullRequests: Bool { false }
+
+    /// Hosts without incremental support send their usual response. Clients
+    /// merge by turn id, so ignoring the cursor costs only bandwidth.
+    func transcript(sessionId: String, limit: Int?, after cursor: TranscriptCursor?) async -> Data? {
+        await transcript(sessionId: sessionId, limit: limit)
+    }
 
     func pullRequestsOverview(refresh: Bool) async -> RemotePullRequestsOverviewOutcome { .unsupported }
 

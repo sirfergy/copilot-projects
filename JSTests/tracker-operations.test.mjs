@@ -59,11 +59,13 @@ fs.openSync = (path, ...args) => {
   return fd;
 };
 fs.createReadStream = (path, ...args) => {
-  const stream = originalCreateReadStream(path, ...args);
   const runtime = [...runtimes].find((entry) =>
     String(path).startsWith(entry.root)
   );
-  if (runtime && String(path).endsWith("events.jsonl")) {
+  const durable = runtime && String(path).endsWith("events.jsonl");
+  if (durable) runtime.beforeDurableRead?.(String(path));
+  const stream = originalCreateReadStream(path, ...args);
+  if (durable) {
     stream.once("close", () => { runtime.durableReadsFinished += 1; });
   }
   return stream;
@@ -979,6 +981,250 @@ test("blank live deltas preserve whitespace and identity when text arrives", {
   await runtime.session.emit("assistant.message", { messageId: "discarded", content: "" });
   await waitFor(() => !readTurn().assistantMessages.some((message) => message.id === "discarded"),
     "empty final message left a stale partial or blank bubble");
+});
+
+const MAX_RECENTLY_DROPPED_BYTES = 256 * 1024;
+
+function transcriptFile(runtime) {
+  return join(runtime.sessions, `${runtime.appSessionId}.transcript.json`);
+}
+
+function readTranscript(runtime) {
+  try {
+    return JSON.parse(realReadFileSync(transcriptFile(runtime), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// Completed root turns as SDK history: a human message and its idle each.
+function humanHistory(prefix, contents, startMilliseconds = 1_700_000_000_000) {
+  return contents.flatMap((content, index) => {
+    const at = (offset) => new Date(startMilliseconds + index * 1_000 + offset).toISOString();
+    return [
+      { id: `${prefix}-${index}`, type: "user.message", timestamp: at(0),
+        data: { source: null, content } },
+      { id: `${prefix}-idle-${index}`, type: "session.idle", timestamp: at(500),
+        data: { aborted: false } },
+    ];
+  });
+}
+
+function numbered(prefix, count, padding = "") {
+  return Array.from({ length: count }, (_, index) => `${prefix} ${index}${padding}`);
+}
+
+test("count-cap evictions publish the ten most recently dropped turns", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, (session) => {
+    session.history = humanHistory("human", numbered("human", 215));
+  });
+  const snapshot = await waitFor(() => {
+    const value = readTranscript(runtime);
+    return value?.turns.length === 200 && value;
+  }, "replayed transcript missing");
+  assert.equal(snapshot.turns[0].id, "human-15");
+  // Oldest eviction first, bounded to the ten most recent.
+  assert.deepEqual(
+    snapshot.droppedTurns.map((turn) => turn.id),
+    Array.from({ length: 10 }, (_, index) => `human-${index + 5}`)
+  );
+  assert.deepEqual(snapshot.droppedTurns[0], {
+    ...snapshot.droppedTurns[0], userContent: "human 5", kind: "foreground",
+  });
+
+  // A live turn that pushes another one out joins the buffer immediately.
+  await runtime.session.emit("user.message", { content: "live" }, { id: "live" });
+  await runtime.session.emit("session.idle", { aborted: false });
+  const live = await waitFor(() => {
+    const value = readTranscript(runtime);
+    return value?.turns.at(-1)?.id === "live" && value?.turns.at(-1)?.endedAt && value;
+  }, "live turn missing");
+  assert.equal(live.turns.length, 200);
+  assert.deepEqual(
+    live.droppedTurns.map((turn) => turn.id),
+    Array.from({ length: 10 }, (_, index) => `human-${index + 6}`)
+  );
+});
+
+test("the dropped-turn buffer stays within its serialized byte bound", {
+  concurrency: false,
+}, async (t) => {
+  const big = numbered("big", 10, ` ${"x".repeat(40_000)}`);
+  const runtime = await createRuntime(t, (session) => {
+    session.history = [
+      ...humanHistory("big", big),
+      ...humanHistory("small", numbered("small", 200), 1_700_100_000_000),
+    ];
+  });
+  const snapshot = await waitFor(() => {
+    const value = readTranscript(runtime);
+    return value?.turns[0]?.id === "small-0" && value;
+  }, "replayed transcript missing");
+  const sizes = snapshot.droppedTurns.map((turn) => Buffer.byteLength(JSON.stringify(turn)));
+  const total = sizes.reduce((sum, size) => sum + size, 0);
+  assert.ok(total <= MAX_RECENTLY_DROPPED_BYTES, `buffer holds ${total} bytes`);
+  // Every big turn has the same size, so exactly as many as fit survive, and
+  // they are the most recent evictions.
+  const fit = Math.floor(MAX_RECENTLY_DROPPED_BYTES / Math.max(...sizes));
+  assert.ok(fit < 10, "fixture must exceed the byte bound before the count bound");
+  assert.deepEqual(
+    snapshot.droppedTurns.map((turn) => turn.id),
+    Array.from({ length: fit }, (_, index) => `big-${10 - fit + index}`)
+  );
+});
+
+test("superseded resume markers are not buffered as dropped turns", {
+  concurrency: false,
+}, async (t) => {
+  const resumed = await createRuntime(t, (session) => {
+    session.history = [
+      ...humanHistory("human", numbered("human", 3)),
+      { id: "resume-old", type: "session.resume",
+        timestamp: new Date(1_700_000_010_000).toISOString(), data: {} },
+      { id: "resume-latest", type: "session.resume",
+        timestamp: new Date(1_700_000_011_000).toISOString(), data: {} },
+    ];
+  });
+  const withResume = await waitFor(() => {
+    const value = readTranscript(resumed);
+    return value?.turns.some((turn) => turn.id === "session-resume-resume-latest") && value;
+  }, "resume marker missing");
+  assert.deepEqual(
+    withResume.turns.filter((turn) => turn.id.startsWith("session-resume-")).map((turn) => turn.id),
+    ["session-resume-resume-latest"]
+  );
+  assert.equal("droppedTurns" in withResume, false);
+});
+
+test("a stale resume marker the count cap evicts is not buffered", {
+  concurrency: false,
+}, async (t) => {
+  // Human messages after the resume clear its "latest" protection, so the
+  // count cap evicts the marker first among the non-foreground turns.
+  const runtime = await createRuntime(t, (session) => {
+    session.history = [
+      ...humanHistory("before", numbered("before", 5)),
+      { id: "resume-stale", type: "session.resume",
+        timestamp: new Date(1_700_000_010_000).toISOString(), data: {} },
+      ...humanHistory("after", numbered("after", 200), 1_700_000_020_000),
+    ];
+  });
+  const snapshot = await waitFor(() => {
+    const value = readTranscript(runtime);
+    return value?.turns[0]?.id === "after-0" && value;
+  }, "replayed transcript missing");
+  assert.equal(snapshot.turns.some((turn) => turn.id.startsWith("session-resume-")), false);
+  assert.deepEqual(
+    snapshot.droppedTurns.map((turn) => turn.id),
+    ["before-0", "before-1", "before-2", "before-3", "before-4"]
+  );
+});
+
+test("a conversation rotation clears the dropped-turn buffer", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, (session) => {
+    session.history = humanHistory("human", numbered("human", 205));
+  });
+  await waitFor(() => readTranscript(runtime)?.droppedTurns?.length === 5, "dropped turns missing");
+
+  const next = uuid();
+  runtime.session.foregroundSessionId = next;
+  runtime.session.history = humanHistory("next", numbered("next", 2), 1_700_200_000_000);
+  await runtime.session.emit("session.start", { sessionId: next });
+  const rotated = await waitFor(() => {
+    const value = readTranscript(runtime);
+    return value?.copilotSessionId === next && value.turns.length === 2 && value;
+  }, "rotated transcript missing");
+  assert.equal("droppedTurns" in rotated, false);
+});
+
+test("a restarted tracker restores its dropped-turn buffer with the transcript", {
+  concurrency: false,
+}, async (t) => {
+  const turn = (id, offset) => ({
+    id,
+    startedAt: new Date(1_700_000_000_000 + offset).toISOString(),
+    endedAt: new Date(1_700_000_000_500 + offset).toISOString(),
+    kind: "foreground",
+    userContent: id,
+    assistantMessages: [],
+    tools: [],
+    isAborted: false,
+  });
+  const dropped = [turn("evicted-1", 0), turn("evicted-2", 1_000)];
+  const runtime = await createRuntime(t, (session, runtime) => {
+    // No SDK history: the restored snapshot is all the tracker has.
+    session.getEvents = async () => { throw new Error("history unavailable"); };
+    realWriteFileSync(
+      join(runtime.sessions, `${runtime.appSessionId}.transcript.json`),
+      JSON.stringify({
+        schemaVersion: 3,
+        updatedAt: new Date(1_700_000_010_000).toISOString(),
+        copilotSessionId: runtime.copilotSessionId,
+        turns: [turn("kept-1", 5_000), turn("kept-2", 6_000)],
+        droppedTurns: dropped,
+      })
+    );
+  });
+  await waitFor(() => readTranscript(runtime)?.ownerPid === process.pid, "restored transcript not republished");
+  const restored = readTranscript(runtime);
+  assert.deepEqual(restored.turns.map((entry) => entry.id), ["kept-1", "kept-2"]);
+  assert.deepEqual(restored.droppedTurns, dropped);
+});
+
+test("losing durable authority before its baseline keeps the restored dropped-turn buffer", {
+  concurrency: false,
+}, async (t) => {
+  const turn = (id, offset) => ({
+    id,
+    startedAt: new Date(1_700_000_000_000 + offset).toISOString(),
+    endedAt: new Date(1_700_000_000_500 + offset).toISOString(),
+    kind: "foreground",
+    userContent: id,
+    assistantMessages: [],
+    tools: [],
+    isAborted: false,
+  });
+  const dropped = [turn("evicted-1", 0), turn("evicted-2", 1_000)];
+  const runtime = await createRuntime(t, (session, runtime) => {
+    realWriteFileSync(
+      join(runtime.sessions, `${runtime.appSessionId}.transcript.json`),
+      JSON.stringify({
+        schemaVersion: 3,
+        updatedAt: new Date(1_700_000_010_000).toISOString(),
+        copilotSessionId: runtime.copilotSessionId,
+        turns: [turn("kept-1", 5_000), turn("kept-2", 6_000)],
+        droppedTurns: dropped,
+      })
+    );
+    const directory = join(runtime.root, "copilot-home", "session-state", runtime.copilotSessionId);
+    realMkdirSync(directory, { recursive: true });
+    realWriteFileSync(join(directory, "events.jsonl"), `${JSON.stringify({
+      id: uuid(), type: "session.info", timestamp: new Date().toISOString(), data: {},
+    })}\n`);
+    // The durable file vanishes as its first replay opens it: that replay
+    // fails before completing a baseline, and the next one loses authority
+    // and falls back to the restored state.
+    runtime.beforeDurableRead = (path) => realRmSync(path, { force: true });
+  });
+  const savedEnvironment = saveEnvironment(["COPILOT_HOME"]);
+  process.env.COPILOT_HOME = join(runtime.root, "copilot-home");
+  t.after(() => restoreEnvironment(savedEnvironment));
+  // Startup ends by scheduling that next replay on a zero-delay timer, which
+  // fires (and synchronously loses authority) before this longer one.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  await runtime.session.emit("user.message", { content: "live" }, { id: "live" });
+  await runtime.session.emit("session.idle", { aborted: false });
+  const published = await waitFor(() => {
+    const value = readTranscript(runtime);
+    return value?.turns.at(-1)?.id === "live" && value?.turns.at(-1)?.endedAt && value;
+  }, "live turn missing");
+  assert.deepEqual(published.turns.map((entry) => entry.id), ["kept-1", "kept-2", "live"]);
+  assert.deepEqual(published.droppedTurns, dropped);
 });
 
 test("an unknown native send outcome upgrades when its exact late SDK reply arrives", {
