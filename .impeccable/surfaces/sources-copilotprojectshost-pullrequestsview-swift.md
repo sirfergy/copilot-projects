@@ -160,8 +160,8 @@ and do not turn Goal Lanes into an app-wide composition rule.
   refresh stability. `Tests/ResumableSessionsTests.swift` checks retention of
   old links through enrichment and first-load incomplete status, including
   the checking-status empty state, and a failed rematch after reconnecting.
-- Native captures are outside the repository, under session
-  `d550907b-ea83-42c8-81e0-5b459ea0eb06/files/pr-design-evidence/`:
+- Native captures are outside the repository, under the session evidence root
+  `~/.copilot/session-state/<session-id>/files/pr-design-evidence/`:
   `mac-dark.png`, `mac-light.png`, `mac-compact.png`, and `mac-offline.png`.
   `PullRequestsDesignCaptureTests.testCaptureNativeDesignStates` renders the
   actual SwiftUI/AppKit window at 1280x800pt or 880x800pt with `FakeWorkspace`,
@@ -198,7 +198,7 @@ availability during checks without moving PRs or giving it priority over blocker
 `pr-review-readiness-final-review/manifest.json` and its immutable `mac.patch`
 (5 changed files; 155 patch lines; 9,605 bytes). The patch hash and complete
 base-to-head diff match. Paths here are relative to the session evidence root
-`/Users/obvioussean/.copilot/session-state/d550907b-ea83-42c8-81e0-5b459ea0eb06/files/`.
+`~/.copilot/session-state/<session-id>/files/`.
 Inspected `PullRequestsPresentation.reviewReadiness`, `PullRequestChip` rendering,
 spoken status and tooltip, focused tests, and shared `StudioStyle.swift` against
 the incumbent PRODUCT.md, DESIGN.md, and sidecar. The production diff is limited
