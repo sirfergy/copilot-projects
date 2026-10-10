@@ -189,7 +189,7 @@ surface-only boundary; neither is a new system rule or a claim of final approval
 
 This dated addendum records the narrow indicator extension, not a redesign or a
 replacement for the October 8 evidence above. Binding choices were
-`ready_for_review` (no longer a draft, not already approved), `checks_only`, and
+`ready_for_review` (no longer a draft, regardless of approval), `checks_only`, and
 `all_clients` (Mac, iOS, and web/PWA). Operate remains the mode: expose review
 availability during checks without moving PRs or giving it priority over blockers.
 
