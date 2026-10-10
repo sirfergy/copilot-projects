@@ -17,19 +17,39 @@ public struct TranscriptSnapshot: Codable, Equatable, Sendable {
     /// default so every existing constructor and decoder keeps working, and so
     /// encoding omits the key entirely rather than emitting `null`.
     public let totalTurns: Int?
+    /// Turns the CLI writer recently evicted to stay under its turn cap, kept
+    /// (bounded) in the transcript file so a client whose cursor is newer than
+    /// an eviction can still receive a turn it never saw. Host-internal: it is
+    /// merged into cursor responses by `remoteWindow` and never sent to a
+    /// client as its own field. Optional with a `nil` default, like
+    /// `totalTurns`, so older snapshots decode and encoding omits the key.
+    public let droppedTurns: [TranscriptTurn]?
 
     public init(
         schemaVersion: Int,
         updatedAt: Date,
         copilotSessionId: String,
         turns: [TranscriptTurn],
-        totalTurns: Int? = nil
+        totalTurns: Int? = nil,
+        droppedTurns: [TranscriptTurn]? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.updatedAt = updatedAt
         self.copilotSessionId = copilotSessionId
         self.turns = turns
         self.totalTurns = totalTurns
+        self.droppedTurns = droppedTurns
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        copilotSessionId = try container.decode(String.self, forKey: .copilotSessionId)
+        turns = try container.decode([TranscriptTurn].self, forKey: .turns)
+        totalTurns = try container.decodeIfPresent(Int.self, forKey: .totalTurns)
+        // A malformed recovery buffer must never cost the transcript itself.
+        droppedTurns = try? container.decodeIfPresent([TranscriptTurn].self, forKey: .droppedTurns)
     }
 
     /// The most recent `limit` turns, tagged with the full turn count so a
@@ -57,31 +77,84 @@ public struct TranscriptSnapshot: Codable, Equatable, Sendable {
     ///
     /// The cursor selects a positional suffix rather than filtering by
     /// timestamp, so a turn positioned after the match is returned even if its
-    /// own `startedAt` were earlier. Whenever a cursor or limit applies,
-    /// `totalTurns` reports the whole transcript, exactly as
-    /// `limitedToMostRecentTurns` does; with neither, this is the unchanged
-    /// legacy response.
+    /// own `startedAt` were earlier. The recoverable dropped turns that started
+    /// at or after the cursor are woven into that suffix by start time (see
+    /// `interleaving(dropped:into:)`), so a turn the writer evicted between two
+    /// of the client's fetches still reaches it; `limit` applies after that
+    /// merge. Whenever a cursor or limit applies, `totalTurns` reports the
+    /// whole live transcript, exactly as `limitedToMostRecentTurns` does; with
+    /// neither, this is the unchanged legacy response. `droppedTurns` itself
+    /// is never part of a response.
     public func remoteWindow(limit: Int?, after cursor: TranscriptCursor?) -> TranscriptSnapshot {
         let applicableCursor = cursor.flatMap {
             $0.copilotSessionId == copilotSessionId ? $0 : nil
         }
-        guard limit != nil || applicableCursor != nil else { return self }
-        var selected = turns[...]
+        guard limit != nil || applicableCursor != nil else {
+            return TranscriptSnapshot(
+                schemaVersion: schemaVersion,
+                updatedAt: updatedAt,
+                copilotSessionId: copilotSessionId,
+                turns: turns,
+                totalTurns: totalTurns
+            )
+        }
+        var selected = turns
         if let applicableCursor {
             let start = applicableCursor.startedAt
-            selected = turns.firstIndex { $0.startedAt >= start }
+            let suffix = turns.firstIndex { $0.startedAt >= start }
                 .map { turns[$0...] } ?? []
+            selected = Self.interleaving(
+                dropped: recoverableDroppedTurns.filter { $0.startedAt >= start },
+                into: suffix
+            ).map(\.turn)
         }
         if let limit {
-            selected = selected.suffix(max(0, limit))
+            selected = Array(selected.suffix(max(0, limit)))
         }
         return TranscriptSnapshot(
             schemaVersion: schemaVersion,
             updatedAt: updatedAt,
             copilotSessionId: copilotSessionId,
-            turns: Array(selected),
+            turns: selected,
             totalTurns: turns.count
         )
+    }
+
+    /// The dropped turns a client could still be missing, in start order: one
+    /// per id (the latest eviction wins) and none that the live transcript
+    /// also carries, because the live copy is authoritative.
+    public var recoverableDroppedTurns: [TranscriptTurn] {
+        guard let droppedTurns, !droppedTurns.isEmpty else { return [] }
+        let liveIds = Set(turns.map(\.id))
+        var seen = Set<String>()
+        let unique = droppedTurns.reversed().filter {
+            !liveIds.contains($0.id) && seen.insert($0.id).inserted
+        }.reversed()
+        return unique.enumerated()
+            .sorted { ($0.element.startedAt, $0.offset) < ($1.element.startedAt, $1.offset) }
+            .map(\.element)
+    }
+
+    /// Weaves `dropped` (already in start order) into `live` without
+    /// reordering `live`: each dropped turn goes just before the first live
+    /// turn that started after it, so it precedes a live turn it ties with.
+    /// Each entry records which list its turn came from.
+    public static func interleaving<Live: Sequence>(
+        dropped: [TranscriptTurn],
+        into live: Live
+    ) -> [(turn: TranscriptTurn, isDropped: Bool)] where Live.Element == TranscriptTurn {
+        var timeline: [(turn: TranscriptTurn, isDropped: Bool)] = []
+        timeline.reserveCapacity(dropped.count + live.underestimatedCount)
+        var next = dropped.startIndex
+        for turn in live {
+            while next < dropped.endIndex, dropped[next].startedAt <= turn.startedAt {
+                timeline.append((dropped[next], true))
+                next += 1
+            }
+            timeline.append((turn, false))
+        }
+        timeline.append(contentsOf: dropped[next...].map { ($0, true) })
+        return timeline
     }
 }
 

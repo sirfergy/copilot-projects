@@ -542,6 +542,10 @@ changing the terminal's PTY size. The host API supports full or bounded transcri
 for optional integrations; image association always precedes windowing. A client can also send
 `after=<epoch milliseconds>&copilotSessionId=<id>` (the start of its newest completed turn) to
 receive only the turns from that point on, merging each response into what it has by turn id.
+The extension keeps the turns its 200-turn cap evicted most recently (at most 10 turns and
+256 KB, written as the snapshot's `droppedTurns`), and the host weaves the ones that started at
+or after the cursor into the response, so a turn added and evicted between two fetches still
+reaches the client. That buffer is never sent as its own field.
 A response with an empty `copilotSessionId` means the host has no transcript it may show for
 the tab, and clients replace what they have with it; the host rereads (up to three reads in all)
 a transcript that came back empty only because it was being rewritten mid-read, so such a race

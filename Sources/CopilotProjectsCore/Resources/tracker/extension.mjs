@@ -213,6 +213,13 @@ if (validSessionId && socketPath) {
     let closeSessionExitQueued = false;
     let schedules = [];
     const transcriptTurns = [];
+    // The turns the count cap evicted most recently, oldest first, each with
+    // its serialized size. Published as the snapshot's `droppedTurns` so the
+    // host can still serve an evicted turn to a remote client whose
+    // incremental cursor is newer than the eviction (a turn that was added
+    // and evicted between two of its fetches).
+    const recentlyDroppedTurns = [];
+    let recentlyDroppedTurnBytes = 0;
     const transcriptEventIds = new Set();
     const queuedTranscriptEvents = [];
     let pendingTranscriptTurn = null;
@@ -272,6 +279,8 @@ if (validSessionId && socketPath) {
 
     const MAX_TRANSCRIPT_TURNS = 200;
     const MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024;
+    const MAX_RECENTLY_DROPPED_TURNS = 10;
+    const MAX_RECENTLY_DROPPED_BYTES = 256 * 1024;
     const MAX_TRANSCRIPT_TEXT = 50_000;
     const MAX_TRANSCRIPT_METADATA_TEXT = 512;
     const MAX_TRANSCRIPT_ASSISTANT_MESSAGES = 250;
@@ -354,6 +363,9 @@ if (validSessionId && socketPath) {
             transcriptTurns.push(
                 ...snapshot.turns.slice(-MAX_TRANSCRIPT_TURNS)
             );
+            if (Array.isArray(snapshot.droppedTurns)) {
+                rememberDroppedTurns(snapshot.droppedTurns);
+            }
             return true;
         } catch {
             return false;
@@ -706,6 +718,7 @@ if (validSessionId && socketPath) {
     // per-session history is never removed.
     function discardRotatedTranscript() {
         removeFile(transcriptPath);
+        clearRecentlyDroppedTurns();
     }
 
     // Roll our own marker forward onto the newly adopted conversation. The
@@ -2795,8 +2808,36 @@ if (validSessionId && socketPath) {
                 );
             }
             if (index === -1) index = 0;
-            transcriptTurns.splice(index, 1);
+            rememberDroppedTurns(transcriptTurns.splice(index, 1));
         }
+    }
+
+    // Only count-cap evictions are remembered: a superseded resume marker is
+    // not conversation, and the byte budget drops turns precisely because the
+    // snapshot has no room for them. Bounded by count and serialized size,
+    // oldest out first; a turn too large to ever fit is skipped rather than
+    // flushing the smaller turns already kept.
+    function rememberDroppedTurns(turns) {
+        for (const turn of turns) {
+            let bytes;
+            try {
+                bytes = Buffer.byteLength(JSON.stringify(turn) ?? "null");
+            } catch {
+                continue;
+            }
+            if (bytes > MAX_RECENTLY_DROPPED_BYTES) continue;
+            recentlyDroppedTurns.push({ turn, bytes });
+            recentlyDroppedTurnBytes += bytes;
+        }
+        while (recentlyDroppedTurns.length > MAX_RECENTLY_DROPPED_TURNS
+                || recentlyDroppedTurnBytes > MAX_RECENTLY_DROPPED_BYTES) {
+            recentlyDroppedTurnBytes -= recentlyDroppedTurns.shift().bytes;
+        }
+    }
+
+    function clearRecentlyDroppedTurns() {
+        recentlyDroppedTurns.length = 0;
+        recentlyDroppedTurnBytes = 0;
     }
 
     function serializedPendingTurn() {
@@ -2844,7 +2885,7 @@ if (validSessionId && socketPath) {
     // surrogates included — and each removal subtracts that item's bytes
     // plus the separating comma it takes with it, so the running total
     // tracks the final encoding byte for byte.
-    function encodedTranscriptWithinBudget(pending) {
+    function encodedTranscriptWithinBudget(pending, droppedTurns = []) {
         // The envelope, `updatedAt` included, is captured once: all the
         // accounting below is anchored to this exact prefix, and a
         // timestamp that drifted mid-trim would invalidate it.
@@ -2855,9 +2896,14 @@ if (validSessionId && socketPath) {
             ownerPid: process.pid,
             turns: pending ? [...transcriptTurns, pending] : transcriptTurns.slice(),
         };
+        if (droppedTurns.length > 0) snapshot.droppedTurns = droppedTurns;
         let encoded = JSON.stringify(snapshot);
         // Overwhelmingly common case: one encode, exactly as before.
         if (Buffer.byteLength(encoded) <= MAX_TRANSCRIPT_BYTES) return encoded;
+        // Already-evicted turns only help a client catch up, so they are the
+        // first thing a tight budget sheds; the accounting below never sees
+        // them.
+        delete snapshot.droppedTurns;
 
         // `n` array members carry `n - 1` separating commas.
         const separators = (count) => (count > 0 ? count - 1 : 0);
@@ -2979,7 +3025,10 @@ if (validSessionId && socketPath) {
         trimTranscriptTurns(pending ? MAX_TRANSCRIPT_TURNS - 1 : MAX_TRANSCRIPT_TURNS);
         const temporaryPath = `${transcriptPath}.${process.pid}.tmp`;
         try {
-            const encoded = encodedTranscriptWithinBudget(pending);
+            const encoded = encodedTranscriptWithinBudget(
+                pending,
+                recentlyDroppedTurns.map(({ turn }) => turn)
+            );
             writeFileSync(temporaryPath, encoded, { mode: 0o600 });
             renameSync(temporaryPath, transcriptPath);
         } catch (error) {
@@ -3183,9 +3232,11 @@ if (validSessionId && socketPath) {
         transcriptEventIds.clear();
     }
 
-    function resetTranscriptReplayState(turns, model) {
+    function resetTranscriptReplayState(turns, model, droppedTurns = []) {
         transcriptTurns.length = 0;
         transcriptTurns.push(...turns);
+        clearRecentlyDroppedTurns();
+        rememberDroppedTurns(droppedTurns);
         resetPendingTranscriptTurn();
         transcriptAssistantTurnActive = false;
         latestResumeTranscriptTurnId = null;
@@ -3695,6 +3746,7 @@ if (validSessionId && socketPath) {
         const stale = () => generation !== conversationGeneration;
         if (stale()) return;
         const preservedTurns = options.preservedTurns || [];
+        const preservedDroppedTurns = options.preservedDroppedTurns || [];
         // Whatever model is already established survives a history fetch
         // that returns nothing: a brand-new conversation's `getEvents()` is
         // empty and would otherwise blank the model line the rotation event
@@ -3762,7 +3814,11 @@ if (validSessionId && socketPath) {
         clearCloseActivityRetry();
         processCloseSessionRequest();
         if (!durableTranscriptAuthoritative && !historyLoaded) {
-            resetTranscriptReplayState(preservedTurns, preservedModel);
+            resetTranscriptReplayState(
+                preservedTurns,
+                preservedModel,
+                preservedDroppedTurns
+            );
         }
         if (durableStartup) {
             try {
@@ -3777,7 +3833,8 @@ if (validSessionId && socketPath) {
             if (!durableTranscriptAuthoritative && !historyLoaded) {
                 resetTranscriptReplayState(
                     preservedTurns,
-                    preservedModel
+                    preservedModel,
+                    preservedDroppedTurns
                 );
             }
         }
@@ -4614,11 +4671,16 @@ if (validSessionId && socketPath) {
 
     // Keep this Copilot session's last good drawer visible while history
     // is fetched, but clear a snapshot left by a different Copilot session.
-    const preservedTranscriptTurns = restoreMatchingTranscript()
+    const restoredTranscript = restoreMatchingTranscript();
+    const preservedTranscriptTurns = restoredTranscript
         ? [...transcriptTurns]
+        : [];
+    const preservedDroppedTurns = restoredTranscript
+        ? recentlyDroppedTurns.map(({ turn }) => turn)
         : [];
     await bootstrapConversation(conversationGeneration, {
         preservedTurns: preservedTranscriptTurns,
+        preservedDroppedTurns,
         publishEmptyPlaceholder: true,
     });
 

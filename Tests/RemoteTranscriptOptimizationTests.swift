@@ -293,6 +293,149 @@ final class RemoteTranscriptOptimizationTests: XCTestCase {
         XCTAssertNil(TranscriptCursor(startedAt: Date(timeIntervalSince1970: -1), copilotSessionId: "abc"))
     }
 
+    // MARK: - Recently dropped turns
+
+    /// Live turns 0, 2, 4, 6 and 7; the writer evicted 1, 3 and 5 (recorded in
+    /// eviction order, not start order), plus a stale copy of live turn 4 and a
+    /// turn that started at exactly the same moment as turn 4.
+    private func snapshotWithDroppedTurns() -> TranscriptSnapshot {
+        let all = fixtureSnapshot(turnCount: 8).turns
+        let staleCopy = TranscriptTurn(
+            id: "turn-4", startedAt: all[4].startedAt, endedAt: nil, kind: "foreground",
+            userContent: "stale", assistantMessages: [], tools: [], isAborted: false
+        )
+        let tie = TranscriptTurn(
+            id: "tie", startedAt: all[4].startedAt, endedAt: all[4].startedAt, kind: "scheduled",
+            userContent: "", assistantMessages: [], tools: [], isAborted: false
+        )
+        return TranscriptSnapshot(
+            schemaVersion: 3,
+            updatedAt: Self.epoch,
+            copilotSessionId: "copilot-session",
+            turns: [all[0], all[2], all[4], all[6], all[7]],
+            droppedTurns: [all[5], all[1], staleCopy, all[3], tie]
+        )
+    }
+
+    func testCursorResponseRecoversDroppedTurnsAtOrAfterTheCursor() throws {
+        let snapshot = snapshotWithDroppedTurns()
+        let all = fixtureSnapshot(turnCount: 8).turns
+        let fromTurnThree = try cursor(at: all[3].startedAt)
+
+        let delta = snapshot.remoteWindow(limit: nil, after: fromTurnThree)
+        // Dropped turns at or after the cursor are woven in by start time — a
+        // dropped turn ahead of a live one it ties with — and turn 1, older
+        // than the cursor, stays out.
+        XCTAssertEqual(
+            delta.turns.map(\.id),
+            ["turn-3", "tie", "turn-4", "turn-5", "turn-6", "turn-7"]
+        )
+        // The live copy of a turn wins over a dropped one with the same id.
+        XCTAssertEqual(delta.turns.first { $0.id == "turn-4" }, all[4])
+        // The count still describes the live transcript.
+        XCTAssertEqual(delta.totalTurns, 5)
+        XCTAssertNil(delta.droppedTurns)
+
+        // The limit applies after the merge.
+        XCTAssertEqual(
+            snapshot.remoteWindow(limit: 3, after: fromTurnThree).turns.map(\.id),
+            ["turn-5", "turn-6", "turn-7"]
+        )
+        XCTAssertEqual(
+            snapshot.remoteWindow(limit: 0, after: fromTurnThree).turns,
+            []
+        )
+
+        // Past every dropped turn, only live turns remain.
+        XCTAssertEqual(
+            snapshot.remoteWindow(limit: nil, after: try cursor(at: all[6].startedAt)).turns.map(\.id),
+            ["turn-6", "turn-7"]
+        )
+
+        // A response is never padded with dropped turns without a cursor, and
+        // nothing older than the cursor sneaks in through the buffer.
+        XCTAssertEqual(snapshot.remoteWindow(limit: 2, after: nil).turns.map(\.id), ["turn-6", "turn-7"])
+        XCTAssertEqual(
+            snapshot.remoteWindow(limit: nil, after: try cursor(at: all[0].startedAt)).turns.map(\.id),
+            ["turn-0", "turn-1", "turn-2", "turn-3", "tie", "turn-4", "turn-5", "turn-6", "turn-7"]
+        )
+    }
+
+    func testDroppedTurnsNeverLeaveTheHost() throws {
+        let snapshot = snapshotWithDroppedTurns()
+        let all = fixtureSnapshot(turnCount: 8).turns
+        let fromTurnThree = try cursor(at: all[3].startedAt)
+        let otherConversation = try cursor(at: all[3].startedAt, copilotSessionId: "previous")
+        let requests: [(String, Int?, TranscriptCursor?)] = [
+            ("legacy", nil, nil),
+            ("window", 2, nil),
+            ("cursor", nil, fromTurnThree),
+            ("cursor and window", 2, fromTurnThree),
+            ("another conversation", nil, otherConversation),
+        ]
+        for (name, limit, after) in requests {
+            XCTAssertNil(snapshot.remoteWindow(limit: limit, after: after).droppedTurns, name)
+            let data = try XCTUnwrap(TranscriptResponse.encodedResponse(
+                snapshot: snapshot,
+                images: fixtureImages(forTurnIndexes: [5]),
+                limit: limit,
+                after: after
+            ), name)
+            XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("droppedTurns"), name)
+        }
+
+        // Without a cursor or window the response is otherwise the unchanged
+        // legacy shape: the live turns, no window metadata.
+        let legacy = snapshot.remoteWindow(limit: nil, after: nil)
+        XCTAssertEqual(legacy.turns, snapshot.turns)
+        XCTAssertNil(legacy.totalTurns)
+        XCTAssertEqual(
+            legacy,
+            TranscriptSnapshot(
+                schemaVersion: 3, updatedAt: Self.epoch, copilotSessionId: "copilot-session",
+                turns: snapshot.turns
+            )
+        )
+    }
+
+    func testDroppedTurnsKeepTheImagesDisplayedDuringThem() throws {
+        let all = fixtureSnapshot(turnCount: 8).turns
+        let forged = TranscriptTurn(
+            id: "turn-1", startedAt: all[1].startedAt, endedAt: all[1].endedAt, kind: "foreground",
+            userContent: "ask 1", assistantMessages: all[1].assistantMessages, tools: [],
+            isAborted: false, images: [TranscriptImageRef(imageId: 99, contentVersion: 1)]
+        )
+        let snapshot = TranscriptSnapshot(
+            schemaVersion: 3, updatedAt: Self.epoch, copilotSessionId: "copilot-session",
+            turns: [all[0], all[2], all[4], all[6], all[7]],
+            droppedTurns: [all[5], forged, all[3]]
+        )
+        // Images displayed during live turn 4 and dropped turn 5.
+        let images = fixtureImages(forTurnIndexes: [4, 5])
+
+        let attached = TranscriptImageAssociation.attach(images: images, to: snapshot)
+        XCTAssertEqual(attached.turns.map(\.id), snapshot.turns.map(\.id))
+        XCTAssertEqual(attached.droppedTurns?.map(\.id), ["turn-1", "turn-3", "turn-5"])
+        // The writer's own refs are never trusted, on dropped turns either.
+        XCTAssertNil(attached.droppedTurns?.first?.images)
+
+        let delta = try decode(try XCTUnwrap(TranscriptResponse.encodedResponse(
+            snapshot: snapshot, images: images, limit: nil,
+            after: try cursor(at: all[3].startedAt)
+        )))
+        XCTAssertEqual(delta.turns.map(\.id), ["turn-3", "turn-4", "turn-5", "turn-6", "turn-7"])
+        let refs = Dictionary(uniqueKeysWithValues: delta.turns.map { ($0.id, $0.images?.map(\.imageId)) })
+        XCTAssertEqual(refs["turn-4"], [5])
+        XCTAssertEqual(refs["turn-5"], [6])
+
+        // A response without the dropped turn doesn't re-anchor its image onto
+        // the live turn before it.
+        let legacy = try decode(try XCTUnwrap(TranscriptResponse.encodedResponse(
+            snapshot: snapshot, images: images, limit: nil
+        )))
+        XCTAssertEqual(legacy.turns.flatMap { $0.images?.map(\.imageId) ?? [] }, [5])
+    }
+
     // MARK: - Reads that race a rewrite
 
     private func writeTranscript(_ data: Data, sessionId: String) throws {

@@ -55,6 +55,19 @@ final class ExtensionOptimizationTests: XCTestCase {
         XCTAssertLessThan(summary["remainingMessages"] as? Int ?? .max, 250)
     }
 
+    /// The recently-dropped-turn buffer holds only what the count cap evicts,
+    /// within its count and byte bounds, and is the first thing an over-budget
+    /// publish sheds: the byte budget neither feeds it nor drops a live turn to
+    /// make room for it.
+    func testTranscriptDroppedTurnBufferHoldsOnlyCountCapEvictions() throws {
+        try requireNodeForJavaScriptTests()
+        let summary = try runTranscriptHarness(
+            name: "dropped",
+            assertions: Self.droppedTurnAssertions
+        )
+        XCTAssertEqual(summary["buffered"] as? Int, 10)
+    }
+
     // MARK: - Poll heartbeat
 
     /// The host treats the snapshot's `updatedAt` as proof the session is still
@@ -141,6 +154,12 @@ final class ExtensionOptimizationTests: XCTestCase {
             file: file,
             line: line
         )
+        let dropped = try extensionSlice(
+            from: "function trimTranscriptTurns(",
+            to: "function serializedPendingTurn(",
+            file: file,
+            line: line
+        )
         let budget = try extensionSlice(
             from: "function encodedTranscriptWithinBudget(",
             to: "function writeTranscriptSnapshot(",
@@ -149,7 +168,7 @@ final class ExtensionOptimizationTests: XCTestCase {
         )
         return try runNodeHarness(
             name: "transcript-\(name)",
-            source: Self.transcriptPrelude + helpers + budget + assertions,
+            source: Self.transcriptPrelude + helpers + dropped + budget + assertions,
             environment: [:],
             file: file,
             line: line
@@ -334,6 +353,11 @@ extension ExtensionOptimizationTests {
     let copilotSessionId = "11111111-1111-4111-8111-111111111111";
     let latestResumeTranscriptTurnId = null;
     let transcriptTurns = [];
+    const MAX_TRANSCRIPT_TURNS = 200;
+    const MAX_RECENTLY_DROPPED_TURNS = 10;
+    const MAX_RECENTLY_DROPPED_BYTES = 256 * 1024;
+    const recentlyDroppedTurns = [];
+    let recentlyDroppedTurnBytes = 0;
 
     const realStringify = JSON.stringify;
     let stringifyCalls = 0;
@@ -570,6 +594,87 @@ extension ExtensionOptimizationTests {
     );
 
     console.log(realStringify({ fullBytes }));
+
+    """#
+
+    fileprivate static let droppedTurnAssertions = #"""
+
+    const small = (id) => turn(id, "foreground", [message(id + "-m", "reply " + id)]);
+    const ids = (turns) => turns.map((entry) => entry.id).join(",");
+    const buffered = () => ids(recentlyDroppedTurns.map(({ turn }) => turn));
+
+    // ---------------------------------------------------------------- count cap
+    clearRecentlyDroppedTurns();
+    load(Array.from({ length: 14 }, (_, index) => small("t" + index)));
+    trimTranscriptTurns(2);
+    equal(ids(transcriptTurns), "t12,t13", "the count cap keeps the newest turns");
+    equal(
+        buffered(), "t2,t3,t4,t5,t6,t7,t8,t9,t10,t11",
+        "the ten most recent evictions are kept, oldest first"
+    );
+
+    // A turn that could never fit the byte bound is skipped without flushing
+    // the smaller turns already kept.
+    load([
+        turn("oversized", "foreground", [
+            message("o", "z".repeat(MAX_RECENTLY_DROPPED_BYTES)),
+        ]),
+        small("next"),
+    ]);
+    trimTranscriptTurns(1);
+    equal(ids(transcriptTurns), "next", "the oversized turn was evicted");
+    equal(buffered(), "t2,t3,t4,t5,t6,t7,t8,t9,t10,t11", "the oversized turn is not kept");
+    const bufferedCount = recentlyDroppedTurns.length;
+
+    // Turns just over a quarter of the byte bound: only the newest three fit.
+    clearRecentlyDroppedTurns();
+    const quarter = (id) => turn(id, "foreground", [
+        message(id + "-m", "q".repeat(MAX_RECENTLY_DROPPED_BYTES / 4)),
+    ]);
+    load(["q0", "q1", "q2", "q3", "q4"].map(quarter).concat([small("kept")]));
+    trimTranscriptTurns(1);
+    equal(buffered(), "q2,q3,q4", "the byte bound drops the oldest kept turns");
+    equal(
+        recentlyDroppedTurnBytes,
+        recentlyDroppedTurns.reduce((sum, { turn }) => sum + itemBytes(turn), 0),
+        "the byte count is exact"
+    );
+    check(recentlyDroppedTurnBytes <= MAX_RECENTLY_DROPPED_BYTES, "the byte bound holds");
+
+    // -------------------------------------------------------------- byte budget
+    const budgetTurns = [
+        turn("scheduled", "scheduled", [message("s0", "scheduled work")]),
+        small("fg1"),
+        small("fg2"),
+    ];
+    MAX_TRANSCRIPT_BYTES = Number.MAX_SAFE_INTEGER;
+    load(budgetTurns);
+    const fullBytes = Buffer.byteLength(encodedTranscriptWithinBudget(null));
+
+    clearRecentlyDroppedTurns();
+    MAX_TRANSCRIPT_BYTES = fullBytes - 1;
+    load(budgetTurns);
+    encodedTranscriptWithinBudget(null);
+    equal(ids(transcriptTurns), "fg1,fg2", "the budget dropped the scheduled turn");
+    equal(recentlyDroppedTurns.length, 0, "byte-budget drops are never buffered");
+
+    // The buffer rides along while it fits…
+    const gone = [small("gone-1"), small("gone-2")];
+    MAX_TRANSCRIPT_BYTES = Number.MAX_SAFE_INTEGER;
+    load(budgetTurns);
+    const roomy = JSON.parse(encodedTranscriptWithinBudget(null, clone(gone)));
+    equal(ids(roomy.droppedTurns), "gone-1,gone-2", "the buffer is published");
+    equal(ids(roomy.turns), "scheduled,fg1,fg2", "next to every live turn");
+
+    // …and is shed before any live turn when it doesn't.
+    MAX_TRANSCRIPT_BYTES = fullBytes;
+    load(budgetTurns);
+    const tight = encodedTranscriptWithinBudget(null, clone(gone));
+    equal(Buffer.byteLength(tight), fullBytes, "only the buffer was shed");
+    equal("droppedTurns" in JSON.parse(tight), false, "the buffer is omitted");
+    equal(ids(transcriptTurns), "scheduled,fg1,fg2", "no live turn made room for it");
+
+    console.log(realStringify({ buffered: bufferedCount }));
 
     """#
 

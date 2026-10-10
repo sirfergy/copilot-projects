@@ -276,6 +276,52 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertEqual(snapshot.totalTurns, 4)
         XCTAssertEqual(snapshot.turns.count, 1)
         XCTAssertEqual(snapshot.turns[0].images, [])
+        // Snapshots from before the dropped-turn buffer decode without one.
+        XCTAssertNil(snapshot.droppedTurns)
+    }
+
+    func testTranscriptDroppedTurnsAreOptionalAndNeverBreakTheTranscript() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let turn = TranscriptTurn(
+            id: "turn-1", startedAt: Date(timeIntervalSince1970: 1_700_000_000), endedAt: nil,
+            kind: "foreground", userContent: "Example", assistantMessages: [], tools: [],
+            isAborted: false
+        )
+        let plain = TranscriptSnapshot(
+            schemaVersion: 3, updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            copilotSessionId: "conversation", turns: [turn]
+        )
+        XCTAssertNil(plain.droppedTurns)
+        let plainObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(plain)) as? [String: Any]
+        )
+        XCTAssertNil(plainObject["droppedTurns"], "a nil buffer omits the key")
+
+        let buffered = TranscriptSnapshot(
+            schemaVersion: 3, updatedAt: plain.updatedAt, copilotSessionId: "conversation",
+            turns: [], droppedTurns: [turn]
+        )
+        XCTAssertEqual(try decoder.decode(TranscriptSnapshot.self, from: encoder.encode(buffered)), buffered)
+
+        // A malformed buffer costs only the buffer, never the transcript.
+        let malformed = try decoder.decode(TranscriptSnapshot.self, from: Data("""
+        {
+          "schemaVersion": 3,
+          "updatedAt": "2026-08-27T00:00:00Z",
+          "copilotSessionId": "conversation",
+          "turns": [{
+            "id": "turn-1", "startedAt": "2026-08-27T00:00:00Z",
+            "kind": "foreground", "userContent": "Example",
+            "assistantMessages": [], "tools": [], "isAborted": false
+          }],
+          "droppedTurns": [{ "id": 1 }]
+        }
+        """.utf8))
+        XCTAssertEqual(malformed.turns.map(\.id), ["turn-1"])
+        XCTAssertNil(malformed.droppedTurns)
     }
 
     func testLegacyControlOmitsEpochAndNewControlKeepsOperationIdentitySeparate() throws {
