@@ -1096,6 +1096,30 @@ test("superseded resume markers are not buffered as dropped turns", {
   assert.equal("droppedTurns" in withResume, false);
 });
 
+test("a stale resume marker the count cap evicts is not buffered", {
+  concurrency: false,
+}, async (t) => {
+  // Human messages after the resume clear its "latest" protection, so the
+  // count cap evicts the marker first among the non-foreground turns.
+  const runtime = await createRuntime(t, (session) => {
+    session.history = [
+      ...humanHistory("before", numbered("before", 5)),
+      { id: "resume-stale", type: "session.resume",
+        timestamp: new Date(1_700_000_010_000).toISOString(), data: {} },
+      ...humanHistory("after", numbered("after", 200), 1_700_000_020_000),
+    ];
+  });
+  const snapshot = await waitFor(() => {
+    const value = readTranscript(runtime);
+    return value?.turns[0]?.id === "after-0" && value;
+  }, "replayed transcript missing");
+  assert.equal(snapshot.turns.some((turn) => turn.id.startsWith("session-resume-")), false);
+  assert.deepEqual(
+    snapshot.droppedTurns.map((turn) => turn.id),
+    ["before-0", "before-1", "before-2", "before-3", "before-4"]
+  );
+});
+
 test("a conversation rotation clears the dropped-turn buffer", {
   concurrency: false,
 }, async (t) => {

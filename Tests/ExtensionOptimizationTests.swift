@@ -358,6 +358,7 @@ extension ExtensionOptimizationTests {
     const MAX_RECENTLY_DROPPED_BYTES = 256 * 1024;
     const recentlyDroppedTurns = [];
     let recentlyDroppedTurnBytes = 0;
+    const RESUME_TRANSCRIPT_TURN_PREFIX = "session-resume-";
 
     const realStringify = JSON.stringify;
     let stringifyCalls = 0;
@@ -673,6 +674,22 @@ extension ExtensionOptimizationTests {
     equal(Buffer.byteLength(tight), fullBytes, "only the buffer was shed");
     equal("droppedTurns" in JSON.parse(tight), false, "the buffer is omitted");
     equal(ids(transcriptTurns), "scheduled,fg1,fg2", "no live turn made room for it");
+
+    // ----------------------------------------------------------- resume markers
+    // Once a user message clears `latestResumeTranscriptTurnId`, an old resume
+    // marker is ordinary non-foreground content to the count cap — but it is
+    // never buffered, whether evicted or restored from disk.
+    clearRecentlyDroppedTurns();
+    load([
+        turn("session-resume-old", "automated", [message("r", "Session resumed.")]),
+        small("a"),
+        small("b"),
+    ]);
+    trimTranscriptTurns(1);
+    equal(ids(transcriptTurns), "b", "the stale marker and the oldest turn were evicted");
+    equal(buffered(), "a", "an evicted resume marker is never buffered");
+    rememberDroppedTurns([turn("session-resume-restored", "automated", [])]);
+    equal(buffered(), "a", "a restored resume marker is never buffered");
 
     console.log(realStringify({ buffered: bufferedCount }));
 

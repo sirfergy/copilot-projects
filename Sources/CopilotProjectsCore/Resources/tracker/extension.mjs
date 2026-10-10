@@ -281,6 +281,7 @@ if (validSessionId && socketPath) {
     const MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024;
     const MAX_RECENTLY_DROPPED_TURNS = 10;
     const MAX_RECENTLY_DROPPED_BYTES = 256 * 1024;
+    const RESUME_TRANSCRIPT_TURN_PREFIX = "session-resume-";
     const MAX_TRANSCRIPT_TEXT = 50_000;
     const MAX_TRANSCRIPT_METADATA_TEXT = 512;
     const MAX_TRANSCRIPT_ASSISTANT_MESSAGES = 250;
@@ -2814,11 +2815,17 @@ if (validSessionId && socketPath) {
 
     // Only count-cap evictions are remembered: a superseded resume marker is
     // not conversation, and the byte budget drops turns precisely because the
-    // snapshot has no room for them. Bounded by count and serialized size,
+    // snapshot has no room for them. A resume marker the count cap evicts
+    // (any but the latest can be) is skipped too, so a stale one is never
+    // served beside the current one. Bounded by count and serialized size,
     // oldest out first; a turn too large to ever fit is skipped rather than
     // flushing the smaller turns already kept.
     function rememberDroppedTurns(turns) {
         for (const turn of turns) {
+            if (typeof turn?.id === "string"
+                    && turn.id.startsWith(RESUME_TRANSCRIPT_TURN_PREFIX)) {
+                continue;
+            }
             let bytes;
             try {
                 bytes = Buffer.byteLength(JSON.stringify(turn) ?? "null");
@@ -3128,7 +3135,7 @@ if (validSessionId && socketPath) {
     }
 
     function appendLatestResumeTurn(event) {
-        const prefix = "session-resume-";
+        const prefix = RESUME_TRANSCRIPT_TURN_PREFIX;
         for (let index = transcriptTurns.length - 1; index >= 0; index -= 1) {
             if (transcriptTurns[index].id.startsWith(prefix)) {
                 transcriptTurns.splice(index, 1);
