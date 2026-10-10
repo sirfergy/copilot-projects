@@ -59,11 +59,13 @@ fs.openSync = (path, ...args) => {
   return fd;
 };
 fs.createReadStream = (path, ...args) => {
-  const stream = originalCreateReadStream(path, ...args);
   const runtime = [...runtimes].find((entry) =>
     String(path).startsWith(entry.root)
   );
-  if (runtime && String(path).endsWith("events.jsonl")) {
+  const durable = runtime && String(path).endsWith("events.jsonl");
+  if (durable) runtime.beforeDurableRead?.(String(path));
+  const stream = originalCreateReadStream(path, ...args);
+  if (durable) {
     stream.once("close", () => { runtime.durableReadsFinished += 1; });
   }
   return stream;
@@ -1171,6 +1173,58 @@ test("a restarted tracker restores its dropped-turn buffer with the transcript",
   const restored = readTranscript(runtime);
   assert.deepEqual(restored.turns.map((entry) => entry.id), ["kept-1", "kept-2"]);
   assert.deepEqual(restored.droppedTurns, dropped);
+});
+
+test("losing durable authority before its baseline keeps the restored dropped-turn buffer", {
+  concurrency: false,
+}, async (t) => {
+  const turn = (id, offset) => ({
+    id,
+    startedAt: new Date(1_700_000_000_000 + offset).toISOString(),
+    endedAt: new Date(1_700_000_000_500 + offset).toISOString(),
+    kind: "foreground",
+    userContent: id,
+    assistantMessages: [],
+    tools: [],
+    isAborted: false,
+  });
+  const dropped = [turn("evicted-1", 0), turn("evicted-2", 1_000)];
+  const runtime = await createRuntime(t, (session, runtime) => {
+    realWriteFileSync(
+      join(runtime.sessions, `${runtime.appSessionId}.transcript.json`),
+      JSON.stringify({
+        schemaVersion: 3,
+        updatedAt: new Date(1_700_000_010_000).toISOString(),
+        copilotSessionId: runtime.copilotSessionId,
+        turns: [turn("kept-1", 5_000), turn("kept-2", 6_000)],
+        droppedTurns: dropped,
+      })
+    );
+    const directory = join(runtime.root, "copilot-home", "session-state", runtime.copilotSessionId);
+    realMkdirSync(directory, { recursive: true });
+    realWriteFileSync(join(directory, "events.jsonl"), `${JSON.stringify({
+      id: uuid(), type: "session.info", timestamp: new Date().toISOString(), data: {},
+    })}\n`);
+    // The durable file vanishes as its first replay opens it: that replay
+    // fails before completing a baseline, and the next one loses authority
+    // and falls back to the restored state.
+    runtime.beforeDurableRead = (path) => realRmSync(path, { force: true });
+  });
+  const savedEnvironment = saveEnvironment(["COPILOT_HOME"]);
+  process.env.COPILOT_HOME = join(runtime.root, "copilot-home");
+  t.after(() => restoreEnvironment(savedEnvironment));
+  // Startup ends by scheduling that next replay on a zero-delay timer, which
+  // fires (and synchronously loses authority) before this longer one.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  await runtime.session.emit("user.message", { content: "live" }, { id: "live" });
+  await runtime.session.emit("session.idle", { aborted: false });
+  const published = await waitFor(() => {
+    const value = readTranscript(runtime);
+    return value?.turns.at(-1)?.id === "live" && value?.turns.at(-1)?.endedAt && value;
+  }, "live turn missing");
+  assert.deepEqual(published.turns.map((entry) => entry.id), ["kept-1", "kept-2", "live"]);
+  assert.deepEqual(published.droppedTurns, dropped);
 });
 
 test("an unknown native send outcome upgrades when its exact late SDK reply arrives", {

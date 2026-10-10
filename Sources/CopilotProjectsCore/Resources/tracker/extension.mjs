@@ -241,6 +241,7 @@ if (validSessionId && socketPath) {
     let durableDroppingOversizedLine = false;
     let durableBaselineComplete = false;
     let durableFallbackTurns = [];
+    let durableFallbackDroppedTurns = [];
     let durableFallbackModel = null;
     let durableAskUser = null;
     let durableAskUserScan = null;
@@ -3561,6 +3562,8 @@ if (validSessionId && socketPath) {
         transcriptPublishTimer = null;
         if (durableHistoryIdentity === null || durableBaselineComplete) {
             durableFallbackTurns = [...transcriptTurns];
+            durableFallbackDroppedTurns =
+                recentlyDroppedTurns.map(({ turn }) => turn);
             durableFallbackModel = currentModel;
         }
         durableHistoryIdentity = identity;
@@ -3580,7 +3583,8 @@ if (validSessionId && socketPath) {
         if (!durableBaselineComplete) {
             resetTranscriptReplayState(
                 durableFallbackTurns,
-                durableFallbackModel
+                durableFallbackModel,
+                durableFallbackDroppedTurns
             );
         }
         durableTranscriptAuthoritative = false;
@@ -3716,6 +3720,8 @@ if (validSessionId && socketPath) {
             durableAskUser = durableAskUserScan;
             if (completedBaseline) {
                 durableFallbackTurns = [...transcriptTurns];
+                durableFallbackDroppedTurns =
+                    recentlyDroppedTurns.map(({ turn }) => turn);
                 durableFallbackModel = currentModel;
             }
             if (changed || completedBaseline || questionChanged) {
@@ -3980,6 +3986,7 @@ if (validSessionId && socketPath) {
         durableBaselineComplete = false;
         durableFailureStreak = 0;
         durableFallbackTurns = [];
+        durableFallbackDroppedTurns = [];
         durableFallbackModel = null;
         durableAskUser = null;
         durableAskUserScan = null;
