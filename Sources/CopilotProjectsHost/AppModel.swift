@@ -4123,6 +4123,15 @@ final class AppModel: ObservableObject {
     }
 
     func refreshAgentActivitySnapshots(now: Date = Date()) {
+        // `now` is when the scan started, but trackers keep publishing while it
+        // runs. Each snapshot is judged as of when its file was read, so one
+        // written mid-scan isn't future-dated, dropped, and its session's
+        // activity blanked until the next scan.
+        let scanStarted = ContinuousClock.now
+        func readTime() -> Date {
+            let (seconds, attoseconds) = scanStarted.duration(to: .now).components
+            return now.addingTimeInterval(Double(seconds) + Double(attoseconds) / 1e18)
+        }
         agentActivityScanObserver?()
         let decoder = JSONDecoder()
         let fm = FileManager.default
@@ -4139,8 +4148,9 @@ final class AppModel: ObservableObject {
                 let snapshot = loadAgentActivitySnapshot(
                     sessionId: sessionId, path: path, decoder: decoder, fm: fm
                 )
-                let fresh = snapshot?.isFresh(at: now) == true ? snapshot : nil
-                if let workflow = fresh?.workflow, workflow.isFresh(at: now),
+                let readAt = readTime()
+                let fresh = snapshot?.isFresh(at: readAt) == true ? snapshot : nil
+                if let workflow = fresh?.workflow, workflow.isFresh(at: readAt),
                    let request = workflow.budgetRequest,
                    let epoch = fresh?.conversationEpoch {
                     let key = "\(epoch):\(request.requestId)"
@@ -4199,7 +4209,7 @@ final class AppModel: ObservableObject {
             .filter { seenSessionIds.contains($0.key) }
         runtimeTrackedOwners = runtimeTrackedOwners.filter { seenSessionIds.contains($0.key) }
         budgetNotificationKeys = budgetNotificationKeys.filter { seenSessionIds.contains($0.key) }
-        reconcileRuntimeActivity(now: now)
+        reconcileRuntimeActivity(now: readTime())
         for target in budgetNotifications {
             postNotification(
                 projectId: target.projectId, sessionId: target.sessionId, kind: .permission,
