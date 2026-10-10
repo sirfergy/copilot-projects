@@ -2942,6 +2942,14 @@ if (validSessionId && socketPath) {
                 if (Buffer.byteLength(encoded) <= MAX_TRANSCRIPT_BYTES) return encoded;
             }
             delete snapshot.droppedTurns;
+            // No buffered turn fits beside a live transcript that does — the
+            // usual state after a byte-budget trim, which leaves less room
+            // than one turn — so the live transcript is the whole document:
+            // one more encode, no measuring pass.
+            if (kept === 0 && room >= 0) {
+                encoded = JSON.stringify(snapshot);
+                if (Buffer.byteLength(encoded) <= MAX_TRANSCRIPT_BYTES) return encoded;
+            }
         }
 
         // `n` array members carry `n - 1` separating commas.

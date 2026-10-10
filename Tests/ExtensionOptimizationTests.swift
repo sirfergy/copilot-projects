@@ -699,6 +699,24 @@ extension ExtensionOptimizationTests {
     equal("droppedTurns" in JSON.parse(tight), false, "the buffer is omitted");
     equal(ids(transcriptTurns), "scheduled,fg1,fg2", "no live turn made room for it");
 
+    // The usual state after a byte-budget trim: the live transcript fits with
+    // less room left than the newest buffered turn needs. That publish is the
+    // live-only document at the cost of one more whole-document encode — no
+    // measuring pass.
+    const withoutUpdatedAt = (encoded) => realStringify({ ...JSON.parse(encoded), updatedAt: null });
+    MAX_TRANSCRIPT_BYTES = Number.MAX_SAFE_INTEGER;
+    load(budgetTurns);
+    const liveOnly = encodedTranscriptWithinBudget(null);
+    MAX_TRANSCRIPT_BYTES = fullBytes + section(gone.slice(2)) - 1;
+    load(budgetTurns);
+    resetCounters(fullBytes);
+    const noneFit = encodedTranscriptWithinBudget(null, entries(clone(gone)));
+    equal(largeEncodes, 2, "the probe and the live-only encode, nothing more");
+    equal(stringifyCalls, 2, "no per-turn measuring either");
+    equal(withoutUpdatedAt(noneFit), withoutUpdatedAt(liveOnly), "the live-only encoding");
+    equal(Buffer.byteLength(noneFit), fullBytes, "exactly the live transcript's size");
+    equal(ids(transcriptTurns), "scheduled,fg1,fg2", "nothing was trimmed");
+
     // A re-encode that misses the budget (sizes that no longer match their
     // turns: the oldest overstated, so the room looks bigger, and the newest
     // understated, so they look like they fit it) falls back to no buffer
