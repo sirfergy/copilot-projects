@@ -1908,9 +1908,60 @@ private struct SelectableMarkdownText: UIViewRepresentable {
 
 #elseif canImport(AppKit)
 
+private final class MarkdownLayoutManager: NSLayoutManager {
+    override func fillBackgroundRectArray(
+        _ rectArray: UnsafePointer<NSRect>,
+        count rectCount: Int,
+        forCharacterRange charRange: NSRange,
+        color: NSColor
+    ) {
+        let isUnemphasizedSelection = color == .unemphasizedSelectedContentBackgroundColor
+            || color == .unemphasizedSelectedTextBackgroundColor
+        let windowIsKey = firstTextView?.window?.isKeyWindow ?? true
+        if isUnemphasizedSelection, windowIsKey {
+            let activeColor = NSColor.selectedTextBackgroundColor
+            activeColor.set()
+            super.fillBackgroundRectArray(
+                rectArray,
+                count: rectCount,
+                forCharacterRange: charRange,
+                color: activeColor
+            )
+        } else {
+            super.fillBackgroundRectArray(
+                rectArray,
+                count: rectCount,
+                forCharacterRange: charRange,
+                color: color
+            )
+        }
+    }
+}
+
 /// A read-only `NSTextView` that provides standard macOS text selection controls
-/// across contiguous Markdown blocks without scrolling independently.
+/// across contiguous Markdown blocks and peer transcript text views without scrolling independently.
 public final class MarkdownSelectableTextView: NSTextView {
+    private struct SelectionPosition: Comparable {
+        let viewIndex: Int
+        let charIndex: Int
+
+        static func < (lhs: Self, rhs: Self) -> Bool {
+            if lhs.viewIndex != rhs.viewIndex {
+                return lhs.viewIndex < rhs.viewIndex
+            }
+            return lhs.charIndex < rhs.charIndex
+        }
+    }
+
+    private struct SelectionAnchor {
+        weak var scopeRoot: NSView?
+        weak var view: MarkdownSelectableTextView?
+        let range: NSRange
+    }
+
+    @MainActor private static var isPreservingCrossViewSelection = false
+    @MainActor private static var lastSelectionAnchor: SelectionAnchor?
+
     public var wrapsText = true
     fileprivate var renderKey: MarkdownText.RenderKey?
     public var preferredMaxLayoutWidth: CGFloat = 0 {
@@ -1921,12 +1972,196 @@ public final class MarkdownSelectableTextView: NSTextView {
         }
     }
 
+    public override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
+        super.init(frame: frameRect, textContainer: container)
+        installMarkdownLayoutManagerIfNeeded()
+    }
+
+    public override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        installMarkdownLayoutManagerIfNeeded()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func installMarkdownLayoutManagerIfNeeded() {
+        if !(layoutManager is MarkdownLayoutManager) {
+            textContainer?.replaceLayoutManager(MarkdownLayoutManager())
+        }
+    }
+
     public var attributedText: NSAttributedString {
         get { textStorage ?? NSAttributedString() }
         set {
             textStorage?.setAttributedString(newValue)
             needsDisplay = true
             invalidateIntrinsicContentSize()
+        }
+    }
+
+    fileprivate var hasActiveSelection: Bool {
+        selectedRanges.contains(where: { $0.rangeValue.length > 0 })
+    }
+
+    fileprivate var selectionScopeRoot: NSView {
+        let skippedHorizontalScrollView = wrapsText ? nil : enclosingScrollView
+        var current: NSView? = self
+        var outermostScrollView: NSScrollView?
+        var topView: NSView = self
+        while let view = current {
+            if let scrollView = view as? NSScrollView, scrollView !== skippedHorizontalScrollView {
+                outermostScrollView = scrollView
+            }
+            topView = view
+            current = view.superview
+        }
+        return outermostScrollView?.documentView ?? outermostScrollView ?? window?.contentView ?? topView
+    }
+
+    public static func peerSelectableTextViews(in root: NSView) -> [MarkdownSelectableTextView] {
+        var collected: [MarkdownSelectableTextView] = []
+        func walk(_ view: NSView) {
+            guard !view.isHidden else { return }
+            if let selectable = view as? MarkdownSelectableTextView {
+                if selectable.attributedText.length > 0 {
+                    collected.append(selectable)
+                }
+                return
+            }
+            for subview in view.subviews {
+                walk(subview)
+            }
+        }
+        walk(root)
+        return collected.sorted { lhs, rhs in
+            let lhsRect = topDownRect(root.convert(lhs.bounds, from: lhs), in: root)
+            let rhsRect = topDownRect(root.convert(rhs.bounds, from: rhs), in: root)
+            if abs(lhsRect.minY - rhsRect.minY) > 0.5 {
+                return lhsRect.minY < rhsRect.minY
+            }
+            return lhsRect.minX < rhsRect.minX
+        }
+    }
+
+    private static func topDownRect(_ rectInRoot: NSRect, in root: NSView) -> NSRect {
+        guard !root.isFlipped else { return rectInRoot }
+        return NSRect(
+            x: rectInRoot.minX,
+            y: -rectInRoot.maxY,
+            width: rectInRoot.width,
+            height: rectInRoot.height
+        )
+    }
+
+    private static func topDownPoint(_ pointInRoot: NSPoint, in root: NSView) -> NSPoint {
+        guard !root.isFlipped else { return pointInRoot }
+        return NSPoint(x: pointInRoot.x, y: -pointInRoot.y)
+    }
+
+    private static func selectionPosition(
+        at pointInRoot: NSPoint,
+        in views: [MarkdownSelectableTextView],
+        scopeRoot: NSView
+    ) -> SelectionPosition {
+        guard !views.isEmpty else {
+            return SelectionPosition(viewIndex: 0, charIndex: 0)
+        }
+        let cursorY = topDownPoint(pointInRoot, in: scopeRoot).y
+        for (index, view) in views.enumerated() {
+            let rect = topDownRect(scopeRoot.convert(view.bounds, from: view), in: scopeRoot)
+            if cursorY <= rect.maxY {
+                if cursorY < rect.minY {
+                    return SelectionPosition(viewIndex: index, charIndex: 0)
+                }
+                if let textContainer = view.textContainer {
+                    view.layoutManager?.ensureLayout(for: textContainer)
+                }
+                let localPoint = view.convert(pointInRoot, from: scopeRoot)
+                let charIndex = min(
+                    max(0, view.characterIndexForInsertion(at: localPoint)),
+                    view.attributedText.length
+                )
+                return SelectionPosition(viewIndex: index, charIndex: charIndex)
+            }
+        }
+        let lastIndex = views.count - 1
+        return SelectionPosition(
+            viewIndex: lastIndex,
+            charIndex: views[lastIndex].attributedText.length
+        )
+    }
+
+    private func resolvedAnchorRange(
+        at charIndex: Int,
+        granularity: NSSelectionGranularity
+    ) -> NSRange {
+        let clamped = min(max(0, charIndex), attributedText.length)
+        let proposed = NSRange(location: clamped, length: 0)
+        guard granularity != .selectByCharacter else { return proposed }
+        return selectionRange(forProposedRange: proposed, granularity: granularity)
+    }
+
+    private static func updateCrossViewSelection(
+        anchor: SelectionAnchor,
+        pointInRoot: NSPoint,
+        granularity: NSSelectionGranularity,
+        in scopeRoot: NSView
+    ) {
+        let views = peerSelectableTextViews(in: scopeRoot)
+        guard let anchorView = anchor.view,
+              let anchorViewIndex = views.firstIndex(where: { $0 === anchorView }) else {
+            return
+        }
+        let targetPos = selectionPosition(at: pointInRoot, in: views, scopeRoot: scopeRoot)
+        let targetView = views[targetPos.viewIndex]
+        let targetRange = targetView.resolvedAnchorRange(
+            at: targetPos.charIndex,
+            granularity: granularity
+        )
+
+        let anchorLength = anchorView.attributedText.length
+        let safeAnchorStart = min(max(0, anchor.range.location), anchorLength)
+        let safeAnchorEnd = min(max(safeAnchorStart, NSMaxRange(anchor.range)), anchorLength)
+        let anchorStart = SelectionPosition(viewIndex: anchorViewIndex, charIndex: safeAnchorStart)
+        let anchorEnd = SelectionPosition(viewIndex: anchorViewIndex, charIndex: safeAnchorEnd)
+        let targetStart = SelectionPosition(viewIndex: targetPos.viewIndex, charIndex: targetRange.location)
+        let targetEnd = SelectionPosition(viewIndex: targetPos.viewIndex, charIndex: NSMaxRange(targetRange))
+
+        let lower: SelectionPosition
+        let upper: SelectionPosition
+        if targetStart < anchorStart {
+            lower = targetStart
+            upper = anchorEnd
+        } else {
+            lower = anchorStart
+            upper = targetEnd
+        }
+
+        for (index, view) in views.enumerated() {
+            let length = view.attributedText.length
+            let range: NSRange
+            if index < lower.viewIndex || index > upper.viewIndex {
+                range = NSRange(location: 0, length: 0)
+            } else if lower.viewIndex == upper.viewIndex {
+                let start = min(max(0, lower.charIndex), length)
+                let end = min(max(start, upper.charIndex), length)
+                range = NSRange(location: start, length: end - start)
+            } else if index == lower.viewIndex {
+                let start = min(max(0, lower.charIndex), length)
+                range = NSRange(location: start, length: length - start)
+            } else if index == upper.viewIndex {
+                let end = min(max(0, upper.charIndex), length)
+                range = NSRange(location: 0, length: end)
+            } else {
+                range = NSRange(location: 0, length: length)
+            }
+            if view.selectedRange() != range {
+                view.setSelectedRange(range)
+                view.needsDisplay = true
+            }
         }
     }
 
@@ -1946,6 +2181,21 @@ public final class MarkdownSelectableTextView: NSTextView {
             return MarkdownText.copiedText(from: attributedText, in: selectedRange())
         }
         return ranges.map { MarkdownText.copiedText(from: attributedText, in: $0) }.joined(separator: "\n")
+    }
+
+    public func selectedTranscriptCopiedText() -> String {
+        let peers = Self.peerSelectableTextViews(in: selectionScopeRoot)
+        let selectedPeers = peers.filter(\.hasActiveSelection)
+        guard !selectedPeers.isEmpty else {
+            return selectedCopiedText()
+        }
+        if selectedPeers.count == 1, let only = selectedPeers.first {
+            return only.selectedCopiedText()
+        }
+        return selectedPeers
+            .map { $0.selectedCopiedText() }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
     }
 
     public func headerDividerY() -> CGFloat? {
@@ -1973,7 +2223,22 @@ public final class MarkdownSelectableTextView: NSTextView {
         return bodyRect.minY - 6
     }
 
+    public override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(copy(_:)) {
+            return Self.peerSelectableTextViews(in: selectionScopeRoot).contains(where: \.hasActiveSelection)
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
     public override func copy(_ sender: Any?) {
+        let peers = Self.peerSelectableTextViews(in: selectionScopeRoot)
+        let selectedPeers = peers.filter(\.hasActiveSelection)
+        if selectedPeers.count > 1 || (selectedPeers.count == 1 && selectedPeers.first !== self) {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(selectedTranscriptCopiedText(), forType: .string)
+            return
+        }
         let ranges = selectedRanges.map(\.rangeValue).filter { $0.length > 0 }
         if ranges.contains(where: { MarkdownText.tableCopiedText(from: attributedText, in: $0) != nil }) {
             let pasteboard = NSPasteboard.general
@@ -1982,6 +2247,244 @@ public final class MarkdownSelectableTextView: NSTextView {
         } else {
             super.copy(sender)
         }
+    }
+
+    private func clearPeerSelectionsExcludingSelf() {
+        for peer in Self.peerSelectableTextViews(in: selectionScopeRoot) where peer !== self && peer.hasActiveSelection {
+            peer.setSelectedRange(NSRange(location: 0, length: 0))
+            peer.needsDisplay = true
+        }
+    }
+
+    private func clearSelectionInScope() {
+        clearPeerSelectionsExcludingSelf()
+        if hasActiveSelection {
+            setSelectedRange(NSRange(location: 0, length: 0))
+            needsDisplay = true
+        }
+    }
+
+    public override func selectAll(_ sender: Any?) {
+        clearPeerSelectionsExcludingSelf()
+        super.selectAll(sender)
+        Self.lastSelectionAnchor = SelectionAnchor(
+            scopeRoot: selectionScopeRoot,
+            view: self,
+            range: selectedRange()
+        )
+    }
+
+    public override func doCommand(by selector: Selector) {
+        let beforeRanges = selectedRanges
+        let name = NSStringFromSelector(selector)
+        let isSelectionCommand = name.hasPrefix("move")
+            || name.hasPrefix("select")
+            || name.hasPrefix("cancel")
+        super.doCommand(by: selector)
+        if isSelectionCommand || selectedRanges != beforeRanges {
+            clearPeerSelectionsExcludingSelf()
+            Self.lastSelectionAnchor = SelectionAnchor(
+                scopeRoot: selectionScopeRoot,
+                view: self,
+                range: selectedRange()
+            )
+        }
+    }
+
+    private func autoscrollEnclosingScrollViews(with event: NSEvent) {
+        var current: NSView? = superview
+        while let view = current {
+            if let clipView = view as? NSClipView {
+                clipView.autoscroll(with: event)
+            }
+            current = view.superview
+        }
+    }
+
+    private func linkTarget(at localPoint: NSPoint) -> (url: Any, charIndex: Int)? {
+        guard let textStorage,
+              let layoutManager,
+              let textContainer,
+              textStorage.length > 0 else {
+            return nil
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        let containerPoint = NSPoint(
+            x: localPoint.x - textContainerOrigin.x,
+            y: localPoint.y - textContainerOrigin.y
+        )
+        let glyphIndex = layoutManager.glyphIndex(for: containerPoint, in: textContainer)
+        guard glyphIndex < layoutManager.numberOfGlyphs else { return nil }
+        let glyphRect = layoutManager.boundingRect(
+            forGlyphRange: NSRange(location: glyphIndex, length: 1),
+            in: textContainer
+        )
+        guard glyphRect.insetBy(dx: -2, dy: -2).contains(containerPoint) else { return nil }
+        let charIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
+        guard charIndex < textStorage.length,
+              let linkValue = textStorage.attribute(.link, at: charIndex, effectiveRange: nil) else {
+            return nil
+        }
+        return (linkValue, charIndex)
+    }
+
+    public override func mouseDown(with event: NSEvent) {
+        guard let window else {
+            super.mouseDown(with: event)
+            return
+        }
+        if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option) {
+            clearPeerSelectionsExcludingSelf()
+            super.mouseDown(with: event)
+            Self.lastSelectionAnchor = SelectionAnchor(
+                scopeRoot: selectionScopeRoot,
+                view: self,
+                range: selectedRange()
+            )
+            return
+        }
+        if let textContainer {
+            layoutManager?.ensureLayout(for: textContainer)
+        }
+        let scopeRoot = selectionScopeRoot
+        let initialWindowPoint = event.locationInWindow
+        let initialLocalPoint = convert(initialWindowPoint, from: nil)
+        let clickedCharIndex = min(
+            max(0, characterIndexForInsertion(at: initialLocalPoint)),
+            attributedText.length
+        )
+        let granularity: NSSelectionGranularity = switch event.clickCount {
+        case 2: .selectByWord
+        case let count where count >= 3: .selectByParagraph
+        default: .selectByCharacter
+        }
+
+        if granularity == .selectByCharacter,
+           !event.modifierFlags.contains(.shift),
+           Self.peerSelectableTextViews(in: scopeRoot).filter(\.hasActiveSelection) == [self],
+           selectedRanges.map(\.rangeValue).contains(where: { $0.length > 0 && NSLocationInRange(clickedCharIndex, $0) }) {
+            super.mouseDown(with: event)
+            if !hasActiveSelection {
+                Self.lastSelectionAnchor = SelectionAnchor(
+                    scopeRoot: selectionScopeRoot,
+                    view: self,
+                    range: selectedRange()
+                )
+            }
+            return
+        }
+
+        let anchor: SelectionAnchor
+        if event.modifierFlags.contains(.shift),
+           let existing = Self.lastSelectionAnchor,
+           existing.scopeRoot === scopeRoot,
+           let existingView = existing.view,
+           Self.peerSelectableTextViews(in: scopeRoot).contains(where: { $0 === existingView }) {
+            anchor = existing
+        } else {
+            let resolvedRange = resolvedAnchorRange(at: clickedCharIndex, granularity: granularity)
+            anchor = SelectionAnchor(
+                scopeRoot: scopeRoot,
+                view: self,
+                range: resolvedRange
+            )
+            Self.lastSelectionAnchor = anchor
+        }
+
+        if window.firstResponder !== self {
+            Self.isPreservingCrossViewSelection = true
+            window.makeFirstResponder(self)
+            Self.isPreservingCrossViewSelection = false
+        }
+
+        if event.modifierFlags.contains(.shift) || granularity != .selectByCharacter {
+            let pointInRoot = scopeRoot.convert(initialWindowPoint, from: nil)
+            Self.updateCrossViewSelection(
+                anchor: anchor,
+                pointInRoot: pointInRoot,
+                granularity: granularity,
+                in: scopeRoot
+            )
+        } else {
+            clearSelectionInScope()
+            setSelectedRange(NSRange(location: clickedCharIndex, length: 0))
+        }
+
+        var lastDragEvent = event
+        var didDrag = false
+        let dragThreshold: CGFloat = 2
+        NSEvent.startPeriodicEvents(afterDelay: 0.1, withPeriod: 0.05)
+        defer { NSEvent.stopPeriodicEvents() }
+
+        while let nextEvent = window.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp, .periodic],
+            until: .distantFuture,
+            inMode: .eventTracking,
+            dequeue: true
+        ) {
+            switch nextEvent.type {
+            case .leftMouseDragged:
+                lastDragEvent = nextEvent
+                let windowPoint = nextEvent.locationInWindow
+                if !didDrag,
+                   hypot(windowPoint.x - initialWindowPoint.x, windowPoint.y - initialWindowPoint.y) >= dragThreshold {
+                    didDrag = true
+                }
+                if didDrag || granularity != .selectByCharacter {
+                    autoscrollEnclosingScrollViews(with: nextEvent)
+                    let currentScopeRoot = selectionScopeRoot
+                    let pointInRoot = currentScopeRoot.convert(windowPoint, from: nil)
+                    Self.updateCrossViewSelection(
+                        anchor: anchor,
+                        pointInRoot: pointInRoot,
+                        granularity: granularity,
+                        in: currentScopeRoot
+                    )
+                }
+            case .periodic:
+                if didDrag {
+                    autoscrollEnclosingScrollViews(with: lastDragEvent)
+                    let windowPoint = window.mouseLocationOutsideOfEventStream
+                    let currentScopeRoot = selectionScopeRoot
+                    let pointInRoot = currentScopeRoot.convert(windowPoint, from: nil)
+                    Self.updateCrossViewSelection(
+                        anchor: anchor,
+                        pointInRoot: pointInRoot,
+                        granularity: granularity,
+                        in: currentScopeRoot
+                    )
+                }
+            case .leftMouseUp:
+                if !didDrag, granularity == .selectByCharacter, !event.modifierFlags.contains(.shift) {
+                    if let (link, charIndex) = linkTarget(at: initialLocalPoint) {
+                        clicked(onLink: link, at: charIndex)
+                    }
+                }
+                return
+            default:
+                break
+            }
+        }
+    }
+
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        let scope = selectionScopeRoot
+        let peers = Self.peerSelectableTextViews(in: scope)
+        let savedSelections = peers.map { ($0, $0.selectedRanges) }
+        let hadSelectionOnSelf = hasActiveSelection
+        Self.isPreservingCrossViewSelection = true
+        defer { Self.isPreservingCrossViewSelection = false }
+        if !hadSelectionOnSelf {
+            clearPeerSelectionsExcludingSelf()
+        }
+        let result = super.menu(for: event)
+        if hadSelectionOnSelf {
+            for (peer, ranges) in savedSelections where peer.selectedRanges != ranges {
+                peer.selectedRanges = ranges
+                peer.needsDisplay = true
+            }
+        }
+        return result
     }
 
     public override var intrinsicContentSize: NSSize {
@@ -2083,9 +2586,10 @@ public final class MarkdownSelectableTextView: NSTextView {
 
     public override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
-        if resigned, selectedRanges.contains(where: { $0.rangeValue.length > 0 }) {
-            setSelectedRange(NSRange(location: 0, length: 0))
+        guard resigned, !Self.isPreservingCrossViewSelection else {
+            return resigned
         }
+        clearSelectionInScope()
         return resigned
     }
 }

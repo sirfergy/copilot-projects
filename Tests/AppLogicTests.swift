@@ -8860,6 +8860,243 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertGreaterThan(wrappedHeight, shortHeight + 100)
         XCTAssertGreaterThan(unbrokenHeight, shortHeight + 100)
+
+        // Dragging across separate MarkdownText messages and segments in a transcript container
+        // highlights every spanned text view and copies their combined text in top-to-bottom order.
+        let transcriptRoot = VStack(alignment: .leading, spacing: 12) {
+            Text("Copilot")
+                .font(.caption.weight(.semibold))
+            MarkdownText(
+                text: "[Ponytail] finished clean (`0` findings). Waiting for `gpt-6.1-sol` and `claude-opus-5.5`."
+            )
+            Text("Copilot")
+                .font(.caption.weight(.semibold))
+            MarkdownText(
+                text: """
+                Opened [sirfergy/copilot-projects-ios#177](https://github.com/sirfergy/copilot-projects-ios/pull/177):
+                - **Worktree**: `/Users/obvioussean/Repos/copilot-projects-ios-shared-markdown`
+                - **Diff**: 7 files changed
+
+                ```swift
+                let status = "green"
+                ```
+
+                Background `manage-pr` agent is running to watch cloud CCR + CI (`validate`) and merge when green.
+                """
+            )
+        }
+        .frame(width: 360, alignment: .leading)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 600),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let transcriptHost = NSHostingView(rootView: transcriptRoot)
+        transcriptHost.sizingOptions = []
+        transcriptHost.frame = NSRect(x: 0, y: 0, width: 380, height: 600)
+        window.contentView = transcriptHost
+        transcriptHost.layoutSubtreeIfNeeded()
+
+        let peers = MarkdownSelectableTextView.peerSelectableTextViews(in: transcriptHost)
+        XCTAssertEqual(
+            peers.count, 4,
+            "Expected top message prose, bottom message intro/list prose, code block, and trailing prose in visual order"
+        )
+        let topMessageView = peers[0]
+        let bottomIntroView = peers[1]
+        let codeBlockView = peers[2]
+        let bottomTrailingView = peers[3]
+
+        let topNSString = topMessageView.attributedText.string as NSString
+        let trailingNSString = bottomTrailingView.attributedText.string as NSString
+        let anchorIndex = NSMaxRange(trailingNSString.range(of: "when green"))
+        let targetCharRange = topNSString.range(of: "Waiting for")
+        XCTAssertNotEqual(anchorIndex, NSNotFound)
+        XCTAssertNotEqual(targetCharRange.location, NSNotFound)
+
+        let targetGlyphs = topMessageView.layoutManager!.glyphRange(
+            forCharacterRange: NSRange(location: targetCharRange.location, length: 1),
+            actualCharacterRange: nil
+        )
+        let targetGlyphRect = topMessageView.layoutManager!.boundingRect(
+            forGlyphRange: targetGlyphs,
+            in: topMessageView.textContainer!
+        )
+        let targetPoint = NSPoint(x: targetGlyphRect.minX + 1, y: targetGlyphRect.midY)
+
+        func sendMouseGesture(
+            on startView: MarkdownSelectableTextView,
+            startLocalPoint: NSPoint,
+            dragTo endView: MarkdownSelectableTextView? = nil,
+            endLocalPoint: NSPoint? = nil,
+            clickCount: Int = 1,
+            modifiers: NSEvent.ModifierFlags = []
+        ) throws {
+            let startWindowPoint = startView.convert(startLocalPoint, to: nil)
+            let downEvent = try XCTUnwrap(
+                NSEvent.mouseEvent(
+                    with: .leftMouseDown,
+                    location: startWindowPoint,
+                    modifierFlags: modifiers,
+                    timestamp: 0,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    eventNumber: 1,
+                    clickCount: clickCount,
+                    pressure: 1.0
+                )
+            )
+            let upWindowPoint = if let endView, let endLocalPoint {
+                endView.convert(endLocalPoint, to: nil)
+            } else {
+                startWindowPoint
+            }
+            let upEvent = try XCTUnwrap(
+                NSEvent.mouseEvent(
+                    with: .leftMouseUp,
+                    location: upWindowPoint,
+                    modifierFlags: modifiers,
+                    timestamp: 0.02,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    eventNumber: 1,
+                    clickCount: clickCount,
+                    pressure: 0.0
+                )
+            )
+            NSApp.postEvent(upEvent, atStart: true)
+            if endView != nil, endLocalPoint != nil {
+                let dragEvent = try XCTUnwrap(
+                    NSEvent.mouseEvent(
+                        with: .leftMouseDragged,
+                        location: upWindowPoint,
+                        modifierFlags: modifiers,
+                        timestamp: 0.01,
+                        windowNumber: window.windowNumber,
+                        context: nil,
+                        eventNumber: 1,
+                        clickCount: clickCount,
+                        pressure: 1.0
+                    )
+                )
+                NSApp.postEvent(dragEvent, atStart: true)
+            }
+            startView.mouseDown(with: downEvent)
+        }
+
+        let anchorLastGlyph = bottomTrailingView.layoutManager!.glyphRange(
+            forCharacterRange: NSRange(location: anchorIndex - 1, length: 1),
+            actualCharacterRange: nil
+        )
+        let anchorGlyphRect = bottomTrailingView.layoutManager!.boundingRect(
+            forGlyphRange: anchorLastGlyph,
+            in: bottomTrailingView.textContainer!
+        )
+        let startPoint = NSPoint(x: anchorGlyphRect.maxX - 0.5, y: anchorGlyphRect.midY)
+
+        // Drag upward from "when green" in the bottom view into "Waiting for" in the top message view.
+        try sendMouseGesture(
+            on: bottomTrailingView,
+            startLocalPoint: startPoint,
+            dragTo: topMessageView,
+            endLocalPoint: targetPoint
+        )
+
+        XCTAssertEqual(
+            topNSString.substring(with: topMessageView.selectedRange()),
+            "Waiting for gpt-6.1-sol and claude-opus-5.5."
+        )
+        XCTAssertEqual(
+            bottomIntroView.selectedRange(),
+            NSRange(location: 0, length: bottomIntroView.attributedText.length)
+        )
+        XCTAssertEqual(
+            codeBlockView.selectedRange(),
+            NSRange(location: 0, length: codeBlockView.attributedText.length)
+        )
+        XCTAssertEqual(
+            trailingNSString.substring(with: bottomTrailingView.selectedRange()),
+            "Background manage-pr agent is running to watch cloud CCR + CI (validate) and merge when green"
+        )
+
+        let expectedCombinedCopy = [
+            "Waiting for gpt-6.1-sol and claude-opus-5.5.",
+            bottomIntroView.attributedText.string,
+            "let status = \"green\"",
+            "Background manage-pr agent is running to watch cloud CCR + CI (validate) and merge when green",
+        ].joined(separator: "\n\n")
+        XCTAssertEqual(bottomTrailingView.selectedTranscriptCopiedText(), expectedCombinedCopy)
+        XCTAssertEqual(topMessageView.selectedTranscriptCopiedText(), expectedCombinedCopy)
+
+        let pasteboard = NSPasteboard.general
+        let savedPasteboard = pasteboard.string(forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let savedPasteboard {
+                pasteboard.setString(savedPasteboard, forType: .string)
+            }
+        }
+        bottomTrailingView.copy(nil)
+        XCTAssertEqual(pasteboard.string(forType: .string), expectedCombinedCopy)
+
+        // Resigning first responder clears the selection across all views in the transcript scope.
+        XCTAssertTrue(window.makeFirstResponder(nil))
+        for peer in peers {
+            XCTAssertEqual(peer.selectedRange(), NSRange(location: 0, length: 0))
+        }
+
+        // Double-clicking inside a horizontally-scrollable code block and Shift-clicking into the top
+        // message view preserves the full double-clicked word boundary across the transcript scope.
+        let codeNSString = codeBlockView.attributedText.string as NSString
+        let codeMidWordAnchor = codeNSString.range(of: "status").location + 2
+        XCTAssertNotEqual(codeMidWordAnchor, NSNotFound)
+        let codeMidGlyph = codeBlockView.layoutManager!.glyphRange(
+            forCharacterRange: NSRange(location: codeMidWordAnchor, length: 1),
+            actualCharacterRange: nil
+        )
+        let codeMidRect = codeBlockView.layoutManager!.boundingRect(
+            forGlyphRange: codeMidGlyph,
+            in: codeBlockView.textContainer!
+        )
+        try sendMouseGesture(
+            on: codeBlockView,
+            startLocalPoint: NSPoint(x: codeMidRect.midX, y: codeMidRect.midY),
+            clickCount: 2
+        )
+        XCTAssertEqual(codeNSString.substring(with: codeBlockView.selectedRange()), "status")
+        try sendMouseGesture(
+            on: topMessageView,
+            startLocalPoint: targetPoint,
+            modifiers: [.shift]
+        )
+        XCTAssertEqual(
+            codeBlockView.selectedTranscriptCopiedText(),
+            [
+                "Waiting for gpt-6.1-sol and claude-opus-5.5.",
+                bottomIntroView.attributedText.string,
+                "let status",
+            ].joined(separator: "\n\n")
+        )
+
+        // Dragging upward from index 0 of the bottom view leaves its local selection at {0, 0},
+        // and pressing Left still clears the peer selections.
+        try sendMouseGesture(
+            on: bottomTrailingView,
+            startLocalPoint: NSPoint(x: 0.5, y: 2),
+            dragTo: topMessageView,
+            endLocalPoint: targetPoint
+        )
+        XCTAssertEqual(bottomTrailingView.selectedRange(), NSRange(location: 0, length: 0))
+        XCTAssertGreaterThan(topMessageView.selectedRange().length, 0)
+        bottomTrailingView.doCommand(by: #selector(NSStandardKeyBindingResponding.moveLeft(_:)))
+        for peer in peers {
+            XCTAssertEqual(peer.selectedRange(), NSRange(location: 0, length: 0))
+        }
+        codeBlockView.selectAll(nil)
+        codeBlockView.copy(nil)
+        XCTAssertEqual(pasteboard.string(forType: .string), "let status = \"green\"")
     }
 
     // MARK: - Remote web terminal image rendering
