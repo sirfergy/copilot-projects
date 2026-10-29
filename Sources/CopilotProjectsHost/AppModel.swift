@@ -463,7 +463,7 @@ final class AppModel: ObservableObject {
     var remoteControlDeliveryEpoch: String { remoteControlDeliveryLedger.epoch }
 
     /// Resolves the absolute Copilot executable for a remotely-created session, and
-    /// the absolute `$HOME/Repos` working directory. Injected so tests can drive the
+    /// the configured working directory. Injected so tests can drive the
     /// unavailable/invalid outcomes without touching the real filesystem.
     let remoteCopilotExecutable: () -> String?
     let remoteWrapperExecutable: () -> String?

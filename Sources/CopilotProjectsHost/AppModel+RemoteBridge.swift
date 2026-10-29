@@ -128,8 +128,8 @@ public enum RemoteSessionCreationOutcome: Equatable, Sendable {
     case existing(RemoteCreateSessionResponse)
     /// The requested project id is not known to the host. (422)
     case unknownProject
-    /// The request is well-formed but cannot be honored — the required `$HOME/Repos`
-    /// working directory is missing. Nothing was created. (422)
+    /// The request is well-formed but its working directory is missing or invalid.
+    /// Nothing was created. (422)
     case invalid
     /// The request contains invalid or conflicting launch options or an invalid PR URL. (400)
     case badRequest
@@ -314,7 +314,7 @@ extension AppModel {
         case .unknownProject:
             return .failure("unknown project", code: "unknown-project")
         case .invalid:
-            return .failure("the ~/Repos working directory is missing", code: "invalid")
+            return .failure("the working directory is missing or invalid", code: "invalid")
         case .badRequest:
             return .failure("invalid title or prompt", code: "bad-request")
         case .conflict:
@@ -352,7 +352,7 @@ extension AppModel {
 
     /// Where a created session starts, and whether it takes its project's selection.
     private enum CreatedSessionPlacement {
-        /// Remote clients: in ~/Repos, never stealing the Mac's selected tab.
+        /// Remote clients: in the configured startup folder, without stealing Mac selection.
         case remote
         /// Copilot Pull Requests: like Start Session in the app, in the project's
         /// current folder and selected in its project.
@@ -504,8 +504,12 @@ extension AppModel {
             if resolvedHost.isLocal {
                 guard let repos = remoteReposDirectory() else { return .invalid }
                 cwd = repos
+            } else if let folder = resolvedHost.defaultCwd {
+                cwd = folder
             } else {
-                cwd = resolvedHost.defaultCwd ?? remoteReposDirectory() ?? Paths.defaultStartupDir
+                let folder = remoteReposDirectory() ?? Paths.defaultStartupDir
+                guard folder.hasPrefix("/") else { return .invalid }
+                cwd = folder
             }
         case .local, .project:
             let folder = Paths.normalizedDirectory(defaultCwd(forProjectIndex: pi, targetHost: resolvedHost))

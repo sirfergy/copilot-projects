@@ -4740,18 +4740,54 @@ final class CoreLogicTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
 
         // Missing Repos → nil (never a home fallback).
-        XCTAssertNil(Paths.resolveReposDirectory(home: home))
+        XCTAssertNil(Paths.resolveReposDirectory(environment: [:], home: home))
 
         let repos = home.appendingPathComponent("Repos", isDirectory: true)
         try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
-        XCTAssertEqual(Paths.resolveReposDirectory(home: home), repos.path)
+        XCTAssertEqual(Paths.resolveReposDirectory(
+            environment: ["COPILOT_PROJECTS_DEFAULT_DIR": ""], home: home), repos.path)
 
         // A regular file named Repos must not satisfy the requirement.
         let fileHome = root.appendingPathComponent("filehome", isDirectory: true)
         try FileManager.default.createDirectory(at: fileHome, withIntermediateDirectories: true)
         FileManager.default.createFile(
             atPath: fileHome.appendingPathComponent("Repos").path, contents: Data())
-        XCTAssertNil(Paths.resolveReposDirectory(home: fileHome))
+        XCTAssertNil(Paths.resolveReposDirectory(environment: [:], home: fileHome))
+    }
+
+    func testResolveReposDirectoryHonorsStartupDirectoryOverride() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = root.appendingPathComponent("code", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let environment = ["COPILOT_PROJECTS_DEFAULT_DIR": directory.path]
+
+        XCTAssertEqual(
+            Paths.resolveReposDirectory(environment: environment, home: root), directory.path)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Repos"), withIntermediateDirectories: true)
+        XCTAssertEqual(
+            Paths.resolveReposDirectory(environment: environment, home: root), directory.path)
+        XCTAssertEqual(
+            Paths.resolveReposDirectory(
+                environment: ["COPILOT_PROJECTS_DEFAULT_DIR": "~"], home: root),
+            FileManager.default.homeDirectoryForCurrentUser.path)
+    }
+
+    func testResolveReposDirectoryRejectsInvalidOverridesWithoutFallback() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Repos"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("file")
+        try Data().write(to: file)
+
+        for directory in ["relative", root.appendingPathComponent("missing").path, file.path] {
+            XCTAssertNil(Paths.resolveReposDirectory(
+                environment: ["COPILOT_PROJECTS_DEFAULT_DIR": directory], home: root), directory)
+        }
     }
 
     func testCocoaLaunchArgumentsAreAcceptedButUnknownCLIFlagsAreNot() {

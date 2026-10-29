@@ -6701,6 +6701,65 @@ final class AppLogicTests: XCTestCase {
     // MARK: - Remote session creation (AppModel)
 
     @MainActor
+    func testCreateRemoteSessionUsesConfiguredStartupDirectory() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = root.appendingPathComponent("code", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let key = "COPILOT_PROJECTS_DEFAULT_DIR"
+        let previous = ProcessInfo.processInfo.environment[key]
+        defer {
+            if let previous { setenv(key, previous, 1) }
+            else { unsetenv(key) }
+        }
+        setenv(key, directory.path, 1)
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [Project(id: "p1", name: "First", cwd: "/tmp", sessions: [])],
+            selectedProjectId: "p1"))
+        let sshHost = RemoteHostInfo(
+            id: "ssh", displayName: "SSH", sshTarget: "ssh", isLocal: false)
+        let configuredHost = RemoteHostInfo(
+            id: "configured", displayName: "Configured", sshTarget: "configured",
+            defaultCwd: "/srv/project", isLocal: false)
+        var launches = 0
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root,
+            remoteCopilotExecutable: { "/usr/bin/true" },
+            remoteSessionBackendAvailable: { true },
+            availableHostsProvider: { [.local, sshHost, configuredHost] },
+            remoteSessionLauncher: { _, _, _ in launches += 1 },
+            sessionCreationLedger: SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        )
+        let request = RemoteCreateSessionRequest(requestId: UUID(), projectId: "p1")
+        XCTAssertEqual(model.createRemoteSession(request), .created(RemoteCreateSessionResponse(
+            requestId: request.requestId, projectId: "p1", sessionId: request.requestId.uuidString)))
+        XCTAssertEqual(model.project("p1")?.sessions.first?.cwd, directory.path)
+
+        let sshRequest = RemoteCreateSessionRequest(
+            requestId: UUID(), projectId: "p1", kind: .terminal, hostId: "ssh")
+        XCTAssertEqual(model.createRemoteConfiguredSession(sshRequest), .created(RemoteCreateSessionResponse(
+            requestId: sshRequest.requestId, projectId: "p1", sessionId: sshRequest.requestId.uuidString)))
+        XCTAssertEqual(model.project("p1")?.sessions.last?.cwd, directory.path)
+
+        setenv(key, "relative", 1)
+        XCTAssertEqual(model.createRemoteConfiguredSession(RemoteCreateSessionRequest(
+            requestId: UUID(), projectId: "p1", kind: .terminal, hostId: "ssh")), .invalid)
+        XCTAssertEqual(launches, 2)
+        XCTAssertEqual(model.project("p1")?.sessions.count, 2)
+
+        let configuredRequest = RemoteCreateSessionRequest(
+            requestId: UUID(), projectId: "p1", kind: .terminal, hostId: "configured")
+        XCTAssertEqual(model.createRemoteConfiguredSession(configuredRequest), .created(RemoteCreateSessionResponse(
+            requestId: configuredRequest.requestId, projectId: "p1", sessionId: configuredRequest.requestId.uuidString)))
+        XCTAssertEqual(model.project("p1")?.sessions.last?.cwd, "/srv/project")
+    }
+
+    @MainActor
     private func makeRemoteCreateModel(
         root: URL,
         projects: [Project],

@@ -454,7 +454,11 @@ to `SessionHost.createConfiguredSession`. In addition to `requestId` and
 Omitted kind means Copilot; omitted prompt means an unprompted session. Copilot
 launches without `--allow-all`, so tool approvals appear in the session's terminal;
 a terminal opens a plain shell without requiring Copilot.
-Both retain the remote `~/Repos` working-directory and desktop-selection policy.
+On the local host, both use `COPILOT_PROJECTS_DEFAULT_DIR` from the app's
+environment, or `~/Repos` when unset, without changing desktop selection.
+The path must expand to an existing absolute directory.
+The app must inherit the variable at launch; an rc export does not affect an
+already-running app or Finder/Dock launches.
 
 A supplied prompt must be nonempty after whitespace trimming, at most 8,192
 UTF-8 bytes after CRLF/CR normalization to LF, and free of terminal control

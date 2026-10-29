@@ -11,9 +11,8 @@ public enum Paths {
     /// sometimes-`/` / sometimes-`~`.
     public static var defaultStartupDir: String {
         let fm = FileManager.default
-        if let override = ProcessInfo.processInfo.environment["COPILOT_PROJECTS_DEFAULT_DIR"],
-           !override.isEmpty {
-            return (override as NSString).expandingTildeInPath
+        if let override = startupDirectoryOverride(environment: ProcessInfo.processInfo.environment) {
+            return override
         }
         let home = fm.homeDirectoryForCurrentUser
         let repos = home.appendingPathComponent("Repos", isDirectory: true)
@@ -22,6 +21,13 @@ public enum Paths {
             return repos.path
         }
         return home.path
+    }
+
+    private static func startupDirectoryOverride(environment: [String: String]) -> String? {
+        guard let override = environment["COPILOT_PROJECTS_DEFAULT_DIR"], !override.isEmpty else {
+            return nil
+        }
+        return (override as NSString).expandingTildeInPath
     }
 
     /// Normalize a working-directory value to a plain filesystem path. Shells emit
@@ -207,23 +213,24 @@ public enum Paths {
         return nil
     }
 
-    /// Absolute `$HOME/Repos`, but only when it already exists and is a directory.
-    /// Remote session creation requires this exact folder (never the literal
-    /// `~/Repos`, and never a home-directory fallback), so a missing Repos fails
-    /// closed instead of dropping a session at an unexpected working directory.
+    /// Remote startup directory: `COPILOT_PROJECTS_DEFAULT_DIR`, or `$HOME/Repos`.
+    /// Must expand to an existing absolute directory; invalid overrides never fall back.
     public static var reposDirectory: String? {
         resolveReposDirectory()
     }
 
     static func resolveReposDirectory(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default
     ) -> String? {
-        let repos = home.appendingPathComponent("Repos", isDirectory: true)
+        let directory = startupDirectoryOverride(environment: environment)
+            ?? home.appendingPathComponent("Repos", isDirectory: true).path
+        guard directory.hasPrefix("/") else { return nil }
         var isDirectory: ObjCBool = false
-        if fileManager.fileExists(atPath: repos.path, isDirectory: &isDirectory),
+        if fileManager.fileExists(atPath: directory, isDirectory: &isDirectory),
            isDirectory.boolValue {
-            return repos.path
+            return directory
         }
         return nil
     }
