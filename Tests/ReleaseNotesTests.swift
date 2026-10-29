@@ -18,6 +18,7 @@ final class ReleaseNotesTests: XCTestCase {
         let snapshot = try JSONDecoder().decode(ReleaseNotesSnapshot.self, from: data())
         try snapshot.validate(version: "2026.10.25", build: "42")
         XCTAssertEqual(snapshot.displayVersion, "2026.10.25 (42)")
+        XCTAssertEqual(snapshot.releasesURL, URL(string: "https://github.com/example/app/releases"))
         XCTAssertThrowsError(try snapshot.validate(version: "2026.10.25", build: "43"))
         XCTAssertThrowsError(try snapshot.validate(version: "2026.10.26", build: "42"))
     }
