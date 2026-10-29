@@ -406,9 +406,11 @@ copilot-projects set-status running               # set the current session's st
 copilot-projects set-status waiting --text "review my diff"
 copilot-projects notify "Build finished" "All tests green"
 copilot-projects list-projects
+copilot-projects list-hosts                       # list This Mac + ~/.ssh/config hosts
 copilot-projects list-status
-copilot-projects new-project myapp                # name only; --cwd optional
-copilot-projects new-session --project <id> --cwd /tmp
+copilot-projects new-project myapp                # name only; --cwd and --default-host optional
+copilot-projects set-default-host woodhaven --project <id>
+copilot-projects new-session --project <id> --cwd /tmp --host woodhaven
 copilot-projects focus --session <id>             # bring app forward + select
 copilot-projects doctor                           # diagnose state/session/runtime health
 copilot-projects version                          # print installed version
