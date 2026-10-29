@@ -662,11 +662,19 @@ final class CopilotPromptComposer: NSObject, NSTextViewDelegate {
 
     let alert = NSAlert()
     let textView: NSTextView
+    let availableHosts: [RemoteHostInfo]
+    private(set) var selectedHostId: String?
+    private var hostPopUpButton: NSPopUpButton?
     private let instructions = "Write the first prompt for an interactive Copilot session. "
         + "Return adds a line; Command-Return starts Copilot. "
         + "If startup fails, use the tab's Copy Starting Prompt menu before closing the tab or quitting."
 
-    override init() {
+    init(
+        availableHosts: [RemoteHostInfo] = [.local],
+        selectedHostId: String? = nil
+    ) {
+        self.availableHosts = availableHosts
+        self.selectedHostId = selectedHostId ?? availableHosts.first?.id
         let (scrollView, textView) = Self.makePromptEditorScrollView(
             initialText: "",
             font: .systemFont(ofSize: NSFont.systemFontSize)
@@ -684,9 +692,42 @@ final class CopilotPromptComposer: NSObject, NSTextViewDelegate {
         alert.buttons[0].keyEquivalent = "\r"
         alert.buttons[0].keyEquivalentModifierMask = .command
         alert.buttons[1].keyEquivalent = "\u{1b}"
-        alert.accessoryView = scrollView
+        if availableHosts.count > 1 {
+            let container = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 214))
+            let label = NSTextField(labelWithString: "Host:")
+            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+            label.frame = NSRect(x: 0, y: 188, width: 40, height: 20)
+            let popUp = NSPopUpButton(frame: NSRect(x: 44, y: 186, width: 220, height: 24), pullsDown: false)
+            for host in availableHosts {
+                let title = host.isLocal ? host.displayName : "\(host.displayName) (\(host.sshTarget ?? host.id))"
+                popUp.addItem(withTitle: title)
+                popUp.lastItem?.representedObject = host.id
+            }
+            if let initialId = self.selectedHostId,
+               let idx = availableHosts.firstIndex(where: { $0.id.caseInsensitiveCompare(initialId) == .orderedSame }) {
+                popUp.selectItem(at: idx)
+            }
+            self.selectedHostId = popUp.selectedItem?.representedObject as? String
+            popUp.target = self
+            popUp.action = #selector(hostSelectionChanged(_:))
+            popUp.setAccessibilityLabel("Execution host")
+            self.hostPopUpButton = popUp
+            scrollView.frame = NSRect(x: 0, y: 0, width: 440, height: 180)
+            container.addSubview(label)
+            container.addSubview(popUp)
+            container.addSubview(scrollView)
+            alert.accessoryView = container
+        } else {
+            alert.accessoryView = scrollView
+        }
         alert.window.initialFirstResponder = textView
         updateValidation()
+    }
+
+    @objc private func hostSelectionChanged(_ sender: NSPopUpButton) {
+        if let hostId = sender.selectedItem?.representedObject as? String {
+            selectedHostId = hostId
+        }
     }
 
     /// Plain-text prompt editor shared by the starting-prompt composer and the

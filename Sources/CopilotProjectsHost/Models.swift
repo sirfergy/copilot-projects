@@ -8,6 +8,7 @@ struct Session: Identifiable, Codable, Equatable {
     var id: String
     var title: String
     var cwd: String
+    var hostId: String?
     var creationFingerprint: String?
     var pullRequestKeys: [String]?
     /// Persisted only while set, so unmarked sessions keep their saved shape.
@@ -92,7 +93,7 @@ struct Session: Identifiable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, cwd, creationFingerprint, pullRequestKeys
+        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys
         case manuallyMarkedUnread = "markedUnread"
     }
 
@@ -100,12 +101,14 @@ struct Session: Identifiable, Codable, Equatable {
         id: String = UUID().uuidString,
         title: String,
         cwd: String,
+        hostId: String? = nil,
         creationFingerprint: String? = nil,
         pullRequestKeys: [String]? = nil
     ) {
         self.id = id
         self.title = title
         self.cwd = cwd
+        self.hostId = hostId
         self.creationFingerprint = creationFingerprint
         self.pullRequestKeys = pullRequestKeys
     }
@@ -116,6 +119,7 @@ struct Project: Identifiable, Codable, Equatable {
     var id: String
     var name: String
     var cwd: String
+    var defaultHostId: String?
     var sessions: [Session]
     var selectedSessionId: String?
     var creationFingerprint: String?
@@ -123,12 +127,14 @@ struct Project: Identifiable, Codable, Equatable {
     init(id: String = UUID().uuidString,
          name: String,
          cwd: String,
+         defaultHostId: String? = nil,
          sessions: [Session] = [],
          selectedSessionId: String? = nil,
          creationFingerprint: String? = nil) {
         self.id = id
         self.name = name
         self.cwd = cwd
+        self.defaultHostId = defaultHostId
         self.sessions = sessions
         self.selectedSessionId = selectedSessionId
         self.creationFingerprint = creationFingerprint

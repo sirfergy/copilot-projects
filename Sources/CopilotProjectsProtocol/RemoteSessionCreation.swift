@@ -38,19 +38,22 @@ public struct RemoteCreateSessionRequest: Codable, Equatable, Sendable {
     public let pullRequestURL: String?
     public let kind: RemoteSessionKind?
     public let initialPrompt: String?
+    public let hostId: String?
 
     public init(
         requestId: UUID,
         projectId: String,
         pullRequestURL: String? = nil,
         kind: RemoteSessionKind? = nil,
-        initialPrompt: String? = nil
+        initialPrompt: String? = nil,
+        hostId: String? = nil
     ) {
         self.requestId = requestId
         self.projectId = projectId
         self.pullRequestURL = pullRequestURL
         self.kind = kind
         self.initialPrompt = initialPrompt
+        self.hostId = hostId
     }
 }
 

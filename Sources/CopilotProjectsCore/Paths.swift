@@ -263,6 +263,25 @@ public enum Paths {
         return nil
     }
 
+    /// The Mach-O `copilot` wrapper that bridges a local `dtach` session to a
+    /// remote SSH host while preserving `pbsi_comm == "copilot"` for process-tree
+    /// liveness checks.
+    public static var remoteCopilotWrapperExecutable: String? {
+        let env = ProcessInfo.processInfo.environment
+        if let override = env["COPILOT_PROJECTS_REMOTE_WRAPPER"],
+           !override.isEmpty,
+           FileManager.default.isExecutableFile(atPath: override) {
+            return override
+        }
+        let defaultWrapper = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".copilot/ccr-pr-review/bin/copilot")
+            .path
+        if FileManager.default.isExecutableFile(atPath: defaultWrapper) {
+            return defaultWrapper
+        }
+        return nil
+    }
+
     /// Best-effort creation of the (user-private) state directory.
     @discardableResult
     public static func ensureStateDir() -> Bool {

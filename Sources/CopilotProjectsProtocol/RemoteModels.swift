@@ -1,9 +1,45 @@
 import Foundation
 
+public struct RemoteHostInfo: Codable, Equatable, Sendable, Identifiable {
+    public static let localId = "local"
+
+    public let id: String
+    public let displayName: String
+    public let sshTarget: String?
+    public let defaultCwd: String?
+    public let isLocal: Bool
+
+    public init(
+        id: String,
+        displayName: String,
+        sshTarget: String? = nil,
+        defaultCwd: String? = nil,
+        isLocal: Bool = false
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.sshTarget = sshTarget
+        self.defaultCwd = defaultCwd
+        self.isLocal = isLocal
+    }
+
+    public static let local = RemoteHostInfo(
+        id: localId,
+        displayName: "This Mac",
+        sshTarget: nil,
+        defaultCwd: nil,
+        isLocal: true
+    )
+}
+
 public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
     public fileprivate(set) var projects: [RemoteProjectSnapshot]
     public let selectedProjectId: String?
     public let protocolInfo: RemoteProtocolInfo?
+    /// Hosts where a session can be launched (`This Mac` plus auto-discovered SSH
+    /// hosts). Optional and omitted when only the local host is configured so
+    /// single-host snapshots stay compact and backward-compatible.
+    public var availableHosts: [RemoteHostInfo]?
     /// When the gateway served this snapshot, in Unix milliseconds on the Mac's
     /// clock: the same clock as each session's `workflow.observedAtMilliseconds`.
     /// Clients pass it with their own monotonic receipt time to
@@ -20,11 +56,13 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
         projects: [RemoteProjectSnapshot],
         selectedProjectId: String?,
         protocolInfo: RemoteProtocolInfo? = nil,
+        availableHosts: [RemoteHostInfo]? = nil,
         servedAtMilliseconds: Int64? = nil
     ) {
         self.projects = projects
         self.selectedProjectId = selectedProjectId
         self.protocolInfo = protocolInfo
+        self.availableHosts = availableHosts
         self.servedAtMilliseconds = servedAtMilliseconds
     }
 }
@@ -51,17 +89,20 @@ public struct RemoteProjectSnapshot: Codable, Equatable, Sendable {
     public let id: String
     public let name: String
     public let selectedSessionId: String?
+    public let defaultHostId: String?
     public fileprivate(set) var sessions: [RemoteSessionSnapshot]
 
     public init(
         id: String,
         name: String,
         selectedSessionId: String?,
+        defaultHostId: String? = nil,
         sessions: [RemoteSessionSnapshot]
     ) {
         self.id = id
         self.name = name
         self.selectedSessionId = selectedSessionId
+        self.defaultHostId = defaultHostId
         self.sessions = sessions
     }
 }
@@ -102,6 +143,10 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     /// includes it; this says why. Present only while set, so unmarked sessions
     /// and older hosts omit it.
     public let markedUnread: Bool?
+    /// Identifier of the remote host running this session (`nil` for local Mac sessions).
+    public let hostId: String?
+    /// Human-readable label for the remote host running this session (`nil` for local Mac sessions).
+    public let hostDisplayName: String?
 
     public init(
         id: String,
@@ -122,7 +167,9 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         operationReceipts: [RemoteOperationReceipt]? = nil,
         workflow: RemoteSessionWorkflow? = nil,
         lastError: TranscriptTurnError? = nil,
-        markedUnread: Bool? = nil
+        markedUnread: Bool? = nil,
+        hostId: String? = nil,
+        hostDisplayName: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -143,6 +190,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.workflow = workflow
         self.lastError = lastError
         self.markedUnread = markedUnread
+        self.hostId = hostId
+        self.hostDisplayName = hostDisplayName
     }
 }
 

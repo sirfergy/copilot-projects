@@ -106,14 +106,35 @@ final class AppModel: ObservableObject {
             let name = request.name
                 ?? request.cwd.map { URL(fileURLWithPath: $0).lastPathComponent }
                 ?? "Project \(self.projects.count + 1)"
-            let project = self.makeProject(name: name, cwd: cwd, withSession: true)
+            if let rawHost = request.hostId?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !rawHost.isEmpty,
+               self.resolvedRemoteHost(hostId: rawHost) == nil {
+                return .failure("unknown host: \(rawHost)", code: "bad-request")
+            }
+            let resolvedDefaultHost = request.hostId.flatMap { self.resolvedRemoteHost(hostId: $0) }
+            let defaultHostId = (resolvedDefaultHost?.isLocal == false) ? resolvedDefaultHost?.id : nil
+            let project = self.makeProject(
+                name: name,
+                cwd: request.cwd ?? resolvedDefaultHost?.defaultCwd ?? cwd,
+                defaultHostId: defaultHostId,
+                withSession: true
+            )
             self.projects.append(project)
             self.selectProject(project.id)
             return .success(project.id)
         },
         newSession: { [unowned self] request in
             guard let pid = self.resolveProject(request) else { return .failure("no project") }
-            guard let sid = self.addSession(toProjectId: pid, cwd: request.cwd) else {
+            if let rawHost = request.hostId?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !rawHost.isEmpty,
+               self.resolvedRemoteHost(hostId: rawHost) == nil {
+                return .failure("unknown host: \(rawHost)", code: "bad-request")
+            }
+            guard let sid = self.addSession(
+                toProjectId: pid,
+                cwd: request.cwd,
+                hostId: request.hostId
+            ) else {
                 return .failure("unknown project: \(pid)")
             }
             return .success(sid)
@@ -130,7 +151,8 @@ final class AppModel: ObservableObject {
                 requestId: requestId,
                 projectId: projectId,
                 title: request.title ?? "Copilot",
-                prompt: prompt
+                prompt: prompt,
+                hostId: request.hostId
             ))
         },
         closeSession: { [unowned self] request in
@@ -189,7 +211,8 @@ final class AppModel: ObservableObject {
             return self.startPullRequestReviewSession(
                 requestId: requestId,
                 projectId: projectId,
-                pullRequestURL: pullRequestURL
+                pullRequestURL: pullRequestURL,
+                hostId: request.hostId
             )
         },
         sendSessionPrompt: { [unowned self] request in
@@ -208,6 +231,20 @@ final class AppModel: ObservableObject {
                 sessionId: sessionId,
                 prompt: prompt
             )
+        },
+        listHosts: { [unowned self] in self.renderHosts() },
+        setDefaultHost: { [unowned self] request in
+            guard let pid = self.resolveProject(request) else { return .failure("no project") }
+            guard self.projectIndex(pid) != nil else {
+                return .failure("unknown project: \(pid)", code: "unknown-project")
+            }
+            let rawHost = request.hostId?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let rawHost, !rawHost.isEmpty, self.resolvedRemoteHost(hostId: rawHost) == nil {
+                return .failure("unknown host: \(rawHost)", code: "bad-request")
+            }
+            let resolved = rawHost.flatMap { self.resolvedRemoteHost(hostId: $0) }
+            self.setProjectDefaultHost(pid, hostId: resolved?.id)
+            return .success(resolved?.id ?? RemoteHostInfo.localId)
         },
         screenshot: { _ in
             .failure("screenshot must be handled by the control server")
@@ -422,8 +459,10 @@ final class AppModel: ObservableObject {
     /// the absolute `$HOME/Repos` working directory. Injected so tests can drive the
     /// unavailable/invalid outcomes without touching the real filesystem.
     let remoteCopilotExecutable: () -> String?
+    let remoteWrapperExecutable: () -> String?
     let remoteReposDirectory: () -> String?
     let remoteSessionBackendAvailable: () -> Bool
+    let availableHostsProvider: () -> [RemoteHostInfo]
     /// Overrides the controller launch for a freshly-created Copilot session (tests
     /// record it instead of spawning a real terminal). Nil in production, where the
     /// real cached terminal controller is created with a one-shot Copilot launch.
@@ -488,10 +527,12 @@ final class AppModel: ObservableObject {
         remoteElicitationTarget:
             ((String) -> RemoteElicitationTerminalTarget?)? = nil,
         remoteCopilotExecutable: @escaping () -> String? = { Paths.copilotExecutable },
+        remoteWrapperExecutable: @escaping () -> String? = { Paths.remoteCopilotWrapperExecutable },
         remoteReposDirectory: @escaping () -> String? = { Paths.reposDirectory },
         remoteSessionBackendAvailable: @escaping () -> Bool = {
             Paths.dtachExecutable != nil
         },
+        availableHostsProvider: (() -> [RemoteHostInfo])? = nil,
         remoteSessionLauncher: ((String, String?, String?) -> Void)? = nil,
         sessionCreationLedger: SessionCreationLedger = SessionCreationLedger(),
         projectCreationLedger: ProjectCreationLedger = ProjectCreationLedger(),
@@ -546,8 +587,12 @@ final class AppModel: ObservableObject {
         self.remotePromptTarget = remotePromptTarget
         self.remoteElicitationTarget = remoteElicitationTarget
         self.remoteCopilotExecutable = remoteCopilotExecutable
+        self.remoteWrapperExecutable = remoteWrapperExecutable
         self.remoteReposDirectory = remoteReposDirectory
         self.remoteSessionBackendAvailable = remoteSessionBackendAvailable
+        self.availableHostsProvider = availableHostsProvider ?? {
+            SSHHostCatalog.defaultAvailableHosts(statePath: stateRepository.path)
+        }
         self.remoteSessionLauncher = remoteSessionLauncher
         self.sessionCreationLedger = sessionCreationLedger
         self.projectCreationLedger = projectCreationLedger
@@ -709,6 +754,76 @@ final class AppModel: ObservableObject {
         projects.first { $0.id == id }
     }
 
+    private var cachedAvailableHosts: (hosts: [RemoteHostInfo], loadedAt: TimeInterval)?
+
+    var availableHosts: [RemoteHostInfo] {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let cached = cachedAvailableHosts, now - cached.loadedAt < 2.0 {
+            return cached.hosts
+        }
+        let hosts = availableHostsProvider()
+        cachedAvailableHosts = (hosts, now)
+        return hosts
+    }
+
+    func resolvedRemoteHost(
+        hostId: String?,
+        projectDefaultHostId: String? = nil
+    ) -> RemoteHostInfo? {
+        SSHHostCatalog.resolve(
+            hostId: hostId,
+            projectDefaultHostId: projectDefaultHostId,
+            in: availableHosts
+        )
+    }
+
+    func resolvedRemoteHost(for session: Session, in project: Project) -> RemoteHostInfo? {
+        if let explicit = session.hostId, !explicit.isEmpty,
+           explicit.caseInsensitiveCompare(RemoteHostInfo.localId) != .orderedSame {
+            return resolvedRemoteHost(hostId: explicit)
+                ?? RemoteHostInfo(id: explicit, displayName: explicit, sshTarget: explicit, isLocal: false)
+        }
+        if let legacyMarker = resumeMarkerValue(sessionId: session.id, suffix: "remote-host"),
+           !legacyMarker.isEmpty {
+            return resolvedRemoteHost(hostId: legacyMarker)
+                ?? RemoteHostInfo(id: legacyMarker, displayName: legacyMarker, sshTarget: legacyMarker, isLocal: false)
+        }
+        return nil
+    }
+
+    func effectiveHostId(forProjectId pid: String) -> String {
+        guard let project = project(pid),
+              let defaultHostId = project.defaultHostId,
+              !defaultHostId.isEmpty else {
+            return RemoteHostInfo.localId
+        }
+        return defaultHostId
+    }
+
+    func setProjectDefaultHost(_ pid: String, hostId: String?) {
+        guard let pi = projectIndex(pid) else { return }
+        let normalized: String?
+        if let hostId, !hostId.isEmpty, hostId.lowercased() != RemoteHostInfo.localId {
+            normalized = resolvedRemoteHost(hostId: hostId)?.id ?? hostId
+        } else {
+            normalized = nil
+        }
+        guard projects[pi].defaultHostId != normalized else { return }
+        projects[pi].defaultHostId = normalized
+        save()
+    }
+
+    func hostDisplayName(for session: Session, in hosts: [RemoteHostInfo]? = nil) -> String? {
+        guard let hostId = session.hostId,
+              !hostId.isEmpty,
+              hostId.lowercased() != RemoteHostInfo.localId else {
+            return nil
+        }
+        let catalog = hosts ?? availableHosts
+        return catalog.first(where: { $0.id.caseInsensitiveCompare(hostId) == .orderedSame })?.displayName
+            ?? hostId
+    }
+
     private var currentSelectedSessionId: String? {
         guard let pid = selectedProjectId, let pi = projectIndex(pid) else { return nil }
         return projects[pi].selectedSessionId
@@ -774,6 +889,7 @@ final class AppModel: ObservableObject {
                 ?? ((recordedCopilot?.isEmpty == false) ? recordedCopilot : nil),
             launchCopilotExecutable: copilotExecutable,
             launchCopilotInitialPrompt: launchCopilotInitialPrompt,
+            remoteHost: resolvedRemoteHost(for: session, in: project),
             kittyImageDiskStore: kittyImageDiskStore
         )
         c.onTitle = { [weak self] title in self?.updateTitle(sessionId: sessionId, title: title) }
@@ -977,10 +1093,15 @@ final class AppModel: ObservableObject {
 
     // MARK: - project / session mutations
 
-    private func makeProject(name: String, cwd: String, withSession: Bool) -> Project {
-        var project = Project(name: name, cwd: cwd)
+    private func makeProject(
+        name: String,
+        cwd: String,
+        defaultHostId: String? = nil,
+        withSession: Bool
+    ) -> Project {
+        var project = Project(name: name, cwd: cwd, defaultHostId: defaultHostId)
         if withSession {
-            let session = Session(title: "shell", cwd: cwd)
+            let session = Session(title: "shell", cwd: cwd, hostId: defaultHostId)
             project.sessions = [session]
             project.selectedSessionId = session.id
         }
@@ -1046,10 +1167,15 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func addSession(toProjectId pid: String, cwd: String? = nil) -> String? {
-        guard let pi = projectIndex(pid) else { return nil }
-        let dir = cwd ?? defaultCwd(forProjectIndex: pi)
-        let session = Session(title: "shell", cwd: dir)
+    func addSession(toProjectId pid: String, cwd: String? = nil, hostId: String? = nil) -> String? {
+        guard let pi = projectIndex(pid),
+              let resolvedHost = resolvedRemoteHost(
+                  hostId: hostId,
+                  projectDefaultHostId: projects[pi].defaultHostId
+              ) else { return nil }
+        let dir = cwd ?? defaultCwd(forProjectIndex: pi, targetHost: resolvedHost)
+        let sessionHostId = resolvedHost.isLocal ? nil : resolvedHost.id
+        let session = Session(title: "shell", cwd: dir, hostId: sessionHostId)
         projects[pi].sessions.append(session)
         projects[pi].selectedSessionId = session.id
         controller(for: session.id)
@@ -1083,28 +1209,55 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func copilotSessionExecutable(toProjectId pid: String) throws -> String {
+    func copilotSessionExecutable(toProjectId pid: String, hostId: String? = nil) throws -> String {
         guard !isTerminating else { throw CopilotSessionStartError.shuttingDown }
-        guard projectIndex(pid) != nil else { throw CopilotSessionStartError.projectUnavailable }
+        guard let pi = projectIndex(pid) else { throw CopilotSessionStartError.projectUnavailable }
         guard remoteSessionBackendAvailable() else { throw CopilotSessionStartError.backendUnavailable }
+        guard let resolvedHost = resolvedRemoteHost(
+            hostId: hostId,
+            projectDefaultHostId: projects[pi].defaultHostId
+        ) else {
+            throw CopilotSessionStartError.backendUnavailable
+        }
+        if !resolvedHost.isLocal {
+            return remoteWrapperExecutable() ?? "/usr/bin/ssh"
+        }
         guard let executable = remoteCopilotExecutable() else {
             throw CopilotSessionStartError.copilotUnavailable
         }
         return executable
     }
 
-    func addCopilotSessionInteractive(toProjectId pid: String, withPrompt: Bool = false) {
+    func addCopilotSessionInteractive(
+        toProjectId pid: String,
+        withPrompt: Bool = false,
+        hostId: String? = nil
+    ) {
         do {
-            _ = try copilotSessionExecutable(toProjectId: pid)
             if withPrompt {
-                let outcome = CopilotPromptComposer().run { prompt in
-                    try self.addCopilotSession(toProjectId: pid, initialPrompt: prompt)
+                guard !isTerminating else { throw CopilotSessionStartError.shuttingDown }
+                guard projectIndex(pid) != nil else { throw CopilotSessionStartError.projectUnavailable }
+                guard remoteSessionBackendAvailable() else { throw CopilotSessionStartError.backendUnavailable }
+                let hosts = availableHosts
+                if hosts.count <= 1 {
+                    _ = try copilotSessionExecutable(toProjectId: pid, hostId: hostId)
+                }
+                let composer = CopilotPromptComposer(
+                    availableHosts: hosts,
+                    selectedHostId: hostId ?? effectiveHostId(forProjectId: pid)
+                )
+                let outcome = composer.run { prompt in
+                    try self.addCopilotSession(
+                        toProjectId: pid,
+                        initialPrompt: prompt,
+                        hostId: composer.selectedHostId
+                    )
                 }
                 if outcome == .newTerminal, !isTerminating {
-                    addSession(toProjectId: pid)
+                    addSession(toProjectId: pid, hostId: composer.selectedHostId)
                 }
             } else {
-                try addCopilotSession(toProjectId: pid)
+                try addCopilotSession(toProjectId: pid, hostId: hostId)
             }
         } catch {
             let alert = NSAlert()
@@ -1120,28 +1273,41 @@ final class AppModel: ObservableObject {
                 }
             }
             if alert.runModal() == .alertSecondButtonReturn, !isTerminating {
-                addSession(toProjectId: pid)
+                addSession(toProjectId: pid, hostId: hostId)
             }
         }
     }
 
     @discardableResult
-    func addCopilotSession(toProjectId pid: String, initialPrompt: String? = nil) throws -> String {
+    func addCopilotSession(
+        toProjectId pid: String,
+        initialPrompt: String? = nil,
+        hostId: String? = nil
+    ) throws -> String {
         // Revalidate after the composer: its modal run loop permits project changes.
-        let executable = try copilotSessionExecutable(toProjectId: pid)
-        guard let pi = projectIndex(pid) else { throw CopilotSessionStartError.projectUnavailable }
+        let executable = try copilotSessionExecutable(toProjectId: pid, hostId: hostId)
+        guard let pi = projectIndex(pid),
+              let resolvedHost = resolvedRemoteHost(
+                  hostId: hostId,
+                  projectDefaultHostId: projects[pi].defaultHostId
+              ) else {
+            throw CopilotSessionStartError.projectUnavailable
+        }
         if let initialPrompt, !SessionInputValidation.isValidPrompt(initialPrompt) {
             throw CopilotSessionStartError.invalidPrompt
         }
-        let cwd = Paths.normalizedDirectory(defaultCwd(forProjectIndex: pi))
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
-            throw CopilotSessionStartError.workingDirectoryUnavailable(cwd)
+        let cwd = Paths.normalizedDirectory(defaultCwd(forProjectIndex: pi, targetHost: resolvedHost))
+        if resolvedHost.isLocal {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw CopilotSessionStartError.workingDirectoryUnavailable(cwd)
+            }
         }
         let prompt = initialPrompt?
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
-        let session = Session(title: "Copilot", cwd: cwd)
+        let sessionHostId = resolvedHost.isLocal ? nil : resolvedHost.id
+        let session = Session(title: "Copilot", cwd: cwd, hostId: sessionHostId)
         let previousSelection = projects[pi].selectedSessionId
         projects[pi].sessions.append(session)
         projects[pi].selectedSessionId = session.id
@@ -1169,12 +1335,16 @@ final class AppModel: ObservableObject {
         NSPasteboard.general.setString(prompt, forType: .string)
     }
 
-    func addAdversarialReviewSessionInteractive(toProjectId pid: String) {
-        guard remoteSessionBackendAvailable(),
-              remoteCopilotExecutable() != nil else {
+    func addAdversarialReviewSessionInteractive(
+        toProjectId pid: String,
+        hostId: String? = nil
+    ) {
+        do {
+            _ = try copilotSessionExecutable(toProjectId: pid, hostId: hostId)
+        } catch {
             presentAlert(
                 title: "Copilot Is Unavailable",
-                message: "Install or configure the Copilot CLI before starting a pull request review."
+                message: error.localizedDescription
             )
             return
         }
@@ -1188,7 +1358,8 @@ final class AppModel: ObservableObject {
         ) {
             if addAdversarialReviewSession(
                 toProjectId: pid,
-                pullRequestURL: input
+                pullRequestURL: input,
+                hostId: hostId
             ) != nil {
                 return
             }
@@ -1203,17 +1374,22 @@ final class AppModel: ObservableObject {
     @discardableResult
     func addAdversarialReviewSession(
         toProjectId pid: String,
-        pullRequestURL: String
+        pullRequestURL: String,
+        hostId: String? = nil
     ) -> String? {
         guard let pi = projectIndex(pid),
               let target = PullRequestReviewTarget.parse(pullRequestURL),
-              remoteSessionBackendAvailable(),
-              let copilotExecutable = remoteCopilotExecutable() else {
+              let resolvedHost = resolvedRemoteHost(
+                  hostId: hostId,
+                  projectDefaultHostId: projects[pi].defaultHostId
+              ),
+              let copilotExecutable = try? copilotSessionExecutable(toProjectId: pid, hostId: resolvedHost.id) else {
             return nil
         }
 
-        let cwd = defaultCwd(forProjectIndex: pi)
-        let session = Session(title: target.title, cwd: cwd)
+        let cwd = defaultCwd(forProjectIndex: pi, targetHost: resolvedHost)
+        let sessionHostId = resolvedHost.isLocal ? nil : resolvedHost.id
+        let session = Session(title: target.title, cwd: cwd, hostId: sessionHostId)
         projects[pi].sessions.append(session)
         projects[pi].selectedSessionId = session.id
         let prompt = pullRequestReviewPrompt(for: target)
@@ -1248,6 +1424,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    nonisolated static func adversarialReviewPrompt(for target: PullRequestReviewTarget) -> String {
+        PullRequestReviewPrompt.builtIn.prompt(for: target)
+    }
+
     func pullRequestReviewPrompt(for target: PullRequestReviewTarget) -> String {
         PullRequestReviewPrompt.stored(in: defaults).prompt(for: target)
     }
@@ -1274,12 +1454,17 @@ final class AppModel: ObservableObject {
     /// Where a new session should start: inherit the active pane's directory
     /// (kept fresh by OSC 7 when the shell emits it), else the project default,
     /// else the default startup folder (~/Repos).
-    func defaultCwd(forProjectIndex pi: Int) -> String {
+    func defaultCwd(forProjectIndex pi: Int, targetHost: RemoteHostInfo? = nil) -> String {
         let project = projects[pi]
+        let targetHostId = (targetHost?.isLocal == false) ? targetHost?.id : nil
         if let sid = project.selectedSessionId,
            let session = project.sessions.first(where: { $0.id == sid }),
+           session.hostId == targetHostId,
            !session.cwd.isEmpty {
             return session.cwd
+        }
+        if targetHostId != nil, let remoteDefault = targetHost?.defaultCwd, !remoteDefault.isEmpty {
+            return remoteDefault
         }
         if !project.cwd.isEmpty { return project.cwd }
         return Paths.defaultStartupDir
@@ -2767,6 +2952,16 @@ final class AppModel: ObservableObject {
             let marker = p.id == selectedProjectId ? "*" : " "
             let counts = "\(p.sessions.count) session\(p.sessions.count == 1 ? "" : "s")"
             return "\(marker) [\(p.aggregateStatus.rawValue)] \(p.name)  (\(counts))  \(p.id)"
+        }.joined(separator: "\n")
+    }
+
+    private func renderHosts() -> String {
+        let hosts = availableHosts
+        if hosts.isEmpty { return "(no hosts)" }
+        return hosts.map { host in
+            let target = host.sshTarget.map { " (\($0))" } ?? ""
+            let kind = host.isLocal ? "local" : "ssh"
+            return "\(host.id)  [\(kind)]  \(host.displayName)\(target)"
         }.joined(separator: "\n")
     }
 

@@ -24,6 +24,10 @@ struct ControlCommandRouter {
         var sendSessionPrompt: (ControlRequest) -> ControlResponse = { _ in
             .failure("send-session-prompt is not configured", code: "unavailable")
         }
+        var listHosts: () -> String = { "" }
+        var setDefaultHost: (ControlRequest) -> ControlResponse = { _ in
+            .failure("set-default-host is not configured", code: "unavailable")
+        }
         let screenshot: (String?) -> ControlResponse
         let diagnostics: () -> String
         let remote: (String) -> ControlResponse
@@ -37,6 +41,10 @@ struct ControlCommandRouter {
             return .success("pong")
         case "list-projects":
             return .success(actions.listProjects())
+        case "list-hosts":
+            return .success(actions.listHosts())
+        case "set-default-host":
+            return actions.setDefaultHost(request)
         case "list-status":
             return .success(actions.listStatus())
         case "set-status":

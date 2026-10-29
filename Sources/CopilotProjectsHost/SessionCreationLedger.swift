@@ -32,10 +32,11 @@ struct SessionCreationRecord: Codable, Equatable, Sendable {
         projectId: String,
         kind: RemoteSessionKind,
         initialPrompt: String?,
-        pullRequestURL: String?
+        pullRequestURL: String?,
+        hostId: String? = nil
     ) -> String {
         var hash = SHA256()
-        let fields: [String?] = [
+        var fields: [String?] = [
             "copilot-projects/session-creation/v1",
             pullRequestURL == nil ? "create" : "review",
             projectId,
@@ -43,6 +44,9 @@ struct SessionCreationRecord: Codable, Equatable, Sendable {
             initialPrompt,
             pullRequestURL,
         ]
+        if let hostId, !hostId.isEmpty {
+            fields.append(hostId.lowercased())
+        }
         for field in fields {
             guard let field else {
                 hash.update(data: Data([0]))

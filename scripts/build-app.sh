@@ -214,9 +214,16 @@ fi
 echo "==> compiling SwiftTerm Metal shaders"
 SHADER_TMP="$(mktemp -d -t copilot-projects-shaders)"
 AIR_FILE="$SHADER_TMP/Shaders.air"
-xcrun -sdk macosx metal -std=metal3.0 -mmacosx-version-min=26.0 \
-  -c "$SHADER_SOURCE" -o "$AIR_FILE"
-xcrun -sdk macosx metallib "$AIR_FILE" -o "$RES/default.metallib"
+if xcrun -sdk macosx metal -std=metal3.0 -mmacosx-version-min=26.0 \
+  -c "$SHADER_SOURCE" -o "$AIR_FILE" 2>/dev/null; then
+  xcrun -sdk macosx metallib "$AIR_FILE" -o "$RES/default.metallib"
+elif [ "$CONFIG" != "release" ] && [ -s "/Applications/Copilot Projects.app/Contents/Resources/default.metallib" ]; then
+  cp "/Applications/Copilot Projects.app/Contents/Resources/default.metallib" "$RES/default.metallib"
+else
+  xcrun -sdk macosx metal -std=metal3.0 -mmacosx-version-min=26.0 \
+    -c "$SHADER_SOURCE" -o "$AIR_FILE"
+  xcrun -sdk macosx metallib "$AIR_FILE" -o "$RES/default.metallib"
+fi
 rm -rf "$SHADER_TMP"
 
 # SwiftPM resource bundles the standalone host loads at runtime.

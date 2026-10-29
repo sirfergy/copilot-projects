@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import CopilotProjectsCore
+import CopilotProjectsProtocol
 
 struct RootView: View {
     @ObservedObject var model: AppModel
@@ -178,6 +179,9 @@ private struct WorkspaceHeading: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .help(session?.title ?? model.selectedProject?.name ?? "Workspace")
+            if let session, let hostName = model.hostDisplayName(for: session) {
+                HostBadge(name: hostName)
+            }
             Spacer(minLength: 0)
             Image(systemName: "terminal")
                 .foregroundStyle(StudioStyle.secondaryText)
@@ -376,6 +380,23 @@ struct SidebarView: View {
                             model.addCopilotSessionInteractive(toProjectId: project.id, withPrompt: true)
                         }
                         Button("New Terminal") { model.addSession(toProjectId: project.id) }
+                        if model.availableHosts.count > 1 {
+                            Divider()
+                            Menu("Default Host") {
+                                let currentHostId = model.effectiveHostId(forProjectId: project.id)
+                                ForEach(model.availableHosts) { host in
+                                    Button {
+                                        model.setProjectDefaultHost(project.id, hostId: host.id)
+                                    } label: {
+                                        if currentHostId.caseInsensitiveCompare(host.id) == .orderedSame {
+                                            Label(host.displayName, systemImage: "checkmark")
+                                        } else {
+                                            Text(host.displayName)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         Divider()
                         Button("Rename…") { model.renameProjectInteractive(project.id) }
                         Divider()
@@ -424,6 +445,7 @@ struct ProjectRow: View, Equatable {
             && lhs.isDropTarget == rhs.isDropTarget
             && lhs.project.id == rhs.project.id
             && lhs.project.name == rhs.project.name
+            && lhs.project.defaultHostId == rhs.project.defaultHostId
             && lhs.project.sessions.count == rhs.project.sessions.count
             && lhs.project.hasUnread == rhs.project.hasUnread
             && lhs.project.runningCount == rhs.project.runningCount
@@ -436,10 +458,15 @@ struct ProjectRow: View, Equatable {
     var body: some View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(project.name)
-                    .font(.body.weight(.medium))
-                    .lineLimit(1)
-                    .help(project.name)
+                HStack(spacing: 5) {
+                    Text(project.name)
+                        .font(.body.weight(.medium))
+                        .lineLimit(1)
+                        .help(project.name)
+                    if let defaultHostId = project.defaultHostId, !defaultHostId.isEmpty {
+                        HostBadge(name: defaultHostId)
+                    }
+                }
                 Text("\(project.sessions.count) session\(project.sessions.count == 1 ? "" : "s")")
                     .font(.caption)
                     .lineLimit(1)
@@ -843,6 +870,47 @@ private struct SessionCreationButtons: View {
                 Button("Review Pull Request…", systemImage: "checkmark.shield") {
                     model.addAdversarialReviewSessionInteractive(toProjectId: project.id)
                 }
+                if model.availableHosts.count > 1 {
+                    Divider()
+                    ForEach(model.availableHosts) { host in
+                        Menu("Run on \(host.displayName)") {
+                            Button("New Copilot Session") {
+                                model.addCopilotSessionInteractive(toProjectId: project.id, hostId: host.id)
+                            }
+                            Button("Start with Prompt…") {
+                                model.addCopilotSessionInteractive(
+                                    toProjectId: project.id,
+                                    withPrompt: true,
+                                    hostId: host.id
+                                )
+                            }
+                            Button("New Terminal") {
+                                model.addSession(toProjectId: project.id, hostId: host.id)
+                            }
+                            Button("Review Pull Request…") {
+                                model.addAdversarialReviewSessionInteractive(
+                                    toProjectId: project.id,
+                                    hostId: host.id
+                                )
+                            }
+                        }
+                    }
+                    Divider()
+                    Menu("Default Host") {
+                        let currentHostId = model.effectiveHostId(forProjectId: project.id)
+                        ForEach(model.availableHosts) { host in
+                            Button {
+                                model.setProjectDefaultHost(project.id, hostId: host.id)
+                            } label: {
+                                if currentHostId.caseInsensitiveCompare(host.id) == .orderedSame {
+                                    Label(host.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(host.displayName)
+                                }
+                            }
+                        }
+                    }
+                }
             } label: {
                 Image(systemName: "chevron.down")
                     .font(.caption2)
@@ -952,6 +1020,28 @@ private struct SessionRowChromeModifier: ViewModifier {
     }
 }
 
+struct HostBadge: View, Equatable {
+    let name: String
+
+    var body: some View {
+        Text(name)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(StudioStyle.secondaryText)
+            .lineLimit(1)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(StudioStyle.raised)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5)
+            )
+            .help("Running on \(name)")
+    }
+}
+
 struct SessionRow: View, Equatable {
     let session: Session
     let isActive: Bool
@@ -966,6 +1056,7 @@ struct SessionRow: View, Equatable {
             && lhs.showNumber == rhs.showNumber
             && lhs.session.id == rhs.session.id
             && lhs.session.title == rhs.session.title
+            && lhs.session.hostId == rhs.session.hostId
             && lhs.session.statusText == rhs.session.statusText
             && lhs.session.displayStatus == rhs.session.displayStatus
             && lhs.session.failedRequest == rhs.session.failedRequest
@@ -1013,6 +1104,9 @@ struct SessionRow: View, Equatable {
                         .help(session.statusText ?? session.title)
                     HStack(spacing: 6) {
                         Text(stateLabel)
+                        if let hostId = session.hostId, !hostId.isEmpty {
+                            HostBadge(name: hostId)
+                        }
                         if session.hasBackgroundWork { BackgroundWorkBadge() }
                         if !session.schedules.isEmpty { ScheduleBadge(schedules: session.schedules) }
                         if showsUnreadIndicator {
