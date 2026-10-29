@@ -1,3 +1,5 @@
+import AppKit
+import SwiftUI
 import XCTest
 import CopilotProjectsCore
 import CopilotProjectsProtocol
@@ -1297,5 +1299,143 @@ final class ProtocolContractTests: XCTestCase {
         let snapshot = model.remoteWorkspaceSnapshot()
         XCTAssertEqual(snapshot.projects[0].sessions[0].memoryUsageBytes, 420_000_000)
         XCTAssertNil(snapshot.projects[0].sessions[1].memoryUsageBytes)
+    }
+
+    @MainActor
+    func testParentSessionRowRendersChildSummaryOnDedicatedTappableRowAndPreservesMemoryBadgeWidth() async throws {
+        @MainActor
+        final class Probe {
+            var compressedBadgeWidth: CGFloat = 0
+            var toggles = 0
+            var selections = 0
+            var closes = 0
+        }
+
+        _ = NSApplication.shared
+        let activationPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.prohibited)
+        defer { NSApp.setActivationPolicy(activationPolicy) }
+        let probe = Probe()
+
+        // 1. SessionMemoryBadge keeps its full horizontal fittingSize even when compressed in a narrow status row
+        let badge = SessionMemoryBadge(bytes: 1_100_000_000)
+        let unconstrainedBadgeWidth = NSHostingView(rootView: badge).fittingSize.width
+        XCTAssertGreaterThan(unconstrainedBadgeWidth, 35)
+        let constrainedStatusRow = NSHostingView(
+            rootView: HStack(spacing: 6) {
+                Text("Waiting for input")
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                badge.onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.width
+                } action: { width in
+                    probe.compressedBadgeWidth = width
+                }
+            }
+            .font(.caption)
+            .frame(width: 80)
+        )
+        let badgeWindow = NSWindow(
+            contentRect: NSRect(x: -20000, y: -20000, width: 80, height: 40),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        badgeWindow.contentView = constrainedStatusRow
+        badgeWindow.orderBack(nil)
+        defer {
+            badgeWindow.orderOut(nil)
+            badgeWindow.contentView = nil
+        }
+        constrainedStatusRow.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(probe.compressedBadgeWidth, unconstrainedBadgeWidth, accuracy: 0.5)
+
+        // 2. Parent SessionRow with childSummary is taller than a plain SessionRow (dedicated row)
+        //    and tapping/double-tapping the childSummary pill toggles expansion without selecting or closing.
+        var parentSession = Session(id: "s1", title: "Orchestrator", cwd: "/tmp", memoryUsageBytes: 1_100_000_000)
+        parentSession.status = .running
+        var child = Session(id: "c1", title: "Worker", cwd: "/tmp", parentSessionId: "s1")
+        child.status = .running
+        let summary = SessionChildSummary(children: [child])
+
+        let plainHosting = NSHostingView(
+            rootView: SessionRow(session: parentSession, isActive: false, onSelect: {}, onClose: {})
+                .frame(width: 220)
+        )
+        let parentHosting = NSHostingView(
+            rootView: SessionRow(
+                session: parentSession,
+                isActive: false,
+                childSummary: summary,
+                isExpanded: false,
+                onToggleExpand: { probe.toggles += 1 },
+                onSelect: { probe.selections += 1 },
+                onClose: { probe.closes += 1 }
+            )
+            .frame(width: 220)
+        )
+        XCTAssertGreaterThan(
+            parentHosting.fittingSize.height,
+            plainHosting.fittingSize.height + 12,
+            "childSummary should render on its own dedicated row below the status/memory row"
+        )
+
+        let window = NSWindow(
+            contentRect: NSRect(x: -20000, y: -20000, width: 220, height: 90),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = parentHosting
+        window.orderBack(nil)
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        parentHosting.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+
+        func sendClick(at point: NSPoint, count: Int) throws {
+            let timestamp = ProcessInfo.processInfo.systemUptime
+            for (type, delta): (NSEvent.EventType, TimeInterval) in [(.leftMouseDown, 0), (.leftMouseUp, 0.01)] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(
+                    with: type,
+                    location: point,
+                    modifierFlags: [],
+                    timestamp: timestamp + delta,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    eventNumber: count,
+                    clickCount: count,
+                    pressure: type == .leftMouseDown ? 1 : 0
+                ))
+                window.sendEvent(event)
+            }
+        }
+
+        // Single-click and double-click on the childSummary pill (bottom-left row of the VStack)
+        let pillPoint = NSPoint(x: 65, y: 24)
+        try sendClick(at: pillPoint, count: 1)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(probe.toggles, 1)
+        XCTAssertEqual(probe.selections, 0)
+        XCTAssertEqual(probe.closes, 0)
+
+        try sendClick(at: pillPoint, count: 2)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(probe.toggles, 2)
+        XCTAssertEqual(probe.selections, 0)
+        XCTAssertEqual(probe.closes, 0)
+
+        // Clicking and double-clicking the title area still selects and closes the row
+        try sendClick(at: NSPoint(x: 80, y: 66), count: 1)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(probe.selections, 1)
+        XCTAssertEqual(probe.closes, 0)
+
+        try sendClick(at: NSPoint(x: 80, y: 66), count: 2)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(probe.closes, 1)
     }
 }

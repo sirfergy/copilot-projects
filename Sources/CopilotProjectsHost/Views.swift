@@ -1285,6 +1285,7 @@ struct SessionMemoryBadge: View, Equatable {
             .monospacedDigit()
             .foregroundStyle(StudioStyle.secondaryText)
             .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
             .background(
@@ -1392,6 +1393,7 @@ struct SessionRow: View, Equatable {
                             .help(session.statusText ?? session.title)
                         HStack(spacing: 6) {
                             Text(stateLabel)
+                                .lineLimit(1)
                             if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
                                 SessionMemoryBadge(bytes: memoryBytes)
                             }
@@ -1403,19 +1405,26 @@ struct SessionRow: View, Equatable {
                                     .foregroundStyle(.blue)
                                     .accessibilityHidden(true)
                             }
-                            if let childSummary {
-                                Text(childSummary.label)
-                                    .font(.caption2.weight(.medium))
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1)
-                                    .background(
-                                        Capsule(style: .continuous)
-                                            .fill(Color.primary.opacity(0.08))
-                                    )
-                            }
                         }
                         .font(.caption)
                         .foregroundStyle(StudioStyle.secondaryText)
+                        if let childSummary {
+                            Text(childSummary.label)
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(StudioStyle.secondaryText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Capsule(style: .continuous)
+                                        .fill(Color.primary.opacity(0.08))
+                                )
+                                .contentShape(Capsule(style: .continuous))
+                                .onTapGesture { onToggleExpand?() }
+                                .help("\(isExpanded ? "Collapse" : "Expand") (\(childSummary.label))")
+                                .accessibilityIdentifier("session-child-summary")
+                        }
                         if let hostLabel = hostDisplayName ?? session.hostId, !hostLabel.isEmpty {
                             HostBadge(name: hostLabel)
                         }
@@ -1425,11 +1434,14 @@ struct SessionRow: View, Equatable {
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
-                .onTapGesture(perform: onSelect)
-                .simultaneousGesture(TapGesture(count: 2).onEnded {
-                    // Finish the second click's selection before removing its row.
-                    DispatchQueue.main.async(execute: onClose)
-                })
+                .gesture(
+                    TapGesture(count: 1)
+                        .onEnded(onSelect)
+                        .simultaneously(with: TapGesture(count: 2).onEnded {
+                            // Finish the second click's selection before removing its row.
+                            DispatchQueue.main.async(execute: onClose)
+                        })
+                )
                 if let childSummary {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
