@@ -372,7 +372,29 @@ final class ProtocolContractTests: XCTestCase {
         )
         for fixture in ["served-workspace", "legacy-workspace"] {
             XCTAssertNil(try workspace(fixture).projects.first?.sessions.first?.markedUnread, fixture)
+            XCTAssertNil(try workspace(fixture).projects.first?.sessions.first?.parentSessionId, fixture)
         }
+    }
+
+    func testRemoteSessionSnapshotOmitsNilParentSessionIdAndRoundTripsWhenPresent() throws {
+        let topLevel = RemoteSessionSnapshot(
+            id: "root", title: "Root", status: "idle", statusText: nil,
+            unread: false, ready: false, background: false, scheduled: false
+        )
+        XCTAssertNil(topLevel.parentSessionId)
+        XCTAssertFalse(try jsonObject(topLevel).keys.contains("parentSessionId"))
+
+        let child = RemoteSessionSnapshot(
+            id: "child", title: "Child", status: "running", statusText: nil,
+            unread: false, ready: false, background: false, scheduled: false,
+            parentSessionId: "root"
+        )
+        XCTAssertEqual(child.parentSessionId, "root")
+        XCTAssertEqual(try jsonObject(child)["parentSessionId"] as? String, "root")
+        XCTAssertEqual(
+            try JSONDecoder().decode(RemoteSessionSnapshot.self, from: JSONEncoder().encode(child)),
+            child
+        )
     }
 
     func testSessionSearchContractIsNotAdvertisedByTheHostProtocol() {

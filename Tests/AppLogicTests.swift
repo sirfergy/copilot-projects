@@ -9329,6 +9329,25 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(received.last?.prompt, prompt)
         XCTAssertEqual(received.last?.title, "Review o/r#1")
         XCTAssertNil(received.last?.sessionId)
+        XCTAssertEqual(received.last?.parentSessionId, "calling-session")
+
+        XCTAssertEqual(
+            CLIMain.run(valid + ["--parent-session", "  explicit-parent  "], environment: environment),
+            0
+        )
+        XCTAssertEqual(received.last?.parentSessionId, "explicit-parent")
+
+        XCTAssertEqual(
+            CLIMain.run(valid + ["--parent-session", "   "], environment: environment),
+            0
+        )
+        XCTAssertNil(received.last?.parentSessionId)
+
+        XCTAssertEqual(
+            CLIMain.run(valid + ["--no-parent"], environment: environment),
+            0
+        )
+        XCTAssertNil(received.last?.parentSessionId)
 
         let expectedExits: [(String?, Int32)] = [
             ("bad-request", 2), ("conflict", 3), ("gone", 4), ("unavailable", 5),
@@ -9350,6 +9369,8 @@ final class AppLogicTests: XCTestCase {
             valid + ["--help"],
             valid + ["--cwd", "/tmp"],
             valid + ["positional"],
+            valid + ["--no-parent", "--parent-session", "p"],
+            valid + ["--no-parent", "unexpected"],
             valid.filter { $0 != "--title" && $0 != "Review o/r#1" } + ["--prompt", "inline"],
             ["new-copilot-session", "--project", "p1", "--prompt-file", promptFile.path],
             ["new-copilot-session", "--project", "p1", "--request-id", "nope",
@@ -13877,6 +13898,256 @@ final class AppLogicTests: XCTestCase {
         ))
         XCTAssertNotEqual(evictedScreenA.images, initialScreenA.images)
         XCTAssertTrue(evictedScreenA.images?.contains { $0.imageId == imageIdA } != true)
+    }
+
+    // MARK: - Parent/child session grouping, auto-peek, and lifecycle
+
+    @MainActor
+    func testParentChildSessionGroupingHierarchyAutoPeekAndLifecycle() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repos = root.appendingPathComponent("Repos", isDirectory: true)
+        try FileManager.default.createDirectory(at: repos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // 1. Pure single-level hierarchy resolution (flattening multi-hop chains,
+        // ignoring missing parents, and breaking cycles).
+        let hierarchyProject = Project(
+            id: "p",
+            name: "Hierarchy",
+            cwd: "/tmp",
+            sessions: [
+                Session(id: "root", title: "Root", cwd: "/tmp"),
+                Session(id: "child", title: "Child", cwd: "/tmp", parentSessionId: "root"),
+                Session(id: "grandchild", title: "Grandchild", cwd: "/tmp", parentSessionId: "child"),
+                Session(id: "orphan", title: "Orphan", cwd: "/tmp", parentSessionId: "missing"),
+                Session(id: "self", title: "Self", cwd: "/tmp", parentSessionId: "self"),
+                Session(id: "cycle-a", title: "Cycle A", cwd: "/tmp", parentSessionId: "cycle-b"),
+                Session(id: "cycle-b", title: "Cycle B", cwd: "/tmp", parentSessionId: "cycle-a"),
+            ]
+        )
+        XCTAssertNil(hierarchyProject.effectiveParentSessionId(for: "root"))
+        XCTAssertEqual(hierarchyProject.effectiveParentSessionId(for: "child"), "root")
+        XCTAssertEqual(hierarchyProject.effectiveParentSessionId(for: "grandchild"), "root")
+        XCTAssertNil(hierarchyProject.effectiveParentSessionId(for: "orphan"))
+        XCTAssertNil(hierarchyProject.effectiveParentSessionId(for: "self"))
+        XCTAssertNil(hierarchyProject.effectiveParentSessionId(for: "cycle-a"))
+        XCTAssertNil(hierarchyProject.effectiveParentSessionId(for: "cycle-b"))
+        XCTAssertNil(hierarchyProject.resolvedParentSessionId(for: "orphan", excluding: "missing"))
+        let hierarchyItems = hierarchyProject.sessionDisplayItems(expandedParentIds: ["root"])
+        XCTAssertEqual(
+            hierarchyItems.filter { $0.effectiveParentSessionId == "root" }.map(\.id),
+            ["child", "grandchild"]
+        )
+
+        // 2. End-to-end creation via `new-copilot-session`, single-level attachment,
+        // remoteWorkspaceSnapshot projection, disclosure & auto-peek, ungroup, move, and close.
+        let parent = Session(id: "parent-1", title: "Coordinator", cwd: repos.path)
+        let otherTop = Session(id: "top-2", title: "Other Top", cwd: repos.path)
+        let p1 = Project(
+            id: "p1", name: "One", cwd: repos.path,
+            sessions: [parent, otherTop], selectedSessionId: parent.id
+        )
+        let p2 = Project(id: "p2", name: "Two", cwd: repos.path)
+        let ledger = SessionCreationLedger(url: root.appendingPathComponent("ledger.json"))
+        let model = try makeRemoteCreateModel(
+            root: root,
+            projects: [p1, p2],
+            selectedProjectId: "p1",
+            reposDirectory: { repos.path },
+            ledger: ledger,
+            onLaunch: { _, _, _ in }
+        )
+
+        let child1Id = UUID()
+        let child2Id = UUID()
+        let orphanChildId = UUID()
+
+        func spawn(id: UUID, title: String, parentSessionId: String?) -> ControlResponse {
+            var req = ControlRequest(command: "new-copilot-session")
+            req.projectId = "p1"
+            req.requestId = id.uuidString
+            req.title = title
+            req.prompt = "Work on \(title)"
+            req.parentSessionId = parentSessionId
+            return model.handle(req)
+        }
+
+        // Direct child of parent-1.
+        XCTAssertEqual(spawn(id: child1Id, title: "Track 1", parentSessionId: "parent-1").code, "created")
+        // Spawned from child1: resolves up to root parent-1 so hierarchy stays 1 level deep.
+        XCTAssertEqual(spawn(id: child2Id, title: "Track 2", parentSessionId: child1Id.uuidString).code, "created")
+        // Unknown parent in project: created as top-level.
+        XCTAssertEqual(spawn(id: orphanChildId, title: "Standalone", parentSessionId: "not-in-project").code, "created")
+
+        let currentP1 = try XCTUnwrap(model.project("p1"))
+        XCTAssertEqual(
+            currentP1.sessions.first(where: { $0.id == child1Id.uuidString })?.parentSessionId,
+            "parent-1"
+        )
+        XCTAssertEqual(
+            currentP1.sessions.first(where: { $0.id == child2Id.uuidString })?.parentSessionId,
+            "parent-1"
+        )
+        XCTAssertNil(currentP1.sessions.first(where: { $0.id == orphanChildId.uuidString })?.parentSessionId)
+
+        // Persisted state round-trips `parentSessionId` when set, omits it when nil,
+        // and decodes legacy sessions without `parentSessionId`.
+        let rawState = try String(contentsOf: root.appendingPathComponent("state.json"), encoding: .utf8)
+        XCTAssertTrue(rawState.contains("\"parentSessionId\""))
+        if case .loaded(let loadedState) = StateRepository(path: root.appendingPathComponent("state.json")).load() {
+            let loadedSessions = try XCTUnwrap(loadedState.projects.first { $0.id == "p1" }?.sessions)
+            XCTAssertEqual(loadedSessions.map(\.parentSessionId), [nil, nil, "parent-1", "parent-1", nil])
+        } else {
+            XCTFail("expected persisted state to load")
+        }
+        let legacySession = try JSONDecoder().decode(
+            Session.self,
+            from: Data(#"{"id":"legacy","title":"Legacy","cwd":"/tmp"}"#.utf8)
+        )
+        XCTAssertNil(legacySession.parentSessionId)
+        XCTAssertFalse(
+            try XCTUnwrap(String(data: JSONEncoder().encode(legacySession), encoding: .utf8))
+                .contains("parentSessionId")
+        )
+
+        // Remote snapshot carries effective parentSessionId for children and nil for top-level.
+        let remoteSessions = model.remoteWorkspaceSnapshot().projects[0].sessions
+        XCTAssertEqual(
+            remoteSessions.map(\.id),
+            ["parent-1", "top-2", child1Id.uuidString, child2Id.uuidString, orphanChildId.uuidString]
+        )
+        XCTAssertEqual(
+            remoteSessions.map(\.parentSessionId),
+            [nil, nil, "parent-1", "parent-1", nil]
+        )
+
+        // Collapsed by default: children are hidden unless selected or waiting.
+        XCTAssertFalse(model.isParentSessionExpanded("parent-1"))
+        let collapsedItems = try XCTUnwrap(model.project("p1")).sessionDisplayItems(
+            expandedParentIds: model.expandedParentSessionIds
+        )
+        XCTAssertEqual(collapsedItems.map(\.id), ["parent-1", "top-2", orphanChildId.uuidString])
+        XCTAssertEqual(collapsedItems[0].childSummary?.label, "2 children")
+        XCTAssertFalse(collapsedItems[0].isExpanded)
+
+        // Auto-peek when a child is waiting for input, and update childSummary counts.
+        model.setStatus(sessionId: child1Id.uuidString, status: .running, text: nil, timestamp: 100)
+        model.setStatus(sessionId: child2Id.uuidString, status: .waiting, text: "Approve?", timestamp: 200)
+        let waitingPeekItems = try XCTUnwrap(model.project("p1")).sessionDisplayItems(
+            expandedParentIds: model.expandedParentSessionIds
+        )
+        XCTAssertEqual(
+            waitingPeekItems.map(\.id),
+            ["parent-1", child2Id.uuidString, "top-2", orphanChildId.uuidString]
+        )
+        XCTAssertTrue(waitingPeekItems[1].isChild)
+        XCTAssertEqual(waitingPeekItems[0].childSummary?.label, "2 children · 1 running, 1 waiting")
+
+        // Auto-peek when a child is selected even if not waiting.
+        model.setStatus(sessionId: child2Id.uuidString, status: .idle, text: nil, timestamp: 300)
+        model.selectSession(projectId: "p1", sessionId: child1Id.uuidString)
+        let selectedPeekItems = try XCTUnwrap(model.project("p1")).sessionDisplayItems(
+            expandedParentIds: model.expandedParentSessionIds
+        )
+        XCTAssertEqual(
+            selectedPeekItems.map(\.id),
+            ["parent-1", child1Id.uuidString, "top-2", orphanChildId.uuidString]
+        )
+
+        // Expanding reveals all children immediately after parent in project order.
+        model.selectSession(projectId: "p1", sessionId: "parent-1")
+        model.toggleParentSessionExpanded("parent-1")
+        XCTAssertTrue(model.isParentSessionExpanded("parent-1"))
+        let expandedItems = try XCTUnwrap(model.project("p1")).sessionDisplayItems(
+            expandedParentIds: model.expandedParentSessionIds
+        )
+        XCTAssertEqual(
+            expandedItems.map(\.id),
+            ["parent-1", child1Id.uuidString, child2Id.uuidString, "top-2", orphanChildId.uuidString]
+        )
+        XCTAssertTrue(expandedItems[0].isExpanded)
+        XCTAssertTrue(expandedItems[1].isChild)
+        XCTAssertTrue(expandedItems[2].isChild)
+
+        // Adjacent and numeric navigation follow the grouped display order.
+        model.selectAdjacentSession(1)
+        XCTAssertEqual(model.project("p1")?.selectedSessionId, child1Id.uuidString)
+        model.selectSessionByIndex(3)
+        XCTAssertEqual(model.project("p1")?.selectedSessionId, "top-2")
+
+        // Group-aware reordering: child rows reorder among siblings; cross-level moves are no-ops.
+        model.moveSession(projectId: "p1", draggedId: "top-2", beforeId: child1Id.uuidString)
+        model.moveSession(projectId: "p1", draggedId: child2Id.uuidString, beforeId: "parent-1")
+        XCTAssertEqual(
+            try XCTUnwrap(model.project("p1")).sessionDisplayItems(
+                expandedParentIds: model.expandedParentSessionIds
+            ).map(\.id),
+            ["parent-1", child1Id.uuidString, child2Id.uuidString, "top-2", orphanChildId.uuidString]
+        )
+        model.moveSession(projectId: "p1", draggedId: child2Id.uuidString, beforeId: child1Id.uuidString)
+        XCTAssertEqual(
+            try XCTUnwrap(model.project("p1")).sessionDisplayItems(
+                expandedParentIds: model.expandedParentSessionIds
+            ).map(\.id),
+            ["parent-1", child2Id.uuidString, child1Id.uuidString, "top-2", orphanChildId.uuidString]
+        )
+        // Appending a child (`beforeId: nil`) moves it after its last sibling within the group.
+        model.moveSession(projectId: "p1", draggedId: child2Id.uuidString, beforeId: nil)
+        XCTAssertEqual(
+            try XCTUnwrap(model.project("p1")).sessionDisplayItems(
+                expandedParentIds: model.expandedParentSessionIds
+            ).map(\.id),
+            ["parent-1", child1Id.uuidString, child2Id.uuidString, "top-2", orphanChildId.uuidString]
+        )
+
+        // Multi-hop chains flatten on decode and preserve effective siblings across ungroup/move/close.
+        let p1ChainIdx = try XCTUnwrap(model.projectIndex("p1"))
+        let c2ChainIdx = try XCTUnwrap(model.projects[p1ChainIdx].sessions.firstIndex { $0.id == child2Id.uuidString })
+        model.projects[p1ChainIdx].sessions[c2ChainIdx].parentSessionId = child1Id.uuidString
+        let decodedChain = try JSONDecoder().decode(
+            Project.self,
+            from: JSONEncoder().encode(model.projects[p1ChainIdx])
+        )
+        XCTAssertEqual(
+            decodedChain.sessions.first(where: { $0.id == child2Id.uuidString })?.parentSessionId,
+            "parent-1"
+        )
+
+        // Ungrouping child1 promotes it to top-level while keeping child2 attached to parent-1.
+        model.ungroupSession(projectId: "p1", sessionId: child1Id.uuidString)
+        XCTAssertNil(model.project("p1")?.sessions.first(where: { $0.id == child1Id.uuidString })?.parentSessionId)
+        XCTAssertEqual(
+            model.project("p1")?.sessions.first(where: { $0.id == child2Id.uuidString })?.parentSessionId,
+            "parent-1"
+        )
+        let afterUngroup = try XCTUnwrap(model.project("p1")).sessionDisplayItems(
+            expandedParentIds: model.expandedParentSessionIds
+        )
+        XCTAssertEqual(afterUngroup[0].childSummary?.label, "1 child")
+
+        // Re-attach child1 -> child2 chain to test moving a child and closing a parent.
+        let p1Index = try XCTUnwrap(model.projectIndex("p1"))
+        let c1Index = try XCTUnwrap(model.projects[p1Index].sessions.firstIndex { $0.id == child1Id.uuidString })
+        let c2Index = try XCTUnwrap(model.projects[p1Index].sessions.firstIndex { $0.id == child2Id.uuidString })
+        model.projects[p1Index].sessions[c1Index].parentSessionId = "parent-1"
+        model.projects[p1Index].sessions[c2Index].parentSessionId = child1Id.uuidString
+
+        // Moving selected child1 to another project clears its parentSessionId, preserves child2's
+        // effective root (`parent-1`), and selects child1's visible left neighbor (`parent-1`).
+        model.selectSession(projectId: "p1", sessionId: child1Id.uuidString)
+        XCTAssertTrue(model.moveSession(toProjectId: "p2", draggedId: child1Id.uuidString))
+        XCTAssertNil(model.project("p2")?.sessions.first(where: { $0.id == child1Id.uuidString })?.parentSessionId)
+        XCTAssertEqual(
+            model.project("p1")?.sessions.first(where: { $0.id == child2Id.uuidString })?.parentSessionId,
+            "parent-1"
+        )
+        XCTAssertEqual(model.project("p1")?.selectedSessionId, "parent-1")
+
+        // Closing parent-1 promotes its remaining child (child2) to top-level and clears expanded state.
+        model.closeSession(projectId: "p1", sessionId: "parent-1")
+        XCTAssertFalse(model.isParentSessionExpanded("parent-1"))
+        XCTAssertNil(model.project("p1")?.sessions.first(where: { $0.id == child2Id.uuidString })?.parentSessionId)
     }
 }
 

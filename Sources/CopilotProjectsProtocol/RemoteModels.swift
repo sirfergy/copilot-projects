@@ -213,6 +213,9 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     public let hostId: String?
     /// Human-readable label for the remote host running this session (`nil` for local Mac sessions).
     public let hostDisplayName: String?
+    /// Effective root parent session ID within the same project when this session
+    /// is grouped as a child tab. Omitted when top-level or on older hosts.
+    public let parentSessionId: String?
     /// Physical memory footprint in bytes of the session's active process tree,
     /// quantized to 10 MB increments (`nil` when unavailable or not sampled).
     public let memoryUsageBytes: Int64?
@@ -239,6 +242,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         markedUnread: Bool? = nil,
         hostId: String? = nil,
         hostDisplayName: String? = nil,
+        parentSessionId: String? = nil,
         memoryUsageBytes: Int64? = nil
     ) {
         self.id = id
@@ -262,6 +266,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.markedUnread = markedUnread
         self.hostId = hostId
         self.hostDisplayName = hostDisplayName
+        self.parentSessionId = parentSessionId
         self.memoryUsageBytes = memoryUsageBytes
     }
 }

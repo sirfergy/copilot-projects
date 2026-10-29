@@ -28,6 +28,7 @@ public struct ControlRequest: Codable, Sendable {
     public var requestId: String?
     public var prompt: String?
     public var hostId: String?
+    public var parentSessionId: String?
 
     public init(command: String) {
         self.command = command

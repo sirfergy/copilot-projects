@@ -95,6 +95,19 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(parsed.positionals, ["first", "--literal"])
     }
 
+    func testControlRequestRoundTripsParentSessionIdAndOmitsWhenNil() throws {
+        let plain = ControlRequest(command: "new-copilot-session")
+        let plainLine = try XCTUnwrap(String(data: Wire.encodeLine(plain), encoding: .utf8))
+        XCTAssertFalse(plainLine.contains("parentSessionId"))
+        XCTAssertNil(try Wire.decode(ControlRequest.self, from: Data(plainLine.utf8)).parentSessionId)
+
+        var withParent = ControlRequest(command: "new-copilot-session")
+        withParent.parentSessionId = "parent-123"
+        let encoded = try Wire.encodeLine(withParent)
+        let decoded = try Wire.decode(ControlRequest.self, from: encoded)
+        XCTAssertEqual(decoded.parentSessionId, "parent-123")
+    }
+
     /// Runs the extension's real catalog mapping against a fixture shaped like an
     /// actual `rpc.model.list()` response. The RPC types its entries as
     /// `unknown[]` and returns raw snake_case CAPI objects, so a camelCase-only

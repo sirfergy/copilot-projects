@@ -925,7 +925,8 @@ struct SessionBrowser: View {
                 SessionList(
                     model: model,
                     project: project,
-                    showTabNumbers: model.numberHint == .tabs
+                    showTabNumbers: model.numberHint == .tabs,
+                    expandedParentIds: model.expandedParentSessionIds
                 )
                     .id(project.id)
             } else {
@@ -941,10 +942,14 @@ private struct SessionList: View {
     let model: AppModel
     let project: Project
     let showTabNumbers: Bool
+    let expandedParentIds: Set<String>
     @State private var draggedSession: Session?
     @State private var dropTargetId: String?     // a session id, or "" for end-of-list
 
     var body: some View {
+        let displayItems = project.sessionDisplayItems(
+            expandedParentIds: expandedParentIds
+        )
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 6) {
@@ -954,12 +959,19 @@ private struct SessionList: View {
                             description: Text("Start Copilot or a terminal for this project.")
                         )
                     }
-                    ForEach(Array(project.sessions.enumerated()), id: \.element.id) { index, session in
+                    ForEach(Array(displayItems.enumerated()), id: \.element.id) { index, item in
+                        let session = item.session
                         SessionRow(
                             session: session,
                             isActive: session.id == project.selectedSessionId,
                             number: index < 9 ? index + 1 : nil,
                             showNumber: showTabNumbers,
+                            isChild: item.isChild,
+                            childSummary: item.childSummary,
+                            isExpanded: item.isExpanded,
+                            onToggleExpand: item.childSummary != nil ? {
+                                model.toggleParentSessionExpanded(session.id)
+                            } : nil,
                             onSelect: {
                                 model.selectSession(projectId: project.id, sessionId: session.id)
                                 model.focusActiveTerminal()
@@ -969,6 +981,18 @@ private struct SessionList: View {
                         .equatable()
                         .id(session.id)
                         .contextMenu {
+                            if item.childSummary != nil {
+                                Button(item.isExpanded ? "Collapse Children" : "Expand Children") {
+                                    model.toggleParentSessionExpanded(session.id)
+                                }
+                                Divider()
+                            }
+                            if item.isChild {
+                                Button("Ungroup from Parent") {
+                                    model.ungroupSession(projectId: project.id, sessionId: session.id)
+                                }
+                                Divider()
+                            }
                             if model.startingPrompt(for: session.id) != nil {
                                 Button("Copy Starting Prompt") { model.copyStartingPrompt(for: session.id) }
                                 Divider()
@@ -993,7 +1017,7 @@ private struct SessionList: View {
                         }
                         .onDrop(of: [.text], delegate: SessionDropDelegate(
                             targetId: session.id, dragged: $draggedSession,
-                            dropTargetId: $dropTargetId, model: model, projectId: project.id))
+                            dropTargetId: $dropTargetId, model: model, project: project))
                     }
                     Color.clear
                         .frame(height: 32)
@@ -1003,7 +1027,7 @@ private struct SessionList: View {
                         }
                         .onDrop(of: [.text], delegate: SessionDropDelegate(
                             targetId: "", dragged: $draggedSession,
-                            dropTargetId: $dropTargetId, model: model, projectId: project.id))
+                            dropTargetId: $dropTargetId, model: model, project: project))
                 }
                 .padding(10)
             }
@@ -1125,29 +1149,39 @@ private extension View {
 }
 
 /// A session id inserts before that row; an empty target appends to the list.
+/// Top-level rows reorder among top-level rows; child rows reorder among siblings.
 private struct SessionDropDelegate: DropDelegate {
     let targetId: String
     @Binding var dragged: Session?
     @Binding var dropTargetId: String?
     let model: AppModel
-    let projectId: String
+    let project: Project
+
+    private var canDrop: Bool {
+        guard let dragged, dragged.id != targetId else { return false }
+        guard !targetId.isEmpty else { return true }
+        return project.effectiveParentSessionId(for: dragged.id)
+            == project.effectiveParentSessionId(for: targetId)
+    }
 
     func dropEntered(info: DropInfo) {
-        guard let dragged, dragged.id != targetId else { dropTargetId = nil; return }
-        dropTargetId = targetId
+        dropTargetId = canDrop ? targetId : nil
     }
     func dropExited(info: DropInfo) {
         if dropTargetId == targetId { dropTargetId = nil }
     }
-    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: canDrop ? .move : .cancel)
+    }
     func performDrop(info: DropInfo) -> Bool {
-        if let dragged {
-            model.moveSession(projectId: projectId, draggedId: dragged.id,
+        let allowed = canDrop
+        if allowed, let dragged {
+            model.moveSession(projectId: project.id, draggedId: dragged.id,
                               beforeId: targetId.isEmpty ? nil : targetId)
         }
         dragged = nil
         dropTargetId = nil
-        return true
+        return allowed
     }
 }
 
@@ -1261,6 +1295,10 @@ struct SessionRow: View, Equatable {
     let isActive: Bool
     var number: Int? = nil
     var showNumber: Bool = false
+    var isChild: Bool = false
+    var childSummary: SessionChildSummary? = nil
+    var isExpanded: Bool = false
+    var onToggleExpand: (() -> Void)? = nil
     let onSelect: () -> Void
     let onClose: () -> Void
 
@@ -1268,6 +1306,9 @@ struct SessionRow: View, Equatable {
         lhs.isActive == rhs.isActive
             && lhs.number == rhs.number
             && lhs.showNumber == rhs.showNumber
+            && lhs.isChild == rhs.isChild
+            && lhs.childSummary == rhs.childSummary
+            && lhs.isExpanded == rhs.isExpanded
             && lhs.session.id == rhs.session.id
             && lhs.session.title == rhs.session.title
             && lhs.session.hostId == rhs.session.hostId
@@ -1291,12 +1332,17 @@ struct SessionRow: View, Equatable {
     var accessibilityStatus: String {
         var states: [String] = []
         if isActive { states.append("Selected") }
+        if isChild { states.append("Child session") }
         states.append(stateLabel)
         if let hostId = session.hostId, !hostId.isEmpty {
             states.append("Running on \(hostId)")
         }
         if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
             states.append("Memory \(SessionMemoryBadge.formattedBytes(memoryBytes))")
+        }
+        if let childSummary {
+            states.append(childSummary.label)
+            states.append(isExpanded ? "Expanded" : "Collapsed")
         }
         if session.isUnread { states.append("Unread") }
         if session.hasBackgroundWork { states.append("Background work active") }
@@ -1308,65 +1354,100 @@ struct SessionRow: View, Equatable {
 
     var body: some View {
         HStack(spacing: 6) {
-            HStack(alignment: .top, spacing: 7) {
-                ZStack {
-                    SessionStateIndicator(session: session)
-                        .equatable()
-                        .opacity(showNumber ? 0 : 1)
-                    if showNumber, let number {
-                        NumberBadge(number: number)
-                    }
-                }
-                .frame(width: 18, height: 18)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(session.title)
-                        .font(.body.weight(.medium))
-                        .lineLimit(2)
-                        .help(session.statusText ?? session.title)
-                    HStack(spacing: 6) {
-                        Text(stateLabel)
-                        if let hostId = session.hostId, !hostId.isEmpty {
-                            HostBadge(name: hostId)
-                        }
-                        if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
-                            SessionMemoryBadge(bytes: memoryBytes)
-                        }
-                        if session.hasBackgroundWork { BackgroundWorkBadge() }
-                        if !session.schedules.isEmpty { ScheduleBadge(schedules: session.schedules) }
-                        if showsUnreadIndicator {
-                            Image(systemName: "circle.fill")
-                                .font(.system(size: 6))
-                                .foregroundStyle(.blue)
-                                .accessibilityHidden(true)
+            if isChild {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(StudioStyle.secondaryText.opacity(0.35))
+                    .frame(width: 2)
+                    .padding(.vertical, 4)
+                    .padding(.leading, 10)
+                    .accessibilityHidden(true)
+            }
+            HStack(spacing: 6) {
+                HStack(alignment: .top, spacing: 7) {
+                    ZStack {
+                        SessionStateIndicator(session: session)
+                            .equatable()
+                            .opacity(showNumber ? 0 : 1)
+                        if showNumber, let number {
+                            NumberBadge(number: number)
                         }
                     }
-                    .font(.caption)
-                    .foregroundStyle(StudioStyle.secondaryText)
+                    .frame(width: 18, height: 18)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(session.title)
+                            .font(.body.weight(.medium))
+                            .lineLimit(2)
+                            .help(session.statusText ?? session.title)
+                        HStack(spacing: 6) {
+                            Text(stateLabel)
+                            if let hostId = session.hostId, !hostId.isEmpty {
+                                HostBadge(name: hostId)
+                            }
+                            if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
+                                SessionMemoryBadge(bytes: memoryBytes)
+                            }
+                            if session.hasBackgroundWork { BackgroundWorkBadge() }
+                            if !session.schedules.isEmpty { ScheduleBadge(schedules: session.schedules) }
+                            if showsUnreadIndicator {
+                                Image(systemName: "circle.fill")
+                                    .font(.system(size: 6))
+                                    .foregroundStyle(.blue)
+                                    .accessibilityHidden(true)
+                            }
+                            if let childSummary {
+                                Text(childSummary.label)
+                                    .font(.caption2.weight(.medium))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(
+                                        Capsule(style: .continuous)
+                                            .fill(Color.primary.opacity(0.08))
+                                    )
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(StudioStyle.secondaryText)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onSelect)
+                .simultaneousGesture(TapGesture(count: 2).onEnded {
+                    // Finish the second click's selection before removing its row.
+                    DispatchQueue.main.async(execute: onClose)
+                })
+                if let childSummary {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 20, height: 20)
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                        .onTapGesture { onToggleExpand?() }
+                        .help("\(isExpanded ? "Collapse" : "Expand") (\(childSummary.label))")
+                }
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("End \(session.title)")
             }
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .onTapGesture(perform: onSelect)
-            .simultaneousGesture(TapGesture(count: 2).onEnded {
-                // Finish the second click's selection before removing its row.
-                DispatchQueue.main.async(execute: onClose)
-            })
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .frame(width: 20, height: 20)
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
-            .help("End \(session.title)")
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity)
+            .modifier(SessionRowChromeModifier(isActive: isActive))
         }
-        .padding(.horizontal, 10)
-        .frame(maxWidth: .infinity)
-        .modifier(SessionRowChromeModifier(isActive: isActive))
         .accessibilityRepresentation {
             HStack {
+                if childSummary != nil, let onToggleExpand {
+                    Button(
+                        isExpanded ? "Collapse \(session.title) children" : "Expand \(session.title) children",
+                        action: onToggleExpand
+                    )
+                }
                 Button(session.title, action: onSelect)
                     .accessibilityValue(accessibilityStatus)
                     .accessibilityAddTraits(isActive ? .isSelected : [])

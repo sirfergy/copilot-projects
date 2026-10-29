@@ -257,16 +257,20 @@ public enum CLIMain {
 
     private static func newCopilotSession(_ args: [String], environment: [String: String]) -> Int32 {
         let usage = "usage: copilot-projects new-copilot-session --project ID --request-id UUID "
-            + "--prompt-file PATH [--title TITLE] [--host HOST]"
+            + "--prompt-file PATH [--title TITLE] [--host HOST] [--parent-session ID | --no-parent]"
         let parsed = parseFlags(args)
-        let allowed: Set<String> = ["project", "request-id", "prompt-file", "title", "host"]
+        let allowed: Set<String> = [
+            "project", "request-id", "prompt-file", "title", "host", "parent-session", "no-parent",
+        ]
         let unknown = parsed.flags.keys.filter { !allowed.contains($0) }.sorted()
         guard unknown.isEmpty, parsed.positionals.isEmpty else {
             let extras = unknown.map { "--\($0)" } + parsed.positionals
             fail("new-copilot-session: unexpected \(extras.joined(separator: " "))\n\(usage)")
             return 2
         }
-        guard let projectId = parsed.flags["project"], !projectId.isEmpty,
+        guard (parsed.flags["no-parent"] ?? "").isEmpty,
+              !(parsed.flags["no-parent"] != nil && parsed.flags["parent-session"] != nil),
+              let projectId = parsed.flags["project"], !projectId.isEmpty,
               let rawRequestId = parsed.flags["request-id"],
               let requestId = UUID(uuidString: rawRequestId),
               let promptPath = parsed.flags["prompt-file"], !promptPath.isEmpty else {
@@ -294,6 +298,11 @@ public enum CLIMain {
         req.prompt = prompt
         req.title = parsed.flags["title"]
         req.hostId = parsed.flags["host"]
+        if parsed.flags["no-parent"] == nil {
+            let rawParent = (parsed.flags["parent-session"] ?? Env.sessionId(environment))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            req.parentSessionId = (rawParent?.isEmpty == false) ? rawParent : nil
+        }
         do {
             let socketPath = Env.socket(environment) ?? Paths.socketPath
             let resp = try ControlClient(socketPath: socketPath).send(req)
@@ -582,7 +591,7 @@ public enum CLIMain {
           copilot-projects new-project [name]      Create a project [--cwd DIR] [--default-host HOST]
           copilot-projects new-session             Add a session to a project [--cwd DIR] [--project ID] [--host HOST]
           copilot-projects new-copilot-session     Start Copilot with a prompt, idempotent by request id
-              --project ID --request-id UUID --prompt-file PATH [--title T] [--host HOST]
+              --project ID --request-id UUID --prompt-file PATH [--title T] [--host HOST] [--parent-session ID | --no-parent]
           copilot-projects set-default-host [host] Set default host for a project [--project ID]
           copilot-projects close-session           End an idle session that is not the selected tab
               --session ID [--project ID]

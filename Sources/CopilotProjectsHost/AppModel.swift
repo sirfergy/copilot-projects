@@ -55,6 +55,7 @@ final class AppModel: ObservableObject {
     }
     @Published var selectedProjectId: String?
     @Published var numberHint: NumberHint = .none
+    @Published var expandedParentSessionIds: Set<String> = []
     @Published private(set) var transcriptOpenSessions: Set<String> = []
     @Published private(set) var hostHealth: [RemoteHostHealth] = []
     var requestMainWindow: (() -> Void)?
@@ -153,7 +154,8 @@ final class AppModel: ObservableObject {
                 projectId: projectId,
                 title: request.title ?? "Copilot",
                 prompt: prompt,
-                hostId: request.hostId
+                hostId: request.hostId,
+                parentSessionId: request.parentSessionId
             ))
         },
         closeSession: { [unowned self] request in
@@ -1534,9 +1536,13 @@ final class AppModel: ObservableObject {
         runtimeTrackedOwners[sid] = nil
         scheduledSnapshotsSuppressed.remove(sid)
         foregroundIdleGenerationBaselines.removeValue(forKey: sid)
-        let closedIndex = projects[pi].sessions.firstIndex { $0.id == sid }
         let wasSelected = projects[pi].selectedSessionId == sid
+        let previousVisibleIds = projects[pi]
+            .sessionDisplayItems(expandedParentIds: expandedParentSessionIds)
+            .map(\.id)
+        projects[pi].normalizeParentSessions(removingParentId: sid)
         projects[pi].sessions.removeAll { $0.id == sid }
+        expandedParentSessionIds.remove(sid)
         if locateIndex(sid) == nil {
             remoteControlDeliveryLedger.removeClosedSession(sid)
             dismissQuestionNotifications(sessionId: sid)
@@ -1544,12 +1550,15 @@ final class AppModel: ObservableObject {
         if wasSelected {
             if projects[pi].sessions.isEmpty {
                 projects[pi].selectedSessionId = nil
+            } else if let visibleIndex = previousVisibleIds.firstIndex(of: sid), visibleIndex > 0 {
+                projects[pi].selectedSessionId = previousVisibleIds[visibleIndex - 1]
             } else {
                 // Select the tab to the left of the one just closed (or the new
                 // leftmost if the closed tab was first), rather than jumping to
                 // the first tab.
-                let newIndex = max(0, (closedIndex ?? 0) - 1)
-                projects[pi].selectedSessionId = projects[pi].sessions[newIndex].id
+                projects[pi].selectedSessionId = projects[pi]
+                    .sessionDisplayItems(expandedParentIds: expandedParentSessionIds)
+                    .first?.id
             }
         }
         clearManualMarkIfShown(replacing: previousGlobalSelection)
@@ -2070,9 +2079,10 @@ final class AppModel: ObservableObject {
     }
 
     func selectSessionByIndex(_ index: Int) {
-        guard let pid = selectedProjectId, let pi = projectIndex(pid),
-              index >= 0, index < projects[pi].sessions.count else { return }
-        selectSession(projectId: pid, sessionId: projects[pi].sessions[index].id)
+        guard let pid = selectedProjectId, let pi = projectIndex(pid) else { return }
+        let visible = projects[pi].sessionDisplayItems(expandedParentIds: expandedParentSessionIds)
+        guard index >= 0, index < visible.count else { return }
+        selectSession(projectId: pid, sessionId: visible[index].session.id)
     }
 
     func selectProjectByIndex(_ index: Int) {
@@ -2088,9 +2098,14 @@ final class AppModel: ObservableObject {
 
     /// Reorder session tabs within a project (drag-and-drop in the tab bar).
     /// Inserts the dragged session immediately before `beforeId`, or at the end
-    /// when `beforeId` is nil.
+    /// when `beforeId` is nil. Top-level sessions reorder among top-level
+    /// sessions; child sessions reorder among siblings under the same parent.
     func moveSession(projectId: String, draggedId: String, beforeId: String?) {
         guard let pi = projectIndex(projectId) else { return }
+        if let beforeId {
+            let effectiveParents = projects[pi].effectiveParentSessionIdsBySessionId()
+            guard effectiveParents[draggedId] == effectiveParents[beforeId] else { return }
+        }
         var sessions = projects[pi].sessions
         guard let from = sessions.firstIndex(where: { $0.id == draggedId }) else { return }
         let item = sessions.remove(at: from)
@@ -2119,14 +2134,25 @@ final class AppModel: ObservableObject {
 
         let previousGlobalSelection = globalSelectedSessionId
         let targetWasEmpty = projects[tpi].sessions.isEmpty
-        let session = projects[from.p].sessions.remove(at: from.s)
+        let previousVisibleIds = projects[from.p]
+            .sessionDisplayItems(expandedParentIds: expandedParentSessionIds)
+            .map(\.id)
+        projects[from.p].normalizeParentSessions(removingParentId: sid)
+        var session = projects[from.p].sessions.remove(at: from.s)
+        session.parentSessionId = nil
+        expandedParentSessionIds.remove(sid)
         // Keep the source project's selection sane (mirrors closeSession): fall back
         // to the tab left of the one that moved, or clear if it's now empty.
         if projects[from.p].selectedSessionId == sid {
-            projects[from.p].selectedSessionId =
-                projects[from.p].sessions.isEmpty
-                    ? nil
-                    : projects[from.p].sessions[max(0, from.s - 1)].id
+            if projects[from.p].sessions.isEmpty {
+                projects[from.p].selectedSessionId = nil
+            } else if let visibleIndex = previousVisibleIds.firstIndex(of: sid), visibleIndex > 0 {
+                projects[from.p].selectedSessionId = previousVisibleIds[visibleIndex - 1]
+            } else {
+                projects[from.p].selectedSessionId = projects[from.p]
+                    .sessionDisplayItems(expandedParentIds: expandedParentSessionIds)
+                    .first?.id
+            }
         }
         projects[tpi].sessions.append(session)
         if selectInTarget || targetWasEmpty {
@@ -2141,13 +2167,34 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    func isParentSessionExpanded(_ sessionId: String) -> Bool {
+        expandedParentSessionIds.contains(sessionId)
+    }
+
+    func toggleParentSessionExpanded(_ sessionId: String) {
+        if !expandedParentSessionIds.insert(sessionId).inserted {
+            expandedParentSessionIds.remove(sessionId)
+        }
+    }
+
+    func ungroupSession(projectId pid: String, sessionId sid: String) {
+        guard let pi = projectIndex(pid),
+              let si = projects[pi].sessions.firstIndex(where: { $0.id == sid }),
+              projects[pi].sessions[si].parentSessionId != nil else { return }
+        projects[pi].normalizeParentSessions()
+        projects[pi].sessions[si].parentSessionId = nil
+        save()
+    }
+
     func setNumberHint(_ hint: NumberHint) {
         if numberHint != hint { numberHint = hint }
     }
 
     func selectAdjacentSession(_ delta: Int) {
         guard let pid = selectedProjectId, let pi = projectIndex(pid) else { return }
-        let sessions = projects[pi].sessions
+        let sessions = projects[pi]
+            .sessionDisplayItems(expandedParentIds: expandedParentSessionIds)
+            .map(\.session)
         guard !sessions.isEmpty else { return }
         let current = sessions.firstIndex { $0.id == projects[pi].selectedSessionId } ?? 0
         let next = (current + delta + sessions.count) % sessions.count
@@ -3150,6 +3197,7 @@ final class AppModel: ObservableObject {
         projects = state.projects
         selectedProjectId = state.selectedProjectId ?? state.projects.first?.id
         for pi in projects.indices {
+            projects[pi].normalizeParentSessions()
             for si in projects[pi].sessions.indices {
                 let sid = projects[pi].sessions[si].id
                 let restored = restoredStatusState(forSession: sid)

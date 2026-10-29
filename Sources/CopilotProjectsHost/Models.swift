@@ -11,6 +11,7 @@ struct Session: Identifiable, Codable, Equatable {
     var hostId: String?
     var creationFingerprint: String?
     var pullRequestKeys: [String]?
+    var parentSessionId: String?
     /// Persisted only while set, so unmarked sessions keep their saved shape.
     private var manuallyMarkedUnread: Bool?
 
@@ -94,7 +95,7 @@ struct Session: Identifiable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys
+        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, parentSessionId
         case manuallyMarkedUnread = "markedUnread"
     }
 
@@ -105,6 +106,7 @@ struct Session: Identifiable, Codable, Equatable {
         hostId: String? = nil,
         creationFingerprint: String? = nil,
         pullRequestKeys: [String]? = nil,
+        parentSessionId: String? = nil,
         memoryUsageBytes: Int64? = nil
     ) {
         self.id = id
@@ -113,8 +115,45 @@ struct Session: Identifiable, Codable, Equatable {
         self.hostId = hostId
         self.creationFingerprint = creationFingerprint
         self.pullRequestKeys = pullRequestKeys
+        self.parentSessionId = parentSessionId
         self.memoryUsageBytes = memoryUsageBytes
     }
+}
+
+/// Rollup of a parent session's child sessions for sidebar disclosure UI.
+struct SessionChildSummary: Equatable, Sendable {
+    var totalCount: Int
+    var runningCount: Int = 0
+    var waitingCount: Int = 0
+    var failedCount: Int = 0
+
+    init(children: [Session]) {
+        self.totalCount = children.count
+        self.runningCount = children.filter { $0.displayStatus == .running }.count
+        self.waitingCount = children.filter { $0.displayStatus == .waiting }.count
+        self.failedCount = children.filter { $0.failedRequest != nil }.count
+    }
+
+    var label: String {
+        let base = "\(totalCount) child\(totalCount == 1 ? "" : "ren")"
+        var details: [String] = []
+        if runningCount > 0 { details.append("\(runningCount) running") }
+        if waitingCount > 0 { details.append("\(waitingCount) waiting") }
+        if failedCount > 0 { details.append("\(failedCount) failed") }
+        return details.isEmpty ? base : "\(base) · \(details.joined(separator: ", "))"
+    }
+}
+
+/// A visible row in `SessionList`, after applying single-level parent/child
+/// grouping, disclosure state, and auto-peek rules.
+struct SessionDisplayItem: Equatable, Identifiable {
+    let session: Session
+    let effectiveParentSessionId: String?
+    let childSummary: SessionChildSummary?
+    let isExpanded: Bool
+
+    var id: String { session.id }
+    var isChild: Bool { effectiveParentSessionId != nil }
 }
 
 /// A project groups sessions and owns a default working directory.
@@ -126,6 +165,10 @@ struct Project: Identifiable, Codable, Equatable {
     var sessions: [Session]
     var selectedSessionId: String?
     var creationFingerprint: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, cwd, defaultHostId, sessions, selectedSessionId, creationFingerprint
+    }
 
     init(id: String = UUID().uuidString,
          name: String,
@@ -141,6 +184,18 @@ struct Project: Identifiable, Codable, Equatable {
         self.sessions = sessions
         self.selectedSessionId = selectedSessionId
         self.creationFingerprint = creationFingerprint
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.cwd = try container.decode(String.self, forKey: .cwd)
+        self.defaultHostId = try container.decodeIfPresent(String.self, forKey: .defaultHostId)
+        self.sessions = try container.decode([Session].self, forKey: .sessions)
+        self.selectedSessionId = try container.decodeIfPresent(String.self, forKey: .selectedSessionId)
+        self.creationFingerprint = try container.decodeIfPresent(String.self, forKey: .creationFingerprint)
+        normalizeParentSessions()
     }
 }
 
@@ -159,6 +214,134 @@ extension Project {
     var failedCount: Int { sessions.filter { $0.failedRequest != nil }.count }
     var hasUnread: Bool { sessions.contains { $0.isUnread } }
     var hasBackgroundWork: Bool { backgroundWorkCount > 0 }
+
+    /// Resolves `candidateParentId` to a root (top-level) session ID within this
+    /// project's `sessions`, walking up any multi-hop chain so the hierarchy is
+    /// strictly single-level. Returns `nil` when `candidateParentId` is missing
+    /// from this project, equals `sessionId`, or participates in a cycle.
+    func resolvedParentSessionId(
+        for candidateParentId: String?,
+        excluding sessionId: String? = nil
+    ) -> String? {
+        guard let candidate = candidateParentId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !candidate.isEmpty,
+              candidate != sessionId else {
+            return nil
+        }
+        let sessionsById = Dictionary(
+            sessions.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return Self.resolveParentSessionId(
+            candidate,
+            excluding: sessionId,
+            sessionsById: sessionsById
+        )
+    }
+
+    private static func resolveParentSessionId(
+        _ candidate: String,
+        excluding sessionId: String?,
+        sessionsById: [String: Session]
+    ) -> String? {
+        guard sessionsById[candidate] != nil else { return nil }
+        var currentId = candidate
+        var visited: Set<String> = [currentId]
+        if let sessionId { visited.insert(sessionId) }
+        while let rawNext = sessionsById[currentId]?.parentSessionId?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawNext.isEmpty {
+            if !visited.insert(rawNext).inserted {
+                return nil
+            }
+            guard sessionsById[rawNext] != nil else { break }
+            currentId = rawNext
+        }
+        return currentId
+    }
+
+    /// Effective root parent session ID for `sessionId` within this project, or
+    /// `nil` if `sessionId` is a top-level session.
+    func effectiveParentSessionId(for sessionId: String) -> String? {
+        guard let session = sessions.first(where: { $0.id == sessionId }),
+              let rawParent = session.parentSessionId else { return nil }
+        return resolvedParentSessionId(for: rawParent, excluding: sessionId)
+    }
+
+    /// Map of session ID to effective root parent session ID for all child
+    /// sessions in this project, computed with a single lookup table.
+    func effectiveParentSessionIdsBySessionId() -> [String: String] {
+        guard sessions.contains(where: { $0.parentSessionId != nil }) else { return [:] }
+        let sessionsById = Dictionary(
+            sessions.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var result: [String: String] = [:]
+        for session in sessions {
+            guard let candidate = session.parentSessionId?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !candidate.isEmpty,
+                  candidate != session.id,
+                  let rootId = Self.resolveParentSessionId(
+                      candidate,
+                      excluding: session.id,
+                      sessionsById: sessionsById
+                  ) else { continue }
+            result[session.id] = rootId
+        }
+        return result
+    }
+
+    mutating func normalizeParentSessions(removingParentId removedId: String? = nil) {
+        let effectiveParents = effectiveParentSessionIdsBySessionId()
+        for index in sessions.indices {
+            let root = effectiveParents[sessions[index].id]
+            sessions[index].parentSessionId = (root == removedId) ? nil : root
+        }
+    }
+
+    /// Whether a child session should auto-peek while its parent is collapsed.
+    func shouldAutoPeekChild(_ child: Session) -> Bool {
+        child.id == selectedSessionId || child.displayStatus == .waiting
+    }
+
+    /// Ordered rows to render in `SessionList`: top-level sessions in project order,
+    /// each immediately followed by all of its children when expanded or its
+    /// auto-peeked children (selected or waiting) when collapsed.
+    func sessionDisplayItems(expandedParentIds: Set<String>) -> [SessionDisplayItem] {
+        let effectiveParents = effectiveParentSessionIdsBySessionId()
+        var childrenByParentId: [String: [Session]] = [:]
+        var topLevelSessions: [Session] = []
+        for session in sessions {
+            if let parentId = effectiveParents[session.id] {
+                childrenByParentId[parentId, default: []].append(session)
+            } else {
+                topLevelSessions.append(session)
+            }
+        }
+        var items: [SessionDisplayItem] = []
+        for session in topLevelSessions {
+            let children = childrenByParentId[session.id] ?? []
+            let summary = children.isEmpty ? nil : SessionChildSummary(children: children)
+            let isExpanded = !children.isEmpty && expandedParentIds.contains(session.id)
+            items.append(SessionDisplayItem(
+                session: session,
+                effectiveParentSessionId: nil,
+                childSummary: summary,
+                isExpanded: isExpanded
+            ))
+            let visibleChildren = isExpanded ? children : children.filter(shouldAutoPeekChild)
+            for child in visibleChildren {
+                items.append(SessionDisplayItem(
+                    session: child,
+                    effectiveParentSessionId: session.id,
+                    childSummary: nil,
+                    isExpanded: false
+                ))
+            }
+        }
+        return items
+    }
 }
 
 /// On-disk shape of the app state.
