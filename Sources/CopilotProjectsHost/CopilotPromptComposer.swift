@@ -703,9 +703,14 @@ final class CopilotPromptComposer: NSObject, NSTextViewDelegate {
                 popUp.addItem(withTitle: title)
                 popUp.lastItem?.representedObject = host.id
             }
-            if let initialId = self.selectedHostId,
-               let idx = availableHosts.firstIndex(where: { $0.id.caseInsensitiveCompare(initialId) == .orderedSame }) {
-                popUp.selectItem(at: idx)
+            if let initialId = self.selectedHostId {
+                if let idx = availableHosts.firstIndex(where: { $0.id.caseInsensitiveCompare(initialId) == .orderedSame }) {
+                    popUp.selectItem(at: idx)
+                } else {
+                    popUp.addItem(withTitle: "Unavailable (\(initialId))")
+                    popUp.lastItem?.representedObject = initialId
+                    popUp.selectItem(at: popUp.numberOfItems - 1)
+                }
             }
             self.selectedHostId = popUp.selectedItem?.representedObject as? String
             popUp.target = self

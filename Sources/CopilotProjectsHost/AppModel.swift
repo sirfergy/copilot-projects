@@ -777,18 +777,16 @@ final class AppModel: ObservableObject {
         )
     }
 
-    func resolvedRemoteHost(for session: Session, in project: Project) -> RemoteHostInfo? {
-        if let explicit = session.hostId, !explicit.isEmpty,
-           explicit.caseInsensitiveCompare(RemoteHostInfo.localId) != .orderedSame {
-            return resolvedRemoteHost(hostId: explicit)
-                ?? RemoteHostInfo(id: explicit, displayName: explicit, sshTarget: explicit, isLocal: false)
+    func resolvedRemoteHost(for session: Session, in hosts: [RemoteHostInfo]? = nil) -> RemoteHostInfo? {
+        let candidate = [session.hostId, resumeMarkerValue(sessionId: session.id, suffix: "remote-host")]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+        guard let candidate,
+              candidate.caseInsensitiveCompare(RemoteHostInfo.localId) != .orderedSame else {
+            return nil
         }
-        if let legacyMarker = resumeMarkerValue(sessionId: session.id, suffix: "remote-host"),
-           !legacyMarker.isEmpty {
-            return resolvedRemoteHost(hostId: legacyMarker)
-                ?? RemoteHostInfo(id: legacyMarker, displayName: legacyMarker, sshTarget: legacyMarker, isLocal: false)
-        }
-        return nil
+        return SSHHostCatalog.resolve(hostId: candidate, in: hosts ?? availableHosts)
+            ?? RemoteHostInfo(id: candidate, displayName: candidate, sshTarget: candidate, isLocal: false)
     }
 
     func effectiveHostId(forProjectId pid: String) -> String {
@@ -811,17 +809,6 @@ final class AppModel: ObservableObject {
         guard projects[pi].defaultHostId != normalized else { return }
         projects[pi].defaultHostId = normalized
         save()
-    }
-
-    func hostDisplayName(for session: Session, in hosts: [RemoteHostInfo]? = nil) -> String? {
-        guard let hostId = session.hostId,
-              !hostId.isEmpty,
-              hostId.lowercased() != RemoteHostInfo.localId else {
-            return nil
-        }
-        let catalog = hosts ?? availableHosts
-        return catalog.first(where: { $0.id.caseInsensitiveCompare(hostId) == .orderedSame })?.displayName
-            ?? hostId
     }
 
     private var currentSelectedSessionId: String? {
@@ -889,7 +876,8 @@ final class AppModel: ObservableObject {
                 ?? ((recordedCopilot?.isEmpty == false) ? recordedCopilot : nil),
             launchCopilotExecutable: copilotExecutable,
             launchCopilotInitialPrompt: launchCopilotInitialPrompt,
-            remoteHost: resolvedRemoteHost(for: session, in: project),
+            remoteHost: resolvedRemoteHost(for: session),
+            remoteWrapperExecutable: remoteWrapperExecutable(),
             kittyImageDiskStore: kittyImageDiskStore
         )
         c.onTitle = { [weak self] title in self?.updateTitle(sessionId: sessionId, title: title) }
@@ -1219,10 +1207,9 @@ final class AppModel: ObservableObject {
         ) else {
             throw CopilotSessionStartError.backendUnavailable
         }
-        if !resolvedHost.isLocal {
-            return remoteWrapperExecutable() ?? "/usr/bin/ssh"
-        }
-        guard let executable = remoteCopilotExecutable() else {
+        guard let executable = resolvedHost.isLocal
+            ? remoteCopilotExecutable()
+            : remoteWrapperExecutable() else {
             throw CopilotSessionStartError.copilotUnavailable
         }
         return executable
@@ -1462,6 +1449,10 @@ final class AppModel: ObservableObject {
            session.hostId == targetHostId,
            !session.cwd.isEmpty {
             return session.cwd
+        }
+        if project.defaultHostId == targetHostId, !project.cwd.isEmpty,
+           (targetHostId == nil || project.cwd != Paths.defaultStartupDir) {
+            return project.cwd
         }
         if targetHostId != nil, let remoteDefault = targetHost?.defaultCwd, !remoteDefault.isEmpty {
             return remoteDefault

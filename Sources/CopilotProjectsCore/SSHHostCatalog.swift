@@ -51,7 +51,7 @@ public enum SSHHostCatalog {
 
         if let sshConfigURL {
             let baseDir = sshConfigURL.deletingLastPathComponent()
-            let parsed = parseSSHConfigFile(at: sshConfigURL, baseSSHDir: baseDir, visited: [])
+            let parsed = parseSSHConfigFile(at: sshConfigURL, baseSSHDir: baseDir)
             for candidate in parsed {
                 let id = candidate.alias.lowercased()
                 guard !seenIds.contains(id) else { continue }
@@ -136,20 +136,9 @@ public enum SSHHostCatalog {
     }
 
     private static func parseSSHConfigFile(
-        at url: URL,
-        baseSSHDir: URL,
-        visited: Set<URL>,
-        depth: Int = 0
+        at rootURL: URL,
+        baseSSHDir: URL
     ) -> [ParsedSSHHost] {
-        guard depth <= 16 else { return [] }
-        let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
-        guard !visited.contains(canonical),
-              let content = try? String(contentsOf: canonical, encoding: .utf8) else {
-            return []
-        }
-        var nextVisited = visited
-        nextVisited.insert(canonical)
-
         var hosts: [ParsedSSHHost] = []
         var currentAliases: [String] = []
         var currentHostName: String?
@@ -186,59 +175,70 @@ public enum SSHHostCatalog {
             }
         }
 
-        for rawLine in content.components(separatedBy: .newlines) {
-            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty { continue }
-
-            if trimmed.hasPrefix("#") {
-                if let directive = parseDirectiveComment(trimmed) {
-                    if directive.ignore { pendingIgnored = true }
-                    if let name = directive.name { pendingDisplayName = name }
-                    if let cwd = directive.cwd { pendingDefaultCwd = cwd }
-                }
-                continue
+        func parseFile(at url: URL, visited: Set<URL>, depth: Int) {
+            guard depth <= 16 else { return }
+            let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
+            guard !visited.contains(canonical),
+                  let content = try? String(contentsOf: canonical, encoding: .utf8) else {
+                return
             }
+            var nextVisited = visited
+            nextVisited.insert(canonical)
 
-            let lineWithoutComment = stripInlineComment(from: trimmed)
-            guard let (keyword, value) = splitKeywordAndValue(lineWithoutComment) else {
-                continue
-            }
-            let lowerKeyword = keyword.lowercased()
-            switch lowerKeyword {
-            case "host":
-                flushCurrentBlock()
-                currentAliases = splitPatterns(value)
-                currentDisplayName = pendingDisplayName
-                currentDefaultCwd = pendingDefaultCwd
-                currentIgnored = pendingIgnored
-                pendingDisplayName = nil
-                pendingDefaultCwd = nil
-                pendingIgnored = false
-            case "match":
-                flushCurrentBlock()
-                pendingDisplayName = nil
-                pendingDefaultCwd = nil
-                pendingIgnored = false
-            case "include":
-                flushCurrentBlock()
-                for pattern in splitPatterns(value) {
-                    for includedURL in resolveIncludePattern(pattern, relativeTo: baseSSHDir) {
-                        hosts.append(contentsOf: parseSSHConfigFile(
-                            at: includedURL,
-                            baseSSHDir: baseSSHDir,
-                            visited: nextVisited,
-                            depth: depth + 1
-                        ))
+            for rawLine in content.components(separatedBy: .newlines) {
+                let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty { continue }
+
+                if trimmed.hasPrefix("#") {
+                    if let directive = parseDirectiveComment(trimmed) {
+                        if directive.ignore { pendingIgnored = true }
+                        if let name = directive.name { pendingDisplayName = name }
+                        if let cwd = directive.cwd { pendingDefaultCwd = cwd }
                     }
+                    continue
                 }
-            case "hostname":
-                if !currentAliases.isEmpty, currentHostName == nil {
-                    currentHostName = unquote(value)
+
+                let lineWithoutComment = stripInlineComment(from: trimmed)
+                guard let (keyword, value) = splitKeywordAndValue(lineWithoutComment) else {
+                    continue
                 }
-            default:
-                break
+                let lowerKeyword = keyword.lowercased()
+                switch lowerKeyword {
+                case "host":
+                    flushCurrentBlock()
+                    currentAliases = splitPatterns(value)
+                    currentDisplayName = pendingDisplayName
+                    currentDefaultCwd = pendingDefaultCwd
+                    currentIgnored = pendingIgnored
+                    pendingDisplayName = nil
+                    pendingDefaultCwd = nil
+                    pendingIgnored = false
+                case "match":
+                    flushCurrentBlock()
+                    pendingDisplayName = nil
+                    pendingDefaultCwd = nil
+                    pendingIgnored = false
+                case "include":
+                    for pattern in splitPatterns(value) {
+                        for includedURL in resolveIncludePattern(pattern, relativeTo: baseSSHDir) {
+                            parseFile(
+                                at: includedURL,
+                                visited: nextVisited,
+                                depth: depth + 1
+                            )
+                        }
+                    }
+                case "hostname":
+                    if !currentAliases.isEmpty, currentHostName == nil {
+                        currentHostName = unquote(value)
+                    }
+                default:
+                    break
+                }
             }
         }
+
+        parseFile(at: rootURL, visited: [], depth: 0)
         flushCurrentBlock()
         return hosts
     }

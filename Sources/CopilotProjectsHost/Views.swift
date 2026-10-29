@@ -179,7 +179,7 @@ private struct WorkspaceHeading: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .help(session?.title ?? model.selectedProject?.name ?? "Workspace")
-            if let session, let hostName = model.hostDisplayName(for: session) {
+            if let session, let hostName = model.resolvedRemoteHost(for: session)?.displayName {
                 HostBadge(name: hostName)
             }
             Spacer(minLength: 0)
@@ -1077,6 +1077,9 @@ struct SessionRow: View, Equatable {
         var states: [String] = []
         if isActive { states.append("Selected") }
         states.append(stateLabel)
+        if let hostId = session.hostId, !hostId.isEmpty {
+            states.append("Running on \(hostId)")
+        }
         if session.isUnread { states.append("Unread") }
         if session.hasBackgroundWork { states.append("Background work active") }
         if !session.schedules.isEmpty { states.append("Scheduled work") }

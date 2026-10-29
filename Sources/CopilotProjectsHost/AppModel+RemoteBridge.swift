@@ -468,17 +468,29 @@ extension AppModel {
             return .unavailable
         }
         if isPlainCreate,
-           !resolvedHost.isLocal,
-           FileManager.default.fileExists(atPath: Paths.dtachSocketPath(sessionId: sessionId)),
-           resumeMarkerValue(sessionId: sessionId, suffix: "remote-host") == nil {
-            return .conflict
+           FileManager.default.fileExists(atPath: Paths.dtachSocketPath(sessionId: sessionId))
+               || resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session") != nil
+               || resumeMarkerValue(sessionId: sessionId, suffix: "remote-host") != nil {
+            let recordedHost = resumeMarkerValue(sessionId: sessionId, suffix: "remote-host")
+                .flatMap { raw -> String? in
+                    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty,
+                          trimmed.caseInsensitiveCompare(RemoteHostInfo.localId) != .orderedSame else {
+                        return nil
+                    }
+                    return resolvedRemoteHost(hostId: trimmed)?.id ?? trimmed
+                }
+            let targetHost = resolvedHost.isLocal ? nil : resolvedHost.id
+            if recordedHost?.lowercased() != targetHost?.lowercased() {
+                return .conflict
+            }
         }
         guard remoteSessionBackendAvailable() else { return .unavailable }
         let copilotExecutable: String?
-        if !resolvedHost.isLocal {
-            copilotExecutable = kind == .copilot ? (remoteWrapperExecutable() ?? "/usr/bin/ssh") : nil
-        } else if kind == .copilot {
-            guard let executable = remoteCopilotExecutable() else { return .unavailable }
+        if kind == .copilot {
+            guard let executable = resolvedHost.isLocal
+                ? remoteCopilotExecutable()
+                : remoteWrapperExecutable() else { return .unavailable }
             copilotExecutable = executable
         } else {
             copilotExecutable = nil
@@ -503,13 +515,15 @@ extension AppModel {
         }
 
         if !isPlainCreate {
-            let marker = resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session")
-            if unlink(marker.path) != 0 {
-                let code = errno
-                guard code == ENOENT else {
-                    NSLog("copilot-projects: could not clear stale resume marker for remote session "
-                        + "\(sessionId) (errno \(code))")
-                    return .persistenceUnavailable
+            for suffix in ["copilot-session", "remote-host"] {
+                let marker = resumeMarkerDirectory.appendingPathComponent("\(sessionId).\(suffix)")
+                if unlink(marker.path) != 0 {
+                    let code = errno
+                    guard code == ENOENT else {
+                        NSLog("copilot-projects: could not clear stale \(suffix) marker for remote session "
+                            + "\(sessionId) (errno \(code))")
+                        return .persistenceUnavailable
+                    }
                 }
             }
         }
@@ -681,6 +695,7 @@ extension AppModel {
                         let status = projectedStatus(
                             for: session, foreground: foreground, now: promptNow
                         )
+                        let remoteHost = resolvedRemoteHost(for: session, in: hosts)
                         return RemoteSessionSnapshot(
                             id: session.id,
                             title: session.title,
@@ -732,8 +747,8 @@ extension AppModel {
                                 ? session.agentActivity?.remoteLastError()
                                 : nil,
                             markedUnread: session.markedUnread ? true : nil,
-                            hostId: session.hostId,
-                            hostDisplayName: hostDisplayName(for: session, in: hosts)
+                            hostId: remoteHost?.id,
+                            hostDisplayName: remoteHost?.displayName
                         )
                     }
                 )

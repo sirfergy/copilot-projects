@@ -534,6 +534,11 @@ final class ProtocolContractTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
+        let forgeIncludeURL = dir.appendingPathComponent("forge_common")
+        try "HostName github.com\n".write(to: forgeIncludeURL, atomically: true, encoding: .utf8)
+        let optionsIncludeURL = dir.appendingPathComponent("user_common")
+        try "User git\n".write(to: optionsIncludeURL, atomically: true, encoding: .utf8)
+
         let configURL = dir.appendingPathComponent("config")
         try """
         Match exec "true"
@@ -547,6 +552,13 @@ final class ProtocolContractTests: XCTestCase {
         Host devbox
           HostName 10.0.0.42
           User ubuntu
+
+        Host forge-via-include
+          Include forge_common
+
+        Host forge-after-include
+          Include user_common
+          HostName gitlab.com
 
         # copilot-projects: ignore
         Host bastion.internal.example.com
@@ -610,14 +622,22 @@ final class ProtocolContractTests: XCTestCase {
             sshTarget: "root@woodhaven.thefergies.com",
             isLocal: false
         )
+        let devbox = RemoteHostInfo(
+            id: "devbox",
+            displayName: "devbox",
+            sshTarget: "devbox",
+            isLocal: false
+        )
+        var wrapperExecutable: String? = "/usr/bin/true"
         let model = AppModel(
             stateRepository: StateRepository(path: dir.appendingPathComponent("state.json")),
             agentActivityDirectory: dir,
             resumeMarkerDirectory: dir,
             remoteCopilotExecutable: { "/usr/bin/true" },
+            remoteWrapperExecutable: { wrapperExecutable },
             remoteReposDirectory: { reposDir.path },
             remoteSessionBackendAvailable: { true },
-            availableHostsProvider: { [.local, woodhaven] },
+            availableHostsProvider: { [.local, woodhaven, devbox] },
             remoteSessionLauncher: { _, _, _ in },
             sessionCreationLedger: SessionCreationLedger(url: dir.appendingPathComponent("ledger.json")),
             projectCreationLedger: ProjectCreationLedger(url: dir.appendingPathComponent("proj-ledger.json"))
@@ -635,13 +655,16 @@ final class ProtocolContractTests: XCTestCase {
         guard case .created = out1 else { return XCTFail("Expected created, got \(out1)") }
         XCTAssertEqual(model.projects[0].sessions.last?.hostId, "woodhaven")
 
-        // 2. Explicit "local" overrides project's defaultHostId
+        // 2. Explicit "local" overrides project's defaultHostId and clears stale .remote-host marker
         let req2 = UUID()
+        let staleHostMarker = dir.appendingPathComponent("\(req2.uuidString).remote-host")
+        try "woodhaven".write(to: staleHostMarker, atomically: true, encoding: .utf8)
         let out2 = model.createRemoteConfiguredSession(RemoteCreateSessionRequest(
             requestId: req2, projectId: "p1", kind: .copilot, initialPrompt: "Local check", hostId: "local"
         ))
         guard case .created = out2 else { return XCTFail("Expected created, got \(out2)") }
         XCTAssertNil(model.projects[0].sessions.last?.hostId)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleHostMarker.path))
 
         // 3. Explicit "woodhaven" on a local-default project runs on woodhaven
         let req3 = UUID()
@@ -657,11 +680,84 @@ final class ProtocolContractTests: XCTestCase {
         ))
         XCTAssertEqual(out4, .badRequest)
 
-        // 5. Snapshot surfaces availableHosts, defaultHostId, hostId, and hostDisplayName
+        // 5. Missing remote wrapper fails closed for remote Copilot launches, while terminal launches succeed
+        wrapperExecutable = nil
+        XCTAssertEqual(
+            model.createRemoteConfiguredSession(RemoteCreateSessionRequest(
+                requestId: UUID(), projectId: "p1", kind: .copilot
+            )),
+            .unavailable
+        )
+        wrapperExecutable = "/usr/bin/true"
+
+        // 6. Plain create with an orphaned dtach socket or resume marker requires matching host
+        let orphanReq = UUID()
+        let orphanSocket = URL(fileURLWithPath: Paths.dtachSocketPath(sessionId: orphanReq.uuidString))
+        try FileManager.default.createDirectory(
+            at: orphanSocket.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data().write(to: orphanSocket)
+        defer { try? FileManager.default.removeItem(at: orphanSocket) }
+        let orphanHostMarker = dir.appendingPathComponent("\(orphanReq.uuidString).remote-host")
+        try "woodhaven".write(to: orphanHostMarker, atomically: true, encoding: .utf8)
+        XCTAssertEqual(
+            model.createRemoteSession(RemoteCreateSessionRequest(
+                requestId: orphanReq, projectId: "p2", hostId: "local"
+            )),
+            .conflict
+        )
+        XCTAssertEqual(
+            model.createRemoteSession(RemoteCreateSessionRequest(
+                requestId: orphanReq, projectId: "p2", hostId: "devbox"
+            )),
+            .conflict
+        )
+        XCTAssertEqual(
+            model.createRemoteSession(RemoteCreateSessionRequest(
+                requestId: orphanReq, projectId: "p1"
+            )),
+            .created(RemoteCreateSessionResponse(
+                requestId: orphanReq, projectId: "p1", sessionId: orphanReq.uuidString
+            ))
+        )
+
+        let noSocketReq = UUID()
+        try UUID().uuidString.write(
+            to: dir.appendingPathComponent("\(noSocketReq.uuidString).copilot-session"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "woodhaven".write(
+            to: dir.appendingPathComponent("\(noSocketReq.uuidString).remote-host"),
+            atomically: true,
+            encoding: .utf8
+        )
+        XCTAssertEqual(
+            model.createRemoteSession(RemoteCreateSessionRequest(
+                requestId: noSocketReq, projectId: "p2", hostId: "local"
+            )),
+            .conflict
+        )
+
+        // 7. Remote project with an explicit cwd preserves it when empty, and composer preserves unavailable host
+        model.projects.append(Project(id: "p3", name: "Custom Remote", cwd: "/srv/my-project", defaultHostId: "woodhaven"))
+        XCTAssertEqual(model.defaultCwd(forProjectIndex: 2, targetHost: woodhaven), "/srv/my-project")
+        let composer = CopilotPromptComposer(availableHosts: [.local, woodhaven], selectedHostId: "retired-host")
+        XCTAssertEqual(composer.selectedHostId, "retired-host")
+
+        // 8. Snapshot and SessionRow accessibilityStatus surface host information
         let snap = model.remoteWorkspaceSnapshot()
-        XCTAssertEqual(snap.availableHosts, [.local, woodhaven])
+        XCTAssertEqual(snap.availableHosts, [.local, woodhaven, devbox])
         XCTAssertEqual(snap.projects[0].defaultHostId, "woodhaven")
         XCTAssertEqual(snap.projects[0].sessions.first?.hostId, "woodhaven")
         XCTAssertEqual(snap.projects[0].sessions.first?.hostDisplayName, "woodhaven")
+        let remoteRow = SessionRow(
+            session: try XCTUnwrap(model.projects[0].sessions.first),
+            isActive: true,
+            onSelect: {},
+            onClose: {}
+        )
+        XCTAssertEqual(remoteRow.accessibilityStatus, "Selected, Idle, Running on woodhaven")
     }
 }
