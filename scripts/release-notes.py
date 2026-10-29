@@ -2,6 +2,7 @@
 """Freeze the changes in an exact build, without publishing or changing refs."""
 
 import argparse
+import datetime
 import json
 from pathlib import Path
 import re
@@ -11,6 +12,8 @@ import time
 
 
 MAX_BYTES = 256 * 1024
+MAX_LINES = 500
+MAX_VERSIONS = 10
 INITIAL_NOTES = "release-notes/initial.json"
 HOST_REPOSITORY = "sirfergy/copilot-projects"
 
@@ -224,11 +227,15 @@ def pure_host_update(root, revision, host_root):
     return True
 
 
-def plain_text(sections):
-    text = "\n\n".join(
-        heading + "\n" + "\n".join("- " + title for title, _ in changes)
-        for heading, changes in sections.items() if changes
-    )
+def plain_text(versions):
+    blocks = [
+        f"Version {label}\n" + "\n\n".join(
+            heading + "\n" + "\n".join("- " + title for title, _ in changes)
+            for heading, changes in sections.items() if changes
+        )
+        for label, sections in versions
+    ]
+    text = "\n\n".join(blocks)
     if len(text.encode("utf-16-le")) // 2 <= 4000:
         return text
     suffix = "\n\nMore changes are available in What's New in the app."
@@ -255,15 +262,21 @@ def markdown_change(title, urls, repository=None):
     return f"{text} ({', '.join(links)})"
 
 
-def collect_changes(repository, history, sections, seen):
+def collect_changes(repository, history, sections, seen, pr_cache=None, retry_newest=True):
     for sha, subject in history:
-        pr = merged_pull_request(repository, sha)
-        if pr is None and sha == history[-1][0] and subject.startswith("Merge pull request #"):
-            for _ in range(2):
-                time.sleep(5)
-                pr = merged_pull_request(repository, sha)
-                if pr is not None:
-                    break
+        cache_key = (repository, sha)
+        if pr_cache is not None and cache_key in pr_cache:
+            pr = pr_cache[cache_key]
+        else:
+            pr = merged_pull_request(repository, sha)
+            if pr is None and retry_newest and sha == history[-1][0] and subject.startswith("Merge pull request #"):
+                for _ in range(2):
+                    time.sleep(5)
+                    pr = merged_pull_request(repository, sha)
+                    if pr is not None:
+                        break
+            if pr_cache is not None:
+                pr_cache[cache_key] = pr
         if pr:
             title, labels, number, summary = pr
             url = f"https://github.com/{repository}/pull/{number}"
@@ -311,18 +324,87 @@ def initial_sections(root, repository, previous, revision):
     return sections
 
 
-def generate(root, repository, previous, version, build, host_root=None):
-    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*", repository):
-        raise ValueError("Repository must be owner/name")
-    if not version or not build:
-        raise ValueError("Version and build are required")
-    revision = git(root, "rev-parse", "HEAD^{commit}")
-    if previous:
-        previous = git(root, "rev-parse", "--verify", f"{previous}^{{commit}}")
-        subprocess.run(
-            ["git", "-C", str(root), "merge-base", "--is-ancestor", previous, revision],
-            check=True
-        )
+def release_tag_key(tag):
+    if not tag.startswith("v"):
+        return None
+    version = tag[1:]
+    match = re.fullmatch(
+        r"([1-9][0-9]{3})\.(1[0-2]|[1-9])\.(3[01]|[12][0-9]|[1-9])\.([1-9][0-9]*)",
+        version,
+    )
+    if match:
+        year, month, day, ordinal = (int(part) for part in match.groups())
+        try:
+            datetime.date(year, month, day)
+        except ValueError:
+            return None
+        return (1, year, month, day, ordinal)
+    match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", version)
+    if match:
+        return (0, *(int(part) for part in match.groups()), 0)
+    return None
+
+
+def discover_prior_releases(root, repository, previous):
+    tags = sorted(
+        (tag for tag in git(root, "tag", "--list", "v*").splitlines() if release_tag_key(tag)),
+        key=release_tag_key,
+    )
+    by_commit = {}
+    for tag in tags:
+        by_commit[git(root, "rev-parse", "--verify", f"{tag}^{{commit}}")] = tag
+    if previous not in by_commit:
+        return []
+    limit_key = release_tag_key(by_commit[previous])
+    ordered = sorted(
+        ((sha, tag) for sha, tag in by_commit.items() if release_tag_key(tag) <= limit_key),
+        key=lambda item: release_tag_key(item[1]),
+    )
+    chain = [ordered[-1]]
+    for sha, tag in reversed(ordered[:-1]):
+        if subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", sha, chain[-1][0]]).returncode == 0:
+            chain.append((sha, tag))
+            if len(chain) == MAX_VERSIONS:
+                break
+    chain.reverse()
+    transitions = [
+        (chain[i][1][1:], chain[i - 1][0], chain[i][0])
+        for i in range(len(chain) - 1, 0, -1)
+    ]
+    if len(transitions) < MAX_VERSIONS - 1 and initial_sections(root, repository, None, chain[0][0]) is not None:
+        transitions.append((chain[0][1][1:], None, chain[0][0]))
+    return transitions
+
+
+def parse_prior_release(root, value, upper_bound):
+    label, sep, spec = value.partition("=")
+    if not sep or not spec:
+        raise ValueError(f"Invalid prior release: {value}")
+    if ".." in spec:
+        prev_spec, _, rev_spec = spec.partition("..")
+        if not prev_spec or not rev_spec or ".." in rev_spec:
+            raise ValueError(f"Invalid prior release range: {value}")
+    else:
+        prev_spec, rev_spec = None, spec
+    label = label.strip()
+    if not label or "\n" in label or "\r" in label or not rev_spec or upper_bound is None:
+        raise ValueError("Invalid prior release")
+    rev_sha = git(root, "rev-parse", "--verify", f"{rev_spec}^{{commit}}")
+    subprocess.run(
+        ["git", "-C", str(root), "merge-base", "--is-ancestor", rev_sha, upper_bound],
+        check=True,
+    )
+    if prev_spec is None:
+        return label, None, rev_sha
+    prev_sha = git(root, "rev-parse", "--verify", f"{prev_spec}^{{commit}}")
+    subprocess.run(
+        ["git", "-C", str(root), "merge-base", "--is-ancestor", prev_sha, rev_sha],
+        check=True,
+    )
+    return label, prev_sha, rev_sha
+
+
+def version_sections(root, repository, previous, revision, host_root, pr_cache, retry_newest):
     initial = initial_sections(root, repository, previous, revision)
     history = "" if initial is not None else git(
         root, "log", "--first-parent", "--reverse", "--format=%H%x09%s",
@@ -355,19 +437,87 @@ def generate(root, repository, previous, version, build, host_root=None):
                     f"https://github.com/{HOST_REPOSITORY}/compare/{old_host}...{new_host}"
                 )]
     seen = {}
-    collect_changes(repository, history, sections, seen)
-    collect_changes(HOST_REPOSITORY, desktop_history, sections, seen)
+    collect_changes(repository, history, sections, seen, pr_cache, retry_newest)
+    collect_changes(HOST_REPOSITORY, desktop_history, sections, seen, pr_cache, retry_newest)
     if not any(sections.values()):
         sections["Other changes"].append(("No source changes since the previous build.", None))
-    markdown = "\n\n".join(
-        "## " + escape(heading) + "\n\n" + "\n".join(
-            markdown_change(title, url, repository if host_root is not None and initial is None else None)
-            for title, url in changes
-        ) for heading, changes in sections.items() if changes
-    ) + "\n"
+    return sections, (repository if host_root is not None and initial is None else None), initial is not None
+
+
+def current_version_markdown(document):
+    markdown = document["markdown"].strip()
+    history_link = f"[Full release notes history](https://github.com/{document['repository']}/releases)"
+    if markdown.endswith(history_link):
+        markdown = markdown[:-len(history_link)].rstrip()
+    if markdown.startswith("## Version "):
+        _, _, markdown = markdown.partition("\n\n")
+        markdown = markdown.split("\n\n## Version ", 1)[0]
+        markdown = re.sub(r"(?m)^### ", "## ", markdown)
+    return markdown + "\n"
+
+
+def within_markdown_limits(markdown):
+    return (
+        len(markdown.split("\n")) <= MAX_LINES
+        and markdown.count("|") <= 1000
+        and sum(markdown.count(marker) for marker in "*_~`[<") <= 2000
+        and len(markdown.encode("utf-8")) <= MAX_BYTES // 2
+    )
+
+
+def generate(root, repository, previous, version, build, host_root=None, prior_releases=None):
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*", repository):
+        raise ValueError("Repository must be owner/name")
+    if not version or not build:
+        raise ValueError("Version and build are required")
+    revision = git(root, "rev-parse", "HEAD^{commit}")
+    if previous:
+        previous = git(root, "rev-parse", "--verify", f"{previous}^{{commit}}")
+        subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", previous, revision],
+            check=True
+        )
+    pr_cache = {}
+    first_sections, first_context, is_initial = version_sections(
+        root, repository, previous, revision, host_root, pr_cache, True
+    )
+    if prior_releases:
+        prior_steps = []
+        upper_bound = previous or revision
+        for item in prior_releases[:MAX_VERSIONS - 1]:
+            step = parse_prior_release(root, item, upper_bound)
+            prior_steps.append(step)
+            upper_bound = step[1]
+    elif previous and not is_initial:
+        prior_steps = discover_prior_releases(root, repository, previous)[:MAX_VERSIONS - 1]
+    else:
+        prior_steps = []
+
+    def format_block(label, sections, repo_context):
+        body = "\n\n".join(
+            "### " + escape(heading) + "\n\n" + "\n".join(
+                markdown_change(title, url, repo_context)
+                for title, url in changes
+            ) for heading, changes in sections.items() if changes
+        )
+        return f"## Version {escape(label)}\n\n{body}"
+
+    history_link = f"[Full release notes history](https://github.com/{repository}/releases)"
+    versions = [(version, first_sections)]
+    included_blocks = [format_block(version, first_sections, first_context)]
+    for label, step_prev, step_rev in prior_steps:
+        sections, repo_context, _ = version_sections(
+            root, repository, step_prev, step_rev, host_root, pr_cache, False
+        )
+        block = format_block(label, sections, repo_context)
+        if not within_markdown_limits("\n\n".join([*included_blocks, block, history_link]) + "\n"):
+            break
+        included_blocks.append(block)
+        versions.append((label, sections))
+    markdown = "\n\n".join([*included_blocks, history_link]) + "\n"
     document = {
         "schemaVersion": 1, "repository": repository, "version": version, "build": build,
-        "sourceRevision": revision, "markdown": markdown, "plainText": plain_text(sections),
+        "sourceRevision": revision, "markdown": markdown, "plainText": plain_text(versions),
     }
     validate(document, version, build)
     return document
@@ -385,6 +535,8 @@ def validate(document, version, build):
     for key in ("markdown", "plainText"):
         if not isinstance(document.get(key), str) or not document[key].strip():
             raise ValueError(f"Release notes require {key}")
+    if not within_markdown_limits(document["markdown"]):
+        raise ValueError("Release notes exceed the Markdown rendering limits")
     if len(document["plainText"].encode("utf-16-le")) // 2 > 4000:
         raise ValueError("TestFlight notes exceed 4000 characters")
     if len(json.dumps(document, ensure_ascii=False).encode("utf-8")) > MAX_BYTES:
@@ -401,6 +553,7 @@ def main():
     create.add_argument("--output", type=Path, required=True)
     create.add_argument("--host-root", type=Path,
                         help="Verified public desktop checkout for an integrated desktop build")
+    create.add_argument("--prior-release", dest="prior_releases", action="append", default=[])
     check = sub.add_parser("validate")
     check.add_argument("--file", type=Path, required=True)
     check.add_argument("--markdown", action="store_true")
@@ -410,7 +563,7 @@ def main():
     args = parser.parse_args()
     if args.command == "generate":
         document = generate(args.root, args.repository, args.previous, args.version, args.build,
-                            args.host_root)
+                            args.host_root, args.prior_releases)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(document, ensure_ascii=False) + "\n", encoding="utf-8")
     else:
@@ -419,7 +572,7 @@ def main():
         document = json.loads(args.file.read_text(encoding="utf-8"))
         validate(document, args.version, args.build)
         if args.markdown:
-            print(document["markdown"], end="")
+            print(current_version_markdown(document), end="")
 
 
 if __name__ == "__main__":

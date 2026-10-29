@@ -60,10 +60,17 @@ class NotesTests(unittest.TestCase):
         self.commit("fix: a bug")
         result = self.generate()
         self.assertNotIn("Already shipped", result["markdown"])
-        self.assertIn("## Features and improvements", result["markdown"])
-        self.assertIn("## Fixes", result["markdown"])
+        self.assertIn("## Version 2026.10.25.4", result["markdown"])
+        self.assertIn("### Features and improvements", result["markdown"])
+        self.assertIn("### Fixes", result["markdown"])
+        self.assertIn("[Full release notes history](https://github.com/example/app/releases)", result["markdown"])
         self.assertEqual(result["sourceRevision"], self.git("rev-parse", "HEAD"))
         self.assertIn("https://github.com/example/app/commit/", result["markdown"])
+        published = notes.current_version_markdown(result)
+        self.assertIn("## Features and improvements", published)
+        self.assertIn("## Fixes", published)
+        self.assertNotIn("## Version ", published)
+        self.assertNotIn("/releases)", published)
 
     def test_merge_title_comes_from_pr_not_trailers_or_branch_commits(self):
         self.git("switch", "-qc", "feature")
@@ -76,7 +83,7 @@ class NotesTests(unittest.TestCase):
         self.assertNotIn("Co-authored-by", result["markdown"])
         self.assertNotIn("Internal implementation", result["markdown"])
         self.assertIn(r"Prevent \[stale\] \*notes\* ([#12](https://github.com/example/app/pull/12))", result["markdown"])
-        self.assertEqual(result["plainText"], "Fixes\n- Prevent [stale] *notes*")
+        self.assertEqual(result["plainText"], "Version 2026.10.25.4\nFixes\n- Prevent [stale] *notes*")
 
     def test_subjects_are_not_mistaken_for_pull_request_identity(self):
         self.commit("Feature (#13)")
@@ -148,7 +155,7 @@ class NotesTests(unittest.TestCase):
 
     def test_plain_text_limit_and_markup_independence(self):
         sections = {"Fixes": [(f"Fix {i} " + "\U0001f680" * 100, "https://example.invalid") for i in range(50)]}
-        text = notes.plain_text(sections)
+        text = notes.plain_text([("2026.10.25.1", sections)])
         self.assertLessEqual(len(text.encode("utf-16-le")) // 2, 4000)
         self.assertIn("More changes", text)
         self.assertNotIn("https", text)
@@ -219,7 +226,7 @@ class NotesTests(unittest.TestCase):
 
     def generate_integrated(self, previous):
         return notes.generate(
-            self.root, "example/app", previous, "2026.10.26.1", "2026.10.26.1", host_root=self.root
+            self.root, "example/app", previous, "2026.10.25.4", "2026.10.25.4", host_root=self.root
         )
 
     def test_integrated_notes_expand_skipped_versions_and_suppress_only_pure_pin_updates(self):
@@ -304,7 +311,7 @@ class NotesTests(unittest.TestCase):
         self.assertEqual(result["markdown"].count("Sessions reconnect reliably."), 1)
         self.assertIn("[#12](https://github.com/example/app/pull/12)", result["markdown"])
         self.assertIn("[copilot-projects#12](https://github.com/sirfergy/copilot-projects/pull/12)", result["markdown"])
-        self.assertEqual(result["plainText"], "Fixes\n- Sessions reconnect reliably.")
+        self.assertEqual(result["plainText"], "Version 2026.10.25.4\nFixes\n- Sessions reconnect reliably.")
 
     def test_summary_uses_explicit_paragraph_and_keeps_title_classification(self):
         examples = [
@@ -401,7 +408,96 @@ class NotesTests(unittest.TestCase):
                 mock.patch.object(notes, "merged_pull_request", return_value=None) as lookup:
             result = self.generate_integrated(previous)
         lookup.assert_called_once_with(notes.HOST_REPOSITORY, "c" * 40)
-        self.assertEqual(result["plainText"], "Fixes\n- fix the desktop")
+        self.assertEqual(result["plainText"], "Version 2026.10.25.4\nFixes\n- fix the desktop")
+
+    def test_discovers_last_ten_versions_from_release_tags_newest_first(self):
+        self.git("tag", "v0.9.120")
+        self.commit("fix legacy 121")
+        self.git("tag", "v0.9.121")
+        for ordinal in range(1, 11):
+            self.commit(f"feat release {ordinal}")
+            if ordinal == 2:
+                self.git("tag", "v0.9.122")
+            self.git("tag", f"v2026.10.25.{ordinal}")
+        previous = self.git("rev-parse", "HEAD")
+        self.git("switch", "-qc", "diverged", "v0.9.121")
+        self.commit("diverged tag commit")
+        self.git("tag", "v2026.10.24.1")
+        self.git("switch", "-q", "main")
+        self.commit("Merge pull request #99 from latest")
+        with mock.patch.object(notes, "merged_pull_request", return_value=None) as lookup, \
+                mock.patch.object(notes.time, "sleep") as sleep:
+            result = notes.generate(self.root, "example/app", previous, "2026.10.25.11", "2026.10.25.11")
+        self.assertEqual(sleep.call_count, 2)
+        headings = [line for line in result["markdown"].splitlines() if line.startswith("## Version ")]
+        self.assertEqual(headings, [f"## Version 2026.10.25.{n}" for n in range(11, 1, -1)])
+        self.assertNotIn("diverged tag commit", result["markdown"])
+        self.assertNotIn("fix legacy 121", result["markdown"])
+        self.assertTrue(
+            result["markdown"].endswith(
+                "\n\n[Full release notes history](https://github.com/example/app/releases)\n"
+            )
+        )
+        self.assertEqual(lookup.call_count, 12)
+
+    def test_short_tag_chain_includes_initial_curated_release_and_cli_prior_releases(self):
+        t0 = self.write_initial_notes({"Highlights": [["Initial curated highlight.", None]]})
+        self.git("tag", "v2026.10.25.1")
+        t1 = self.commit("fix second release")
+        self.git("tag", "v2026.10.25.2")
+        self.commit("add third release")
+        auto = notes.generate(self.root, "example/app", t1, "2026.10.25.3", "2026.10.25.3")
+        headings = [line for line in auto["markdown"].splitlines() if line.startswith("## Version ")]
+        self.assertEqual(headings, [
+            "## Version 2026.10.25.3", "## Version 2026.10.25.2", "## Version 2026.10.25.1"
+        ])
+        self.assertIn("Initial curated highlight.", auto["markdown"])
+        output = self.root / "out.json"
+        with mock.patch("sys.argv", [
+            "release-notes.py", "generate", "--root", str(self.root), "--repository", "example/app",
+            "--previous", t1, "--version", "1.0", "--build", "3", "--output", str(output),
+            "--prior-release", f"1.0 (2)={t0}..{t1}", "--prior-release", f"1.0 (1)={t0}",
+        ]):
+            notes.main()
+        explicit = json.loads(output.read_text())
+        self.assertIn("## Version 1.0\n", explicit["markdown"])
+        self.assertIn("## Version 1.0 \\(2\\)\n", explicit["markdown"])
+        self.assertIn("## Version 1.0 \\(1\\)\n", explicit["markdown"])
+        self.assertIn("Initial curated highlight.", explicit["markdown"])
+        with mock.patch("sys.argv", [
+            "release-notes.py", "validate", "--file", str(output),
+            "--version", "1.0", "--build", "3", "--markdown",
+        ]), mock.patch("builtins.print") as printed:
+            notes.main()
+        single = printed.call_args.args[0]
+        self.assertIn("## Features and improvements\n\n- add third release", single)
+        self.assertNotIn("fix second release", single)
+        self.assertNotIn("Initial curated highlight.", single)
+        self.assertNotIn("/releases)", single)
+
+    def test_markdown_stays_within_five_hundred_line_rendering_limit(self):
+        prior = []
+        prev = self.previous
+        for idx in range(1, 10):
+            rev = self.commit(f"fix v{idx}")
+            prior.append(f"2026.10.25.{idx}={prev}..{rev}")
+            prev = rev
+        self.commit("feat current")
+        many_changes = [(f"Change {item}", f"https://github.com/example/app/pull/{item + 1}") for item in range(60)]
+        with mock.patch.object(
+            notes, "version_sections",
+            return_value=({"Features and improvements": many_changes, "Fixes": [], "Other changes": []}, None, False),
+        ):
+            result = notes.generate(
+                self.root, "example/app", prev, "2026.10.25.10", "2026.10.25.10",
+                prior_releases=list(reversed(prior)),
+            )
+        self.assertLessEqual(len(result["markdown"].split("\n")), 500)
+        self.assertTrue(
+            result["markdown"].endswith(
+                "\n\n[Full release notes history](https://github.com/example/app/releases)\n"
+            )
+        )
 
 
 if __name__ == "__main__":

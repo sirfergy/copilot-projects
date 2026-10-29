@@ -290,7 +290,11 @@ class ReleaseTests(unittest.TestCase):
             arg[5:] for _, cmd, args in self.calls if cmd == "gh"
             for arg in args if arg.startswith("body=")
         )
-        self.assertTrue(published_body.startswith(snapshot["markdown"]))
+        self.assertIn("## Version 2026.10.8.3\n\n### Other changes\n\n- fixture (", snapshot["markdown"])
+        self.assertIn("[Full release notes history](https://github.com/example/integration/releases)", snapshot["markdown"])
+        self.assertTrue(published_body.startswith("## Other changes\n\n- fixture ("))
+        self.assertNotIn("## Version ", published_body)
+        self.assertNotIn("/releases)", published_body)
         self.assertIn("## Install", published_body)
 
     def test_default_root_and_repository_remain_public(self):

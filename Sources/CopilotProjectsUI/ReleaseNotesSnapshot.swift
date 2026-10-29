@@ -13,6 +13,10 @@ public struct ReleaseNotesSnapshot: Codable, Equatable, Sendable {
         version == build ? version : "\(version) (\(build))"
     }
 
+    public var releasesURL: URL? {
+        URL(string: "https://github.com/\(repository)/releases")
+    }
+
     public static func load(bundle: Bundle = .main) throws -> ReleaseNotesSnapshot? {
         guard let url = bundle.url(forResource: "release-notes", withExtension: "json") else { return nil }
         let data = try Data(contentsOf: url)

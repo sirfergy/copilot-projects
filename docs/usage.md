@@ -762,13 +762,16 @@ entries; malformed content fails generation rather than silently replacing it.
 Links stay within this repository or the public host.
 
 Subsequent published builds generate notes from first-parent commits since the
-previous complete release. Merged pull requests use their GitHub titles and
-labels; direct commits use their subjects. Features, fixes, and other changes are
-grouped automatically. Write descriptive titles; `bug`/`fix` and
-`enhancement`/`feature` labels take precedence over title-prefix classification.
+previous complete release, and include up to the last ten versions in What's New
+with a link to the full release notes history on GitHub Releases. Merged pull
+requests use their GitHub titles and labels; direct commits use their subjects.
+Features, fixes, and other changes are grouped automatically. Write descriptive
+titles; `bug`/`fix` and `enhancement`/`feature` labels take precedence over
+title-prefix classification.
 
-The same version-stamped snapshot is signed into the app and used in the GitHub
-release body before the existing install instructions. API failures, mismatched
+The version-stamped snapshot is signed into the app, while `validate --markdown`
+writes only the current version's changes into the GitHub release body before
+the existing install instructions. API failures, mismatched
 versions, and changed release predecessors fail publication rather than silently
 publishing stale or empty notes. `scripts/test-release-notes.py` exercises the
 generator without network access.

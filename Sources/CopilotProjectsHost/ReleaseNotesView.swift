@@ -31,6 +31,10 @@ struct ReleaseNotesView: View {
                         Text("Version \(snapshot.displayVersion)")
                             .foregroundStyle(StudioStyle.secondaryText)
                         MarkdownText(text: snapshot.markdown)
+                        if let url = snapshot.releasesURL,
+                           !snapshot.markdown.contains(url.absoluteString) {
+                            Link("Full release notes history", destination: url)
+                        }
                     } else if let error {
                         Text("Couldn't Load Release Notes").font(.headline)
                         Text("Version \(installedVersion)")
