@@ -535,7 +535,11 @@ final class ProtocolContractTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let forgeIncludeURL = dir.appendingPathComponent("forge_common")
-        try "HostName github.com\n".write(to: forgeIncludeURL, atomically: true, encoding: .utf8)
+        try "Host *\n  HostName github.com\nHost nested-only\n  HostName 10.0.0.99\n".write(
+            to: forgeIncludeURL,
+            atomically: true,
+            encoding: .utf8
+        )
         let optionsIncludeURL = dir.appendingPathComponent("user_common")
         try "User git\n".write(to: optionsIncludeURL, atomically: true, encoding: .utf8)
 
@@ -756,6 +760,12 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertEqual(model.defaultCwd(forProjectIndex: 2, targetHost: .local), Paths.defaultStartupDir)
         model.setProjectDefaultHost("p3", hostId: "local")
         XCTAssertEqual(model.projects[2].cwd, Paths.defaultStartupDir)
+        SessionArtifacts.removeLeakedFiles(keeping: [], sessionsDirectory: dir)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: dir.appendingPathComponent("\(noSocketReq.uuidString).remote-host").path
+            )
+        )
         let composer = CopilotPromptComposer(availableHosts: [.local, woodhaven], selectedHostId: "retired-host")
         XCTAssertEqual(composer.selectedHostId, "retired-host")
 

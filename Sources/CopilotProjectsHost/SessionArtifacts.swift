@@ -268,7 +268,7 @@ enum SessionArtifacts {
 
     /// Turn markers only the hook script names (`CopilotHooks.script`). The hook
     /// clears them on sessionEnd, which a close that has to kill the CLI never runs.
-    private static let hookMarkerSuffixes = ["active-turn", "agent-stop-completion"]
+    private static let hookMarkerSuffixes = ["active-turn", "agent-stop-completion", "remote-host"]
 
     /// Files replaced by writing a pid-named sibling and renaming it over the
     /// original: `<name>.<pid>` by the hook, `<name>.<pid>.tmp` by the tracker. A

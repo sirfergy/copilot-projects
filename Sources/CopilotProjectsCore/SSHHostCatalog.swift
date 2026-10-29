@@ -116,10 +116,16 @@ public enum SSHHostCatalog {
 
     private struct SSHHostBlock {
         var patterns: [String]
+        var scopePatterns: [[String]] = []
         var hostName: String?
         var customDisplayName: String?
         var defaultCwd: String?
         var ignored: Bool = false
+
+        func matches(_ alias: String) -> Bool {
+            matchesHostPatterns(alias, patterns: patterns)
+                && scopePatterns.allSatisfy { matchesHostPatterns(alias, patterns: $0) }
+        }
     }
 
     private static func parseSSHConfigFile(
@@ -127,12 +133,14 @@ public enum SSHHostCatalog {
         baseSSHDir: URL
     ) -> [RemoteHostInfo] {
         var blocks: [SSHHostBlock] = [SSHHostBlock(patterns: ["*"], ignored: true)]
-        var inMatchBlock = false
-        var pendingDisplayName: String?
-        var pendingDefaultCwd: String?
-        var pendingIgnored = false
 
-        func parseFile(at url: URL, visited: Set<URL>, depth: Int) {
+        func parseFile(
+            at url: URL,
+            visited: Set<URL>,
+            depth: Int,
+            activeBlockIndex: Int,
+            scopePatterns: [[String]]
+        ) {
             guard depth <= 16 else { return }
             let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
             guard !visited.contains(canonical),
@@ -141,6 +149,11 @@ public enum SSHHostCatalog {
             }
             var nextVisited = visited
             nextVisited.insert(canonical)
+            var currentBlockIndex = activeBlockIndex
+            var inMatchBlock = false
+            var pendingDisplayName: String?
+            var pendingDefaultCwd: String?
+            var pendingIgnored = false
 
             for rawLine in content.components(separatedBy: .newlines) {
                 let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
@@ -164,10 +177,12 @@ public enum SSHHostCatalog {
                     inMatchBlock = false
                     blocks.append(SSHHostBlock(
                         patterns: splitPatterns(value),
+                        scopePatterns: scopePatterns,
                         customDisplayName: pendingDisplayName,
                         defaultCwd: pendingDefaultCwd,
                         ignored: pendingIgnored
                     ))
+                    currentBlockIndex = blocks.count - 1
                     pendingDisplayName = nil
                     pendingDefaultCwd = nil
                     pendingIgnored = false
@@ -177,14 +192,24 @@ public enum SSHHostCatalog {
                     pendingDefaultCwd = nil
                     pendingIgnored = false
                 case "include":
+                    guard !inMatchBlock else { break }
+                    let childScope = currentBlockIndex == 0
+                        ? scopePatterns
+                        : scopePatterns + [blocks[currentBlockIndex].patterns]
                     for pattern in splitPatterns(value) {
                         for includedURL in resolveIncludePattern(pattern, relativeTo: baseSSHDir) {
-                            parseFile(at: includedURL, visited: nextVisited, depth: depth + 1)
+                            parseFile(
+                                at: includedURL,
+                                visited: nextVisited,
+                                depth: depth + 1,
+                                activeBlockIndex: currentBlockIndex,
+                                scopePatterns: childScope
+                            )
                         }
                     }
                 case "hostname":
-                    if !inMatchBlock, blocks[blocks.count - 1].hostName == nil {
-                        blocks[blocks.count - 1].hostName = unquote(value)
+                    if !inMatchBlock, blocks[currentBlockIndex].hostName == nil {
+                        blocks[currentBlockIndex].hostName = unquote(value)
                     }
                 default:
                     break
@@ -192,12 +217,12 @@ public enum SSHHostCatalog {
             }
         }
 
-        parseFile(at: rootURL, visited: [], depth: 0)
+        parseFile(at: rootURL, visited: [], depth: 0, activeBlockIndex: 0, scopePatterns: [])
         return blocks.filter { !$0.ignored }.flatMap { block in
             block.patterns.compactMap { alias -> RemoteHostInfo? in
-                guard isEligibleHostAlias(alias) else { return nil }
+                guard isEligibleHostAlias(alias), block.matches(alias) else { return nil }
                 let effectiveHostName = blocks.first {
-                    $0.hostName != nil && matchesHostPatterns(alias, patterns: $0.patterns)
+                    $0.hostName != nil && $0.matches(alias)
                 }?.hostName
                 if let effectiveHostName, !isEligibleHostAlias(effectiveHostName) {
                     return nil
@@ -229,21 +254,11 @@ public enum SSHHostCatalog {
 
     private static func isEligibleHostAlias(_ alias: String) -> Bool {
         let lower = alias.lowercased()
-        guard !lower.isEmpty,
-              !lower.contains("*"),
-              !lower.contains("?"),
-              !lower.hasPrefix("!"),
-              !ignoredExactHosts.contains(lower) else {
-            return false
+        guard !lower.isEmpty, !lower.contains("*"), !lower.contains("?"), !lower.hasPrefix("!"),
+              !ignoredExactHosts.contains(lower) else { return false }
+        return !ignoredHostSuffixes.contains {
+            $0.hasPrefix(".") ? lower.hasSuffix($0) : lower == $0
         }
-        for suffix in ignoredHostSuffixes {
-            if suffix.hasPrefix(".") {
-                if lower.hasSuffix(suffix) { return false }
-            } else if lower == suffix {
-                return false
-            }
-        }
-        return true
     }
 
     private static func shortIdentifier(for alias: String) -> String {
@@ -265,39 +280,26 @@ public enum SSHHostCatalog {
         let prefix = "copilot-projects:"
         guard body.lowercased().hasPrefix(prefix) else { return nil }
         let rest = String(body.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
-        if rest.lowercased() == "ignore" {
-            return (nil, nil, true)
-        }
-        var name: String?
-        var cwd: String?
-        var ignore = false
+        if rest.lowercased() == "ignore" { return (nil, nil, true) }
+        var name: String?, cwd: String?, ignore = false
         let scanner = Scanner(string: rest)
         scanner.charactersToBeSkipped = .whitespaces
         while !scanner.isAtEnd {
             guard let key = scanner.scanUpToString("=") else {
-                if let word = scanner.scanUpToCharacters(from: .whitespaces),
-                   word.lowercased() == "ignore" {
+                if scanner.scanUpToCharacters(from: .whitespaces)?.lowercased() == "ignore" {
                     ignore = true
                 }
                 break
             }
             _ = scanner.scanString("=")
-            let value: String?
-            if scanner.scanString("\"") != nil {
-                value = scanner.scanUpToString("\"")
-                _ = scanner.scanString("\"")
-            } else {
-                value = scanner.scanUpToCharacters(from: .whitespaces)
-            }
+            let value = scanner.scanString("\"") != nil
+                ? { let v = scanner.scanUpToString("\""); _ = scanner.scanString("\""); return v }()
+                : scanner.scanUpToCharacters(from: .whitespaces)
             switch key.trimmingCharacters(in: .whitespaces).lowercased() {
-            case "name":
-                name = value
-            case "cwd":
-                cwd = value
-            case "ignore":
-                ignore = (value?.lowercased() == "true" || value == "1")
-            default:
-                break
+            case "name": name = value
+            case "cwd": cwd = value
+            case "ignore": ignore = (value?.lowercased() == "true" || value == "1")
+            default: break
             }
         }
         return (name, cwd, ignore)

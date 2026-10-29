@@ -1454,7 +1454,7 @@ final class AppModel: ObservableObject {
         let targetHostId = (targetHost?.isLocal == false) ? targetHost?.id : nil
         if let sid = project.selectedSessionId,
            let session = project.sessions.first(where: { $0.id == sid }),
-           session.hostId == targetHostId,
+           resolvedRemoteHost(for: session)?.id == targetHostId,
            !session.cwd.isEmpty {
             return session.cwd
         }

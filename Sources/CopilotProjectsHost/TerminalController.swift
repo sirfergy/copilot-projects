@@ -345,7 +345,10 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         let program: [String]
         if let remoteHost, !remoteHost.isLocal {
             let target = (remoteHost.sshTarget?.isEmpty == false) ? remoteHost.sshTarget! : remoteHost.id
-            let remoteCommand: String
+            let remoteShellCmd = "cd -- \(Self.shellSingleQuote(dir)) 2>/dev/null || cd \"$HOME/Repos\" 2>/dev/null || cd; TERM=xterm-256color COLORTERM=truecolor TERM_PROGRAM=ghostty exec \"${SHELL:-/bin/bash}\" -l"
+            let sshShell = "/usr/bin/ssh -tt \(Self.shellSingleQuote(target)) \(Self.shellSingleQuote(remoteShellCmd))"
+            let retry = "run() { while ! \"$@\"; do printf '\\n[Copilot Projects] remote session failed; press Return to retry.\\n'; read -r _ || exit 1; done; }; "
+            let script: String
             if let wrapper = remoteWrapper {
                 var arguments: [String] = []
                 if let cid = validCopilotSessionId {
@@ -354,17 +357,16 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
                           let prompt = launchCopilotInitialPrompt, !prompt.isEmpty {
                     arguments = ["--interactive", prompt]
                 }
-                remoteCommand = Self.profiledCopilotCommand(wrapper, arguments: arguments)
+                let command = Self.profiledCopilotCommand(wrapper, arguments: arguments)
+                let postExit = (launchCopilotExecutable != nil || validCopilotSessionId != nil)
+                    ? "; run \(sshShell)" : ""
+                script = "\(retry)run \(command)\(postExit)"
             } else if validCopilotSessionId != nil {
-                remoteCommand = "(/usr/bin/printf '%s\\n' 'Remote Copilot resume requires the remote wrapper.' >&2; exit 1)"
+                script = "\(retry)run /bin/sh -c 'printf \"%s\\n\" \"Remote Copilot resume requires the remote wrapper.\" >&2; exit 1'"
             } else {
-                let remoteCmd = "cd -- \(Self.shellSingleQuote(dir)) 2>/dev/null || cd \"$HOME/Repos\" 2>/dev/null || cd; TERM=xterm-256color COLORTERM=truecolor TERM_PROGRAM=ghostty exec \"${SHELL:-/bin/bash}\" -l"
-                remoteCommand = "/usr/bin/ssh -tt \(Self.shellSingleQuote(target)) \(Self.shellSingleQuote(remoteCmd))"
+                script = "\(retry)run \(sshShell)"
             }
-            program = [
-                shell, "-l", "-c",
-                "while ! \(remoteCommand); do printf '\\n[Copilot Projects] remote session failed; press Return to retry.\\n'; read -r _ || exit 1; done",
-            ]
+            program = [shell, "-l", "-c", "exec /bin/sh -c \(Self.shellSingleQuote(script))"]
         } else {
             program = Self.startupProgram(
                 shell: shell,
