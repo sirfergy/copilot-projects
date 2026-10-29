@@ -533,6 +533,7 @@ struct SidebarView: View {
     @State private var dropTargetProjectId: String?
 
     var body: some View {
+        let hosts = model.availableHosts
         List(selection: Binding(
             get: { model.selectedProjectId },
             set: { model.selectProject($0) }
@@ -540,6 +541,10 @@ struct SidebarView: View {
             ForEach(Array(model.projects.enumerated()), id: \.element.id) { index, project in
                 ProjectRow(
                     project: project,
+                    hostDisplayName: project.defaultHostId.flatMap { raw in
+                        guard !raw.isEmpty else { return nil }
+                        return SSHHostCatalog.resolve(hostId: raw, in: hosts)?.displayName ?? raw
+                    },
                     number: index < 9 ? index + 1 : nil,
                     showNumber: model.numberHint == .projects,
                     isDropTarget: dropTargetProjectId == project.id
@@ -611,6 +616,7 @@ struct SidebarView: View {
 
 struct ProjectRow: View, Equatable {
     let project: Project
+    var hostDisplayName: String? = nil
     var number: Int? = nil
     var showNumber: Bool = false
     var isDropTarget: Bool = false
@@ -619,6 +625,7 @@ struct ProjectRow: View, Equatable {
         lhs.number == rhs.number
             && lhs.showNumber == rhs.showNumber
             && lhs.isDropTarget == rhs.isDropTarget
+            && lhs.hostDisplayName == rhs.hostDisplayName
             && lhs.project.id == rhs.project.id
             && lhs.project.name == rhs.project.name
             && lhs.project.defaultHostId == rhs.project.defaultHostId
@@ -634,14 +641,12 @@ struct ProjectRow: View, Equatable {
     var body: some View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    Text(project.name)
-                        .font(.body.weight(.medium))
-                        .lineLimit(1)
-                        .help(project.name)
-                    if let defaultHostId = project.defaultHostId, !defaultHostId.isEmpty {
-                        HostBadge(name: defaultHostId)
-                    }
+                Text(project.name)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                    .help(project.name)
+                if let hostLabel = hostDisplayName ?? project.defaultHostId, !hostLabel.isEmpty {
+                    HostBadge(name: hostLabel)
                 }
                 Text("\(project.sessions.count) session\(project.sessions.count == 1 ? "" : "s")")
                     .font(.caption)
@@ -959,10 +964,15 @@ private struct SessionList: View {
                             description: Text("Start Copilot or a terminal for this project.")
                         )
                     }
+                    let hosts = model.availableHosts
                     ForEach(Array(displayItems.enumerated()), id: \.element.id) { index, item in
                         let session = item.session
                         SessionRow(
                             session: session,
+                            hostDisplayName: session.hostId.flatMap { raw in
+                                guard !raw.isEmpty else { return nil }
+                                return SSHHostCatalog.resolve(hostId: raw, in: hosts)?.displayName ?? raw
+                            },
                             isActive: session.id == project.selectedSessionId,
                             number: index < 9 ? index + 1 : nil,
                             showNumber: showTabNumbers,
@@ -1292,6 +1302,7 @@ struct SessionMemoryBadge: View, Equatable {
 
 struct SessionRow: View, Equatable {
     let session: Session
+    var hostDisplayName: String? = nil
     let isActive: Bool
     var number: Int? = nil
     var showNumber: Bool = false
@@ -1306,6 +1317,7 @@ struct SessionRow: View, Equatable {
         lhs.isActive == rhs.isActive
             && lhs.number == rhs.number
             && lhs.showNumber == rhs.showNumber
+            && lhs.hostDisplayName == rhs.hostDisplayName
             && lhs.isChild == rhs.isChild
             && lhs.childSummary == rhs.childSummary
             && lhs.isExpanded == rhs.isExpanded
@@ -1334,8 +1346,8 @@ struct SessionRow: View, Equatable {
         if isActive { states.append("Selected") }
         if isChild { states.append("Child session") }
         states.append(stateLabel)
-        if let hostId = session.hostId, !hostId.isEmpty {
-            states.append("Running on \(hostId)")
+        if let hostLabel = hostDisplayName ?? session.hostId, !hostLabel.isEmpty {
+            states.append("Running on \(hostLabel)")
         }
         if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
             states.append("Memory \(SessionMemoryBadge.formattedBytes(memoryBytes))")
@@ -1380,9 +1392,6 @@ struct SessionRow: View, Equatable {
                             .help(session.statusText ?? session.title)
                         HStack(spacing: 6) {
                             Text(stateLabel)
-                            if let hostId = session.hostId, !hostId.isEmpty {
-                                HostBadge(name: hostId)
-                            }
                             if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
                                 SessionMemoryBadge(bytes: memoryBytes)
                             }
@@ -1407,6 +1416,9 @@ struct SessionRow: View, Equatable {
                         }
                         .font(.caption)
                         .foregroundStyle(StudioStyle.secondaryText)
+                        if let hostLabel = hostDisplayName ?? session.hostId, !hostLabel.isEmpty {
+                            HostBadge(name: hostLabel)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }

@@ -797,13 +797,23 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertEqual(snap.projects[0].defaultHostId, "woodhaven")
         XCTAssertEqual(snap.projects[0].sessions.first?.hostId, "woodhaven")
         XCTAssertEqual(snap.projects[0].sessions.first?.hostDisplayName, "woodhaven")
+        let remoteSession = try XCTUnwrap(model.projects[0].sessions.first)
         let remoteRow = SessionRow(
-            session: try XCTUnwrap(model.projects[0].sessions.first),
+            session: remoteSession,
+            hostDisplayName: "Surface WSL",
             isActive: true,
             onSelect: {},
             onClose: {}
         )
-        XCTAssertEqual(remoteRow.accessibilityStatus, "Selected, Idle, Running on woodhaven")
+        XCTAssertEqual(remoteRow.accessibilityStatus, "Selected, Idle, Running on Surface WSL")
+        XCTAssertNotEqual(
+            remoteRow,
+            SessionRow(session: remoteSession, hostDisplayName: "woodhaven", isActive: true, onSelect: {}, onClose: {})
+        )
+        XCTAssertNotEqual(
+            ProjectRow(project: model.projects[0], hostDisplayName: "Surface WSL"),
+            ProjectRow(project: model.projects[0], hostDisplayName: "woodhaven")
+        )
     }
 
     // MARK: - Host Health Indicators

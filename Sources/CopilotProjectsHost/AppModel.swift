@@ -800,10 +800,11 @@ final class AppModel: ObservableObject {
     }
 
     func resolvedRemoteHost(for session: Session, in hosts: [RemoteHostInfo]? = nil) -> RemoteHostInfo? {
-        let candidate = [session.hostId, resumeMarkerValue(sessionId: session.id, suffix: "remote-host")]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first { !$0.isEmpty }
-        guard let candidate,
+        let explicit = session.hostId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate = (explicit?.isEmpty == false ? explicit : nil)
+            ?? resumeMarkerValue(sessionId: session.id, suffix: "remote-host")?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let candidate, !candidate.isEmpty,
               candidate.caseInsensitiveCompare(RemoteHostInfo.localId) != .orderedSame else {
             return nil
         }
