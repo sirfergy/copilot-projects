@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import CopilotProjectsProtocol
 
@@ -51,18 +52,9 @@ public enum SSHHostCatalog {
 
         if let sshConfigURL {
             let baseDir = sshConfigURL.deletingLastPathComponent()
-            let parsed = parseSSHConfigFile(at: sshConfigURL, baseSSHDir: baseDir)
-            for candidate in parsed {
-                let id = candidate.alias.lowercased()
-                guard !seenIds.contains(id) else { continue }
-                seenIds.insert(id)
-                result.append(RemoteHostInfo(
-                    id: id,
-                    displayName: candidate.customDisplayName ?? candidate.shortId.lowercased(),
-                    sshTarget: candidate.sshTarget,
-                    defaultCwd: candidate.defaultCwd,
-                    isLocal: false
-                ))
+            for candidate in parseSSHConfigFile(at: sshConfigURL, baseSSHDir: baseDir)
+                where seenIds.insert(candidate.id).inserted {
+                result.append(candidate)
             }
         }
 
@@ -122,58 +114,23 @@ public enum SSHHostCatalog {
 
     // MARK: - SSH Config Parser
 
-    private struct ParsedSSHHost {
-        var alias: String
-        var shortId: String
+    private struct SSHHostBlock {
+        var patterns: [String]
         var hostName: String?
         var customDisplayName: String?
         var defaultCwd: String?
         var ignored: Bool = false
-
-        var sshTarget: String {
-            alias
-        }
     }
 
     private static func parseSSHConfigFile(
         at rootURL: URL,
         baseSSHDir: URL
-    ) -> [ParsedSSHHost] {
-        var hosts: [ParsedSSHHost] = []
-        var currentAliases: [String] = []
-        var currentHostName: String?
-        var currentDisplayName: String?
-        var currentDefaultCwd: String?
-        var currentIgnored = false
+    ) -> [RemoteHostInfo] {
+        var blocks: [SSHHostBlock] = [SSHHostBlock(patterns: ["*"], ignored: true)]
+        var inMatchBlock = false
         var pendingDisplayName: String?
         var pendingDefaultCwd: String?
         var pendingIgnored = false
-
-        func flushCurrentBlock() {
-            defer {
-                currentAliases = []
-                currentHostName = nil
-                currentDisplayName = nil
-                currentDefaultCwd = nil
-                currentIgnored = false
-            }
-            guard !currentIgnored else { return }
-            for alias in currentAliases {
-                guard isEligibleHostAlias(alias) else { continue }
-                if let currentHostName, !isEligibleHostAlias(currentHostName) {
-                    continue
-                }
-                let shortId = shortIdentifier(for: alias)
-                hosts.append(ParsedSSHHost(
-                    alias: alias,
-                    shortId: shortId,
-                    hostName: currentHostName,
-                    customDisplayName: currentDisplayName,
-                    defaultCwd: currentDefaultCwd,
-                    ignored: false
-                ))
-            }
-        }
 
         func parseFile(at url: URL, visited: Set<URL>, depth: Int) {
             guard depth <= 16 else { return }
@@ -202,35 +159,32 @@ public enum SSHHostCatalog {
                 guard let (keyword, value) = splitKeywordAndValue(lineWithoutComment) else {
                     continue
                 }
-                let lowerKeyword = keyword.lowercased()
-                switch lowerKeyword {
+                switch keyword.lowercased() {
                 case "host":
-                    flushCurrentBlock()
-                    currentAliases = splitPatterns(value)
-                    currentDisplayName = pendingDisplayName
-                    currentDefaultCwd = pendingDefaultCwd
-                    currentIgnored = pendingIgnored
+                    inMatchBlock = false
+                    blocks.append(SSHHostBlock(
+                        patterns: splitPatterns(value),
+                        customDisplayName: pendingDisplayName,
+                        defaultCwd: pendingDefaultCwd,
+                        ignored: pendingIgnored
+                    ))
                     pendingDisplayName = nil
                     pendingDefaultCwd = nil
                     pendingIgnored = false
                 case "match":
-                    flushCurrentBlock()
+                    inMatchBlock = true
                     pendingDisplayName = nil
                     pendingDefaultCwd = nil
                     pendingIgnored = false
                 case "include":
                     for pattern in splitPatterns(value) {
                         for includedURL in resolveIncludePattern(pattern, relativeTo: baseSSHDir) {
-                            parseFile(
-                                at: includedURL,
-                                visited: nextVisited,
-                                depth: depth + 1
-                            )
+                            parseFile(at: includedURL, visited: nextVisited, depth: depth + 1)
                         }
                     }
                 case "hostname":
-                    if !currentAliases.isEmpty, currentHostName == nil {
-                        currentHostName = unquote(value)
+                    if !inMatchBlock, blocks[blocks.count - 1].hostName == nil {
+                        blocks[blocks.count - 1].hostName = unquote(value)
                     }
                 default:
                     break
@@ -239,8 +193,38 @@ public enum SSHHostCatalog {
         }
 
         parseFile(at: rootURL, visited: [], depth: 0)
-        flushCurrentBlock()
-        return hosts
+        return blocks.filter { !$0.ignored }.flatMap { block in
+            block.patterns.compactMap { alias -> RemoteHostInfo? in
+                guard isEligibleHostAlias(alias) else { return nil }
+                let effectiveHostName = blocks.first {
+                    $0.hostName != nil && matchesHostPatterns(alias, patterns: $0.patterns)
+                }?.hostName
+                if let effectiveHostName, !isEligibleHostAlias(effectiveHostName) {
+                    return nil
+                }
+                return RemoteHostInfo(
+                    id: alias.lowercased(),
+                    displayName: block.customDisplayName ?? shortIdentifier(for: alias).lowercased(),
+                    sshTarget: alias,
+                    defaultCwd: block.defaultCwd,
+                    isLocal: false
+                )
+            }
+        }
+    }
+
+    private static func matchesHostPatterns(_ alias: String, patterns: [String]) -> Bool {
+        let lowerAlias = alias.lowercased()
+        var matchedPositive = false
+        for raw in patterns {
+            let lower = raw.lowercased()
+            if lower.hasPrefix("!") {
+                if fnmatch(String(lower.dropFirst()), lowerAlias, 0) == 0 { return false }
+            } else if fnmatch(lower, lowerAlias, 0) == 0 {
+                matchedPositive = true
+            }
+        }
+        return matchedPositive
     }
 
     private static func isEligibleHostAlias(_ alias: String) -> Bool {

@@ -800,14 +800,14 @@ final class AppModel: ObservableObject {
 
     func setProjectDefaultHost(_ pid: String, hostId: String?) {
         guard let pi = projectIndex(pid) else { return }
-        let normalized: String?
-        if let hostId, !hostId.isEmpty, hostId.lowercased() != RemoteHostInfo.localId {
-            normalized = resolvedRemoteHost(hostId: hostId)?.id ?? hostId
-        } else {
-            normalized = nil
+        let resolved = hostId.flatMap { raw -> RemoteHostInfo? in
+            guard !raw.isEmpty, raw.lowercased() != RemoteHostInfo.localId else { return nil }
+            return resolvedRemoteHost(hostId: raw)
+                ?? RemoteHostInfo(id: raw, displayName: raw, sshTarget: raw, isLocal: false)
         }
-        guard projects[pi].defaultHostId != normalized else { return }
-        projects[pi].defaultHostId = normalized
+        guard projects[pi].defaultHostId != resolved?.id else { return }
+        projects[pi].defaultHostId = resolved?.id
+        projects[pi].cwd = resolved?.defaultCwd ?? Paths.defaultStartupDir
         save()
     }
 
@@ -1174,6 +1174,7 @@ final class AppModel: ObservableObject {
 
     enum CopilotSessionStartError: LocalizedError {
         case shuttingDown, projectUnavailable, backendUnavailable, copilotUnavailable
+        case remoteWrapperUnavailable(String)
         case invalidPrompt, terminalUnavailable
         case workingDirectoryUnavailable(String)
 
@@ -1187,6 +1188,8 @@ final class AppModel: ObservableObject {
                 return "The bundled terminal backend is unavailable. Reinstall the app, or use New Terminal."
             case .copilotUnavailable:
                 return "Install the Copilot CLI or set COPILOT_PROJECTS_COPILOT to its executable, or use New Terminal."
+            case .remoteWrapperUnavailable(let host):
+                return "Configure the remote Copilot wrapper for \(host) or set COPILOT_PROJECTS_REMOTE_WRAPPER, or use New Terminal."
             case .invalidPrompt:
                 return "Enter a prompt of at most 8,192 UTF-8 bytes, without terminal control characters."
             case .workingDirectoryUnavailable(let path):
@@ -1207,12 +1210,16 @@ final class AppModel: ObservableObject {
         ) else {
             throw CopilotSessionStartError.backendUnavailable
         }
-        guard let executable = resolvedHost.isLocal
-            ? remoteCopilotExecutable()
-            : remoteWrapperExecutable() else {
-            throw CopilotSessionStartError.copilotUnavailable
+        if resolvedHost.isLocal {
+            guard let executable = remoteCopilotExecutable() else {
+                throw CopilotSessionStartError.copilotUnavailable
+            }
+            return executable
         }
-        return executable
+        guard let wrapper = remoteWrapperExecutable() else {
+            throw CopilotSessionStartError.remoteWrapperUnavailable(resolvedHost.displayName)
+        }
+        return wrapper
     }
 
     func addCopilotSessionInteractive(
@@ -1226,12 +1233,13 @@ final class AppModel: ObservableObject {
                 guard projectIndex(pid) != nil else { throw CopilotSessionStartError.projectUnavailable }
                 guard remoteSessionBackendAvailable() else { throw CopilotSessionStartError.backendUnavailable }
                 let hosts = availableHosts
-                if hosts.count <= 1 {
+                let initialHostId = hostId ?? effectiveHostId(forProjectId: pid)
+                if hosts.count <= 1, initialHostId.caseInsensitiveCompare(RemoteHostInfo.localId) == .orderedSame {
                     _ = try copilotSessionExecutable(toProjectId: pid, hostId: hostId)
                 }
                 let composer = CopilotPromptComposer(
                     availableHosts: hosts,
-                    selectedHostId: hostId ?? effectiveHostId(forProjectId: pid)
+                    selectedHostId: initialHostId
                 )
                 let outcome = composer.run { prompt in
                     try self.addCopilotSession(
@@ -1253,7 +1261,7 @@ final class AppModel: ObservableObject {
             alert.addButton(withTitle: "OK")
             if let startError = error as? CopilotSessionStartError {
                 switch startError {
-                case .copilotUnavailable, .backendUnavailable:
+                case .copilotUnavailable, .remoteWrapperUnavailable, .backendUnavailable:
                     alert.addButton(withTitle: "New Terminal")
                 default:
                     break
@@ -1450,14 +1458,12 @@ final class AppModel: ObservableObject {
            !session.cwd.isEmpty {
             return session.cwd
         }
-        if project.defaultHostId == targetHostId, !project.cwd.isEmpty,
-           (targetHostId == nil || project.cwd != Paths.defaultStartupDir) {
+        if project.defaultHostId == targetHostId, !project.cwd.isEmpty {
             return project.cwd
         }
         if targetHostId != nil, let remoteDefault = targetHost?.defaultCwd, !remoteDefault.isEmpty {
             return remoteDefault
         }
-        if !project.cwd.isEmpty { return project.cwd }
         return Paths.defaultStartupDir
     }
 

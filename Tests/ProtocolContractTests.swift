@@ -560,6 +560,12 @@ final class ProtocolContractTests: XCTestCase {
           Include user_common
           HostName gitlab.com
 
+        Host forge-via-wildcard
+          User git
+
+        Host forge-*
+          HostName github.com
+
         # copilot-projects: ignore
         Host bastion.internal.example.com
           User admin
@@ -680,7 +686,7 @@ final class ProtocolContractTests: XCTestCase {
         ))
         XCTAssertEqual(out4, .badRequest)
 
-        // 5. Missing remote wrapper fails closed for remote Copilot launches, while terminal launches succeed
+        // 5. Missing remote wrapper fails closed for remote Copilot launches with wrapper-specific error
         wrapperExecutable = nil
         XCTAssertEqual(
             model.createRemoteConfiguredSession(RemoteCreateSessionRequest(
@@ -688,6 +694,10 @@ final class ProtocolContractTests: XCTestCase {
             )),
             .unavailable
         )
+        XCTAssertThrowsError(try model.copilotSessionExecutable(toProjectId: "p1")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("COPILOT_PROJECTS_REMOTE_WRAPPER"))
+            XCTAssertTrue(error.localizedDescription.contains("woodhaven"))
+        }
         wrapperExecutable = "/usr/bin/true"
 
         // 6. Plain create with an orphaned dtach socket or resume marker requires matching host
@@ -740,9 +750,12 @@ final class ProtocolContractTests: XCTestCase {
             .conflict
         )
 
-        // 7. Remote project with an explicit cwd preserves it when empty, and composer preserves unavailable host
+        // 7. Remote project with an explicit cwd preserves it on its default host, falls back to local startup dir for local sessions, and switching default host updates cwd
         model.projects.append(Project(id: "p3", name: "Custom Remote", cwd: "/srv/my-project", defaultHostId: "woodhaven"))
         XCTAssertEqual(model.defaultCwd(forProjectIndex: 2, targetHost: woodhaven), "/srv/my-project")
+        XCTAssertEqual(model.defaultCwd(forProjectIndex: 2, targetHost: .local), Paths.defaultStartupDir)
+        model.setProjectDefaultHost("p3", hostId: "local")
+        XCTAssertEqual(model.projects[2].cwd, Paths.defaultStartupDir)
         let composer = CopilotPromptComposer(availableHosts: [.local, woodhaven], selectedHostId: "retired-host")
         XCTAssertEqual(composer.selectedHostId, "retired-host")
 

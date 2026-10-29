@@ -515,17 +515,18 @@ extension AppModel {
         }
 
         if !isPlainCreate {
-            for suffix in ["copilot-session", "remote-host"] {
-                let marker = resumeMarkerDirectory.appendingPathComponent("\(sessionId).\(suffix)")
-                if unlink(marker.path) != 0 {
-                    let code = errno
-                    guard code == ENOENT else {
-                        NSLog("copilot-projects: could not clear stale \(suffix) marker for remote session "
-                            + "\(sessionId) (errno \(code))")
-                        return .persistenceUnavailable
-                    }
-                }
+            let marker = resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session")
+            if unlink(marker.path) != 0 && errno != ENOENT {
+                return .persistenceUnavailable
             }
+        }
+        let hostMarker = resumeMarkerDirectory.appendingPathComponent("\(sessionId).remote-host")
+        if resolvedHost.isLocal {
+            if unlink(hostMarker.path) != 0 && errno != ENOENT {
+                return .persistenceUnavailable
+            }
+        } else if (try? Data(resolvedHost.id.utf8).write(to: hostMarker, options: .atomic)) == nil {
+            return .persistenceUnavailable
         }
 
         let sessionHostId = resolvedHost.isLocal ? nil : resolvedHost.id
@@ -1996,7 +1997,8 @@ extension AppModel {
         case .projectUnavailable: code = "unknown-project"
         case .invalidPrompt: code = "bad-request"
         case .workingDirectoryUnavailable: code = "invalid"
-        case .shuttingDown, .backendUnavailable, .copilotUnavailable, .terminalUnavailable: code = "unavailable"
+        case .shuttingDown, .backendUnavailable, .copilotUnavailable, .remoteWrapperUnavailable, .terminalUnavailable:
+            code = "unavailable"
         }
         return .failure(error.localizedDescription, code: code)
     }
@@ -2088,6 +2090,8 @@ extension AppModel {
         guard let pi = projectIndex(projectId) else {
             return .failure(CopilotSessionStartError.projectUnavailable.localizedDescription, code: "unknown-project")
         }
+        let hostMarker = resumeMarkerDirectory.appendingPathComponent("\(tabId).remote-host")
+        if unlink(hostMarker.path) != 0 && errno != ENOENT { return unsaved }
         let resolvedTitle = initialTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let session = Session(
             id: tabId,

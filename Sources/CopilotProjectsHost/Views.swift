@@ -380,7 +380,7 @@ struct SidebarView: View {
                             model.addCopilotSessionInteractive(toProjectId: project.id, withPrompt: true)
                         }
                         Button("New Terminal") { model.addSession(toProjectId: project.id) }
-                        if model.availableHosts.count > 1 {
+                        if model.availableHosts.count > 1 || project.defaultHostId != nil {
                             Divider()
                             Menu("Default Host") {
                                 let currentHostId = model.effectiveHostId(forProjectId: project.id)
@@ -870,7 +870,7 @@ private struct SessionCreationButtons: View {
                 Button("Review Pull Request…", systemImage: "checkmark.shield") {
                     model.addAdversarialReviewSessionInteractive(toProjectId: project.id)
                 }
-                if model.availableHosts.count > 1 {
+                if model.availableHosts.count > 1 || project.defaultHostId != nil {
                     Divider()
                     ForEach(model.availableHosts) { host in
                         Menu("Run on \(host.displayName)") {

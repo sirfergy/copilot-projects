@@ -345,6 +345,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         let program: [String]
         if let remoteHost, !remoteHost.isLocal {
             let target = (remoteHost.sshTarget?.isEmpty == false) ? remoteHost.sshTarget! : remoteHost.id
+            let remoteCommand: String
             if let wrapper = remoteWrapper {
                 var arguments: [String] = []
                 if let cid = validCopilotSessionId {
@@ -353,13 +354,17 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
                           let prompt = launchCopilotInitialPrompt, !prompt.isEmpty {
                     arguments = ["--interactive", prompt]
                 }
-                let command = Self.profiledCopilotCommand(wrapper, arguments: arguments)
-                program = [shell, "-l", "-c", "exec \(command)"]
+                remoteCommand = Self.profiledCopilotCommand(wrapper, arguments: arguments)
+            } else if validCopilotSessionId != nil {
+                remoteCommand = "(/usr/bin/printf '%s\\n' 'Remote Copilot resume requires the remote wrapper.' >&2; exit 1)"
             } else {
                 let remoteCmd = "cd -- \(Self.shellSingleQuote(dir)) 2>/dev/null || cd \"$HOME/Repos\" 2>/dev/null || cd; TERM=xterm-256color COLORTERM=truecolor TERM_PROGRAM=ghostty exec \"${SHELL:-/bin/bash}\" -l"
-                let sshCmd = "/usr/bin/ssh -tt \(Self.shellSingleQuote(target)) \(Self.shellSingleQuote(remoteCmd))"
-                program = [shell, "-l", "-c", "exec \(sshCmd)"]
+                remoteCommand = "/usr/bin/ssh -tt \(Self.shellSingleQuote(target)) \(Self.shellSingleQuote(remoteCmd))"
             }
+            program = [
+                shell, "-l", "-c",
+                "while ! \(remoteCommand); do printf '\\n[Copilot Projects] remote session failed; press Return to retry.\\n'; read -r _ || exit 1; done",
+            ]
         } else {
             program = Self.startupProgram(
                 shell: shell,

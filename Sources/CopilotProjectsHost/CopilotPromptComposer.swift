@@ -692,7 +692,10 @@ final class CopilotPromptComposer: NSObject, NSTextViewDelegate {
         alert.buttons[0].keyEquivalent = "\r"
         alert.buttons[0].keyEquivalentModifierMask = .command
         alert.buttons[1].keyEquivalent = "\u{1b}"
-        if availableHosts.count > 1 {
+        let hasRemoteSelection = self.selectedHostId.map {
+            $0.caseInsensitiveCompare(RemoteHostInfo.localId) != .orderedSame
+        } == true
+        if availableHosts.count > 1 || hasRemoteSelection {
             let container = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 214))
             let label = NSTextField(labelWithString: "Host:")
             label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
@@ -797,7 +800,7 @@ final class CopilotPromptComposer: NSObject, NSTextViewDelegate {
                 // Keep the same editor and its text on synchronous launch failures.
                 alert.informativeText = error.localizedDescription
                 switch error as? AppModel.CopilotSessionStartError {
-                case .copilotUnavailable, .backendUnavailable:
+                case .copilotUnavailable, .remoteWrapperUnavailable, .backendUnavailable:
                     offersTerminal = true
                 default:
                     offersTerminal = false
