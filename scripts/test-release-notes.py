@@ -140,7 +140,7 @@ class NotesTests(unittest.TestCase):
     def test_unchanged_build_is_explicit(self):
         self.assertIn("No source changes", self.generate()["markdown"])
 
-    def test_public_host_pin_context_is_linked_without_reading_private_repos(self):
+    def test_public_host_pin_context_is_omitted_without_host_root(self):
         def write_pin(revision):
             (self.root / "Package.resolved").write_text(json.dumps({"pins": [{
                 "identity": "copilot-projects",
@@ -151,7 +151,10 @@ class NotesTests(unittest.TestCase):
         previous = self.commit("Old host")
         write_pin("b" * 40)
         self.commit("Update host")
-        self.assertIn("compare/" + "a" * 40 + "..." + "b" * 40, self.generate(previous)["markdown"])
+        result = self.generate(previous)
+        self.assertIn("Update host", result["markdown"])
+        self.assertNotIn("Desktop host changes", result["markdown"])
+        self.assertNotIn("View the desktop host changes", result["plainText"])
 
     def test_plain_text_limit_and_markup_independence(self):
         sections = {"Fixes": [(f"Fix {i} " + "\U0001f680" * 100, "https://example.invalid") for i in range(50)]}
@@ -286,14 +289,14 @@ class NotesTests(unittest.TestCase):
         self.assertIn("update desktop and a web-only dependency", result["markdown"])
         self.assertIn("fix desktop", result["markdown"])
 
-    def test_default_consumer_keeps_compare_link_and_unchanged_pin_never_calls_compare(self):
+    def test_default_consumer_omits_desktop_host_section_and_unchanged_pin_never_calls_compare(self):
         self.write_host_pin("a" * 40)
         previous = self.commit("Old desktop")
         self.write_host_pin("b" * 40)
         current = self.commit("update desktop")
         with mock.patch.object(notes, "host_changes", side_effect=AssertionError("Unexpected expansion")):
             legacy = self.generate(previous)
-            self.assertIn("View the desktop host changes", legacy["markdown"])
+            self.assertNotIn("Desktop host changes", legacy["markdown"])
             self.commit("fix web only")
             self.assertIn("fix web only", self.generate_integrated(current)["markdown"])
 

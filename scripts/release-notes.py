@@ -415,26 +415,20 @@ def version_sections(root, repository, previous, revision, host_root, pr_cache, 
     }
     history = [tuple(line.split("\t", 1)) for line in history.splitlines()]
     desktop_history = []
-    if previous and initial is None:
+    if previous and initial is None and host_root is not None:
         old_host, new_host = host_pin(root, previous), host_pin(root, revision)
         if old_host and new_host and old_host != new_host:
-            if host_root is not None:
-                status, desktop_history = host_changes(host_root, old_host, new_host)
-                if status == "ahead":
-                    history = [(sha, subject) for sha, subject in history if not pure_host_update(root, sha, host_root)]
-                else:
-                    description = (
-                        "Desktop host rolled back to an earlier revision; compare the removed changes"
-                        if status == "behind" else "Desktop host changed to a different history; compare revisions"
-                    )
-                    left, right = (new_host, old_host) if status == "behind" else (old_host, new_host)
-                    sections["Desktop host changes"] = [(
-                        description, f"https://github.com/{HOST_REPOSITORY}/compare/{left}...{right}"
-                    )]
+            status, desktop_history = host_changes(host_root, old_host, new_host)
+            if status == "ahead":
+                history = [(sha, subject) for sha, subject in history if not pure_host_update(root, sha, host_root)]
             else:
+                description = (
+                    "Desktop host rolled back to an earlier revision; compare the removed changes"
+                    if status == "behind" else "Desktop host changed to a different history; compare revisions"
+                )
+                left, right = (new_host, old_host) if status == "behind" else (old_host, new_host)
                 sections["Desktop host changes"] = [(
-                    "View the desktop host changes included in this build",
-                    f"https://github.com/{HOST_REPOSITORY}/compare/{old_host}...{new_host}"
+                    description, f"https://github.com/{HOST_REPOSITORY}/compare/{left}...{right}"
                 )]
     seen = {}
     collect_changes(repository, history, sections, seen, pr_cache, retry_newest)
