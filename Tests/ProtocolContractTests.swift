@@ -783,4 +783,353 @@ final class ProtocolContractTests: XCTestCase {
         )
         XCTAssertEqual(remoteRow.accessibilityStatus, "Selected, Idle, Running on woodhaven")
     }
+
+    // MARK: - Host Health Indicators
+
+    func testRemoteHostHealthContractAndEvaluationThresholds() throws {
+        XCTAssertTrue(RemoteHostHealthLevel.healthy < .warning)
+        XCTAssertTrue(RemoteHostHealthLevel.warning < .critical)
+        XCTAssertFalse(RemoteHostHealthLevel.critical < .healthy)
+
+        let unreachable = HostHealthEvaluator.makeHealth(
+            host: RemoteHostInfo(id: "woodhaven", displayName: "Surface WSL", isLocal: false),
+            reachable: false,
+            cpuUsagePercent: 10,
+            memoryUsagePercent: 20,
+            diskAvailableBytes: 50_000_000_000,
+            diskTotalBytes: 100_000_000_000,
+            latencyMilliseconds: 30
+        )
+        XCTAssertEqual(unreachable.level, .critical)
+        XCTAssertEqual(unreachable.statusSummary, "Unreachable")
+        XCTAssertFalse(unreachable.reachable)
+        XCTAssertNil(unreachable.cpuUsagePercent)
+        XCTAssertNil(unreachable.diskAvailableBytes)
+
+        let criticalCPU = HostHealthEvaluator.evaluate(
+            reachable: true, cpuUsagePercent: 92, memoryUsagePercent: 45, diskAvailableBytes: 80_000_000_000
+        )
+        XCTAssertEqual(criticalCPU.level, .critical)
+        XCTAssertEqual(criticalCPU.statusSummary, "High CPU (92%)")
+
+        let criticalMem = HostHealthEvaluator.evaluate(
+            reachable: true, cpuUsagePercent: 40, memoryUsagePercent: 91, diskAvailableBytes: 80_000_000_000
+        )
+        XCTAssertEqual(criticalMem.level, .critical)
+        XCTAssertEqual(criticalMem.statusSummary, "High memory (91%)")
+
+        let criticalDisk = HostHealthEvaluator.evaluate(
+            reachable: true, cpuUsagePercent: 20, memoryUsagePercent: 30, diskAvailableBytes: 4_900_000_000
+        )
+        XCTAssertEqual(criticalDisk.level, .critical)
+        XCTAssertEqual(criticalDisk.statusSummary, "Low disk")
+
+        let warningCPU = HostHealthEvaluator.evaluate(
+            reachable: true, cpuUsagePercent: 78, memoryUsagePercent: 50, diskAvailableBytes: 80_000_000_000
+        )
+        XCTAssertEqual(warningCPU.level, .warning)
+        XCTAssertEqual(warningCPU.statusSummary, "High CPU (78%)")
+
+        let warningMem = HostHealthEvaluator.evaluate(
+            reachable: true, cpuUsagePercent: 30, memoryUsagePercent: 84, diskAvailableBytes: 80_000_000_000
+        )
+        XCTAssertEqual(warningMem.level, .warning)
+        XCTAssertEqual(warningMem.statusSummary, "High memory (84%)")
+
+        let warningDisk = HostHealthEvaluator.evaluate(
+            reachable: true, cpuUsagePercent: 20, memoryUsagePercent: 40, diskAvailableBytes: 12_000_000_000
+        )
+        XCTAssertEqual(warningDisk.level, .warning)
+        XCTAssertEqual(warningDisk.statusSummary, "Low disk")
+
+        let warningLatency = HostHealthEvaluator.evaluate(
+            reachable: true,
+            cpuUsagePercent: 20,
+            memoryUsagePercent: 40,
+            diskAvailableBytes: 80_000_000_000,
+            latencyMilliseconds: 520
+        )
+        XCTAssertEqual(warningLatency.level, .warning)
+        XCTAssertEqual(warningLatency.statusSummary, "High latency (520 ms)")
+
+        // Exact threshold boundaries
+        XCTAssertEqual(HostHealthEvaluator.evaluate(cpuUsagePercent: 90).level, .critical)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(cpuUsagePercent: 89).level, .warning)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(cpuUsagePercent: 75).level, .warning)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(cpuUsagePercent: 74).level, .healthy)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(memoryUsagePercent: 90).level, .critical)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(memoryUsagePercent: 89).level, .warning)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(memoryUsagePercent: 80).level, .warning)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(memoryUsagePercent: 79).level, .healthy)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(diskAvailableBytes: 4_999_999_999).level, .critical)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(diskAvailableBytes: 5_000_000_000).level, .warning)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(diskAvailableBytes: 14_999_999_999).level, .warning)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(diskAvailableBytes: 15_000_000_000).level, .healthy)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(latencyMilliseconds: 500).level, .warning)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(latencyMilliseconds: 499).level, .healthy)
+
+        let healthy = HostHealthEvaluator.makeHealth(
+            host: .local,
+            reachable: true,
+            cpuUsagePercent: 24,
+            memoryUsagePercent: 58,
+            diskAvailableBytes: 142_345_678_901,
+            diskTotalBytes: 499_987_654_321,
+            latencyMilliseconds: 14
+        )
+        XCTAssertEqual(healthy.level, .healthy)
+        XCTAssertNil(healthy.statusSummary)
+        XCTAssertEqual(healthy.diskAvailableBytes, 142_300_000_000)
+        XCTAssertEqual(healthy.diskTotalBytes, 499_900_000_000)
+        XCTAssertEqual(healthy.latencyMilliseconds, 10)
+
+        let withoutHealth = RemoteWorkspaceSnapshot(projects: [], selectedProjectId: nil)
+        XCTAssertNil(withoutHealth.hostHealth)
+        XCTAssertFalse(try jsonObject(withoutHealth).keys.contains("hostHealth"))
+
+        let withHealth = RemoteWorkspaceSnapshot(
+            projects: [],
+            selectedProjectId: nil,
+            hostHealth: [healthy, unreachable]
+        )
+        let decoded = try JSONDecoder().decode(
+            RemoteWorkspaceSnapshot.self,
+            from: JSONEncoder().encode(withHealth)
+        )
+        XCTAssertEqual(decoded.hostHealth, [healthy, unreachable])
+    }
+
+    @MainActor
+    func testHostHealthMonitorSamplingAndAppModelSnapshotIntegration() async throws {
+        XCTAssertEqual(
+            HostHealthMonitor.cpuUsagePercent(
+                previous: CPULoadTicks(user: 100, system: 50, idle: 850, nice: 0),
+                current: CPULoadTicks(user: 160, system: 90, idle: 950, nice: 0)
+            ),
+            50
+        )
+
+        let parsed = HostHealthMonitor.parseSSHProbeOutput("""
+        /dev/sda1 104857600 52428800 41943040 56% /
+        MEM 64
+        CPU_TICKS 100 1000
+        """)
+        XCTAssertEqual(parsed.diskTotalBytes, 104_857_600 * 1_024)
+        XCTAssertEqual(parsed.diskAvailableBytes, 41_943_040 * 1_024)
+        XCTAssertEqual(parsed.memoryUsagePercent, 64)
+        XCTAssertEqual(parsed.cpuUsagePercent, 10)
+
+        let deltaMonitor = HostHealthMonitor()
+        XCTAssertEqual(deltaMonitor.resolveRemoteCPUPercent(hostId: "woodhaven", parsed: parsed), 10)
+        let saturatedNext = HostHealthMonitor.parseSSHProbeOutput("""
+        /dev/sda1 104857600 52428800 41943040 56% /
+        MEM 64
+        CPU_TICKS 195 1100
+        """)
+        // Delta over the interval is (195 - 100) / (1100 - 1000) = 95%, even though cumulative is ~18%.
+        XCTAssertEqual(deltaMonitor.resolveRemoteCPUPercent(hostId: "woodhaven", parsed: saturatedNext), 95)
+
+        // Edge cases: negative available blocks (reserved space exhausted) and overflow block counts
+        let negativeAvail = HostHealthMonitor.parseSSHProbeOutput("/dev/sda1 104857600 104857600 -512 100% /")
+        XCTAssertEqual(negativeAvail.diskTotalBytes, 104_857_600 * 1_024)
+        XCTAssertEqual(negativeAvail.diskAvailableBytes, 0)
+        let overflowBlocks = HostHealthMonitor.parseSSHProbeOutput("/dev/sda1 9223372036854775807 0 1 1% /")
+        XCTAssertNil(overflowBlocks.diskTotalBytes)
+        XCTAssertNil(overflowBlocks.diskAvailableBytes)
+
+        // Reboot reset (decreasing total ticks) falls back to the new sample's ratio rather than stale high load
+        let rebootedSample = HostHealthMonitor.parseSSHProbeOutput("""
+        /dev/sda1 104857600 52428800 41943040 56% /
+        MEM 20
+        CPU_TICKS 5 100
+        """)
+        XCTAssertEqual(deltaMonitor.resolveRemoteCPUPercent(hostId: "woodhaven", parsed: rebootedSample), 5)
+
+        // Malformed delta where activeDelta > totalDelta falls back safely without trapping
+        let weirdBase = HostHealthMonitor.parseSSHProbeOutput("CPU_TICKS 0 1000000000000000000")
+        let weirdNext = HostHealthMonitor.parseSSHProbeOutput("CPU_TICKS 1000000000000000001 1000000000000000001")
+        _ = deltaMonitor.resolveRemoteCPUPercent(hostId: "weird", parsed: weirdBase)
+        XCTAssertEqual(deltaMonitor.resolveRemoteCPUPercent(hostId: "weird", parsed: weirdNext), 100)
+
+        // Direct subprocess runner test (success, non-zero exit, and timeout)
+        let scriptDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: scriptDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scriptDir) }
+
+        let okScript = scriptDir.appendingPathComponent("fake-ssh-ok.sh")
+        try """
+        #!/bin/sh
+        printf '/dev/sda1 209715200 104857600 83886080 55%% /\\nMEM 48\\nCPU_TICKS 30 100\\n'
+        """.write(to: okScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: okScript.path)
+
+        let failScript = scriptDir.appendingPathComponent("fake-ssh-fail.sh")
+        try "#!/bin/sh\nexit 255\n".write(to: failScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: failScript.path)
+
+        let timeoutScript = scriptDir.appendingPathComponent("fake-ssh-timeout.sh")
+        try "#!/bin/sh\nsleep 5\n".write(to: timeoutScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: timeoutScript.path)
+
+        let woodhavenHost = RemoteHostInfo(
+            id: "woodhaven",
+            displayName: "Surface WSL",
+            sshTarget: "woodhaven.thefergies.com",
+            isLocal: false
+        )
+        let okResult = await HostHealthMonitor.probeSSHHost(
+            woodhavenHost,
+            sshExecutablePath: okScript.path,
+            timeoutSeconds: 2.0
+        )
+        XCTAssertTrue(okResult.reachable)
+        XCTAssertEqual(okResult.level, .healthy)
+        XCTAssertEqual(okResult.cpuUsagePercent, 30)
+        XCTAssertEqual(okResult.memoryUsagePercent, 48)
+        XCTAssertEqual(okResult.diskAvailableBytes, 85_800_000_000)
+
+        let failResult = await HostHealthMonitor.probeSSHHost(
+            woodhavenHost,
+            sshExecutablePath: failScript.path,
+            timeoutSeconds: 2.0
+        )
+        XCTAssertFalse(failResult.reachable)
+        XCTAssertEqual(failResult.level, .critical)
+        XCTAssertEqual(failResult.statusSummary, "Unreachable")
+
+        let timeoutResult = await HostHealthMonitor.probeSSHHost(
+            woodhavenHost,
+            sshExecutablePath: timeoutScript.path,
+            timeoutSeconds: 0.15
+        )
+        XCTAssertFalse(timeoutResult.reachable)
+        XCTAssertEqual(timeoutResult.level, .critical)
+        XCTAssertEqual(timeoutResult.statusSummary, "Unreachable")
+
+        let woodhaven = RemoteHostInfo(
+            id: "woodhaven",
+            displayName: "Surface WSL",
+            sshTarget: "woodhaven.thefergies.com",
+            isLocal: false
+        )
+        let monitor = HostHealthMonitor { host in
+            HostHealthEvaluator.makeHealth(
+                host: host,
+                reachable: true,
+                cpuUsagePercent: 35,
+                memoryUsagePercent: 62,
+                diskAvailableBytes: 85_000_000_000,
+                diskTotalBytes: 250_000_000_000,
+                latencyMilliseconds: 43
+            )
+        }
+        let sampled = await monitor.sampleAll(hosts: [.local, woodhaven])
+        XCTAssertEqual(sampled.map(\.hostId), ["local", "woodhaven"])
+        XCTAssertTrue(sampled[0].isLocal)
+        XCTAssertNotNil(sampled[0].cpuUsagePercent)
+        XCTAssertNotNil(sampled[0].memoryUsagePercent)
+        XCTAssertNotNil(sampled[0].diskAvailableBytes)
+        XCTAssertEqual(sampled[1].latencyMilliseconds, 40)
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Production refresh path (without hostHealthProvider override)
+        let productionModel = AppModel(
+            stateRepository: StateRepository(path: dir.appendingPathComponent("state.json")),
+            agentActivityDirectory: dir,
+            resumeMarkerDirectory: dir,
+            availableHostsProvider: { [.local, woodhaven] },
+            hostHealthMonitor: monitor,
+            sessionCreationLedger: SessionCreationLedger(url: dir.appendingPathComponent("ledger.json")),
+            projectCreationLedger: ProjectCreationLedger(url: dir.appendingPathComponent("proj-ledger.json"))
+        )
+        XCTAssertNil(productionModel.remoteWorkspaceSnapshot().hostHealth)
+        await productionModel.refreshHostHealthNow()
+        XCTAssertEqual(productionModel.hostHealth.map(\.hostId), ["local", "woodhaven"])
+        XCTAssertEqual(productionModel.remoteWorkspaceSnapshot().hostHealth?.map(\.hostId), ["local", "woodhaven"])
+        XCTAssertEqual(productionModel.hostHealth[1].latencyMilliseconds, 40)
+        productionModel.beginTermination()
+
+        // Coalescing and in-flight termination guarantees
+        actor ProbeGate {
+            var calls = 0
+            private var continuations: [CheckedContinuation<Void, Never>] = []
+            func enter() async -> Int {
+                calls += 1
+                let index = calls
+                await withCheckedContinuation { continuations.append($0) }
+                return index
+            }
+            func releaseNext() {
+                guard !continuations.isEmpty else { return }
+                continuations.removeFirst().resume()
+            }
+            func currentCalls() -> Int { calls }
+        }
+        let gate = ProbeGate()
+        let gatedMonitor = HostHealthMonitor { host in
+            let callIndex = await gate.enter()
+            return HostHealthEvaluator.makeHealth(
+                host: host,
+                reachable: true,
+                cpuUsagePercent: 20 + callIndex,
+                memoryUsagePercent: 50,
+                diskAvailableBytes: 80_000_000_000,
+                diskTotalBytes: 200_000_000_000,
+                latencyMilliseconds: 25
+            )
+        }
+        let coalescedModel = AppModel(
+            stateRepository: StateRepository(path: dir.appendingPathComponent("state-coalesced.json")),
+            agentActivityDirectory: dir,
+            resumeMarkerDirectory: dir,
+            availableHostsProvider: { [.local, woodhaven] },
+            hostHealthMonitor: gatedMonitor,
+            sessionCreationLedger: SessionCreationLedger(url: dir.appendingPathComponent("ledger-c.json")),
+            projectCreationLedger: ProjectCreationLedger(url: dir.appendingPathComponent("proj-ledger-c.json"))
+        )
+        coalescedModel.refreshHostHealth()
+        coalescedModel.refreshHostHealth()
+        coalescedModel.refreshHostHealth()
+        for _ in 0 ..< 40 {
+            if await gate.currentCalls() == 1 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let firstCallCount = await gate.currentCalls()
+        XCTAssertEqual(firstCallCount, 1)
+        await gate.releaseNext()
+        for _ in 0 ..< 40 {
+            if await gate.currentCalls() == 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let secondCallCount = await gate.currentCalls()
+        XCTAssertEqual(secondCallCount, 2)
+        coalescedModel.beginTermination()
+        await gate.releaseNext()
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(coalescedModel.hostHealth.first(where: { $0.hostId == "woodhaven" })?.cpuUsagePercent, 21)
+
+        // Provider override path
+        var injectedHealth: [RemoteHostHealth] = []
+        let model = AppModel(
+            stateRepository: StateRepository(path: dir.appendingPathComponent("state-2.json")),
+            agentActivityDirectory: dir,
+            resumeMarkerDirectory: dir,
+            availableHostsProvider: { [.local, woodhaven] },
+            hostHealthProvider: { injectedHealth },
+            hostHealthMonitor: monitor,
+            sessionCreationLedger: SessionCreationLedger(url: dir.appendingPathComponent("ledger-2.json")),
+            projectCreationLedger: ProjectCreationLedger(url: dir.appendingPathComponent("proj-ledger-2.json"))
+        )
+        XCTAssertNil(model.remoteWorkspaceSnapshot().hostHealth)
+
+        injectedHealth = sampled
+        model.refreshHostHealth()
+        XCTAssertEqual(model.hostHealth, sampled)
+        XCTAssertEqual(model.remoteWorkspaceSnapshot().hostHealth, sampled)
+        XCTAssertEqual(HostHealthPill.overallLevel(for: sampled), sampled.map(\.level).max())
+        XCTAssertTrue(HostHealthPill.metricsDescription(for: sampled[1]).contains("40 ms"))
+    }
 }

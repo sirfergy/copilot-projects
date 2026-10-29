@@ -679,6 +679,7 @@ extension AppModel {
         let promptNowMs = SessionArtifacts.currentStatusTimestamp()
         let promptLiveSessions = remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions
         let hosts = availableHosts
+        let resolvedHostHealth = hostHealthProvider?() ?? hostHealth
         return RemoteWorkspaceSnapshot(
             projects: projects.map { project in
                 RemoteProjectSnapshot(
@@ -756,7 +757,8 @@ extension AppModel {
             },
             selectedProjectId: selectedProjectId,
             protocolInfo: .current.supportingReplaySafeControl(epoch: remoteControlDeliveryEpoch),
-            availableHosts: hosts.count > 1 ? hosts : nil
+            availableHosts: hosts.count > 1 ? hosts : nil,
+            hostHealth: resolvedHostHealth.isEmpty ? nil : resolvedHostHealth
         )
     }
 

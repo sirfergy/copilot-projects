@@ -56,6 +56,7 @@ final class AppModel: ObservableObject {
     @Published var selectedProjectId: String?
     @Published var numberHint: NumberHint = .none
     @Published private(set) var transcriptOpenSessions: Set<String> = []
+    @Published private(set) var hostHealth: [RemoteHostHealth] = []
     var requestMainWindow: (() -> Void)?
 
     var controllers: [String: TerminalController] = [:]
@@ -334,6 +335,10 @@ final class AppModel: ObservableObject {
     var livenessTimer: Timer?
     var footerTimer: Timer?
     var agentActivityTimer: Timer?
+    var hostHealthTimer: Timer?
+    private var hostHealthRefreshTask: Task<Void, Never>?
+    private var hostHealthRefreshQueued = false
+    private var hostHealthGeneration = 0
     var agentActivitySource: DispatchSourceFileSystemObject?
     // Throttle state for the sessions-directory watcher: the directory holds a
     // file per session (activity/status/marker/transcript) and receives frequent
@@ -463,6 +468,8 @@ final class AppModel: ObservableObject {
     let remoteReposDirectory: () -> String?
     let remoteSessionBackendAvailable: () -> Bool
     let availableHostsProvider: () -> [RemoteHostInfo]
+    let hostHealthProvider: (() -> [RemoteHostHealth])?
+    let hostHealthMonitor: HostHealthMonitor
     /// Overrides the controller launch for a freshly-created Copilot session (tests
     /// record it instead of spawning a real terminal). Nil in production, where the
     /// real cached terminal controller is created with a one-shot Copilot launch.
@@ -533,6 +540,8 @@ final class AppModel: ObservableObject {
             Paths.dtachExecutable != nil
         },
         availableHostsProvider: (() -> [RemoteHostInfo])? = nil,
+        hostHealthProvider: (() -> [RemoteHostHealth])? = nil,
+        hostHealthMonitor: HostHealthMonitor = HostHealthMonitor(),
         remoteSessionLauncher: ((String, String?, String?) -> Void)? = nil,
         sessionCreationLedger: SessionCreationLedger = SessionCreationLedger(),
         projectCreationLedger: ProjectCreationLedger = ProjectCreationLedger(),
@@ -593,6 +602,8 @@ final class AppModel: ObservableObject {
         self.availableHostsProvider = availableHostsProvider ?? {
             SSHHostCatalog.defaultAvailableHosts(statePath: stateRepository.path)
         }
+        self.hostHealthProvider = hostHealthProvider
+        self.hostHealthMonitor = hostHealthMonitor
         self.remoteSessionLauncher = remoteSessionLauncher
         self.sessionCreationLedger = sessionCreationLedger
         self.projectCreationLedger = projectCreationLedger
@@ -605,6 +616,9 @@ final class AppModel: ObservableObject {
         self.forcedSessionDestroyer = forcedSessionDestroyer
         self.alertPresenter = alertPresenter
         self.defaults = defaults
+        if let hostHealthProvider {
+            self.hostHealth = hostHealthProvider()
+        }
         load()
     }
 
@@ -1707,6 +1721,12 @@ final class AppModel: ObservableObject {
         footerTimer?.invalidate()
         livenessTimer?.invalidate()
         agentActivityTimer?.invalidate()
+        hostHealthTimer?.invalidate()
+        hostHealthTimer = nil
+        hostHealthGeneration += 1
+        hostHealthRefreshQueued = false
+        hostHealthRefreshTask?.cancel()
+        hostHealthRefreshTask = nil
         agentActivitySource?.cancel()
         agentActivitySource = nil
         agentActivityRefreshGeneration += 1
@@ -1770,7 +1790,71 @@ final class AppModel: ObservableObject {
     }
 
     func startIntegration() {
+        if stateRepository.path.standardizedFileURL == Paths.statePath.standardizedFileURL
+            || hostHealthProvider != nil {
+            startHostHealthMonitoring()
+        }
         integration?.start()
+    }
+
+    func startHostHealthMonitoring(interval: TimeInterval = 30) {
+        hostHealthTimer?.invalidate()
+        refreshHostHealth()
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshHostHealth()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        hostHealthTimer = timer
+    }
+
+    func refreshHostHealth() {
+        guard !isTerminating else { return }
+        if let hostHealthProvider {
+            hostHealthGeneration += 1
+            hostHealthRefreshQueued = false
+            hostHealthRefreshTask?.cancel()
+            hostHealthRefreshTask = nil
+            let next = hostHealthProvider()
+            if hostHealth != next {
+                hostHealth = next
+            }
+            return
+        }
+        guard hostHealthRefreshTask == nil else {
+            hostHealthRefreshQueued = true
+            return
+        }
+        let hosts = availableHosts
+        let targetHosts = hosts.isEmpty ? [RemoteHostInfo.local] : hosts
+        let monitor = hostHealthMonitor
+        let generation = hostHealthGeneration
+        hostHealthRefreshTask = Task { @MainActor [weak self] in
+            let sampled = await monitor.sampleAll(hosts: targetHosts)
+            guard let self else { return }
+            self.hostHealthRefreshTask = nil
+            guard !Task.isCancelled,
+                  !self.isTerminating,
+                  self.hostHealthGeneration == generation else {
+                return
+            }
+            if self.hostHealth != sampled {
+                self.hostHealth = sampled
+            }
+            if self.hostHealthRefreshQueued {
+                self.hostHealthRefreshQueued = false
+                self.refreshHostHealth()
+            }
+        }
+    }
+
+    func refreshHostHealthNow() async {
+        guard !isTerminating else { return }
+        refreshHostHealth()
+        while let task = hostHealthRefreshTask {
+            await task.value
+        }
     }
 
     /// Fleet roll-ups across every project, for the title-bar status line.

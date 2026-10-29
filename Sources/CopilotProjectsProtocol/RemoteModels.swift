@@ -40,6 +40,10 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
     /// hosts). Optional and omitted when only the local host is configured so
     /// single-host snapshots stay compact and backward-compatible.
     public var availableHosts: [RemoteHostInfo]?
+    /// Live health metrics for `This Mac` and any configured remote SSH hosts.
+    /// Optional and omitted when absent so existing clients and snapshots without
+    /// health data stay compact and backward-compatible.
+    public var hostHealth: [RemoteHostHealth]?
     /// When the gateway served this snapshot, in Unix milliseconds on the Mac's
     /// clock: the same clock as each session's `workflow.observedAtMilliseconds`.
     /// Clients pass it with their own monotonic receipt time to
@@ -57,13 +61,75 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
         selectedProjectId: String?,
         protocolInfo: RemoteProtocolInfo? = nil,
         availableHosts: [RemoteHostInfo]? = nil,
+        hostHealth: [RemoteHostHealth]? = nil,
         servedAtMilliseconds: Int64? = nil
     ) {
         self.projects = projects
         self.selectedProjectId = selectedProjectId
         self.protocolInfo = protocolInfo
         self.availableHosts = availableHosts
+        self.hostHealth = hostHealth
         self.servedAtMilliseconds = servedAtMilliseconds
+    }
+}
+
+public enum RemoteHostHealthLevel: String, Codable, Equatable, Sendable, Comparable {
+    case healthy
+    case warning
+    case critical
+
+    private var rank: Int {
+        switch self {
+        case .healthy: 0
+        case .warning: 1
+        case .critical: 2
+        }
+    }
+
+    public static func < (lhs: Self, rhs: Self) -> Bool {
+        lhs.rank < rhs.rank
+    }
+}
+
+public struct RemoteHostHealth: Codable, Equatable, Sendable, Identifiable {
+    public let hostId: String
+    public let displayName: String
+    public let isLocal: Bool
+    public let reachable: Bool
+    public let level: RemoteHostHealthLevel
+    public let cpuUsagePercent: Int?
+    public let memoryUsagePercent: Int?
+    public let diskAvailableBytes: Int64?
+    public let diskTotalBytes: Int64?
+    public let latencyMilliseconds: Int?
+    public let statusSummary: String?
+
+    public var id: String { hostId }
+
+    public init(
+        hostId: String,
+        displayName: String,
+        isLocal: Bool = false,
+        reachable: Bool = true,
+        level: RemoteHostHealthLevel = .healthy,
+        cpuUsagePercent: Int? = nil,
+        memoryUsagePercent: Int? = nil,
+        diskAvailableBytes: Int64? = nil,
+        diskTotalBytes: Int64? = nil,
+        latencyMilliseconds: Int? = nil,
+        statusSummary: String? = nil
+    ) {
+        self.hostId = hostId
+        self.displayName = displayName
+        self.isLocal = isLocal
+        self.reachable = reachable
+        self.level = level
+        self.cpuUsagePercent = cpuUsagePercent
+        self.memoryUsagePercent = memoryUsagePercent
+        self.diskAvailableBytes = diskAvailableBytes
+        self.diskTotalBytes = diskTotalBytes
+        self.latencyMilliseconds = latencyMilliseconds
+        self.statusSummary = statusSummary
     }
 }
 extension RemoteWorkspaceSnapshot {
