@@ -622,6 +622,7 @@ public final class HostHealthMonitor: @unchecked Sendable {
                         "-o", "ConnectTimeout=4",
                         "-o", "ClearAllForwardings=yes",
                         "-o", "ForwardAgent=no",
+                        "-o", "PermitLocalCommand=no",
                         "-o", "RemoteCommand=none",
                         target,
                         "/bin/sh -c \(TerminalController.shellSingleQuote(sshRemoteProbeScript))",
