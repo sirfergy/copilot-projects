@@ -182,6 +182,9 @@ private struct WorkspaceHeading: View {
             if let session, let hostName = model.resolvedRemoteHost(for: session)?.displayName {
                 HostBadge(name: hostName)
             }
+            if let session, let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
+                SessionMemoryBadge(bytes: memoryBytes)
+            }
             Spacer(minLength: 0)
             Image(systemName: "terminal")
                 .foregroundStyle(StudioStyle.secondaryText)
@@ -1215,6 +1218,44 @@ struct HostBadge: View, Equatable {
     }
 }
 
+struct SessionMemoryBadge: View, Equatable {
+    let bytes: Int64
+
+    static func formattedBytes(_ bytes: Int64) -> String {
+        guard bytes > 0 else { return "0 MB" }
+        if bytes >= 1_000_000_000 {
+            let tenths = Int((Double(bytes) / 100_000_000.0).rounded())
+            if tenths % 10 == 0 {
+                return "\(tenths / 10) GB"
+            }
+            return "\(tenths / 10).\(tenths % 10) GB"
+        }
+        let megabytes = max(1, Int((Double(bytes) / 1_000_000.0).rounded()))
+        return "\(megabytes) MB"
+    }
+
+    var body: some View {
+        let label = Self.formattedBytes(bytes)
+        Text(label)
+            .font(.system(size: 10, weight: .medium))
+            .monospacedDigit()
+            .foregroundStyle(StudioStyle.secondaryText)
+            .lineLimit(1)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(StudioStyle.raised)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5)
+            )
+            .help("Session memory footprint: \(label)")
+            .accessibilityIdentifier("session-memory-badge")
+    }
+}
+
 struct SessionRow: View, Equatable {
     let session: Session
     let isActive: Bool
@@ -1230,6 +1271,7 @@ struct SessionRow: View, Equatable {
             && lhs.session.id == rhs.session.id
             && lhs.session.title == rhs.session.title
             && lhs.session.hostId == rhs.session.hostId
+            && lhs.session.memoryUsageBytes == rhs.session.memoryUsageBytes
             && lhs.session.statusText == rhs.session.statusText
             && lhs.session.displayStatus == rhs.session.displayStatus
             && lhs.session.failedRequest == rhs.session.failedRequest
@@ -1252,6 +1294,9 @@ struct SessionRow: View, Equatable {
         states.append(stateLabel)
         if let hostId = session.hostId, !hostId.isEmpty {
             states.append("Running on \(hostId)")
+        }
+        if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
+            states.append("Memory \(SessionMemoryBadge.formattedBytes(memoryBytes))")
         }
         if session.isUnread { states.append("Unread") }
         if session.hasBackgroundWork { states.append("Background work active") }
@@ -1282,6 +1327,9 @@ struct SessionRow: View, Equatable {
                         Text(stateLabel)
                         if let hostId = session.hostId, !hostId.isEmpty {
                             HostBadge(name: hostId)
+                        }
+                        if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
+                            SessionMemoryBadge(bytes: memoryBytes)
                         }
                         if session.hasBackgroundWork { BackgroundWorkBadge() }
                         if !session.schedules.isEmpty { ScheduleBadge(schedules: session.schedules) }

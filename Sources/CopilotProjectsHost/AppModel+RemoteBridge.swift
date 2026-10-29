@@ -680,6 +680,7 @@ extension AppModel {
         let promptLiveSessions = remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions
         let hosts = availableHosts
         let resolvedHostHealth = hostHealthProvider?() ?? hostHealth
+        let providedSessionMemory = sessionMemoryProvider?()
         return RemoteWorkspaceSnapshot(
             projects: projects.map { project in
                 RemoteProjectSnapshot(
@@ -750,7 +751,10 @@ extension AppModel {
                                 : nil,
                             markedUnread: session.markedUnread ? true : nil,
                             hostId: remoteHost?.id,
-                            hostDisplayName: remoteHost?.displayName
+                            hostDisplayName: remoteHost?.displayName,
+                            memoryUsageBytes: providedSessionMemory.map {
+                                ProcessTree.quantizeSessionMemoryBytes($0[session.id])
+                            } ?? session.memoryUsageBytes
                         )
                     }
                 )

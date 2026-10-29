@@ -385,12 +385,26 @@ public enum ProcessTree {
         }
     }
 
-    public static func dtachProcesses(in snap: Snapshot) -> [DtachProcess] {
+    public static func dtachProcesses(
+        in snap: Snapshot,
+        sessionsDirectory: URL? = nil
+    ) -> [DtachProcess] {
+        let customDirPrefix = sessionsDirectory.map {
+            $0.standardizedFileURL.path.hasSuffix("/")
+                ? $0.standardizedFileURL.path
+                : $0.standardizedFileURL.path + "/"
+        }
         let raw: [DtachProcess] = snap.nameOf.compactMap { pid, name in
             guard name == "dtach" else { return nil }
             let args = inspect(pid).args
-            let socket = args.first {
-                $0.hasSuffix(".sock") && $0.contains("/sessions/")
+            let socket = args.first { arg in
+                guard arg.hasSuffix(".sock") else { return false }
+                if arg.contains("/sessions/") { return true }
+                if let customDirPrefix {
+                    let standardized = URL(fileURLWithPath: arg).standardizedFileURL.path
+                    return standardized.hasPrefix(customDirPrefix)
+                }
+                return false
             }
             let parent = snap.parentOf[pid] ?? 0
             return DtachProcess(
@@ -446,5 +460,102 @@ public enum ProcessTree {
             return nil
         }
         return value
+    }
+
+    // MARK: - Per-session memory footprint
+
+    public static let sessionMemoryQuantizationBytes: Int64 = 10_000_000
+
+    public static func quantizeSessionMemoryBytes(_ bytes: Int64?) -> Int64? {
+        guard let bytes, bytes > 0 else { return nil }
+        return max(
+            sessionMemoryQuantizationBytes,
+            (bytes / sessionMemoryQuantizationBytes) * sessionMemoryQuantizationBytes
+        )
+    }
+
+    public static func processMemoryFootprintBytes(pid: pid_t) -> Int64? {
+        guard pid > 0 else { return nil }
+        var rusage = rusage_info_v4()
+        let rusageResult = withUnsafeMutablePointer(to: &rusage) { pointer in
+            pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { rebound in
+                proc_pid_rusage(pid, RUSAGE_INFO_V4, rebound)
+            }
+        }
+        if rusageResult == 0, rusage.ri_phys_footprint > 0 {
+            return Int64(min(rusage.ri_phys_footprint, UInt64(Int64.max)))
+        }
+        var taskInfo = proc_taskinfo()
+        let size = Int32(MemoryLayout<proc_taskinfo>.size)
+        if proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &taskInfo, size) == size,
+           taskInfo.pti_resident_size > 0 {
+            return Int64(min(taskInfo.pti_resident_size, UInt64(Int64.max)))
+        }
+        return nil
+    }
+
+    /// Computes each active session's process-tree memory footprint in bytes from its
+    /// `dtach` server (plus any direct non-dtach shell root PIDs) and all non-nested-`dtach`
+    /// descendant PIDs, quantized to 10 MB increments.
+    public static func sessionMemoryUsageBytes(
+        in snap: Snapshot,
+        dtachProcesses: [DtachProcess]? = nil,
+        additionalRootPIDsBySession: [String: pid_t] = [:],
+        sessionsDirectory: URL = Paths.sessionsDir,
+        memoryOfPID: (pid_t) -> Int64? = { processMemoryFootprintBytes(pid: $0) }
+    ) -> [String: Int64] {
+        let dtachList = dtachProcesses ?? self.dtachProcesses(
+            in: snap,
+            sessionsDirectory: sessionsDirectory
+        )
+        let expectedDirectory = sessionsDirectory.standardizedFileURL.path
+        var rootsBySession: [String: [pid_t]] = [:]
+        var sessionOfDtachPID: [pid_t: String] = [:]
+
+        for dtach in dtachList {
+            guard let socketPath = dtach.socketPath else { continue }
+            let socketURL = URL(fileURLWithPath: socketPath).standardizedFileURL
+            guard socketURL.deletingLastPathComponent().path == expectedDirectory,
+                  socketURL.pathExtension == "sock" else {
+                continue
+            }
+            let sessionId = socketURL.deletingPathExtension().lastPathComponent
+            guard !sessionId.isEmpty else { continue }
+            sessionOfDtachPID[dtach.pid] = sessionId
+            rootsBySession[sessionId, default: []].append(dtach.pid)
+        }
+
+        for (sessionId, rootPID) in additionalRootPIDsBySession where rootPID > 0 {
+            rootsBySession[sessionId, default: []].append(rootPID)
+        }
+
+        var result: [String: Int64] = [:]
+        for (sessionId, roots) in rootsBySession {
+            var seen = Set<pid_t>()
+            var stack: [pid_t] = []
+            for root in roots where root > 0 && seen.insert(root).inserted {
+                stack.append(root)
+            }
+            var totalBytes: Int64 = 0
+            while let pid = stack.popLast() {
+                if let bytes = memoryOfPID(pid), bytes > 0 {
+                    let (sum, overflow) = totalBytes.addingReportingOverflow(bytes)
+                    totalBytes = overflow ? Int64.max : sum
+                }
+                for child in snap.childrenOf[pid] ?? [] {
+                    if snap.nameOf[child] == "dtach",
+                       sessionOfDtachPID[child] != sessionId {
+                        continue
+                    }
+                    if seen.insert(child).inserted {
+                        stack.append(child)
+                    }
+                }
+            }
+            if let quantized = quantizeSessionMemoryBytes(totalBytes) {
+                result[sessionId] = quantized
+            }
+        }
+        return result
     }
 }

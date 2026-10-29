@@ -1132,4 +1132,138 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertEqual(HostHealthPill.overallLevel(for: sampled), sampled.map(\.level).max())
         XCTAssertTrue(HostHealthPill.metricsDescription(for: sampled[1]).contains("40 ms"))
     }
+
+    @MainActor
+    func testPerSessionMemoryFootprintAggregationAndSnapshotContract() throws {
+        // 1. Live process memory footprint is positive for current PID
+        let selfBytes = ProcessTree.processMemoryFootprintBytes(pid: getpid())
+        XCTAssertNotNil(selfBytes)
+        XCTAssertGreaterThan(selfBytes ?? 0, 0)
+
+        // 2. ProcessTree aggregates dtach + non-nested-dtach descendants and quantizes to 10 MB
+        let sessionsDir = URL(fileURLWithPath: "/tmp/test-sessions")
+        var snap = ProcessTree.Snapshot()
+        // s1: dtach (100) -> zsh (101) -> copilot (102), plus a nested dtach (200) for s2 -> node (201)
+        snap.nameOf = [
+            100: "dtach",
+            101: "zsh",
+            102: "copilot",
+            200: "dtach",
+            201: "node",
+        ]
+        snap.parentOf = [
+            100: 1,
+            101: 100,
+            102: 101,
+            200: 101,
+            201: 200,
+        ]
+        snap.childrenOf = [
+            100: [101],
+            101: [102, 200],
+            200: [201],
+        ]
+        let dtachProcesses = [
+            ProcessTree.DtachProcess(
+                pid: 100,
+                parentPID: 1,
+                socketPath: "/tmp/test-sessions/s1.sock",
+                isMaster: true
+            ),
+            ProcessTree.DtachProcess(
+                pid: 200,
+                parentPID: 101,
+                socketPath: "/tmp/test-sessions/s2.sock",
+                isMaster: true
+            ),
+        ]
+        let fakeMemory: [pid_t: Int64] = [
+            100: 2_000_000,
+            101: 18_000_000,
+            102: 407_000_000,
+            200: 2_000_000,
+            201: 1_195_000_000,
+        ]
+        let aggregated = ProcessTree.sessionMemoryUsageBytes(
+            in: snap,
+            dtachProcesses: dtachProcesses,
+            additionalRootPIDsBySession: ["s1": 101, "s3": 300],
+            sessionsDirectory: sessionsDir,
+            memoryOfPID: { pid in
+                if pid == 300 { return 54_000_000 }
+                return fakeMemory[pid]
+            }
+        )
+        // s1: 2 + 18 + 407 = 427 MB -> quantized to 420 MB (excludes nested s2 dtach + node, and doesn't double-count overlapping root 101)
+        XCTAssertEqual(aggregated["s1"], 420_000_000)
+        // s2: 2 + 1195 = 1197 MB -> quantized to 1,190 MB
+        XCTAssertEqual(aggregated["s2"], 1_190_000_000)
+        // s3: direct non-dtach shell root 300 -> 54 MB quantized to 50 MB
+        XCTAssertEqual(aggregated["s3"], 50_000_000)
+
+        // 3. Formatting and SessionRow equality
+        XCTAssertEqual(SessionMemoryBadge.formattedBytes(420_000_000), "420 MB")
+        XCTAssertEqual(SessionMemoryBadge.formattedBytes(1_200_000_000), "1.2 GB")
+        XCTAssertEqual(SessionMemoryBadge.formattedBytes(2_000_000_000), "2 GB")
+
+        let baseSession = Session(id: "s1", title: "Session 1", cwd: "/tmp")
+        var withMemSession = baseSession
+        withMemSession.memoryUsageBytes = 420_000_000
+        let rowA = SessionRow(session: baseSession, isActive: true, onSelect: {}, onClose: {})
+        let rowB = SessionRow(session: withMemSession, isActive: true, onSelect: {}, onClose: {})
+        XCTAssertNotEqual(rowA, rowB)
+        XCTAssertTrue(rowB.accessibilityStatus.contains("Memory 420 MB"))
+
+        // 4. RemoteSessionSnapshot wire contract & AppModel projection
+        let withoutMem = RemoteSessionSnapshot(
+            id: "s1", title: "S1", status: "idle", statusText: nil,
+            unread: false, ready: false, background: false, scheduled: false
+        )
+        XCTAssertNil(withoutMem.memoryUsageBytes)
+        XCTAssertFalse(try jsonObject(withoutMem).keys.contains("memoryUsageBytes"))
+
+        let withMem = RemoteSessionSnapshot(
+            id: "s1", title: "S1", status: "idle", statusText: nil,
+            unread: false, ready: false, background: false, scheduled: false,
+            memoryUsageBytes: 420_000_000
+        )
+        let roundTripped = try JSONDecoder().decode(
+            RemoteSessionSnapshot.self,
+            from: JSONEncoder().encode(withMem)
+        )
+        XCTAssertEqual(roundTripped.memoryUsageBytes, 420_000_000)
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let providedMemory: [String: Int64] = ["s1": 427_000_000]
+        let model = AppModel(
+            stateRepository: StateRepository(path: dir.appendingPathComponent("state.json")),
+            agentActivityDirectory: dir,
+            resumeMarkerDirectory: dir,
+            availableHostsProvider: { [.local] },
+            hostHealthProvider: { [] },
+            sessionMemoryProvider: { providedMemory },
+            sessionCreationLedger: SessionCreationLedger(url: dir.appendingPathComponent("ledger.json")),
+            projectCreationLedger: ProjectCreationLedger(url: dir.appendingPathComponent("proj-ledger.json"))
+        )
+        model.projects = [
+            Project(
+                id: "p1",
+                name: "One",
+                cwd: "/tmp",
+                sessions: [
+                    Session(id: "s1", title: "First", cwd: "/tmp"),
+                    Session(id: "s2", title: "Second", cwd: "/tmp"),
+                ]
+            ),
+        ]
+        model.refreshHostHealth()
+        XCTAssertEqual(model.projects[0].sessions[0].memoryUsageBytes, 420_000_000)
+        XCTAssertNil(model.projects[0].sessions[1].memoryUsageBytes)
+        let snapshot = model.remoteWorkspaceSnapshot()
+        XCTAssertEqual(snapshot.projects[0].sessions[0].memoryUsageBytes, 420_000_000)
+        XCTAssertNil(snapshot.projects[0].sessions[1].memoryUsageBytes)
+    }
 }

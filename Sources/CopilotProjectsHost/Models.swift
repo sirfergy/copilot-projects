@@ -45,6 +45,7 @@ struct Session: Identifiable, Codable, Equatable {
     var backgroundAgentsActive: Bool = false
     var scheduledTurnActive: Bool = false
     var agentActivity: AgentActivitySnapshot?
+    var memoryUsageBytes: Int64? = nil
 
     var activeSubagentCount: Int { agentActivity?.activeSubagents.count ?? 0 }
     var schedules: [TrackedSchedule] { agentActivity?.schedules ?? [] }
@@ -103,7 +104,8 @@ struct Session: Identifiable, Codable, Equatable {
         cwd: String,
         hostId: String? = nil,
         creationFingerprint: String? = nil,
-        pullRequestKeys: [String]? = nil
+        pullRequestKeys: [String]? = nil,
+        memoryUsageBytes: Int64? = nil
     ) {
         self.id = id
         self.title = title
@@ -111,6 +113,7 @@ struct Session: Identifiable, Codable, Equatable {
         self.hostId = hostId
         self.creationFingerprint = creationFingerprint
         self.pullRequestKeys = pullRequestKeys
+        self.memoryUsageBytes = memoryUsageBytes
     }
 }
 

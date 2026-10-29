@@ -213,6 +213,9 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     public let hostId: String?
     /// Human-readable label for the remote host running this session (`nil` for local Mac sessions).
     public let hostDisplayName: String?
+    /// Physical memory footprint in bytes of the session's active process tree,
+    /// quantized to 10 MB increments (`nil` when unavailable or not sampled).
+    public let memoryUsageBytes: Int64?
 
     public init(
         id: String,
@@ -235,7 +238,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         lastError: TranscriptTurnError? = nil,
         markedUnread: Bool? = nil,
         hostId: String? = nil,
-        hostDisplayName: String? = nil
+        hostDisplayName: String? = nil,
+        memoryUsageBytes: Int64? = nil
     ) {
         self.id = id
         self.title = title
@@ -258,6 +262,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.markedUnread = markedUnread
         self.hostId = hostId
         self.hostDisplayName = hostDisplayName
+        self.memoryUsageBytes = memoryUsageBytes
     }
 }
 

@@ -469,6 +469,7 @@ final class AppModel: ObservableObject {
     let remoteSessionBackendAvailable: () -> Bool
     let availableHostsProvider: () -> [RemoteHostInfo]
     let hostHealthProvider: (() -> [RemoteHostHealth])?
+    let sessionMemoryProvider: (() -> [String: Int64])?
     let hostHealthMonitor: HostHealthMonitor
     /// Overrides the controller launch for a freshly-created Copilot session (tests
     /// record it instead of spawning a real terminal). Nil in production, where the
@@ -541,6 +542,7 @@ final class AppModel: ObservableObject {
         },
         availableHostsProvider: (() -> [RemoteHostInfo])? = nil,
         hostHealthProvider: (() -> [RemoteHostHealth])? = nil,
+        sessionMemoryProvider: (() -> [String: Int64])? = nil,
         hostHealthMonitor: HostHealthMonitor = HostHealthMonitor(),
         remoteSessionLauncher: ((String, String?, String?) -> Void)? = nil,
         sessionCreationLedger: SessionCreationLedger = SessionCreationLedger(),
@@ -603,6 +605,7 @@ final class AppModel: ObservableObject {
             SSHHostCatalog.defaultAvailableHosts(statePath: stateRepository.path)
         }
         self.hostHealthProvider = hostHealthProvider
+        self.sessionMemoryProvider = sessionMemoryProvider
         self.hostHealthMonitor = hostHealthMonitor
         self.remoteSessionLauncher = remoteSessionLauncher
         self.sessionCreationLedger = sessionCreationLedger
@@ -620,6 +623,9 @@ final class AppModel: ObservableObject {
             self.hostHealth = hostHealthProvider()
         }
         load()
+        if let sessionMemoryProvider {
+            self.applySessionMemoryUsage(sessionMemoryProvider())
+        }
     }
 
     // MARK: - lifecycle wiring
@@ -1809,8 +1815,30 @@ final class AppModel: ObservableObject {
         hostHealthTimer = timer
     }
 
+    func applySessionMemoryUsage(_ memoryBySessionId: [String: Int64]) {
+        guard !projects.isEmpty else { return }
+        var nextProjects = projects
+        var changed = false
+        for pi in nextProjects.indices {
+            for si in nextProjects[pi].sessions.indices {
+                let sid = nextProjects[pi].sessions[si].id
+                let nextValue = ProcessTree.quantizeSessionMemoryBytes(memoryBySessionId[sid])
+                if nextProjects[pi].sessions[si].memoryUsageBytes != nextValue {
+                    nextProjects[pi].sessions[si].memoryUsageBytes = nextValue
+                    changed = true
+                }
+            }
+        }
+        if changed {
+            projects = nextProjects
+        }
+    }
+
     func refreshHostHealth() {
         guard !isTerminating else { return }
+        if let sessionMemoryProvider {
+            applySessionMemoryUsage(sessionMemoryProvider())
+        }
         if let hostHealthProvider {
             hostHealthGeneration += 1
             hostHealthRefreshQueued = false
@@ -1830,8 +1858,26 @@ final class AppModel: ObservableObject {
         let targetHosts = hosts.isEmpty ? [RemoteHostInfo.local] : hosts
         let monitor = hostHealthMonitor
         let generation = hostHealthGeneration
+        let sessionsDir = resumeMarkerDirectory
+        let shouldSampleSessionMemory = sessionMemoryProvider == nil
+        let activeDirectRoots: [String: pid_t] = shouldSampleSessionMemory
+            ? Dictionary(uniqueKeysWithValues: controllers.compactMap { sid, ctrl in
+                ctrl.shellPID > 0 ? (sid, ctrl.shellPID) : nil
+            })
+            : [:]
         hostHealthRefreshTask = Task { @MainActor [weak self] in
-            let sampled = await monitor.sampleAll(hosts: targetHosts)
+            async let sampledHealth = monitor.sampleAll(hosts: targetHosts)
+            let sampledMemory: [String: Int64]? = shouldSampleSessionMemory
+                ? await Task.detached(priority: .utility) {
+                    let snap = ProcessTree.snapshot(maxAge: .zero)
+                    return ProcessTree.sessionMemoryUsageBytes(
+                        in: snap,
+                        additionalRootPIDsBySession: activeDirectRoots,
+                        sessionsDirectory: sessionsDir
+                    )
+                }.value
+                : nil
+            let sampled = await sampledHealth
             guard let self else { return }
             self.hostHealthRefreshTask = nil
             guard !Task.isCancelled,
@@ -1841,6 +1887,14 @@ final class AppModel: ObservableObject {
             }
             if self.hostHealth != sampled {
                 self.hostHealth = sampled
+            }
+            if let sampledMemory, self.sessionMemoryProvider == nil {
+                let localSessionIds = Set(self.projects.flatMap(\.sessions)
+                    .filter { self.resolvedRemoteHost(for: $0) == nil }
+                    .map(\.id))
+                self.applySessionMemoryUsage(sampledMemory.filter {
+                    localSessionIds.contains($0.key)
+                })
             }
             if self.hostHealthRefreshQueued {
                 self.hostHealthRefreshQueued = false
