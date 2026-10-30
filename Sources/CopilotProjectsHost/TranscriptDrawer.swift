@@ -280,7 +280,7 @@ private struct TranscriptPromptComposerView: View {
                     .controlSize(.small)
                     .disabled(!composer.canAttach(workflow: currentWorkflow, operation: currentOperation, now: now))
                     .help(composer.attachHelpText(workflow: currentWorkflow, operation: currentOperation, now: now))
-                    .accessibilityLabel("Attach screenshot")
+                    .accessibilityLabel("Attach files")
                     .accessibilityIdentifier("desktop-attach-screenshot")
 
                     Button(action: pasteScreenshots) {
@@ -291,7 +291,7 @@ private struct TranscriptPromptComposerView: View {
                     .controlSize(.small)
                     .disabled(!composer.canAttach(workflow: currentWorkflow, operation: currentOperation, now: now))
                     .help(composer.attachHelpText(workflow: currentWorkflow, operation: currentOperation, now: now))
-                    .accessibilityLabel("Paste screenshot")
+                    .accessibilityLabel("Paste attachment")
                     .accessibilityIdentifier("desktop-paste-screenshot")
                 }
 
@@ -355,14 +355,22 @@ private struct TranscriptPromptComposerView: View {
     }
 
     private func chooseFiles() {
-        guard let limits = composer.imageLimits(workflow: liveWorkflow, operation: liveOperation) else { return }
+        let currentWorkflow = liveWorkflow
+        let currentOperation = liveOperation
+        guard composer.canAttach(workflow: currentWorkflow, operation: currentOperation) else { return }
+        let limits = composer.imageLimits(workflow: currentWorkflow, operation: currentOperation)
+        let allowText = composer.supportsFileAttachments(workflow: currentWorkflow, operation: currentOperation)
+        let maxCount = composer.maxAttachmentCount(workflow: currentWorkflow, operation: currentOperation)
         let panel = NSOpenPanel()
-        panel.title = "Attach Screenshots"
+        panel.title = allowText ? "Attach Files" : "Attach Screenshots"
         panel.prompt = "Attach"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = limits.maxImages - composer.attachments.count > 1
-        panel.allowedContentTypes = [.png, .jpeg, .image]
+        panel.allowsMultipleSelection = maxCount - composer.attachments.count > 1
+        panel.allowedContentTypes = DesktopScreenshotAttachmentImage.allowedPickerContentTypes(
+            allowImages: limits != nil,
+            allowTextFiles: allowText
+        )
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
         let urls = panel.urls
         Task { @MainActor in
@@ -379,22 +387,32 @@ private struct StagedAttachmentCard: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Button(action: onPreview) {
-                if let image = NSImage(data: item.previewPNGData) ?? NSImage(data: item.data) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 56, height: 42)
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
-                } else {
-                    Label("Screenshot", systemImage: "photo")
-                        .font(.caption2)
-                        .frame(width: 56, height: 42)
+            if item.isImage {
+                Button(action: onPreview) {
+                    if let image = NSImage(data: item.previewPNGData) ?? NSImage(data: item.data) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 56, height: 42)
+                            .clipShape(RoundedRectangle(cornerRadius: 5))
+                    } else {
+                        Label(item.displayName, systemImage: "photo")
+                            .font(.caption2)
+                            .frame(width: 56, height: 42)
+                    }
                 }
+                .buttonStyle(.plain)
+                .help("Open screenshot preview")
+                .accessibilityLabel("Open screenshot preview")
+            } else {
+                Label(item.displayName, systemImage: "doc.text")
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .frame(maxWidth: 160, minHeight: 28)
+                    .padding(.horizontal, 6)
+                    .help(item.displayName)
+                    .accessibilityLabel("Attached file \(item.displayName)")
             }
-            .buttonStyle(.plain)
-            .help("Open screenshot preview")
-            .accessibilityLabel("Open screenshot preview")
 
             Button(action: onRemove) {
                 Image(systemName: "xmark.circle.fill")
@@ -402,8 +420,8 @@ private struct StagedAttachmentCard: View {
             }
             .buttonStyle(.borderless)
             .disabled(removeDisabled)
-            .help("Remove screenshot")
-            .accessibilityLabel("Remove screenshot")
+            .help("Remove attachment")
+            .accessibilityLabel("Remove attachment")
         }
         .padding(4)
         .background(

@@ -217,5 +217,144 @@ final class SessionWorkflowTests: XCTestCase {
             sessionId: session.id, action: send,
             operation: CLIOperationRequest(operationId: "blocked", conversationEpoch: "epoch-1")
         ), .invalid)
+
+        // Verify host attachment admission in performSessionAction for text-only and mixed sends.
+        snapshot.pendingPermissionRequestIds = []
+        let imageCaps = RemoteImageCapabilities(
+            maxImages: 1,
+            maxBytes: RemoteAttachmentContract.maxBytes,
+            mimeTypes: ["image/png"]
+        )
+        let jsonAttachment = try model.attachmentStore.store(
+            Data(#"{"ok":true}"#.utf8),
+            id: UUID().uuidString.lowercased(),
+            sessionId: session.id,
+            conversationEpoch: "epoch-1",
+            mimeType: "application/json",
+            displayName: "config.json",
+            now: now
+        )
+        let mdAttachment = try model.attachmentStore.store(
+            Data("# Notes\n".utf8),
+            id: UUID().uuidString.lowercased(),
+            sessionId: session.id,
+            conversationEpoch: "epoch-1",
+            mimeType: "text/markdown",
+            displayName: "NOTES.md",
+            now: now
+        )
+        // Without file-attachments-v1, text attachments are rejected.
+        snapshot.workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+            capabilities: [RemoteSessionActionKind.send.rawValue, RemoteAttachmentContract.capability],
+            sendReady: true,
+            imageAttachments: imageCaps
+        )
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        let textSend = RemoteSessionAction(
+            kind: .send,
+            prompt: "review files",
+            mode: .enqueue,
+            attachmentIds: [jsonAttachment.id, mdAttachment.id]
+        )
+        XCTAssertEqual(model.performSessionAction(
+            sessionId: session.id,
+            action: textSend,
+            operation: CLIOperationRequest(operationId: "text-no-cap", conversationEpoch: "epoch-1")
+        ), .invalid)
+
+        // With file-attachments-v1 and no vision support, stored JSON and Markdown are accepted and preserved in handoff.
+        snapshot.workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+            capabilities: [RemoteSessionActionKind.send.rawValue, RemoteAttachmentContract.fileCapability],
+            sendReady: true,
+            imageAttachments: nil
+        )
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        let sendHandoffURL = sessions.appendingPathComponent("\(session.id).session-send.json")
+        XCTAssertEqual(model.performSessionAction(
+            sessionId: session.id,
+            action: textSend,
+            operation: CLIOperationRequest(operationId: "text-with-cap", conversationEpoch: "epoch-1")
+        ), .accepted)
+        let handoffData = try Data(contentsOf: sendHandoffURL)
+        let handoffString = try XCTUnwrap(String(data: handoffData, encoding: .utf8))
+        XCTAssertTrue(handoffString.contains(jsonAttachment.id))
+        XCTAssertTrue(handoffString.contains(mdAttachment.id))
+        try FileManager.default.removeItem(at: sendHandoffURL)
+
+        // Mixed sends: 2 text + 1 image (total 3 > maxImages=1) is accepted when image count <= maxImages,
+        // and 2 images (> maxImages=1) is rejected.
+        let rep = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ))
+        let pngData = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        let img1 = try model.attachmentStore.store(
+            pngData,
+            id: UUID().uuidString.lowercased(),
+            sessionId: session.id,
+            conversationEpoch: "epoch-1",
+            mimeType: "image/png",
+            now: now,
+            limits: imageCaps
+        )
+        let img2 = try model.attachmentStore.store(
+            pngData,
+            id: UUID().uuidString.lowercased(),
+            sessionId: session.id,
+            conversationEpoch: "epoch-1",
+            mimeType: "image/png",
+            now: now,
+            limits: imageCaps
+        )
+        snapshot.workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+            capabilities: [
+                RemoteSessionActionKind.send.rawValue,
+                RemoteAttachmentContract.capability,
+                RemoteAttachmentContract.fileCapability,
+            ],
+            sendReady: true,
+            imageAttachments: imageCaps
+        )
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        let mixedValidSend = RemoteSessionAction(
+            kind: .send,
+            prompt: "mixed valid",
+            mode: .enqueue,
+            attachmentIds: [jsonAttachment.id, mdAttachment.id, img1.id]
+        )
+        XCTAssertEqual(model.performSessionAction(
+            sessionId: session.id,
+            action: mixedValidSend,
+            operation: CLIOperationRequest(operationId: "mixed-valid", conversationEpoch: "epoch-1")
+        ), .accepted)
+        try FileManager.default.removeItem(at: sendHandoffURL)
+
+        let mixedTooManyImagesSend = RemoteSessionAction(
+            kind: .send,
+            prompt: "mixed too many images",
+            mode: .enqueue,
+            attachmentIds: [jsonAttachment.id, img1.id, img2.id]
+        )
+        XCTAssertEqual(model.performSessionAction(
+            sessionId: session.id,
+            action: mixedTooManyImagesSend,
+            operation: CLIOperationRequest(operationId: "mixed-too-many-images", conversationEpoch: "epoch-1")
+        ), .invalid)
+
+        let missingAttachmentSend = RemoteSessionAction(
+            kind: .send,
+            prompt: "missing attachment",
+            mode: .enqueue,
+            attachmentIds: [UUID().uuidString.lowercased()]
+        )
+        XCTAssertEqual(model.performSessionAction(
+            sessionId: session.id,
+            action: missingAttachmentSend,
+            operation: CLIOperationRequest(operationId: "missing-attachment", conversationEpoch: "epoch-1")
+        ), .invalid)
     }
 }
