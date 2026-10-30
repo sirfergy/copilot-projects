@@ -127,6 +127,11 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         let rows = rows.map(withoutScrollbarGutter).filter { !isEmptyFooterRow($0) }
         guard let footer = rows.last else { return .unknown }
         if hasModalHint(footer, allowStatusColumn: true) { return .working }
+        // Busy footers can replace "Working" with an intent; keep the spinner and control hint as evidence.
+        if footer.range(
+            of: #"(?i)(?:^|·)\s*[^\x00-\x7f\p{L}\p{N}]\s+.+\s+(?:esc(?: esc)?|ctrl\+c) (?:again to )?(?:interrupt|cancel|edit prompt|stop agents|clear input|exit shell mode)(?:\s|·|$)"#,
+            options: .regularExpression
+        ) != nil { return .working }
         guard hasIdleFooterHints(footer) else { return .unknown }
         return rows.contains { hasModalHint($0) } ? .working : .idle
     }
