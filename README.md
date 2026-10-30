@@ -412,7 +412,9 @@ the app reports running, waiting, background, scheduled, or pending-input work.
 A single idle session ends immediately; unread completion markers alone do not
 trigger a prompt. **Reopen Closed Session** (`⇧⌘T`) reopens the most recently
 closed session in its original project and tab position, resuming its Copilot CLI
-conversation when one was recorded. **End Project** also confirms whenever it contains multiple
+conversation when one was recorded; **Recently Closed Sessions** in the Session
+menu and the **+** split button's dropdown lists recently closed sessions so you
+can reopen any of them directly. **End Project** also confirms whenever it contains multiple
 sessions. Cancel ends nothing, and a project that gains sessions while the dialog
 is open must be reviewed again. Ending removes sessions from the workspace and
 stops their processes; project files are not deleted.

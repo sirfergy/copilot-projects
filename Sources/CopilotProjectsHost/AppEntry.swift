@@ -70,6 +70,15 @@ private struct ReopenClosedSessionButton: View {
         }
         .keyboardShortcut("t", modifiers: [.command, .shift])
         .disabled(!model.canReopenClosedSession)
+
+        Menu("Recently Closed Sessions") {
+            ForEach(model.recentlyClosedSessionItems) { item in
+                Button("\(item.title) — \(item.projectName)") {
+                    _ = model.reopenClosedSession(id: item.id)
+                }
+            }
+        }
+        .disabled(!model.canReopenClosedSession)
     }
 }
 

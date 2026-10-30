@@ -323,4 +323,109 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(model.recentlyClosedSessions.last?.title, "Extra-25")
         }
     }
+
+    func testRecentlyClosedSessionItemsAndTargetedReopenByIdAndRemoteBridge() throws {
+        try withTempStateDirectory { root in
+            let remoteHost = RemoteHostInfo(
+                id: "woodhaven",
+                displayName: "Woodhaven",
+                sshTarget: "woodhaven",
+                isLocal: false
+            )
+            let s1 = Session(title: "First", cwd: root.path)
+            let s2 = Session(title: "Second-Remote", cwd: root.path, hostId: "woodhaven")
+            let s3 = Session(title: "Third-Copilot", cwd: root.path)
+            let s4 = Session(title: "KeepOpen", cwd: root.path)
+            let projectA = Project(
+                name: "Project A",
+                cwd: root.path,
+                sessions: [s1, s2, s3, s4],
+                selectedSessionId: s1.id
+            )
+            let b1 = Session(title: "Other-Project-Tab", cwd: root.path)
+            let projectB = Project(
+                name: "Project B",
+                cwd: root.path,
+                sessions: [b1],
+                selectedSessionId: b1.id
+            )
+            let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+            try repository.save(PersistedState(projects: [projectA, projectB], selectedProjectId: projectA.id))
+
+            let model = AppModel(
+                stateRepository: repository,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteWrapperExecutable: { "/usr/local/bin/copilot-remote-wrapper" },
+                remoteSessionBackendAvailable: { true },
+                availableHostsProvider: { [.local, remoteHost] },
+                remoteSessionLauncher: { _, _, _ in },
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                model.forcePendingSessionDestroys()
+                model.detachAllClients()
+            }
+
+            let copilotId = UUID().uuidString.lowercased()
+            try Data("\(copilotId)\n".utf8).write(
+                to: root.appendingPathComponent("\(s3.id).copilot-session")
+            )
+
+            let bridge = RemoteModelBridge(model: model)
+            XCTAssertTrue(bridge.supportsReopenClosedSession)
+            XCTAssertNil(bridge.workspace()?.recentlyClosedSessions)
+            XCTAssertEqual(bridge.reopenClosedSession(id: nil), .missing)
+
+            XCTAssertTrue(model.destroySession(projectId: projectA.id, sessionId: s1.id))
+            XCTAssertTrue(model.destroySession(projectId: projectA.id, sessionId: s2.id))
+            XCTAssertTrue(model.destroySession(projectId: projectB.id, sessionId: b1.id))
+            XCTAssertTrue(model.destroySession(projectId: projectA.id, sessionId: s3.id))
+
+            // Newest-first ordering across projects with host and Copilot metadata.
+            let items = model.recentlyClosedSessionItems
+            XCTAssertEqual(items.map(\.id), [s3.id, b1.id, s2.id, s1.id])
+            XCTAssertEqual(items.map(\.title), ["Third-Copilot", "Other-Project-Tab", "Second-Remote", "First"])
+            XCTAssertEqual(items.map(\.projectName), ["Project A", "Project B", "Project A", "Project A"])
+            XCTAssertEqual(items.map(\.isCopilotSession), [true, false, false, false])
+            XCTAssertEqual(items[2].hostId, "woodhaven")
+            XCTAssertEqual(items[2].hostDisplayName, "Woodhaven")
+            XCTAssertNil(items[0].hostId)
+            XCTAssertNil(items[0].hostDisplayName)
+            XCTAssertEqual(model.remoteWorkspaceSnapshot().recentlyClosedSessions, items)
+
+            // Reopen a specific non-top entry (s2) by id; newer/older entries remain intact.
+            let reopenedS2Id = try XCTUnwrap(model.reopenClosedSession(id: s2.id))
+            XCTAssertNotEqual(reopenedS2Id, s2.id)
+            XCTAssertEqual(model.recentlyClosedSessionItems.map(\.id), [s3.id, b1.id, s1.id])
+            XCTAssertEqual(model.projects[0].sessions.map(\.title), ["Second-Remote", "KeepOpen"])
+            XCTAssertEqual(model.projects[0].sessions[0].hostId, "woodhaven")
+
+            // Unknown id returns .missing without disturbing the remaining stack.
+            XCTAssertEqual(bridge.reopenClosedSession(id: "nonexistent"), .missing)
+            XCTAssertEqual(model.recentlyClosedSessionItems.map(\.id), [s3.id, b1.id, s1.id])
+
+            // Remote reopen by explicit id for s1 (oldest entry).
+            let remoteSpecific = bridge.reopenClosedSession(id: s1.id)
+            guard case let .reopened(projectId: reopenedProjectId, sessionId: reopenedS1Id) = remoteSpecific else {
+                return XCTFail("Expected .reopened for s1, got \(remoteSpecific)")
+            }
+            XCTAssertEqual(reopenedProjectId, projectA.id)
+            XCTAssertEqual(model.projects[0].sessions.first?.id, reopenedS1Id)
+            XCTAssertEqual(model.recentlyClosedSessionItems.map(\.id), [s3.id, b1.id])
+
+            // Remote reopen with "latest" token reopens the newest remaining entry (s3).
+            let remoteLatest = bridge.reopenClosedSession(id: RemoteReopenSessionContract.latestSessionToken)
+            guard case let .reopened(projectId: latestProjectId, sessionId: reopenedS3Id) = remoteLatest else {
+                return XCTFail("Expected .reopened for latest, got \(remoteLatest)")
+            }
+            XCTAssertEqual(latestProjectId, projectA.id)
+            XCTAssertEqual(model.capturedResumeLaunches[reopenedS3Id], copilotId)
+            XCTAssertEqual(model.recentlyClosedSessionItems.map(\.id), [b1.id])
+        }
+    }
 }
