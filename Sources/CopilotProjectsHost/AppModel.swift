@@ -16,6 +16,20 @@ enum PermissionNotificationDecision: Equatable {
     case suppress
 }
 
+struct RecentlyClosedSession: Equatable, Sendable {
+    var originalSessionId: String
+    var projectId: String
+    var sessionIndex: Int
+    var title: String
+    var cwd: String
+    var hostId: String?
+    var pullRequestKeys: [String]?
+    var parentSessionId: String?
+    var copilotSessionId: String?
+    var closeSequence: UInt64 = 0
+    var closingProcesses: Set<TranscriptController.CloseProcessIdentity> = []
+}
+
 /// Single source of truth. Holds value-type projects/sessions (observed) and live
 /// terminal controllers (NOT observed, kept out of the SwiftUI graph).
 typealias GracefulSessionDestroyer = (
@@ -26,6 +40,9 @@ typealias ForcedSessionDestroyer = (_ sessionIds: [String]) -> Void
 
 @MainActor
 final class AppModel: ObservableObject {
+    typealias RecentlyClosedSession = CopilotProjectsHost.RecentlyClosedSession
+    static let maxRecentlyClosedSessions = 20
+
     var projectStorage: [Project] = []
     private var projectPublicationBatchDepth = 0
     private var projectPublicationPending = false
@@ -57,6 +74,9 @@ final class AppModel: ObservableObject {
     @Published var numberHint: NumberHint = .none
     @Published var expandedParentSessionIds: Set<String> = []
     @Published private(set) var transcriptOpenSessions: Set<String> = []
+    @Published private(set) var recentlyClosedSessions: [RecentlyClosedSession] = []
+    private var nextClosedSessionSequence: UInt64 = 0
+    var reopenShutdownTimeout: Duration = .seconds(2)
     @Published private(set) var hostHealth: [RemoteHostHealth] = []
     var requestMainWindow: (() -> Void)?
 
@@ -1612,8 +1632,13 @@ final class AppModel: ObservableObject {
     /// tab from the model immediately.
     func destroySession(projectId pid: String, sessionId sid: String) -> Bool {
         guard let pi = projectIndex(pid),
-              projects[pi].sessions.contains(where: { $0.id == sid }),
+              let si = projects[pi].sessions.firstIndex(where: { $0.id == sid }),
               acceptSessionCloses(sessionIds: [sid]) else { return false }
+        recordRecentlyClosedSession(
+            projectId: pid,
+            sessionIndex: si,
+            session: projects[pi].sessions[si]
+        )
         let controller = controllers[sid]
         controller?.terminalView.kittyImageCapture.disablePersistence()
         scheduleSessionDestroy(
@@ -1625,6 +1650,220 @@ final class AppModel: ObservableObject {
             terminateController: Paths.dtachExecutable != nil
         )
         return true
+    }
+
+    var canReopenClosedSession: Bool {
+        let projectIds = Set(projects.map(\.id))
+        return recentlyClosedSessions.contains { projectIds.contains($0.projectId) }
+    }
+
+    private func recordRecentlyClosedSession(
+        projectId: String,
+        sessionIndex: Int,
+        session: Session
+    ) {
+        nextClosedSessionSequence += 1
+        appendRecentlyClosedSession(RecentlyClosedSession(
+            originalSessionId: session.id,
+            projectId: projectId,
+            sessionIndex: sessionIndex,
+            title: session.title,
+            cwd: session.cwd,
+            hostId: resolvedRemoteHost(for: session)?.id ?? session.hostId,
+            pullRequestKeys: session.pullRequestKeys,
+            parentSessionId: session.parentSessionId,
+            copilotSessionId: resolvedCopilotSessionId(for: session),
+            closeSequence: nextClosedSessionSequence
+        ))
+    }
+
+    private func appendRecentlyClosedSession(_ entry: RecentlyClosedSession) {
+        guard !recentlyClosedSessions.contains(where: { $0.originalSessionId == entry.originalSessionId }) else { return }
+        let target = recentlyClosedSessions.firstIndex(where: { $0.closeSequence > entry.closeSequence }) ?? recentlyClosedSessions.count
+        recentlyClosedSessions.insert(entry, at: target)
+        if recentlyClosedSessions.count > Self.maxRecentlyClosedSessions {
+            recentlyClosedSessions.removeFirst(recentlyClosedSessions.count - Self.maxRecentlyClosedSessions)
+        }
+    }
+
+    private func validatedCopilotSessionMarker(for sessionId: String) -> String? {
+        guard TranscriptController.transcriptOwnerAllowsRead(sessionId: sessionId, directory: resumeMarkerDirectory),
+              let marker = resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session"),
+              !TranscriptController.isCopilotSessionQuarantined(
+                  sessionId: sessionId, copilotSessionId: marker, directory: resumeMarkerDirectory
+              ),
+              TerminalController.isSafeSessionId(marker) else { return nil }
+        return marker
+    }
+
+    private func resolvedCopilotSessionId(for session: Session) -> String? {
+        let sid = session.id
+        let ownerAllows = TranscriptController.transcriptOwnerAllowsRead(sessionId: sid, directory: resumeMarkerDirectory)
+        let validatedMarker = validatedCopilotSessionMarker(for: sid)
+        if ownerAllows,
+           let rawActivityId = session.agentActivity?.copilotSessionId?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !TranscriptController.isCopilotSessionQuarantined(
+               sessionId: sid, copilotSessionId: rawActivityId, directory: resumeMarkerDirectory
+           ),
+           TerminalController.isSafeSessionId(rawActivityId),
+           validatedMarker == nil || validatedMarker?.caseInsensitiveCompare(rawActivityId) == .orderedSame {
+            return rawActivityId
+        }
+        if let validatedMarker { return validatedMarker }
+        if ownerAllows,
+           let launch = pullRequestsResumeLaunches.first(where: {
+               $0.value.sessionId == sid && Date().timeIntervalSince($0.value.launchedAt) < Self.pullRequestsResumeStartupGrace
+           }),
+           TerminalController.isSafeSessionId(launch.key),
+           !TranscriptController.isCopilotSessionQuarantined(
+               sessionId: sid, copilotSessionId: launch.key, directory: resumeMarkerDirectory
+           ) {
+            return launch.key
+        }
+        if let captured = capturedResumeLaunches[sid]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           TerminalController.isSafeSessionId(captured) {
+            return captured
+        }
+        return nil
+    }
+
+    @discardableResult
+    func reopenClosedSession() -> String? {
+        guard !isTerminating && !didFailToLoadWorkspaceState else { return nil }
+        while let candidate = recentlyClosedSessions.popLast() {
+            if projectIndex(candidate.projectId) != nil {
+                return reopenClosedEntry(candidate)
+            }
+        }
+        return nil
+    }
+
+    private func reopenClosedEntry(_ candidate: RecentlyClosedSession) -> String? {
+        guard !isTerminating && !didFailToLoadWorkspaceState,
+              let pi = projectIndex(candidate.projectId) else { return nil }
+        var entry = candidate
+        entry.closingProcesses.formUnion(completePendingSessionDestroyImmediately(entry.originalSessionId))
+        if let cid = entry.copilotSessionId,
+           let existingId = tabHoldingCopilotSession(cid.lowercased(), now: Date()),
+           let loc = locateIndex(existingId) {
+            selectedProjectId = projects[loc.p].id
+            selectSession(projectId: projects[loc.p].id, sessionId: existingId)
+            focusActiveTerminal()
+            return existingId
+        }
+        if let cid = entry.copilotSessionId?.lowercased(),
+           Self.isCopilotSessionStillShuttingDown(copilotId: cid, closingProcesses: entry.closingProcesses) {
+            let timeout = reopenShutdownTimeout
+            let retainedEntry = entry
+            Task { @MainActor [weak self] in
+                let confirmed = await Self.waitForCopilotSessionShutdown(
+                    copilotId: cid, closingProcesses: retainedEntry.closingProcesses, timeout: timeout
+                )
+                guard let self, !self.isTerminating, !self.didFailToLoadWorkspaceState,
+                      self.projectIndex(retainedEntry.projectId) != nil else { return }
+                if confirmed {
+                    _ = self.reopenClosedEntry(retainedEntry)
+                } else {
+                    self.appendRecentlyClosedSession(retainedEntry)
+                }
+            }
+            return nil
+        }
+        // TerminalController resumes `resumeCopilotSessionId` via Paths.copilotExecutable
+        // even when `copilotSessionExecutable` (which requires dtach/host catalog) is nil.
+        let executable = entry.copilotSessionId.flatMap { _ in
+            try? copilotSessionExecutable(
+                toProjectId: entry.projectId,
+                hostId: entry.hostId ?? RemoteHostInfo.localId
+            )
+        }
+        let validParentId = entry.parentSessionId.flatMap { parentId in
+            projects[pi].sessions.contains(where: { $0.id == parentId && $0.parentSessionId == nil }) ? parentId : nil
+        }
+        let session = Session(
+            id: UUID().uuidString,
+            title: entry.title,
+            cwd: entry.cwd,
+            hostId: entry.hostId,
+            creationFingerprint: entry.copilotSessionId.map {
+                SessionCreationRecord.resumeFingerprint(
+                    projectId: entry.projectId,
+                    copilotSessionId: $0.lowercased()
+                )
+            },
+            pullRequestKeys: entry.pullRequestKeys,
+            parentSessionId: validParentId
+        )
+        let insertIndex = min(max(0, entry.sessionIndex), projects[pi].sessions.count)
+        projects[pi].sessions.insert(session, at: insertIndex)
+        selectedProjectId = entry.projectId
+        projects[pi].selectedSessionId = session.id
+        launchSession(
+            session.id,
+            executable: executable,
+            initialPrompt: nil,
+            resumeRecordedSession: false,
+            resumeCopilotSessionId: entry.copilotSessionId
+        )
+        if let cid = entry.copilotSessionId {
+            pullRequestsResumeLaunches[cid.lowercased()] = (session.id, Date())
+        }
+        refreshSelectedTranscriptController()
+        updateDockBadge()
+        save()
+        focusActiveTerminal()
+        return session.id
+    }
+
+    private func completePendingSessionDestroyImmediately(
+        _ sessionId: String
+    ) -> Set<TranscriptController.CloseProcessIdentity> {
+        guard let pending = pendingSessionDestroys.removeValue(forKey: sessionId) else { return [] }
+        let closing = TranscriptController.liveCLIProcesses(sessionId: sessionId, directory: resumeMarkerDirectory)
+        pending.task.cancel()
+        forcedSessionDestroyer([sessionId])
+        if Paths.dtachExecutable == nil {
+            pending.controller?.terminate()
+        }
+        finishPersistedSessionCloses()
+        return closing
+    }
+
+    nonisolated private static func isCopilotSessionStillShuttingDown(
+        copilotId: String,
+        closingProcesses: Set<TranscriptController.CloseProcessIdentity>
+    ) -> Bool {
+        closingProcesses.contains(where: TranscriptController.closeProcessIsAlive) || CopilotSessionStore().isInUse(copilotId)
+    }
+
+    nonisolated private static func waitForCopilotSessionShutdown(
+        copilotId: String,
+        closingProcesses: Set<TranscriptController.CloseProcessIdentity>,
+        timeout: Duration
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline,
+              isCopilotSessionStillShuttingDown(copilotId: copilotId, closingProcesses: closingProcesses) {
+            let remaining = ContinuousClock.now.duration(to: deadline)
+            try? await ContinuousClock().sleep(until: .now.advanced(by: min(.milliseconds(50), max(.zero, remaining))))
+        }
+        return !isCopilotSessionStillShuttingDown(copilotId: copilotId, closingProcesses: closingProcesses)
+    }
+
+    private func tabHoldingCopilotSession(_ copilotId: String, now: Date) -> String? {
+        let sessions = projects.flatMap(\.sessions).map(\.id)
+        if let marked = sessions.first(where: { validatedCopilotSessionMarker(for: $0)?.lowercased() == copilotId }) {
+            return marked
+        }
+        let resuming = copilotResumeSessions?(copilotId)
+            ?? ProcessTree.sessionsResuming(copilotSessionId: copilotId, in: ProcessTree.snapshot())
+        if let starting = sessions.first(where: resuming.contains) { return starting }
+        if let launch = pullRequestsResumeLaunches[copilotId], locateIndex(launch.sessionId) != nil,
+           now.timeIntervalSince(launch.launchedAt) < Self.pullRequestsResumeStartupGrace {
+            return launch.sessionId
+        }
+        return nil
     }
 
     private func acceptSessionCloses(sessionIds: [String], projectIds: [String] = []) -> Bool {
@@ -2009,6 +2248,7 @@ final class AppModel: ObservableObject {
         }
         let closedSessionIds = projects[pi].sessions.map(\.id)
         projects.remove(at: pi)
+        recentlyClosedSessions.removeAll { $0.projectId == pid }
         for sessionId in closedSessionIds where locateIndex(sessionId) == nil {
             remoteControlDeliveryLedger.removeClosedSession(sessionId)
             dismissQuestionNotifications(sessionId: sessionId)
@@ -3075,6 +3315,11 @@ final class AppModel: ObservableObject {
         projects[loc.p].sessions[loc.s].backgroundAgentsActive = false
         backgroundAgentsSuppressed.remove(sessionId)
         let projectId = projects[loc.p].id
+        recordRecentlyClosedSession(
+            projectId: projectId,
+            sessionIndex: loc.s,
+            session: projects[loc.p].sessions[loc.s]
+        )
         _ = kittyImageDiskStore.tombstone(sessionId: sessionId)
         SessionArtifacts.removeFiles(sessionId: sessionId)
         closeSession(projectId: projectId, sessionId: sessionId)

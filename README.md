@@ -142,6 +142,7 @@ accessibility labels.
 | New Copilot session | `⌘T` |
 | New plain terminal | `⌥⌘T` |
 | End the current session | `⌘W` |
+| Reopen closed session | `⇧⌘T` |
 | Mark the current session unread / read | `⇧⌘U` |
 | Next / previous session | `⌃Tab` / `⌃⇧Tab` |
 | Find a session | `⌘K` |
@@ -409,7 +410,9 @@ when reattached.
 **End Session** (including `⌘W` and the session row's x button) asks for confirmation when
 the app reports running, waiting, background, scheduled, or pending-input work.
 A single idle session ends immediately; unread completion markers alone do not
-trigger a prompt. **End Project** also confirms whenever it contains multiple
+trigger a prompt. **Reopen Closed Session** (`⇧⌘T`) reopens the most recently
+closed session in its original project and tab position, resuming its Copilot CLI
+conversation when one was recorded. **End Project** also confirms whenever it contains multiple
 sessions. Cancel ends nothing, and a project that gains sessions while the dialog
 is open must be reviewed again. Ending removes sessions from the workspace and
 stops their processes; project files are not deleted.

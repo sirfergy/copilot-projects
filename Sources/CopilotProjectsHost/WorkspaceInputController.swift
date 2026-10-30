@@ -190,6 +190,11 @@ final class WorkspaceInputController: ObservableObject {
             model.closeSelectedSession()
             return nil
         }
+        if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "t" {
+            clearNumberHint()
+            _ = model.reopenClosedSession()
+            return nil
+        }
         if mods == .command, event.charactersIgnoringModifiers?.lowercased() == "v",
            let sessionId = model.globalSelectedSessionId,
            model.isTranscriptDrawerOpen(sessionId: sessionId),
