@@ -2,6 +2,27 @@ import Darwin
 import Foundation
 import CopilotProjectsProtocol
 
+public struct SSHHostConfiguration: Codable, Equatable, Sendable {
+    public var autoDiscover: Bool
+    public var hosts: [RemoteHostInfo]
+
+    public init(autoDiscover: Bool = true, hosts: [RemoteHostInfo] = []) {
+        self.autoDiscover = autoDiscover
+        self.hosts = hosts
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case autoDiscover
+        case hosts
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.autoDiscover = try container.decodeIfPresent(Bool.self, forKey: .autoDiscover) ?? true
+        self.hosts = try container.decodeIfPresent([RemoteHostInfo].self, forKey: .hosts) ?? []
+    }
+}
+
 /// Auto-discovers SSH hosts from `~/.ssh/config` (and optional `hosts.json` overrides)
 /// so sessions and projects can target either This Mac or any configured remote machine.
 public enum SSHHostCatalog {
@@ -23,6 +44,91 @@ public enum SSHHostCatalog {
         "::1",
     ]
 
+    public static func configurationURL(statePath: URL = Paths.statePath) -> URL {
+        statePath.deletingLastPathComponent().appendingPathComponent("hosts.json")
+    }
+
+    public static func loadConfiguration(statePath: URL = Paths.statePath) -> SSHHostConfiguration {
+        let url = configurationURL(statePath: statePath)
+        guard let data = try? Data(contentsOf: url),
+              var config = try? JSONDecoder().decode(SSHHostConfiguration.self, from: data) else {
+            return SSHHostConfiguration(autoDiscover: true, hosts: [])
+        }
+        config.hosts = config.hosts.filter { host in
+            let id = host.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            let target = (host.sshTarget ?? host.id).trimmingCharacters(in: .whitespacesAndNewlines)
+            return !host.isLocal
+                && !id.isEmpty
+                && !id.hasPrefix("-")
+                && !id.contains(where: \.isWhitespace)
+                && !target.isEmpty
+                && !target.hasPrefix("-")
+                && !target.contains(where: \.isWhitespace)
+                && id.caseInsensitiveCompare(RemoteHostInfo.localId) != .orderedSame
+                && !ignoredExactHosts.contains(id.lowercased())
+        }
+        return config
+    }
+
+    @discardableResult
+    public static func saveConfiguration(
+        _ config: SSHHostConfiguration,
+        statePath: URL = Paths.statePath
+    ) -> Bool {
+        let url = configurationURL(statePath: statePath)
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(config)
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    public static func makeManualHost(
+        sshTarget: String,
+        displayName: String? = nil,
+        defaultCwd: String? = nil
+    ) -> RemoteHostInfo? {
+        let trimmedTarget = sshTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTarget.isEmpty,
+              !trimmedTarget.contains(where: \.isWhitespace),
+              !trimmedTarget.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }),
+              !trimmedTarget.hasPrefix("-"),
+              !trimmedTarget.hasPrefix("@"),
+              !trimmedTarget.hasSuffix("@"),
+              trimmedTarget.filter({ $0 == "@" }).count <= 1 else {
+            return nil
+        }
+        let lowerTarget = trimmedTarget.lowercased()
+        let hostPart = lowerTarget.split(separator: "@", omittingEmptySubsequences: false).last.map(String.init) ?? lowerTarget
+        guard lowerTarget != RemoteHostInfo.localId,
+              !ignoredExactHosts.contains(lowerTarget),
+              hostPart != RemoteHostInfo.localId,
+              !ignoredExactHosts.contains(hostPart) else {
+            return nil
+        }
+        let trimmedDisplayName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedDisplayName = (trimmedDisplayName?.isEmpty == false)
+            ? trimmedDisplayName!
+            : shortIdentifier(for: trimmedTarget).lowercased()
+        let trimmedDefaultCwd = defaultCwd?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedDefaultCwd = (trimmedDefaultCwd?.isEmpty == false) ? trimmedDefaultCwd : nil
+        return RemoteHostInfo(
+            id: lowerTarget,
+            displayName: resolvedDisplayName,
+            sshTarget: trimmedTarget,
+            defaultCwd: resolvedDefaultCwd,
+            isLocal: false
+        )
+    }
+
     /// Default discovery used by `AppModel`: only reads the user's real `~/.ssh/config`
     /// when running against the primary state path, so unit tests with isolated temp
     /// `StateRepository` paths remain deterministic unless they place `ssh_config` or
@@ -33,27 +139,41 @@ public enum SSHHostCatalog {
     ) -> [RemoteHostInfo] {
         let stateDir = statePath.deletingLastPathComponent()
         let isolatedSSHConfig = stateDir.appendingPathComponent("ssh_config")
-        if FileManager.default.fileExists(atPath: isolatedSSHConfig.path)
-            || statePath.standardizedFileURL != Paths.statePath.standardizedFileURL {
-            return discoverHosts(
-                sshConfigURL: FileManager.default.fileExists(atPath: isolatedSSHConfig.path)
-                    ? isolatedSSHConfig : nil
-            )
+        if FileManager.default.fileExists(atPath: isolatedSSHConfig.path) {
+            return discoverHosts(sshConfigURL: isolatedSSHConfig, statePath: statePath)
+        }
+        let defaultHome = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
+        if statePath.standardizedFileURL != Paths.statePath.standardizedFileURL
+            && homeDirectory.standardizedFileURL == defaultHome {
+            return discoverHosts(sshConfigURL: nil, statePath: statePath)
         }
         let userSSHConfig = homeDirectory
             .appendingPathComponent(".ssh", isDirectory: true)
             .appendingPathComponent("config")
-        return discoverHosts(sshConfigURL: userSSHConfig)
+        return discoverHosts(sshConfigURL: userSSHConfig, statePath: statePath)
     }
 
-    public static func discoverHosts(sshConfigURL: URL?) -> [RemoteHostInfo] {
+    public static func discoverHosts(
+        sshConfigURL: URL?,
+        statePath: URL? = nil
+    ) -> [RemoteHostInfo] {
+        let effectiveStatePath = statePath
+            ?? (sshConfigURL?.lastPathComponent == "ssh_config" ? sshConfigURL : nil)
+        let config = effectiveStatePath.map { loadConfiguration(statePath: $0) }
+            ?? SSHHostConfiguration()
         var result: [RemoteHostInfo] = [.local]
         var seenIds: Set<String> = [RemoteHostInfo.localId]
 
-        if let sshConfigURL {
+        for manual in config.hosts where !manual.isLocal {
+            let lowerId = manual.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !lowerId.isEmpty, seenIds.insert(lowerId).inserted else { continue }
+            result.append(manual)
+        }
+
+        if config.autoDiscover, let sshConfigURL {
             let baseDir = sshConfigURL.deletingLastPathComponent()
             for candidate in parseSSHConfigFile(at: sshConfigURL, baseSSHDir: baseDir)
-                where seenIds.insert(candidate.id).inserted {
+                where seenIds.insert(candidate.id.lowercased()).inserted {
                 result.append(candidate)
             }
         }
