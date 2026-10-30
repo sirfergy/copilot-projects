@@ -61,6 +61,18 @@ private struct NextAttentionSessionButton: View {
     }
 }
 
+private struct ReopenClosedSessionButton: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        Button("Reopen Closed Session") {
+            _ = model.reopenClosedSession()
+        }
+        .keyboardShortcut("t", modifiers: [.command, .shift])
+        .disabled(!model.canReopenClosedSession)
+    }
+}
+
 /// Session ▸ Back (⌘[) / Forward (⌘]).
 private struct SessionHistoryMenuButtons: View {
     @ObservedObject var model: AppModel
@@ -132,6 +144,7 @@ private struct WorkspaceCommands: Commands {
                 Divider()
                 Button("End Session") { model.closeSelectedSession() }
                     .keyboardShortcut("w", modifiers: .command)
+                ReopenClosedSessionButton(model: model)
                 Divider()
                 Button("Find Session…") { input.presentSessionFinder() }
                     .keyboardShortcut("k", modifiers: .command)
