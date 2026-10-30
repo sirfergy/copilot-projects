@@ -338,9 +338,10 @@ final class AppModelTests: XCTestCase {
         }
 
         let copilotId = UUID().uuidString.lowercased()
+        let earlier = Session(title: "Earlier Plain", cwd: root.path)
         let session = Session(title: "Locked Copilot", cwd: root.path)
         let later = Session(title: "Closed During Wait", cwd: root.path)
-        let project = Project(name: "Main", cwd: root.path, sessions: [session, later], selectedSessionId: session.id)
+        let project = Project(name: "Main", cwd: root.path, sessions: [earlier, session, later], selectedSessionId: session.id)
         let repository = StateRepository(path: root.appendingPathComponent("state.json"))
         try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
         try Data("\(copilotId)\n".utf8).write(to: root.appendingPathComponent("\(session.id).copilot-session"))
@@ -368,17 +369,19 @@ final class AppModelTests: XCTestCase {
         }
         model.reopenShutdownTimeout = .milliseconds(120)
 
+        XCTAssertTrue(model.destroySession(projectId: project.id, sessionId: earlier.id))
         XCTAssertTrue(model.destroySession(projectId: project.id, sessionId: session.id))
+        XCTAssertEqual(model.recentlyClosedSessions.map(\.title), ["Earlier Plain", "Locked Copilot"])
 
-        // 1. When the lock remains held past the timeout, reopen does not launch and retains the undo entry
-        // in its original LIFO position beneath any session closed during the wait.
+        // 1. Begin reopening locked B, reopen A, then close C: B's timeout restores [B, C] by close order.
         XCTAssertNil(model.reopenClosedSession())
+        let reopenedEarlierId = try XCTUnwrap(model.reopenClosedSession())
+        XCTAssertEqual(launched, [reopenedEarlierId])
         XCTAssertTrue(model.destroySession(projectId: project.id, sessionId: later.id))
         try await Task.sleep(nanoseconds: 200_000_000)
-        XCTAssertTrue(launched.isEmpty)
         XCTAssertEqual(model.recentlyClosedSessions.map(\.title), ["Locked Copilot", "Closed During Wait"])
         let reopenedLaterId = try XCTUnwrap(model.reopenClosedSession())
-        XCTAssertEqual(launched, [reopenedLaterId])
+        XCTAssertEqual(launched, [reopenedEarlierId, reopenedLaterId])
         XCTAssertEqual(model.recentlyClosedSessions.map(\.title), ["Locked Copilot"])
 
         // 2. When the lock releases during the bounded wait, reopen finishes launching asynchronously.
@@ -386,8 +389,8 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.reopenClosedSession())
         try? FileManager.default.removeItem(at: lockFile)
         try await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertEqual(launched.count, 2)
+        XCTAssertEqual(launched.count, 3)
         XCTAssertTrue(model.recentlyClosedSessions.isEmpty)
-        XCTAssertEqual(model.capturedResumeLaunches[launched[1]], copilotId)
+        XCTAssertEqual(model.capturedResumeLaunches[launched[2]], copilotId)
     }
 }

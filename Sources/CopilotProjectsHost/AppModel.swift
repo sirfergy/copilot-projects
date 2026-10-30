@@ -26,6 +26,7 @@ struct RecentlyClosedSession: Equatable, Sendable {
     var pullRequestKeys: [String]?
     var parentSessionId: String?
     var copilotSessionId: String?
+    var closeSequence: UInt64 = 0
     var closingProcesses: Set<TranscriptController.CloseProcessIdentity> = []
 }
 
@@ -74,6 +75,7 @@ final class AppModel: ObservableObject {
     @Published var expandedParentSessionIds: Set<String> = []
     @Published private(set) var transcriptOpenSessions: Set<String> = []
     @Published private(set) var recentlyClosedSessions: [RecentlyClosedSession] = []
+    private var nextClosedSessionSequence: UInt64 = 0
     var reopenShutdownTimeout: Duration = .seconds(2)
     @Published private(set) var hostHealth: [RemoteHostHealth] = []
     var requestMainWindow: (() -> Void)?
@@ -1660,6 +1662,7 @@ final class AppModel: ObservableObject {
         sessionIndex: Int,
         session: Session
     ) {
+        nextClosedSessionSequence += 1
         appendRecentlyClosedSession(RecentlyClosedSession(
             originalSessionId: session.id,
             projectId: projectId,
@@ -1669,13 +1672,14 @@ final class AppModel: ObservableObject {
             hostId: resolvedRemoteHost(for: session)?.id ?? session.hostId,
             pullRequestKeys: session.pullRequestKeys,
             parentSessionId: session.parentSessionId,
-            copilotSessionId: resolvedCopilotSessionId(for: session)
+            copilotSessionId: resolvedCopilotSessionId(for: session),
+            closeSequence: nextClosedSessionSequence
         ))
     }
 
-    private func appendRecentlyClosedSession(_ entry: RecentlyClosedSession, at index: Int? = nil) {
+    private func appendRecentlyClosedSession(_ entry: RecentlyClosedSession) {
         guard !recentlyClosedSessions.contains(where: { $0.originalSessionId == entry.originalSessionId }) else { return }
-        let target = min(max(0, index ?? recentlyClosedSessions.count), recentlyClosedSessions.count)
+        let target = recentlyClosedSessions.firstIndex(where: { $0.closeSequence > entry.closeSequence }) ?? recentlyClosedSessions.count
         recentlyClosedSessions.insert(entry, at: target)
         if recentlyClosedSessions.count > Self.maxRecentlyClosedSessions {
             recentlyClosedSessions.removeFirst(recentlyClosedSessions.count - Self.maxRecentlyClosedSessions)
@@ -1727,17 +1731,18 @@ final class AppModel: ObservableObject {
     @discardableResult
     func reopenClosedSession() -> String? {
         guard !isTerminating && !didFailToLoadWorkspaceState else { return nil }
-        var matchedEntry: RecentlyClosedSession?
-        var matchedProjectIndex: Int?
         while let candidate = recentlyClosedSessions.popLast() {
-            if let pi = projectIndex(candidate.projectId) {
-                matchedEntry = candidate
-                matchedProjectIndex = pi
-                break
+            if projectIndex(candidate.projectId) != nil {
+                return reopenClosedEntry(candidate)
             }
         }
-        guard var entry = matchedEntry, let pi = matchedProjectIndex else { return nil }
-        let restoreIndex = recentlyClosedSessions.count
+        return nil
+    }
+
+    private func reopenClosedEntry(_ candidate: RecentlyClosedSession) -> String? {
+        guard !isTerminating && !didFailToLoadWorkspaceState,
+              let pi = projectIndex(candidate.projectId) else { return nil }
+        var entry = candidate
         entry.closingProcesses.formUnion(completePendingSessionDestroyImmediately(entry.originalSessionId))
         if let cid = entry.copilotSessionId,
            let existingId = tabHoldingCopilotSession(cid.lowercased(), now: Date()),
@@ -1758,13 +1763,20 @@ final class AppModel: ObservableObject {
                 guard let self, !self.isTerminating, !self.didFailToLoadWorkspaceState,
                       self.projectIndex(retainedEntry.projectId) != nil else { return }
                 if confirmed {
-                    self.appendRecentlyClosedSession(retainedEntry)
-                    _ = self.reopenClosedSession()
+                    _ = self.reopenClosedEntry(retainedEntry)
                 } else {
-                    self.appendRecentlyClosedSession(retainedEntry, at: restoreIndex)
+                    self.appendRecentlyClosedSession(retainedEntry)
                 }
             }
             return nil
+        }
+        // TerminalController resumes `resumeCopilotSessionId` via Paths.copilotExecutable
+        // even when `copilotSessionExecutable` (which requires dtach/host catalog) is nil.
+        let executable = entry.copilotSessionId.flatMap { _ in
+            try? copilotSessionExecutable(
+                toProjectId: entry.projectId,
+                hostId: entry.hostId ?? RemoteHostInfo.localId
+            )
         }
         let validParentId = entry.parentSessionId.flatMap { parentId in
             projects[pi].sessions.contains(where: { $0.id == parentId && $0.parentSessionId == nil }) ? parentId : nil
@@ -1787,12 +1799,6 @@ final class AppModel: ObservableObject {
         projects[pi].sessions.insert(session, at: insertIndex)
         selectedProjectId = entry.projectId
         projects[pi].selectedSessionId = session.id
-        let executable = entry.copilotSessionId.flatMap { _ in
-            try? copilotSessionExecutable(
-                toProjectId: entry.projectId,
-                hostId: entry.hostId ?? RemoteHostInfo.localId
-            )
-        }
         launchSession(
             session.id,
             executable: executable,
