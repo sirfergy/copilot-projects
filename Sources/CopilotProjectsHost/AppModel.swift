@@ -847,9 +847,7 @@ final class AppModel: ObservableObject {
         } else {
             config.hosts.append(host)
         }
-        guard SSHHostCatalog.saveConfiguration(config, statePath: stateRepository.path) else {
-            return nil
-        }
+        SSHHostCatalog.saveConfiguration(config, statePath: stateRepository.path)
         cachedAvailableHosts = nil
         objectWillChange.send()
         refreshHostHealthAfterCatalogChange()
