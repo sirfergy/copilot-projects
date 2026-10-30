@@ -298,6 +298,34 @@ final class ForegroundActivityTests: XCTestCase {
         }
     }
 
+    func testStrictFooterRecognizesDraftAndModelColumns() {
+        let cases: [([String], FooterActivity)] = [
+            (["Autopilot · Allow All    GPT-6.1 Sol · Max"], .idle),
+            (["Autopilot · Allow All GPT-6.1 Sol · Max"], .idle),
+            (["Autopilot (limited) · Manual Approval    GPT-6.1 Sol"], .idle),
+            (["Plan · Assisted Permissions    GPT-6.1 Sol"], .idle),
+            (["Shell · Manual Approval    GPT-6.1 Sol"], .idle),
+            (["Interactive · Manual Approval · @ files · # issues    GPT-6.1 Sol"], .idle),
+            (["@ files · # issues    GPT-6.1 Sol · Max┃"], .idle),
+            (["@ files · # issues GPT-6.1 Sol · Max"], .idle),
+            (["/ commands · ? help · tab next tab    GPT-6.1 Sol"], .idle),
+            (["◎ Working   esc cancel    GPT-6.1 Sol · Max"], .working),
+            (["◎ Working   esc cancel GPT-6.1 Sol · Max"], .working),
+            (["esc to interrupt    GPT-6.1 Sol"], .working),
+            (["esc cancel", "Autopilot · Allow All    GPT-6.1 Sol"], .working),
+            (["Autopilot · Allow All    GPT-6.1 Sol", "model picker"], .unknown),
+            (["~/src % echo Autopilot · Allow All    GPT-6.1 Sol"], .unknown),
+            (["~/src % echo @ files · # issues    GPT-6.1 Sol"], .unknown),
+            (["~/src % echo working esc cancel    GPT-6.1 Sol"], .unknown),
+            (["Autopilot settings · Allow All"], .unknown),
+            (["Autopilot · Allow Almost"], .unknown),
+            (["esc cancel    doesn't work", "@ files · # issues"], .idle),
+        ]
+        for (rows, expected) in cases {
+            XCTAssertEqual(TerminalController.classifyCopilotFooterRows(rows), expected, "\(rows)")
+        }
+    }
+
     @MainActor
     func testSuppressedPermissionRetainsWaitUntilMatchingCompletion() async throws {
         let fixture = try Fixture(permissionDelayNanoseconds: 5_000_000)

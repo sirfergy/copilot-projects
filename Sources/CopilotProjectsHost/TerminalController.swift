@@ -118,43 +118,51 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         guard activity == .idle else { return activity }
         // Modal chrome can sit above the shortcuts. Do not classify arbitrary
         // draft/output rows as busy just because they contain "working".
-        return rows.contains(where: hasModalHint) ? .working : .idle
+        return rows.contains { hasModalHint($0) } ? .working : .idle
     }
 
-    /// Like `classifyFooterRows`, but hints and shortcuts must be whole
-    /// `·`-separated footer parts, ignoring Copilot's scrollbar gutter.
+    /// Require whole Copilot footer labels, allowing a padded model/status column
+    /// and ignoring the scrollbar gutter.
     nonisolated static func classifyCopilotFooterRows(_ rows: [String]) -> FooterActivity {
         let rows = rows.map(withoutScrollbarGutter).filter { !isEmptyFooterRow($0) }
         guard let footer = rows.last else { return .unknown }
-        if hasModalHint(footer) { return .working }
-        guard hasIdleShortcuts(footer) else { return .unknown }
-        return rows.contains(where: hasModalHint) ? .working : .idle
+        if hasModalHint(footer, allowStatusColumn: true) { return .working }
+        guard hasIdleFooterHints(footer) else { return .unknown }
+        return rows.contains { hasModalHint($0) } ? .working : .idle
     }
 
-    /// A `·`-separated footer part that is exactly a modal hint, optionally
-    /// preceded by Copilot's spinner and "Working".
-    nonisolated private static func hasModalHint(_ row: String) -> Bool {
+    /// Only the footer may have trailing status text; other rows can be drafts.
+    nonisolated private static func hasModalHint(_ row: String, allowStatusColumn: Bool = false) -> Bool {
         row.split(separator: "·").contains { part in
             let hint = part.trimmingCharacters(
                 in: CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
             ).lowercased()
-            guard let suffix = modalFooterHints.first(where: { hint.hasSuffix($0) }) else { return false }
-            let prefix = hint.dropLast(suffix.count).trimmingCharacters(in: .whitespaces)
-            return prefix.isEmpty
-                || prefix.range(of: #"^[^\p{L}\p{N}]*working$"#, options: .regularExpression) != nil
+            return modalFooterHints.contains { suffix in
+                guard let range = hint.range(of: suffix),
+                      hint[range.upperBound...].isEmpty
+                        || (allowStatusColumn && hint[range.upperBound...].hasPrefix(" ")) else { return false }
+                let prefix = hint[..<range.lowerBound].trimmingCharacters(in: .whitespaces)
+                return prefix.isEmpty
+                    || prefix.range(of: #"^[^\p{L}\p{N}]*working$"#, options: .regularExpression) != nil
+            }
         }
     }
 
-    nonisolated private static func hasIdleShortcuts(_ row: String) -> Bool {
+    nonisolated private static func hasIdleFooterHints(_ row: String) -> Bool {
         let parts = Set(row.lowercased().split(separator: "·").map {
             $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.controlCharacters))
         })
-        return parts.contains("tab next tab")
-            || (parts.contains("/ commands")
-                && (parts.contains("? help") || parts.contains { $0.hasPrefix("autopilot") }))
-            || parts.isSuperset(of: ["@ files", "# issues"])
-            || parts.contains("esc again to stop agents")
-            || parts.contains("esc stop agents")
+        func hasLabel(_ label: String) -> Bool {
+            parts.contains { $0 == label || $0.hasPrefix(label + " ") }
+        }
+        return hasLabel("tab next tab")
+            || (hasLabel("/ commands")
+                && (hasLabel("? help") || parts.contains { $0.hasPrefix("autopilot") }))
+            || (hasLabel("@ files") && hasLabel("# issues"))
+            || hasLabel("esc again to stop agents")
+            || hasLabel("esc stop agents")
+            || (!parts.isDisjoint(with: ["interactive", "plan", "autopilot", "autopilot (limited)", "shell"])
+                && ["allow all", "manual approval", "assisted permissions"].contains(where: hasLabel))
     }
 
     nonisolated private static func withoutScrollbarGutter(_ row: String) -> String {
