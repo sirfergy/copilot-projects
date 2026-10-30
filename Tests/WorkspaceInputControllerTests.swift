@@ -632,6 +632,7 @@ final class WorkspaceInputControllerTests: XCTestCase {
                 "◎ Working   esc cancel    GPT-6.1 Sol · Max",
                 "◎ Running tests esc esc interrupt · ctrl+q enqueue GPT-6.1 Sol",
                 "◎ Running tests ctrl+c interrupt · ctrl+q enqueue GPT-6.1 Sol",
+                "esc again to clear input GPT-6.1 Sol",
             ] {
                 view.feed(text: "\r\n" + footer)
                 for modifiers in [NSEvent.ModifierFlags.command, .shift] {

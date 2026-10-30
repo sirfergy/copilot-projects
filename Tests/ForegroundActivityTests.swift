@@ -317,18 +317,28 @@ final class ForegroundActivityTests: XCTestCase {
             (["◎ Working · 1.2 KB esc esc interrupt · enter enqueue GPT-6.1 Sol"], .working),
             (["-- INSERT -- · ◎ Running tests esc again to cancel GPT-6.1 Sol"], .working),
             (["esc to interrupt    GPT-6.1 Sol"], .working),
+            (["esc again to clear input"], .idle),
+            (["esc again to rewind GPT-6.1 Sol"], .idle),
+            (["esc again to edit prompt GPT-6.1 Sol"], .idle),
             (["esc cancel", "Autopilot · Allow All    GPT-6.1 Sol"], .working),
             (["Autopilot · Allow All    GPT-6.1 Sol", "model picker"], .unknown),
             (["~/src % echo Autopilot · Allow All    GPT-6.1 Sol"], .unknown),
             (["~/src % echo @ files · # issues    GPT-6.1 Sol"], .unknown),
             (["~/src % echo working esc cancel    GPT-6.1 Sol"], .unknown),
             (["~/src % echo ◎ Running tests esc esc interrupt · ctrl+q enqueue"], .unknown),
+            (["❯ echo esc cancel"], .unknown),
+            (["➜  src git:(main) ✗ echo ctrl+c interrupt"], .unknown),
             (["Autopilot settings · Allow All"], .unknown),
             (["Autopilot · Allow Almost"], .unknown),
             (["esc cancel    doesn't work", "@ files · # issues"], .idle),
         ]
         for (rows, expected) in cases {
             XCTAssertEqual(TerminalController.classifyCopilotFooterRows(rows), expected, "\(rows)")
+        }
+        for spinner in ["∙", "∘", "●", "◉", "◎", "○"] {
+            XCTAssertEqual(TerminalController.classifyCopilotFooterRows([
+                "\(spinner) Running tests esc esc interrupt · ctrl+q enqueue GPT-6.1 Sol",
+            ]), .working, spinner)
         }
     }
 

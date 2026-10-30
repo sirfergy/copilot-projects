@@ -127,9 +127,9 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         let rows = rows.map(withoutScrollbarGutter).filter { !isEmptyFooterRow($0) }
         guard let footer = rows.last else { return .unknown }
         if hasModalHint(footer, allowStatusColumn: true) { return .working }
-        // Busy footers can replace "Working" with an intent; keep the spinner and control hint as evidence.
+        // Busy footers can replace "Working" with an intent; require Copilot's spinner frames and control hint.
         if footer.range(
-            of: #"(?i)(?:^|·)\s*[^\x00-\x7f\p{L}\p{N}]\s+.+\s+(?:esc(?: esc)?|ctrl\+c) (?:again to )?(?:interrupt|cancel|edit prompt|stop agents|clear input|exit shell mode)(?:\s|·|$)"#,
+            of: #"(?i)(?:^|·)\s*[∙∘●◉◎○]\s+.+\s+(?:esc(?: esc)?|ctrl\+c) (?:again to )?(?:interrupt|cancel|edit prompt|stop agents|clear input|exit shell mode)(?:\s|·|$)"#,
             options: .regularExpression
         ) != nil { return .working }
         guard hasIdleFooterHints(footer) else { return .unknown }
@@ -166,6 +166,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
             || (hasLabel("@ files") && hasLabel("# issues"))
             || hasLabel("esc again to stop agents")
             || hasLabel("esc stop agents")
+            || ["esc again to clear input", "esc again to rewind", "esc again to edit prompt"].contains(where: hasLabel)
             || (!parts.isDisjoint(with: ["interactive", "plan", "autopilot", "autopilot (limited)", "shell"])
                 && ["allow all", "manual approval", "assisted permissions"].contains(where: hasLabel))
     }
