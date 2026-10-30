@@ -1121,6 +1121,8 @@ private struct SessionCreationButtons: View {
                         }
                     }
                 }
+                Divider()
+                SSHHostsSettingsMenu(model: model)
             } label: {
                 Image(systemName: "chevron.down")
                     .font(.caption2)

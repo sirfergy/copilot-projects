@@ -804,6 +804,122 @@ final class AppModel: ObservableObject {
         return hosts
     }
 
+    var autoDiscoverSSHHosts: Bool {
+        get {
+            SSHHostCatalog.loadConfiguration(statePath: stateRepository.path).autoDiscover
+        }
+        set {
+            setAutoDiscoverSSHHosts(newValue)
+        }
+    }
+
+    var manualSSHHosts: [RemoteHostInfo] {
+        SSHHostCatalog.loadConfiguration(statePath: stateRepository.path).hosts
+    }
+
+    func setAutoDiscoverSSHHosts(_ enabled: Bool) {
+        var config = SSHHostCatalog.loadConfiguration(statePath: stateRepository.path)
+        config.autoDiscover = enabled
+        SSHHostCatalog.saveConfiguration(config, statePath: stateRepository.path)
+        cachedAvailableHosts = nil
+        objectWillChange.send()
+        refreshHostHealthAfterCatalogChange()
+    }
+
+    @discardableResult
+    func addManualSSHHost(
+        sshTarget: String,
+        displayName: String? = nil,
+        defaultCwd: String? = nil
+    ) -> RemoteHostInfo? {
+        guard let host = SSHHostCatalog.makeManualHost(
+            sshTarget: sshTarget,
+            displayName: displayName,
+            defaultCwd: defaultCwd
+        ) else {
+            return nil
+        }
+        var config = SSHHostCatalog.loadConfiguration(statePath: stateRepository.path)
+        if let index = config.hosts.firstIndex(where: {
+            $0.id.caseInsensitiveCompare(host.id) == .orderedSame
+        }) {
+            config.hosts[index] = host
+        } else {
+            config.hosts.append(host)
+        }
+        guard SSHHostCatalog.saveConfiguration(config, statePath: stateRepository.path) else {
+            return nil
+        }
+        cachedAvailableHosts = nil
+        objectWillChange.send()
+        refreshHostHealthAfterCatalogChange()
+        return host
+    }
+
+    func removeManualSSHHost(id: String) {
+        var config = SSHHostCatalog.loadConfiguration(statePath: stateRepository.path)
+        config.hosts.removeAll { $0.id.caseInsensitiveCompare(id) == .orderedSame }
+        SSHHostCatalog.saveConfiguration(config, statePath: stateRepository.path)
+        cachedAvailableHosts = nil
+        objectWillChange.send()
+        refreshHostHealthAfterCatalogChange()
+    }
+
+    private func refreshHostHealthAfterCatalogChange() {
+        if hostHealthTimer != nil
+            || hostHealthProvider != nil
+            || stateRepository.path.standardizedFileURL == Paths.statePath.standardizedFileURL {
+            refreshHostHealth()
+        } else {
+            let validIds = Set(availableHosts.map { $0.id.lowercased() })
+            hostHealth.removeAll { !validIds.contains($0.id.lowercased()) }
+        }
+    }
+
+    func addManualSSHHostInteractive() {
+        let alert = NSAlert()
+        alert.messageText = "Add SSH Host"
+        alert.informativeText = "Register a remote SSH host or ~/.ssh/config alias."
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 88))
+        let targetField = NSTextField(frame: NSRect(x: 0, y: 64, width: 300, height: 24))
+        targetField.placeholderString = "user@host or ssh-alias"
+        targetField.setAccessibilityLabel("SSH Host / Target")
+
+        let displayNameField = NSTextField(frame: NSRect(x: 0, y: 32, width: 300, height: 24))
+        displayNameField.placeholderString = "Optional display name"
+        displayNameField.setAccessibilityLabel("Display Name")
+
+        let defaultCwdField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        defaultCwdField.placeholderString = "Optional remote path, e.g. ~/Repos"
+        defaultCwdField.setAccessibilityLabel("Default Folder")
+
+        targetField.nextKeyView = displayNameField
+        displayNameField.nextKeyView = defaultCwdField
+
+        container.addSubview(targetField)
+        container.addSubview(displayNameField)
+        container.addSubview(defaultCwdField)
+
+        alert.accessoryView = container
+        alert.addButton(withTitle: "Add Host")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = targetField
+
+        guard alertPresenter(alert) == .alertFirstButtonReturn else { return }
+        guard !isTerminating else { return }
+        if addManualSSHHost(
+            sshTarget: targetField.stringValue,
+            displayName: displayNameField.stringValue,
+            defaultCwd: defaultCwdField.stringValue
+        ) == nil {
+            presentAlert(
+                title: "Invalid SSH Host",
+                message: "Enter an SSH host or user@host target without spaces or leading dashes."
+            )
+        }
+    }
+
     func resolvedRemoteHost(
         hostId: String?,
         projectDefaultHostId: String? = nil
