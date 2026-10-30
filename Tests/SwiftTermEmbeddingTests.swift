@@ -199,14 +199,16 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         XCTAssertEqual(view.process.sendCount, sends)
         view.unmarkText()
 
-        view.feed(text: "selected")
+        view.feed(text: "selected\r\nAutopilot · Allow All    GPT-6.1 Sol · Max")
         view.selectAll()
         XCTAssertTrue(view.selectionActive)
         XCTAssertTrue(view.terminalInputStateSnapshot()?.keyboardEnhancementFlags.isEmpty == true)
         XCTAssertTrue(view.sendRestoredModifiedReturnIfNeeded(
             for: event,
             restoredAgentLive: true,
-            copilotFooterVisible: true
+            copilotFooterVisible: TerminalController.classifyCopilotFooterRows(
+                view.terminalStateSnapshot().visibleRows.map(\.text)
+            ) != .unknown
         ))
         XCTAssertEqual(view.process.sendCount, sends + 1)
         XCTAssertFalse(view.selectionActive)

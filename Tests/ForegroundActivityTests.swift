@@ -298,6 +298,50 @@ final class ForegroundActivityTests: XCTestCase {
         }
     }
 
+    func testStrictFooterRecognizesDraftAndModelColumns() {
+        let cases: [([String], FooterActivity)] = [
+            (["Autopilot · Allow All    GPT-6.1 Sol · Max"], .idle),
+            (["Autopilot · Allow All GPT-6.1 Sol · Max"], .idle),
+            (["Autopilot (limited) · Manual Approval    GPT-6.1 Sol"], .idle),
+            (["Plan · Assisted Permissions    GPT-6.1 Sol"], .idle),
+            (["Shell · Manual Approval    GPT-6.1 Sol"], .idle),
+            (["Interactive · Manual Approval · @ files · # issues    GPT-6.1 Sol"], .idle),
+            (["@ files · # issues    GPT-6.1 Sol · Max┃"], .idle),
+            (["@ files · # issues GPT-6.1 Sol · Max"], .idle),
+            (["/ commands · ? help · tab next tab    GPT-6.1 Sol"], .idle),
+            (["◎ Working   esc cancel    GPT-6.1 Sol · Max"], .working),
+            (["◎ Working   esc cancel GPT-6.1 Sol · Max"], .working),
+            (["◎ Working esc esc interrupt    GPT-6.1 Sol · Max"], .working),
+            (["◎ Running tests esc esc interrupt · ctrl+q enqueue    GPT-6.1 Sol"], .working),
+            (["◎ Running tests ctrl+c interrupt · ctrl+q enqueue GPT-6.1 Sol"], .working),
+            (["◎ Working · 1.2 KB esc esc interrupt · enter enqueue GPT-6.1 Sol"], .working),
+            (["-- INSERT -- · ◎ Running tests esc again to cancel GPT-6.1 Sol"], .working),
+            (["esc to interrupt    GPT-6.1 Sol"], .working),
+            (["esc again to clear input"], .idle),
+            (["esc again to rewind GPT-6.1 Sol"], .idle),
+            (["esc again to edit prompt GPT-6.1 Sol"], .idle),
+            (["esc cancel", "Autopilot · Allow All    GPT-6.1 Sol"], .working),
+            (["Autopilot · Allow All    GPT-6.1 Sol", "model picker"], .unknown),
+            (["~/src % echo Autopilot · Allow All    GPT-6.1 Sol"], .unknown),
+            (["~/src % echo @ files · # issues    GPT-6.1 Sol"], .unknown),
+            (["~/src % echo working esc cancel    GPT-6.1 Sol"], .unknown),
+            (["~/src % echo ◎ Running tests esc esc interrupt · ctrl+q enqueue"], .unknown),
+            (["❯ echo esc cancel"], .unknown),
+            (["➜  src git:(main) ✗ echo ctrl+c interrupt"], .unknown),
+            (["Autopilot settings · Allow All"], .unknown),
+            (["Autopilot · Allow Almost"], .unknown),
+            (["esc cancel    doesn't work", "@ files · # issues"], .idle),
+        ]
+        for (rows, expected) in cases {
+            XCTAssertEqual(TerminalController.classifyCopilotFooterRows(rows), expected, "\(rows)")
+        }
+        for spinner in ["∙", "∘", "●", "◉", "◎", "○"] {
+            XCTAssertEqual(TerminalController.classifyCopilotFooterRows([
+                "\(spinner) Running tests esc esc interrupt · ctrl+q enqueue GPT-6.1 Sol",
+            ]), .working, spinner)
+        }
+    }
+
     @MainActor
     func testSuppressedPermissionRetainsWaitUntilMatchingCompletion() async throws {
         let fixture = try Fixture(permissionDelayNanoseconds: 5_000_000)
