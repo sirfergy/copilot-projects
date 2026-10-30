@@ -1653,6 +1653,25 @@ final class AppModel: ObservableObject {
         return recentlyClosedSessions.contains { projectIds.contains($0.projectId) }
     }
 
+    var recentlyClosedSessionItems: [RemoteRecentlyClosedSession] {
+        let projectsById = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
+        return recentlyClosedSessions.reversed().compactMap { entry in
+            guard let project = projectsById[entry.projectId] else { return nil }
+            let remoteHost = entry.hostId != nil
+                ? resolvedRemoteHost(hostId: entry.hostId, projectDefaultHostId: nil)
+                : nil
+            return RemoteRecentlyClosedSession(
+                id: entry.originalSessionId,
+                projectId: entry.projectId,
+                projectName: project.name,
+                title: entry.title,
+                hostId: remoteHost?.id ?? entry.hostId,
+                hostDisplayName: remoteHost?.displayName ?? entry.hostId,
+                isCopilotSession: entry.copilotSessionId != nil
+            )
+        }
+    }
+
     private func recordRecentlyClosedSession(
         projectId: String,
         sessionIndex: Int,
@@ -1711,18 +1730,22 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func reopenClosedSession() -> String? {
+    func reopenClosedSession(id originalSessionId: String? = nil) -> String? {
         guard !isTerminating && !didFailToLoadWorkspaceState else { return nil }
-        var matchedEntry: RecentlyClosedSession?
-        var matchedProjectIndex: Int?
-        while let candidate = recentlyClosedSessions.popLast() {
-            if let pi = projectIndex(candidate.projectId) {
-                matchedEntry = candidate
-                matchedProjectIndex = pi
-                break
-            }
+        let targetId = (originalSessionId?.isEmpty == true
+            || originalSessionId == RemoteReopenSessionContract.latestSessionToken)
+            ? nil : originalSessionId
+        let validProjectIds = Set(projects.map(\.id))
+        if recentlyClosedSessions.contains(where: { !validProjectIds.contains($0.projectId) }) {
+            recentlyClosedSessions.removeAll { !validProjectIds.contains($0.projectId) }
         }
-        guard let entry = matchedEntry, let pi = matchedProjectIndex else {
+        guard let index = recentlyClosedSessions.lastIndex(where: {
+            targetId == nil || $0.originalSessionId == targetId
+        }) else {
+            return nil
+        }
+        var entry = recentlyClosedSessions.remove(at: index)
+        guard let pi = projectIndex(entry.projectId) else {
             return nil
         }
         if pendingSessionDestroys[entry.originalSessionId] != nil {
@@ -1735,6 +1758,14 @@ final class AppModel: ObservableObject {
             selectSession(projectId: projects[loc.p].id, sessionId: existingId)
             focusActiveTerminal()
             return existingId
+        }
+        for j in index..<recentlyClosedSessions.count
+            where recentlyClosedSessions[j].projectId == entry.projectId {
+            if recentlyClosedSessions[j].sessionIndex < entry.sessionIndex {
+                entry.sessionIndex -= 1
+            } else {
+                recentlyClosedSessions[j].sessionIndex += 1
+            }
         }
         let validParentId = entry.parentSessionId.flatMap { parentId in
             projects[pi].sessions.contains(where: { $0.id == parentId && $0.parentSessionId == nil }) ? parentId : nil

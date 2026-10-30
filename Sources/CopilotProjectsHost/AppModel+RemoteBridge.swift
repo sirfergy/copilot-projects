@@ -645,6 +645,17 @@ extension AppModel {
         ) ? .closed : .failed
     }
 
+    func reopenRemoteClosedSession(id: String?) -> RemoteReopenSessionResult {
+        let targetId = (id?.isEmpty == true || id == RemoteReopenSessionContract.latestSessionToken)
+            ? nil : id
+        guard !isTerminating && !didFailToLoadWorkspaceState else { return .failed }
+        guard let reopenedSessionId = reopenClosedSession(id: targetId),
+              let loc = locateIndex(reopenedSessionId) else {
+            return .missing
+        }
+        return .reopened(projectId: projects[loc.p].id, sessionId: reopenedSessionId)
+    }
+
     /// Scripted ending (`close-session`). Unlike the remote path, no person confirmed
     /// the close, so it refuses a session that has reported work or is the selected
     /// tab of the selected project (what the window shows, even while another app is
@@ -692,6 +703,7 @@ extension AppModel {
         let promptLiveSessions = remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions
         let hosts = availableHosts
         let resolvedHostHealth = hostHealthProvider?() ?? hostHealth
+        let closedItems = recentlyClosedSessionItems
         let providedSessionMemory = sessionMemoryProvider?()
         return RemoteWorkspaceSnapshot(
             projects: projects.map { project in
@@ -776,7 +788,8 @@ extension AppModel {
             selectedProjectId: selectedProjectId,
             protocolInfo: .current.supportingReplaySafeControl(epoch: remoteControlDeliveryEpoch),
             availableHosts: hosts.count > 1 ? hosts : nil,
-            hostHealth: resolvedHostHealth.isEmpty ? nil : resolvedHostHealth
+            hostHealth: resolvedHostHealth.isEmpty ? nil : resolvedHostHealth,
+            recentlyClosedSessions: closedItems.isEmpty ? nil : closedItems
         )
     }
 

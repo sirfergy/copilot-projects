@@ -44,6 +44,10 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
     /// Optional and omitted when absent so existing clients and snapshots without
     /// health data stay compact and backward-compatible.
     public var hostHealth: [RemoteHostHealth]?
+    /// Recently closed sessions (newest first) that can still be reopened.
+    /// Optional and omitted when empty so snapshots without closed sessions stay
+    /// compact and backward-compatible.
+    public var recentlyClosedSessions: [RemoteRecentlyClosedSession]?
     /// When the gateway served this snapshot, in Unix milliseconds on the Mac's
     /// clock: the same clock as each session's `workflow.observedAtMilliseconds`.
     /// Clients pass it with their own monotonic receipt time to
@@ -62,6 +66,7 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
         protocolInfo: RemoteProtocolInfo? = nil,
         availableHosts: [RemoteHostInfo]? = nil,
         hostHealth: [RemoteHostHealth]? = nil,
+        recentlyClosedSessions: [RemoteRecentlyClosedSession]? = nil,
         servedAtMilliseconds: Int64? = nil
     ) {
         self.projects = projects
@@ -69,8 +74,50 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
         self.protocolInfo = protocolInfo
         self.availableHosts = availableHosts
         self.hostHealth = hostHealth
+        self.recentlyClosedSessions = recentlyClosedSessions
         self.servedAtMilliseconds = servedAtMilliseconds
     }
+}
+
+public struct RemoteRecentlyClosedSession: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let projectId: String
+    public let projectName: String
+    public let title: String
+    public let hostId: String?
+    public let hostDisplayName: String?
+    public let isCopilotSession: Bool
+
+    public init(
+        id: String,
+        projectId: String,
+        projectName: String,
+        title: String,
+        hostId: String? = nil,
+        hostDisplayName: String? = nil,
+        isCopilotSession: Bool = false
+    ) {
+        self.id = id
+        self.projectId = projectId
+        self.projectName = projectName
+        self.title = title
+        self.hostId = hostId
+        self.hostDisplayName = hostDisplayName
+        self.isCopilotSession = isCopilotSession
+    }
+}
+
+public enum RemoteReopenSessionContract {
+    public static let controlType = "reopen-closed-session"
+    public static let capability = "reopen-closed-session"
+    public static let latestSessionToken = "latest"
+}
+
+public enum RemoteReopenSessionResult: Equatable, Sendable {
+    case reopened(projectId: String, sessionId: String)
+    case missing
+    case failed
+    case unsupported
 }
 
 public enum RemoteHostHealthLevel: String, Codable, Equatable, Sendable, Comparable {

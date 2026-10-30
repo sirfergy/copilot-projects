@@ -154,6 +154,12 @@ final class RemoteModelBridge: SessionHost {
         model?.closeRemoteSession(sessionId: sessionId) ?? .failed
     }
 
+    var supportsReopenClosedSession: Bool { model != nil }
+
+    func reopenClosedSession(id: String?) -> RemoteReopenSessionResult {
+        model?.reopenRemoteClosedSession(id: id) ?? .failed
+    }
+
     func moveSession(
         sessionId: String,
         toProjectId targetProjectId: String

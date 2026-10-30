@@ -1056,7 +1056,7 @@ private struct SessionList: View {
 }
 
 private struct SessionCreationButtons: View {
-    let model: AppModel
+    @ObservedObject var model: AppModel
     let project: Project
 
     var body: some View {
@@ -1079,6 +1079,20 @@ private struct SessionCreationButtons: View {
                 Button("New Terminal") { model.addSession(toProjectId: project.id) }
                 Button("Review Pull Request…", systemImage: "checkmark.shield") {
                     model.addAdversarialReviewSessionInteractive(toProjectId: project.id)
+                }
+                if !model.recentlyClosedSessionItems.isEmpty {
+                    Divider()
+                    Menu("Recently Closed Sessions") {
+                        Button("Reopen Last Closed Session") {
+                            _ = model.reopenClosedSession()
+                        }
+                        Divider()
+                        ForEach(model.recentlyClosedSessionItems) { item in
+                            Button("\(item.title) — \(item.projectName)") {
+                                _ = model.reopenClosedSession(id: item.id)
+                            }
+                        }
+                    }
                 }
                 if model.availableHosts.count > 1 || project.defaultHostId != nil {
                     Divider()
