@@ -15,12 +15,19 @@ final class AppModelTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let oldStateDir = ProcessInfo.processInfo.environment["COPILOT_PROJECTS_STATE_DIR"]
+        let oldCopilotHome = ProcessInfo.processInfo.environment["COPILOT_HOME"]
         setenv("COPILOT_PROJECTS_STATE_DIR", root.path, 1)
+        setenv("COPILOT_HOME", root.path, 1)
         defer {
             if let oldStateDir {
                 setenv("COPILOT_PROJECTS_STATE_DIR", oldStateDir, 1)
             } else {
                 unsetenv("COPILOT_PROJECTS_STATE_DIR")
+            }
+            if let oldCopilotHome {
+                setenv("COPILOT_HOME", oldCopilotHome, 1)
+            } else {
+                unsetenv("COPILOT_HOME")
             }
             try? FileManager.default.removeItem(at: root)
         }
@@ -269,7 +276,8 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(model.capturedResumeLaunches[reopenedA2Id], markerCopilotId)
             XCTAssertEqual(model.projects[0].sessions.map(\.title), ["A-2", "A-3"])
 
-            // If another closed entry shares the same live copilotSessionId, reopening selects the existing tab.
+            // If another closed entry shares the same live copilotSessionId, reopening selects the existing tab
+            // while within startup grace or backed by a validated marker, but not a stale markerless shell.
             let duplicateTab = Session(title: "Dup", cwd: root.path)
             model.projects[0].sessions.append(duplicateTab)
             try Data("\(markerCopilotId)\n".utf8).write(
@@ -280,6 +288,23 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(model.reopenClosedSession(), reopenedA2Id)
             XCTAssertEqual(launchedCount, launchesBeforeDuplicateReopen)
             XCTAssertEqual(model.projects[0].selectedSessionId, reopenedA2Id)
+
+            // Once startup grace expires without a marker on reopenedA2Id, a closed session for the same
+            // copilotSessionId must not match the stale markerless tab via capturedResumeLaunches.
+            model.pullRequestsResumeLaunches[markerCopilotId] = (
+                reopenedA2Id,
+                Date(timeIntervalSinceNow: -(AppModel.pullRequestsResumeStartupGrace + 1))
+            )
+            let anotherClosed = Session(title: "Resumed Later", cwd: root.path)
+            model.projects[0].sessions.append(anotherClosed)
+            try Data("\(markerCopilotId)\n".utf8).write(
+                to: root.appendingPathComponent("\(anotherClosed.id).copilot-session")
+            )
+            XCTAssertTrue(model.destroySession(projectId: projectA.id, sessionId: anotherClosed.id))
+            let freshReopenedId = try XCTUnwrap(model.reopenClosedSession())
+            XCTAssertNotEqual(freshReopenedId, reopenedA2Id)
+            XCTAssertEqual(model.capturedResumeLaunches[freshReopenedId], markerCopilotId)
+            model.projects[0].sessions.removeAll { $0.id == freshReopenedId }
 
             let reopenedA1Id = try XCTUnwrap(model.reopenClosedSession())
             XCTAssertNil(model.capturedResumeLaunches[reopenedA1Id])
@@ -297,5 +322,72 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(model.recentlyClosedSessions.first?.title, "Extra-6")
             XCTAssertEqual(model.recentlyClosedSessions.last?.title, "Extra-25")
         }
+    }
+
+    func testReopenWaitsForSessionLockReleaseAndRetainsUndoEntryOnTimeout() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let oldStateDir = ProcessInfo.processInfo.environment["COPILOT_PROJECTS_STATE_DIR"]
+        let oldCopilotHome = ProcessInfo.processInfo.environment["COPILOT_HOME"]
+        setenv("COPILOT_PROJECTS_STATE_DIR", root.path, 1)
+        setenv("COPILOT_HOME", root.path, 1)
+        defer {
+            if let oldStateDir { setenv("COPILOT_PROJECTS_STATE_DIR", oldStateDir, 1) } else { unsetenv("COPILOT_PROJECTS_STATE_DIR") }
+            if let oldCopilotHome { setenv("COPILOT_HOME", oldCopilotHome, 1) } else { unsetenv("COPILOT_HOME") }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let copilotId = UUID().uuidString.lowercased()
+        let session = Session(title: "Locked Copilot", cwd: root.path)
+        let later = Session(title: "Closed During Wait", cwd: root.path)
+        let project = Project(name: "Main", cwd: root.path, sessions: [session, later], selectedSessionId: session.id)
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        try Data("\(copilotId)\n".utf8).write(to: root.appendingPathComponent("\(session.id).copilot-session"))
+
+        let sessionDir = root.appendingPathComponent("session-state/\(copilotId)")
+        try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+        let lockFile = sessionDir.appendingPathComponent("inuse.\(getpid()).lock")
+        try Data().write(to: lockFile)
+
+        var launched: [String] = []
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root,
+            remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+            remoteSessionLauncher: { sessionId, _, _ in launched.append(sessionId) },
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+            gracefulSessionDestroyer: { _, _ in Task {} },
+            forcedSessionDestroyer: { _ in }
+        )
+        defer {
+            model.forcePendingSessionDestroys()
+            model.detachAllClients()
+        }
+        model.reopenShutdownTimeout = .milliseconds(120)
+
+        XCTAssertTrue(model.destroySession(projectId: project.id, sessionId: session.id))
+
+        // 1. When the lock remains held past the timeout, reopen does not launch and retains the undo entry
+        // in its original LIFO position beneath any session closed during the wait.
+        XCTAssertNil(model.reopenClosedSession())
+        XCTAssertTrue(model.destroySession(projectId: project.id, sessionId: later.id))
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertTrue(launched.isEmpty)
+        XCTAssertEqual(model.recentlyClosedSessions.map(\.title), ["Locked Copilot", "Closed During Wait"])
+        let reopenedLaterId = try XCTUnwrap(model.reopenClosedSession())
+        XCTAssertEqual(launched, [reopenedLaterId])
+        XCTAssertEqual(model.recentlyClosedSessions.map(\.title), ["Locked Copilot"])
+
+        // 2. When the lock releases during the bounded wait, reopen finishes launching asynchronously.
+        model.reopenShutdownTimeout = .milliseconds(500)
+        XCTAssertNil(model.reopenClosedSession())
+        try? FileManager.default.removeItem(at: lockFile)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(launched.count, 2)
+        XCTAssertTrue(model.recentlyClosedSessions.isEmpty)
+        XCTAssertEqual(model.capturedResumeLaunches[launched[1]], copilotId)
     }
 }
