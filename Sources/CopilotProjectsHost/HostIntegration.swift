@@ -74,6 +74,8 @@ public protocol SessionHost: AnyObject, Sendable {
     var supportsMarkUnread: Bool { get }
     func markUnread(sessionId: String)
     func closeSession(sessionId: String) -> RemoteSessionCloseResult
+    var supportsReopenClosedSession: Bool { get }
+    func reopenClosedSession(id: String?) -> RemoteReopenSessionResult
     func moveSession(sessionId: String, toProjectId: String) -> RemoteSessionMoveResult
     func sendPrompt(sessionId: String, value: String) -> RemotePromptResult
     func answerUserInput(sessionId: String, answer: RemoteUserInputAnswer, operation: CLIOperationRequest?) -> RemoteUserInputResult
@@ -98,6 +100,10 @@ public extension SessionHost {
     var supportsMarkUnread: Bool { false }
 
     func markUnread(sessionId: String) {}
+
+    var supportsReopenClosedSession: Bool { false }
+
+    func reopenClosedSession(id: String?) -> RemoteReopenSessionResult { .unsupported }
 
     /// Hosts without incremental support send their usual response. Clients
     /// merge by turn id, so ignoring the cursor costs only bandwidth.

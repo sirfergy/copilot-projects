@@ -70,6 +70,15 @@ private struct ReopenClosedSessionButton: View {
         }
         .keyboardShortcut("t", modifiers: [.command, .shift])
         .disabled(!model.canReopenClosedSession)
+
+        Menu("Recently Closed Sessions") {
+            ForEach(model.recentlyClosedSessionItems) { item in
+                Button("\(item.title) — \(item.projectName)") {
+                    _ = model.reopenClosedSession(id: item.id)
+                }
+            }
+        }
+        .disabled(!model.canReopenClosedSession)
     }
 }
 
@@ -92,6 +101,35 @@ private struct SessionHistoryMenuButtons: View {
     }
 }
 
+struct SSHHostsSettingsMenu: View {
+    @ObservedObject var model: AppModel
+    var isSheetPresented: Bool = false
+
+    var body: some View {
+        Menu("SSH Hosts") {
+            Toggle(
+                "Auto-Discover from ~/.ssh/config",
+                isOn: Binding(
+                    get: { model.autoDiscoverSSHHosts },
+                    set: { model.setAutoDiscoverSSHHosts($0) }
+                )
+            )
+            Button("Add SSH Host…") {
+                model.addManualSSHHostInteractive()
+            }
+            .disabled(isSheetPresented)
+            if !model.manualSSHHosts.isEmpty {
+                Divider()
+                ForEach(model.manualSSHHosts) { host in
+                    Button("Remove \(host.displayName) (\(host.sshTarget ?? host.id))") {
+                        model.removeManualSSHHost(id: host.id)
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct WorkspaceCommands: Commands {
     @Environment(\.openWindow) private var openWindow
     let model: AppModel
@@ -110,6 +148,7 @@ private struct WorkspaceCommands: Commands {
             Toggle("Keep Running When Window Closes", isOn: $keepRunning)
             Toggle("Start Notifications with Copilot Projects", isOn: $startsNotifications)
             Divider()
+            SSHHostsSettingsMenu(model: model, isSheetPresented: input.hasWorkspaceSheet)
             Button("Pull Request Review Prompt…") {
                 model.configurePullRequestReviewPromptInteractive()
             }

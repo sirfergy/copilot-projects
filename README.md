@@ -114,9 +114,10 @@ discards it. Closing the drawer or switching sessions dismisses that preview.
   Prompt…**. Put `{url}` where the pull request URL goes.
 - **Resumable terminals.** The bundled `dtach` backend keeps shells and agents
   alive when the app quits or relaunches. You can also reattach over SSH.
-- **Remote SSH hosts.** Run Copilot or plain-shell sessions on **This Mac** or any
-  SSH host discovered from `~/.ssh/config`. Set a default host per project or
-  choose a host when starting a session.
+- **Remote SSH hosts.** Run Copilot or plain-shell sessions on **This Mac**, any
+  SSH host discovered from `~/.ssh/config`, or hosts registered manually in
+  **SSH Hosts**. Set a default host per project or choose a host when starting a
+  session.
 
 Copilot CLI hooks and a local tracker supply automatic status and session
 details. Other command-line tools work as ordinary terminal sessions and can
@@ -374,6 +375,9 @@ tool approvals follow your normal Copilot CLI permission settings.
 Copilot Projects discovers remote execution hosts automatically from `~/.ssh/config`
 (and any `Include` files), skipping wildcards, loopback addresses, and Git hosting
 providers (`github.com`, `*.ghe.com`, `gitlab.com`, `bitbucket.org`, Azure DevOps).
+You can disable `~/.ssh/config` auto-discovery or register and remove SSH hosts
+manually from **Copilot Projects ▸ SSH Hosts** or the **+** split button's
+**SSH Hosts** menu (persisted in `~/.local/state/copilot-projects/hosts.json`).
 
 Add an optional `# copilot-projects:` comment above a `Host` entry to customize its
 display name, default working directory, or visibility:
@@ -412,7 +416,9 @@ the app reports running, waiting, background, scheduled, or pending-input work.
 A single idle session ends immediately; unread completion markers alone do not
 trigger a prompt. **Reopen Closed Session** (`⇧⌘T`) reopens the most recently
 closed session in its original project and tab position, resuming its Copilot CLI
-conversation when one was recorded. **End Project** also confirms whenever it contains multiple
+conversation when one was recorded; **Recently Closed Sessions** in the Session
+menu and the **+** split button's dropdown lists recently closed sessions so you
+can reopen any of them directly. **End Project** also confirms whenever it contains multiple
 sessions. Cancel ends nothing, and a project that gains sessions while the dialog
 is open must be reviewed again. Ending removes sessions from the workspace and
 stops their processes; project files are not deleted.

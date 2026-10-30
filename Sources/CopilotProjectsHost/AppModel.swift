@@ -804,6 +804,120 @@ final class AppModel: ObservableObject {
         return hosts
     }
 
+    var autoDiscoverSSHHosts: Bool {
+        get {
+            SSHHostCatalog.loadConfiguration(statePath: stateRepository.path).autoDiscover
+        }
+        set {
+            setAutoDiscoverSSHHosts(newValue)
+        }
+    }
+
+    var manualSSHHosts: [RemoteHostInfo] {
+        SSHHostCatalog.loadConfiguration(statePath: stateRepository.path).hosts
+    }
+
+    func setAutoDiscoverSSHHosts(_ enabled: Bool) {
+        var config = SSHHostCatalog.loadConfiguration(statePath: stateRepository.path)
+        config.autoDiscover = enabled
+        SSHHostCatalog.saveConfiguration(config, statePath: stateRepository.path)
+        cachedAvailableHosts = nil
+        objectWillChange.send()
+        refreshHostHealthAfterCatalogChange()
+    }
+
+    @discardableResult
+    func addManualSSHHost(
+        sshTarget: String,
+        displayName: String? = nil,
+        defaultCwd: String? = nil
+    ) -> RemoteHostInfo? {
+        guard let host = SSHHostCatalog.makeManualHost(
+            sshTarget: sshTarget,
+            displayName: displayName,
+            defaultCwd: defaultCwd
+        ) else {
+            return nil
+        }
+        var config = SSHHostCatalog.loadConfiguration(statePath: stateRepository.path)
+        if let index = config.hosts.firstIndex(where: {
+            $0.id.caseInsensitiveCompare(host.id) == .orderedSame
+        }) {
+            config.hosts[index] = host
+        } else {
+            config.hosts.append(host)
+        }
+        SSHHostCatalog.saveConfiguration(config, statePath: stateRepository.path)
+        cachedAvailableHosts = nil
+        objectWillChange.send()
+        refreshHostHealthAfterCatalogChange()
+        return host
+    }
+
+    func removeManualSSHHost(id: String) {
+        var config = SSHHostCatalog.loadConfiguration(statePath: stateRepository.path)
+        config.hosts.removeAll { $0.id.caseInsensitiveCompare(id) == .orderedSame }
+        SSHHostCatalog.saveConfiguration(config, statePath: stateRepository.path)
+        cachedAvailableHosts = nil
+        objectWillChange.send()
+        refreshHostHealthAfterCatalogChange()
+    }
+
+    private func refreshHostHealthAfterCatalogChange() {
+        if hostHealthTimer != nil
+            || hostHealthProvider != nil
+            || stateRepository.path.standardizedFileURL == Paths.statePath.standardizedFileURL {
+            refreshHostHealth()
+        } else {
+            let validIds = Set(availableHosts.map { $0.id.lowercased() })
+            hostHealth.removeAll { !validIds.contains($0.id.lowercased()) }
+        }
+    }
+
+    func addManualSSHHostInteractive() {
+        let alert = NSAlert()
+        alert.messageText = "Add SSH Host"
+        alert.informativeText = "Register a remote SSH host or ~/.ssh/config alias."
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 88))
+        let targetField = NSTextField(frame: NSRect(x: 0, y: 64, width: 300, height: 24))
+        targetField.placeholderString = "user@host or ssh-alias"
+        targetField.setAccessibilityLabel("SSH Host / Target")
+
+        let displayNameField = NSTextField(frame: NSRect(x: 0, y: 32, width: 300, height: 24))
+        displayNameField.placeholderString = "Optional display name"
+        displayNameField.setAccessibilityLabel("Display Name")
+
+        let defaultCwdField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        defaultCwdField.placeholderString = "Optional remote path, e.g. ~/Repos"
+        defaultCwdField.setAccessibilityLabel("Default Folder")
+
+        targetField.nextKeyView = displayNameField
+        displayNameField.nextKeyView = defaultCwdField
+
+        container.addSubview(targetField)
+        container.addSubview(displayNameField)
+        container.addSubview(defaultCwdField)
+
+        alert.accessoryView = container
+        alert.addButton(withTitle: "Add Host")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = targetField
+
+        guard alertPresenter(alert) == .alertFirstButtonReturn else { return }
+        guard !isTerminating else { return }
+        if addManualSSHHost(
+            sshTarget: targetField.stringValue,
+            displayName: displayNameField.stringValue,
+            defaultCwd: defaultCwdField.stringValue
+        ) == nil {
+            presentAlert(
+                title: "Invalid SSH Host",
+                message: "Enter an SSH host or user@host target without spaces or leading dashes."
+            )
+        }
+    }
+
     func resolvedRemoteHost(
         hostId: String?,
         projectDefaultHostId: String? = nil
@@ -1653,6 +1767,25 @@ final class AppModel: ObservableObject {
         return recentlyClosedSessions.contains { projectIds.contains($0.projectId) }
     }
 
+    var recentlyClosedSessionItems: [RemoteRecentlyClosedSession] {
+        let projectsById = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
+        return recentlyClosedSessions.reversed().compactMap { entry in
+            guard let project = projectsById[entry.projectId] else { return nil }
+            let remoteHost = entry.hostId != nil
+                ? resolvedRemoteHost(hostId: entry.hostId, projectDefaultHostId: nil)
+                : nil
+            return RemoteRecentlyClosedSession(
+                id: entry.originalSessionId,
+                projectId: entry.projectId,
+                projectName: project.name,
+                title: entry.title,
+                hostId: remoteHost?.id ?? entry.hostId,
+                hostDisplayName: remoteHost?.displayName ?? entry.hostId,
+                isCopilotSession: entry.copilotSessionId != nil
+            )
+        }
+    }
+
     private func recordRecentlyClosedSession(
         projectId: String,
         sessionIndex: Int,
@@ -1711,18 +1844,22 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func reopenClosedSession() -> String? {
+    func reopenClosedSession(id originalSessionId: String? = nil) -> String? {
         guard !isTerminating && !didFailToLoadWorkspaceState else { return nil }
-        var matchedEntry: RecentlyClosedSession?
-        var matchedProjectIndex: Int?
-        while let candidate = recentlyClosedSessions.popLast() {
-            if let pi = projectIndex(candidate.projectId) {
-                matchedEntry = candidate
-                matchedProjectIndex = pi
-                break
-            }
+        let targetId = (originalSessionId?.isEmpty == true
+            || originalSessionId == RemoteReopenSessionContract.latestSessionToken)
+            ? nil : originalSessionId
+        let validProjectIds = Set(projects.map(\.id))
+        if recentlyClosedSessions.contains(where: { !validProjectIds.contains($0.projectId) }) {
+            recentlyClosedSessions.removeAll { !validProjectIds.contains($0.projectId) }
         }
-        guard let entry = matchedEntry, let pi = matchedProjectIndex else {
+        guard let index = recentlyClosedSessions.lastIndex(where: {
+            targetId == nil || $0.originalSessionId == targetId
+        }) else {
+            return nil
+        }
+        var entry = recentlyClosedSessions.remove(at: index)
+        guard let pi = projectIndex(entry.projectId) else {
             return nil
         }
         if pendingSessionDestroys[entry.originalSessionId] != nil {
@@ -1735,6 +1872,14 @@ final class AppModel: ObservableObject {
             selectSession(projectId: projects[loc.p].id, sessionId: existingId)
             focusActiveTerminal()
             return existingId
+        }
+        for j in index..<recentlyClosedSessions.count
+            where recentlyClosedSessions[j].projectId == entry.projectId {
+            if recentlyClosedSessions[j].sessionIndex < entry.sessionIndex {
+                entry.sessionIndex -= 1
+            } else {
+                recentlyClosedSessions[j].sessionIndex += 1
+            }
         }
         let validParentId = entry.parentSessionId.flatMap { parentId in
             projects[pi].sessions.contains(where: { $0.id == parentId && $0.parentSessionId == nil }) ? parentId : nil
