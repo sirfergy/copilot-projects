@@ -130,6 +130,46 @@ test("native workflow RPCs target the requested session", {
     assert.equal(images.length, 4, "all image bytes must reach the provider");
     assert.ok(images.every((image) => image.image_url.url.startsWith("data:image/png;base64,")));
   }
+  const textOnlySession = await client.createSession({
+    ...config,
+    modelCapabilities: { supports: { vision: false } },
+  });
+  const jsonPayload = '{"feature":"file-attachments","enabled":true}\n';
+  const mdPayload = "# Spec\n\nSupport JSON and Markdown attachments.\n";
+  for (const mode of ["enqueue", "immediate"]) {
+    const idle = new Promise((resolve) => {
+      const unsubscribe = textOnlySession.on("session.idle", () => { unsubscribe(); resolve(); });
+    });
+    const before = requests.length;
+    await connection.sendRequest("session.send", {
+      sessionId: textOnlySession.sessionId,
+      prompt: `Inspect attached text files (${mode}).`,
+      mode,
+      attachments: [
+        {
+          type: "blob",
+          mimeType: "application/json",
+          displayName: "settings.json",
+          data: Buffer.from(jsonPayload, "utf8").toString("base64"),
+        },
+        {
+          type: "blob",
+          mimeType: "text/markdown",
+          displayName: "NOTES.md",
+          data: Buffer.from(mdPayload, "utf8").toString("base64"),
+        },
+      ],
+    });
+    await idle;
+    const serializedUserMessages = JSON.stringify(
+      requests.slice(before).flatMap((request) => request.messages ?? [])
+        .filter((message) => message.role === "user").at(-1) ?? null
+    );
+    assert.ok(serializedUserMessages.includes("settings.json"), "JSON filename must reach the provider");
+    assert.ok(serializedUserMessages.includes(JSON.stringify('"feature":"file-attachments"').slice(1, -1)), "JSON content must reach the provider");
+    assert.ok(serializedUserMessages.includes("NOTES.md"), "Markdown filename must reach the provider");
+    assert.ok(serializedUserMessages.includes("Support JSON and Markdown attachments."), "Markdown content must reach the provider");
+  }
   const metrics = await call("session.usage.getMetrics");
   assert.equal(typeof metrics.totalUserRequests, "number");
   const abort = await call("session.abort");

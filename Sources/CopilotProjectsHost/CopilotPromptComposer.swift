@@ -9,7 +9,22 @@ enum DesktopScreenshotAttachmentImage {
     struct NormalizedAttachment: Sendable, Equatable {
         let data: Data
         let mimeType: String
+        let displayName: String
         let previewPNGData: Data
+
+        init(
+            data: Data,
+            mimeType: String,
+            displayName: String? = nil,
+            previewPNGData: Data = Data()
+        ) {
+            self.data = data
+            self.mimeType = mimeType
+            self.displayName = displayName
+                .flatMap { RemoteAttachmentContract.sanitizeDisplayName($0, fallbackMimeType: mimeType) }
+                ?? RemoteAttachmentContract.defaultDisplayName(forMimeType: mimeType)
+            self.previewPNGData = previewPNGData
+        }
     }
 
     enum PasteboardSource {
@@ -19,20 +34,26 @@ enum DesktopScreenshotAttachmentImage {
 
     enum AttachmentError: LocalizedError, Equatable {
         case invalid
+        case unsupportedModelForImage
         case tooLarge
         case emptyPasteboard
         case tooManyImages(Int)
+        case tooManyAttachments(Int)
 
         var errorDescription: String? {
             switch self {
             case .invalid:
-                "Choose a valid screenshot up to 16 megapixels and 20 MB."
+                "Choose a valid screenshot (up to 16 megapixels and 20 MB) or UTF-8 text file (up to 512 KB)."
+            case .unsupportedModelForImage:
+                "The selected model does not support image attachments. Switch to a vision-capable model or attach text files."
             case .tooLarge:
-                "This screenshot cannot fit the selected model's image limit. Crop it and try again."
+                "This attachment cannot fit the upload size limit."
             case .emptyPasteboard:
-                "Clipboard does not contain an image."
+                "Clipboard does not contain a supported file or image."
             case .tooManyImages(let limit):
                 "This model allows up to \(limit) screenshot(s) per message."
+            case .tooManyAttachments(let limit):
+                "This session allows up to \(limit) attachment(s) per message."
             }
         }
     }
@@ -41,7 +62,8 @@ enum DesktopScreenshotAttachmentImage {
 
     static func normalized(
         _ data: Data,
-        limits: RemoteImageCapabilities
+        limits: RemoteImageCapabilities,
+        displayName: String? = nil
     ) throws -> NormalizedAttachment {
         guard limits.isValid,
               !data.isEmpty,
@@ -77,6 +99,7 @@ enum DesktopScreenshotAttachmentImage {
             return NormalizedAttachment(
                 data: data,
                 mimeType: directMime,
+                displayName: displayName,
                 previewPNGData: previewPNGData
             )
         }
@@ -96,6 +119,7 @@ enum DesktopScreenshotAttachmentImage {
             return NormalizedAttachment(
                 data: png,
                 mimeType: "image/png",
+                displayName: displayName,
                 previewPNGData: previewPNGData
             )
         }
@@ -108,6 +132,7 @@ enum DesktopScreenshotAttachmentImage {
                     return NormalizedAttachment(
                         data: jpeg,
                         mimeType: "image/jpeg",
+                        displayName: displayName,
                         previewPNGData: previewPNGData
                     )
                 }
@@ -116,13 +141,75 @@ enum DesktopScreenshotAttachmentImage {
         throw AttachmentError.tooLarge
     }
 
-    static func hasPasteboardImage(_ pasteboard: NSPasteboard = .general) -> Bool {
+    static func normalizedFile(
+        _ url: URL,
+        imageLimits: RemoteImageCapabilities?,
+        allowTextFiles: Bool = true
+    ) throws -> NormalizedAttachment {
+        if let textMime = canonicalTextMimeType(for: url) {
+            guard allowTextFiles else {
+                throw AttachmentError.invalid
+            }
+            let rawData = try readTextFileData(url)
+            guard let validatedData = RemoteAttachmentContract.validateTextData(rawData) else {
+                throw RemoteAttachmentError.unsupportedText
+            }
+            return NormalizedAttachment(
+                data: validatedData,
+                mimeType: textMime,
+                displayName: url.lastPathComponent,
+                previewPNGData: Data()
+            )
+        }
+        if isSupportedImageFileURL(url) {
+            guard let imageLimits, imageLimits.isValid else {
+                throw AttachmentError.unsupportedModelForImage
+            }
+            let rawData = try readImageFileData(url)
+            return try normalized(rawData, limits: imageLimits, displayName: url.lastPathComponent)
+        }
+        throw RemoteAttachmentError.unsupportedText
+    }
+
+    static func allowedPickerContentTypes(allowImages: Bool, allowTextFiles: Bool) -> [UTType] {
+        var types: [UTType] = []
+        if allowImages {
+            types.append(contentsOf: [.png, .jpeg, .image])
+        }
+        if allowTextFiles {
+            for fallbackType in pickerTextContentTypes {
+                if !types.contains(fallbackType) {
+                    types.append(fallbackType)
+                }
+            }
+            let extraExtensions = RemoteAttachmentContract.extensionToTextMimeType.keys.sorted()
+            for ext in extraExtensions {
+                if let utType = UTType(filenameExtension: ext), !types.contains(utType) {
+                    types.append(utType)
+                }
+            }
+        }
+        return types
+    }
+
+    private static let pickerTextContentTypes: [UTType] = [
+        .json, .plainText, .sourceCode, .script, .xml, .yaml, .commaSeparatedText, .tabSeparatedText, .html,
+    ]
+
+    static func hasPasteboardImage(
+        _ pasteboard: NSPasteboard = .general,
+        allowImages: Bool = true,
+        allowTextFiles: Bool = true
+    ) -> Bool {
         if let urls = pasteboard.readObjects(
             forClasses: [NSURL.self],
             options: [.urlReadingFileURLsOnly: true]
-        ) as? [URL], urls.contains(where: isSupportedImageFileURL) {
+        ) as? [URL], urls.contains(where: {
+            isSupportedAttachmentFileURL($0, allowImages: allowImages, allowTextFiles: allowTextFiles)
+        }) {
             return true
         }
+        guard allowImages else { return false }
         let imageTypes: [NSPasteboard.PasteboardType] = [
             .png,
             NSPasteboard.PasteboardType("public.jpeg"),
@@ -136,18 +223,30 @@ enum DesktopScreenshotAttachmentImage {
     static func pasteboardSources(
         from pasteboard: NSPasteboard = .general,
         remainingCapacity: Int,
-        maxImages: Int
+        maxImages: Int,
+        allowImages: Bool = true,
+        allowTextFiles: Bool = true
     ) throws -> PasteboardSource {
         if let urls = pasteboard.readObjects(
             forClasses: [NSURL.self],
             options: [.urlReadingFileURLsOnly: true]
         ) as? [URL], !urls.isEmpty {
-            let imageURLs = urls.filter(isSupportedImageFileURL)
-            if !imageURLs.isEmpty {
-                guard imageURLs.count <= remainingCapacity else {
-                    throw AttachmentError.tooManyImages(maxImages)
+            if !allowImages && urls.contains(where: isSupportedImageFileURL) {
+                throw AttachmentError.unsupportedModelForImage
+            }
+            if !allowTextFiles && urls.contains(where: isSupportedTextFileURL) {
+                throw AttachmentError.invalid
+            }
+            let matchingURLs = urls.filter {
+                isSupportedAttachmentFileURL($0, allowImages: allowImages, allowTextFiles: allowTextFiles)
+            }
+            if !matchingURLs.isEmpty {
+                guard matchingURLs.count <= remainingCapacity else {
+                    throw allowTextFiles
+                        ? AttachmentError.tooManyAttachments(maxImages)
+                        : AttachmentError.tooManyImages(maxImages)
                 }
-                return .fileURLs(imageURLs)
+                return .fileURLs(matchingURLs)
             }
         }
         let imageTypes: [NSPasteboard.PasteboardType] = [
@@ -158,7 +257,10 @@ enum DesktopScreenshotAttachmentImage {
         let items = (pasteboard.pasteboardItems ?? []).filter { item in
             imageTypes.contains { item.types.contains($0) }
         }
-        guard !items.isEmpty else {
+        if !items.isEmpty && !allowImages {
+            throw AttachmentError.unsupportedModelForImage
+        }
+        guard allowImages, !items.isEmpty else {
             throw AttachmentError.emptyPasteboard
         }
         guard items.count <= remainingCapacity else {
@@ -179,10 +281,12 @@ enum DesktopScreenshotAttachmentImage {
 
     static func readImageFileData(_ url: URL) throws -> Data {
         let values = try url.resourceValues(forKeys: [
-            .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentTypeKey,
+            .isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey, .isPackageKey, .fileSizeKey, .contentTypeKey,
         ])
         guard values.isRegularFile == true,
               values.isSymbolicLink != true,
+              values.isDirectory != true,
+              values.isPackage != true,
               let size = values.fileSize,
               size > 0, size <= maxSourceBytes else {
             throw AttachmentError.invalid
@@ -197,9 +301,82 @@ enum DesktopScreenshotAttachmentImage {
         return data
     }
 
-    private static func isSupportedImageFileURL(_ url: URL) -> Bool {
-        if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
-            return type.conforms(to: .image)
+    static func readTextFileData(_ url: URL) throws -> Data {
+        let values = try url.resourceValues(forKeys: [
+            .isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey, .isPackageKey, .fileSizeKey,
+        ])
+        guard values.isRegularFile == true,
+              values.isSymbolicLink != true,
+              values.isDirectory != true,
+              values.isPackage != true,
+              let size = values.fileSize,
+              size > 0 else {
+            throw RemoteAttachmentError.unsupportedText
+        }
+        guard size <= RemoteAttachmentContract.maxTextBytes else {
+            throw RemoteAttachmentError.tooLarge
+        }
+        let data = try Data(contentsOf: url)
+        guard !data.isEmpty else {
+            throw RemoteAttachmentError.unsupportedText
+        }
+        guard data.count <= RemoteAttachmentContract.maxTextBytes else {
+            throw RemoteAttachmentError.tooLarge
+        }
+        return data
+    }
+
+    static func canonicalTextMimeType(for url: URL) -> String? {
+        if !url.pathExtension.isEmpty,
+           let mapped = RemoteAttachmentContract.canonicalTextMimeType(forExtension: url.pathExtension) {
+            return mapped
+        }
+        guard let utType = (!url.pathExtension.isEmpty ? UTType(filenameExtension: url.pathExtension) : nil)
+                ?? (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType,
+              !utType.conforms(to: .image) else {
+            return nil
+        }
+        if let ext = utType.preferredFilenameExtension,
+           let mapped = RemoteAttachmentContract.canonicalTextMimeType(forExtension: ext) {
+            return mapped
+        }
+        if pickerTextContentTypes.contains(where: { utType.conforms(to: $0) }) {
+            return "text/plain"
+        }
+        return nil
+    }
+
+    static func isSupportedTextFileURL(_ url: URL) -> Bool {
+        guard !url.hasDirectoryPath, canonicalTextMimeType(for: url) != nil else {
+            return false
+        }
+        if let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey]),
+           values.isDirectory == true || values.isPackage == true {
+            return false
+        }
+        return true
+    }
+
+    static func isSupportedAttachmentFileURL(
+        _ url: URL,
+        allowImages: Bool = true,
+        allowTextFiles: Bool = true
+    ) -> Bool {
+        (allowTextFiles && isSupportedTextFileURL(url))
+            || (allowImages && isSupportedImageFileURL(url))
+    }
+
+    static func isSupportedImageFileURL(_ url: URL) -> Bool {
+        guard !url.hasDirectoryPath, canonicalTextMimeType(for: url) == nil else {
+            return false
+        }
+        if let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey, .contentTypeKey]) {
+            if values.isDirectory == true || values.isPackage == true {
+                return false
+            }
+            if let type = values.contentType {
+                return type.conforms(to: .image)
+            }
         }
         guard !url.pathExtension.isEmpty,
               let type = UTType(filenameExtension: url.pathExtension) else {
@@ -218,6 +395,14 @@ final class DesktopSessionPromptComposer: ObservableObject {
         let previewPNGData: Data
         let previewImageId: UInt32
         let previewVersion: UInt64
+
+        var displayName: String {
+            attachment.displayName ?? RemoteAttachmentContract.defaultDisplayName(forMimeType: attachment.mimeType)
+        }
+
+        var isImage: Bool {
+            attachment.isImage
+        }
     }
 
     let sessionId: String
@@ -261,17 +446,44 @@ final class DesktopSessionPromptComposer: ObservableObject {
         return limits
     }
 
+    func supportsFileAttachments(
+        workflow: RemoteSessionWorkflow?,
+        operation: AgentOperationProjection,
+        now: Date = Date()
+    ) -> Bool {
+        guard operation.support == .receipts,
+              let epoch = operation.conversationEpoch,
+              RemoteAttachmentContract.validScope(sessionId: sessionId, conversationEpoch: epoch),
+              let workflow,
+              workflow.supports(.send, at: now),
+              workflow.capabilities.contains(RemoteAttachmentContract.fileCapability) else {
+            return false
+        }
+        return true
+    }
+
+    func maxAttachmentCount(
+        workflow: RemoteSessionWorkflow?,
+        operation: AgentOperationProjection,
+        now: Date = Date()
+    ) -> Int {
+        if supportsFileAttachments(workflow: workflow, operation: operation, now: now) {
+            return RemoteAttachmentContract.maxAttachments
+        }
+        return imageLimits(workflow: workflow, operation: operation, now: now)?.maxImages ?? 0
+    }
+
     func canAttach(
         workflow: RemoteSessionWorkflow?,
         operation: AgentOperationProjection,
         now: Date = Date()
     ) -> Bool {
         guard !isSending, !isAttaching, pendingOperationId == nil,
-              let limits = imageLimits(workflow: workflow, operation: operation, now: now),
               let epoch = operation.conversationEpoch else {
             return false
         }
-        guard attachments.count < limits.maxImages else { return false }
+        let maxCount = maxAttachmentCount(workflow: workflow, operation: operation, now: now)
+        guard maxCount > 0, attachments.count < maxCount else { return false }
         return attachments.isEmpty || attachedEpoch == epoch
     }
 
@@ -280,10 +492,18 @@ final class DesktopSessionPromptComposer: ObservableObject {
         operation: AgentOperationProjection,
         now: Date = Date()
     ) -> String {
-        if let limits = imageLimits(workflow: workflow, operation: operation, now: now) {
+        let limits = imageLimits(workflow: workflow, operation: operation, now: now)
+        let allowText = supportsFileAttachments(workflow: workflow, operation: operation, now: now)
+        if let limits, allowText {
+            return "Attach files (JSON, Markdown, code, text up to 512 KB) or screenshots (up to \(limits.maxImages) images, \(limits.maxBytes / 1_024) KB each)."
+        }
+        if let limits {
             return "Attach PNG or JPEG screenshots (up to \(limits.maxImages) images, \(limits.maxBytes / 1_024) KB each)."
         }
-        return "Requires an active Copilot session and a vision-capable model."
+        if allowText {
+            return "Attach JSON, Markdown, code, or text files (up to \(RemoteAttachmentContract.maxAttachments) files, 512 KB each)."
+        }
+        return "Requires an active Copilot session with attachment support."
     }
 
     func attachmentsBlockedReason(
@@ -295,13 +515,23 @@ final class DesktopSessionPromptComposer: ObservableObject {
         guard operation.support == .receipts,
               let currentEpoch = operation.conversationEpoch,
               attachedEpoch == currentEpoch else {
-            return "Screenshots belong to an earlier conversation. Remove and reattach them."
+            return "Attachments belong to an earlier conversation. Remove and reattach them."
         }
-        guard let limits = imageLimits(workflow: workflow, operation: operation, now: now) else {
+        guard let workflow, workflow.supports(.send, at: now) else {
+            return "This session cannot send attachments right now."
+        }
+        let stagedAttachments = attachments.map(\.attachment)
+        let limits = imageLimits(workflow: workflow, operation: operation, now: now)
+        if stagedAttachments.contains(where: \.isImage) && limits == nil {
             return "This model or session cannot send screenshots right now. Remove them or switch to a vision-capable model."
         }
-        guard limits.accepts(attachments.map(\.attachment), at: now) else {
-            return "Screenshots expired or exceed this model's image limits. Remove and reattach them."
+        guard RemoteAttachmentContract.accepts(
+            stagedAttachments,
+            capabilities: workflow.capabilities,
+            imageLimits: limits,
+            at: now
+        ) else {
+            return "Attachments expired or exceed this model's limits. Remove and reattach them."
         }
         return nil
     }
@@ -394,19 +624,24 @@ final class DesktopSessionPromptComposer: ObservableObject {
         now: Date = Date()
     ) async -> Bool {
         guard !isSending, !isAttaching, pendingOperationId == nil else {
-            statusMessage = "Wait for the current action to finish before attaching screenshots."
+            statusMessage = "Wait for the current action to finish before attaching files."
             return false
         }
-        guard let limits = imageLimits(workflow: workflow, operation: operation, now: now) else {
-            statusMessage = "Select a vision-capable model with active native controls before attaching screenshots."
+        let limits = imageLimits(workflow: workflow, operation: operation, now: now)
+        let allowText = supportsFileAttachments(workflow: workflow, operation: operation, now: now)
+        let maxCount = maxAttachmentCount(workflow: workflow, operation: operation, now: now)
+        guard maxCount > 0 else {
+            statusMessage = "Select an active session with native controls before attaching files."
             return false
         }
-        let remaining = max(0, limits.maxImages - attachments.count)
+        let remaining = max(0, maxCount - attachments.count)
         do {
             let source = try DesktopScreenshotAttachmentImage.pasteboardSources(
                 from: pasteboard,
                 remainingCapacity: remaining,
-                maxImages: limits.maxImages
+                maxImages: maxCount,
+                allowImages: limits != nil,
+                allowTextFiles: allowText
             )
             let beforeCount = attachments.count
             await attachSources(source, workflow: workflow, operation: operation, now: now)
@@ -429,22 +664,25 @@ final class DesktopSessionPromptComposer: ObservableObject {
         }
         guard itemCount > 0 else { return }
         guard !isSending, !isAttaching, pendingOperationId == nil else {
-            statusMessage = "Wait for the current action to finish before attaching screenshots."
+            statusMessage = "Wait for the current action to finish before attaching files."
             return
         }
-        guard let limits = imageLimits(workflow: workflow, operation: operation, now: now),
-              let epoch = operation.conversationEpoch else {
-            statusMessage = "Select a vision-capable model with active native controls before attaching screenshots."
+        let limits = imageLimits(workflow: workflow, operation: operation, now: now)
+        let allowText = supportsFileAttachments(workflow: workflow, operation: operation, now: now)
+        let maxCount = maxAttachmentCount(workflow: workflow, operation: operation, now: now)
+        guard maxCount > 0, let epoch = operation.conversationEpoch else {
+            statusMessage = "Select an active session with native controls before attaching files."
             return
         }
         if !attachments.isEmpty && attachedEpoch != epoch {
-            statusMessage = "Screenshots belong to an earlier conversation. Remove saved screenshots before attaching new ones."
+            statusMessage = "Attachments belong to an earlier conversation. Remove saved attachments before attaching new ones."
             return
         }
-        guard attachments.count + itemCount <= limits.maxImages else {
-            statusMessage = "This model allows up to \(limits.maxImages) screenshot(s) per message."
+        guard attachments.count + itemCount <= maxCount else {
+            statusMessage = "This session allows up to \(maxCount) attachment(s) per message."
             return
         }
+        let existingImageCount = attachments.filter(\.isImage).count
         let targetSessionId = sessionId
         let store = attachmentStore
         attachGeneration &+= 1
@@ -459,22 +697,46 @@ final class DesktopSessionPromptComposer: ObservableObject {
             await Task.detached {
                 var stored: [(RemoteAttachment, DesktopScreenshotAttachmentImage.NormalizedAttachment)] = []
                 do {
-                    let payloads: [Data] = switch source {
+                    let normalizedList: [DesktopScreenshotAttachmentImage.NormalizedAttachment]
+                    switch source {
                     case .fileURLs(let urls):
-                        try urls.map(DesktopScreenshotAttachmentImage.readImageFileData)
+                        normalizedList = try urls.map {
+                            try DesktopScreenshotAttachmentImage.normalizedFile(
+                                $0,
+                                imageLimits: limits,
+                                allowTextFiles: allowText
+                            )
+                        }
                     case .imagePayloads(let rawDataList):
-                        rawDataList
+                        guard let limits else {
+                            throw DesktopScreenshotAttachmentImage.AttachmentError.unsupportedModelForImage
+                        }
+                        normalizedList = try rawDataList.map {
+                            try DesktopScreenshotAttachmentImage.normalized($0, limits: limits)
+                        }
                     }
-                    for rawData in payloads {
-                        let normalized = try DesktopScreenshotAttachmentImage.normalized(rawData, limits: limits)
+                    let newImageCount = normalizedList.filter {
+                        RemoteAttachmentContract.isImageMimeType($0.mimeType)
+                    }.count
+                    if newImageCount > 0 {
+                        guard let limits, existingImageCount + newImageCount <= limits.maxImages else {
+                            throw DesktopScreenshotAttachmentImage.AttachmentError.tooManyImages(
+                                limits?.maxImages ?? 0
+                            )
+                        }
+                    }
+                    for normalized in normalizedList {
                         let id = UUID().uuidString.lowercased()
+                        let isImage = RemoteAttachmentContract.isImageMimeType(normalized.mimeType)
                         let metadata = try store.store(
                             normalized.data,
                             id: id,
                             sessionId: targetSessionId,
                             conversationEpoch: epoch,
+                            mimeType: normalized.mimeType,
+                            displayName: normalized.displayName,
                             now: now,
-                            limits: limits
+                            limits: isImage ? limits : nil
                         )
                         stored.append((metadata, normalized))
                     }
@@ -497,12 +759,17 @@ final class DesktopSessionPromptComposer: ObservableObject {
         }
         switch result {
         case .success(let stored):
+            let currentNewImages = stored.filter { $0.0.isImage }.count
+            let imageCountValid = currentNewImages == 0 || (
+                limits != nil && attachments.filter(\.isImage).count + currentNewImages <= (limits?.maxImages ?? 0)
+            )
             guard attachments.isEmpty || attachedEpoch == epoch,
-                  attachments.count + stored.count <= limits.maxImages else {
+                  attachments.count + stored.count <= maxCount,
+                  imageCountValid else {
                 for (metadata, _) in stored {
                     removeStoredFiles(id: metadata.id)
                 }
-                statusMessage = "The conversation changed while attaching screenshots. Try again."
+                statusMessage = "The conversation changed while attaching files. Try again."
                 return
             }
             if attachments.isEmpty {
@@ -598,7 +865,7 @@ final class DesktopSessionPromptComposer: ObservableObject {
             }.value
             guard verified else {
                 isSending = false
-                statusMessage = "Screenshot is missing or expired. Remove and reattach it."
+                statusMessage = "Attachment is missing or expired. Remove and reattach it."
                 return
             }
         }

@@ -1758,7 +1758,8 @@ if (validSessionId && socketPath) {
                     ? newerHeartbeat.observedAtMilliseconds
                     : observedAtMilliseconds,
                 capabilities: [
-                    "session-send", "session-abort", "answer-session-budget", "image-attachments-v1",
+                    "session-send", "session-abort", "answer-session-budget",
+                    "image-attachments-v1", "file-attachments-v1",
                     ...(effectiveLimitsKnown ? ["set-session-budget"] : []),
                     ...(bounceAvailable ? ["session-bounce"] : []),
                 ],
@@ -1830,6 +1831,78 @@ if (validSessionId && socketPath) {
         }
     }
 
+    const IMAGE_ATTACHMENT_MIME_TYPES = new Set(["image/png", "image/jpeg"]);
+    const TEXT_ATTACHMENT_MIME_TYPES = new Set([
+        "application/json",
+        "application/x-json5",
+        "text/markdown",
+        "text/plain",
+        "text/csv",
+        "text/xml",
+        "text/html",
+        "text/css",
+        "application/x-yaml",
+        "application/x-toml",
+        "application/x-graphql",
+        "text/javascript",
+        "application/javascript",
+        "application/typescript",
+        "text/x-typescript",
+        "text/x-python",
+        "text/x-swift",
+        "text/x-c++",
+        "text/x-csharp",
+        "text/x-go",
+        "text/x-java",
+        "text/x-ruby",
+        "text/x-rust",
+        "text/x-sh",
+        "text/x-shellscript",
+        "text/x-sql",
+        "text/x-diff",
+        "text/x-patch",
+    ]);
+    const DEFAULT_ATTACHMENT_NAMES = {
+        "image/png": "Screenshot.png",
+        "image/jpeg": "Screenshot.jpg",
+        "application/json": "attachment.json",
+        "application/x-json5": "attachment.json5",
+        "text/markdown": "attachment.md",
+        "text/csv": "attachment.csv",
+        "text/xml": "attachment.xml",
+        "text/html": "attachment.html",
+        "text/css": "attachment.css",
+        "application/x-yaml": "attachment.yaml",
+        "application/x-toml": "attachment.toml",
+        "application/x-graphql": "attachment.graphql",
+        "text/javascript": "attachment.js",
+        "application/javascript": "attachment.js",
+        "application/typescript": "attachment.ts",
+        "text/x-typescript": "attachment.ts",
+        "text/x-python": "attachment.py",
+        "text/x-swift": "attachment.swift",
+        "text/x-c++": "attachment.cpp",
+        "text/x-csharp": "attachment.cs",
+        "text/x-go": "attachment.go",
+        "text/x-java": "attachment.java",
+        "text/x-ruby": "attachment.rb",
+        "text/x-rust": "attachment.rs",
+        "text/x-sh": "attachment.sh",
+        "text/x-shellscript": "attachment.sh",
+        "text/x-sql": "attachment.sql",
+        "text/x-diff": "attachment.diff",
+        "text/x-patch": "attachment.patch",
+    };
+
+    function validAttachmentDisplayName(name) {
+        if (typeof name !== "string") return false;
+        const byteLength = Buffer.byteLength(name, "utf8");
+        return byteLength >= 1 && byteLength <= 128
+            && name.trim() === name
+            && !name.startsWith(".")
+            && !/[/\\"'<>&\x00-\x1f\x7f]/.test(name);
+    }
+
     function imageCapabilities(entry) {
         if (entry?.capabilities?.supports?.vision !== true) return null;
         const vision = entry.capabilities.limits?.vision;
@@ -1847,49 +1920,66 @@ if (validSessionId && socketPath) {
     async function loadImageAttachments(action, context) {
         if (!action.attachmentIds) return undefined;
         // Read-only preflight runs before accepting the operation. A missing
-        // image or unsupported model rejects the WHOLE message, never just its images.
-        const current = await workflowRead("session.model.getCurrent", {}, context);
-        const catalog = await workflowRead("session.model.list", {}, context);
-        const limits = imageCapabilities(catalog?.list?.find((model) => model.id === current?.modelId));
-        if (!limits || action.attachmentIds.length > limits.maxImages) {
-            throw new Error("The selected model does not support these screenshots");
-        }
+        // attachment or unsupported model rejects the WHOLE message, never just its attachments.
         const root = join(sessionsDir, "attachments-v1");
         if (!lstatSync(root).isDirectory() || lstatSync(root).isSymbolicLink()) {
-            throw new Error("Invalid screenshot store");
+            throw new Error("Invalid attachment store");
         }
         const readBounded = (path, max) => {
             const stat = lstatSync(path);
-            if (!stat.isFile() || stat.size < 1 || stat.size > max) throw new Error("Invalid screenshot file");
+            if (!stat.isFile() || stat.size < 1 || stat.size > max) throw new Error("Invalid attachment file");
             const bytes = readFileSync(path);
-            if (bytes.length > max) throw new Error("Screenshot is too large");
+            if (bytes.length > max) throw new Error("Attachment is too large");
             return bytes;
         };
-        const attachments = action.attachmentIds.map((id) => {
+        const loaded = action.attachmentIds.map((id) => {
             const record = JSON.parse(readBounded(join(root, `${id}.json`), 4096));
             const metadata = record.attachment;
+            const isImage = IMAGE_ATTACHMENT_MIME_TYPES.has(metadata?.mimeType);
+            const isText = TEXT_ATTACHMENT_MIME_TYPES.has(metadata?.mimeType);
+            const maxAllowedBytes = isImage ? 2 * 1024 * 1024 : 512 * 1024;
             if (metadata?.id !== id || metadata.sessionId !== appSessionId
                     || metadata.conversationEpoch !== context.conversationEpoch
+                    || (!isImage && !isText)
+                    || (metadata.displayName != null && !validAttachmentDisplayName(metadata.displayName))
                     || !Number.isSafeInteger(metadata.expiresAtMilliseconds)
                     || metadata.expiresAtMilliseconds <= Date.now()
-                    || !limits.mimeTypes.includes(metadata.mimeType)
                     || !Number.isSafeInteger(metadata.byteCount)
-                    || metadata.byteCount < 1 || metadata.byteCount > limits.maxBytes) {
-                throw new Error("Screenshot is expired or belongs to another conversation");
+                    || metadata.byteCount < 1 || metadata.byteCount > maxAllowedBytes) {
+                throw new Error("Attachment is expired or belongs to another conversation");
             }
-            const bytes = readBounded(join(root, `${id}.image`), limits.maxBytes);
+            const bytes = readBounded(join(root, `${id}.image`), maxAllowedBytes);
             if (bytes.length !== metadata.byteCount
                     || createHash("sha256").update(bytes).digest("hex") !== record.sha256) {
-                throw new Error("Screenshot bytes changed");
+                throw new Error("Attachment bytes changed");
             }
-            return {
-                type: "blob", mimeType: metadata.mimeType,
-                displayName: metadata.mimeType === "image/png" ? "Screenshot.png" : "Screenshot.jpg",
-                data: bytes.toString("base64"),
-            };
+            if (isText) {
+                if (bytes.includes(0)) throw new Error("Text attachment contains NUL bytes");
+                const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+                if (/<\s*\/\s*attachment\b/i.test(text)) {
+                    throw new Error("Text attachment contains reserved wrapper tag");
+                }
+            }
+            return { metadata, bytes, isImage };
         });
-        if (!operationAuthorityCurrent(context)) throw new Error("Conversation changed during screenshot preflight");
-        return attachments;
+        const imageEntries = loaded.filter((entry) => entry.isImage);
+        if (imageEntries.length > 0) {
+            const current = await workflowRead("session.model.getCurrent", {}, context);
+            const catalog = await workflowRead("session.model.list", {}, context);
+            const limits = imageCapabilities(catalog?.list?.find((model) => model.id === current?.modelId));
+            if (!limits || imageEntries.length > limits.maxImages
+                    || imageEntries.some(({ metadata }) =>
+                        !limits.mimeTypes.includes(metadata.mimeType) || metadata.byteCount > limits.maxBytes)) {
+                throw new Error("The selected model does not support these screenshots");
+            }
+        }
+        if (!operationAuthorityCurrent(context)) throw new Error("Conversation changed during attachment preflight");
+        return loaded.map(({ metadata, bytes }) => ({
+            type: "blob",
+            mimeType: metadata.mimeType,
+            displayName: metadata.displayName ?? DEFAULT_ATTACHMENT_NAMES[metadata.mimeType] ?? "attachment.txt",
+            data: bytes.toString("base64"),
+        }));
     }
 
     async function invokeWorkflowAction(action, context, attachments) {

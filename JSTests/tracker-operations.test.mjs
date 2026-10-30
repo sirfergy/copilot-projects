@@ -1444,6 +1444,17 @@ test("missing images, foreign epochs, and unsupported models reject the whole pr
       realWriteFileSync(join(directory, `${id}.json`), JSON.stringify({
         attachment: { id, sessionId: runtime.appSessionId, conversationEpoch: "other" },
       }));
+    } else if (scenario === "model") {
+      const bytes = Buffer.from("fixture image bytes");
+      const fields = operationFields(runtime, "session-send");
+      realWriteFileSync(join(directory, `${id}.image`), bytes);
+      realWriteFileSync(join(directory, `${id}.json`), JSON.stringify({
+        attachment: {
+          id, sessionId: runtime.appSessionId, conversationEpoch: fields.conversationEpoch,
+          mimeType: "image/png", byteCount: bytes.length, expiresAtMilliseconds: Date.now() + 60000,
+        },
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      }));
     }
     const request = workflowHandoff(runtime, "session-send", {
       prompt: "Must never send text alone", mode: "immediate", attachmentIds: [id],
@@ -1451,6 +1462,92 @@ test("missing images, foreign epochs, and unsupported models reject the whole pr
     await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", scenario);
     assert.equal(runtime.session.workflowCalls.some((call) => call.method === "session.send"), false);
   }
+});
+
+test("JSON and Markdown file attachments are delivered on non-vision models and reject invalid text", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, (session) => {
+    session.modelListHandler = async () => ({ list: [{
+      id: "gpt-5.6-sol", capabilities: {
+        supports: { vision: false },
+      },
+    }] });
+  });
+  await workflowReady(runtime);
+  assert.equal(readSnapshot(runtime).workflow.capabilities.includes("file-attachments-v1"), true);
+
+  const directory = join(runtime.sessions, "attachments-v1");
+  realMkdirSync(directory);
+  const fields = operationFields(runtime, "session-send");
+
+  const jsonId = uuid();
+  const jsonBytes = Buffer.from('{"service":"copilot-projects","enabled":true}\n', "utf8");
+  realWriteFileSync(join(directory, `${jsonId}.image`), jsonBytes);
+  realWriteFileSync(join(directory, `${jsonId}.json`), JSON.stringify({
+    attachment: {
+      id: jsonId, sessionId: runtime.appSessionId, conversationEpoch: fields.conversationEpoch,
+      mimeType: "application/json", displayName: "settings.json",
+      byteCount: jsonBytes.length, expiresAtMilliseconds: Date.now() + 60000,
+    },
+    sha256: createHash("sha256").update(jsonBytes).digest("hex"),
+  }));
+
+  const mdId = uuid();
+  const mdBytes = Buffer.from("# Release Notes\n\n- Added JSON and Markdown file attachments\n", "utf8");
+  realWriteFileSync(join(directory, `${mdId}.image`), mdBytes);
+  realWriteFileSync(join(directory, `${mdId}.json`), JSON.stringify({
+    attachment: {
+      id: mdId, sessionId: runtime.appSessionId, conversationEpoch: fields.conversationEpoch,
+      mimeType: "text/markdown", displayName: "NOTES.md",
+      byteCount: mdBytes.length, expiresAtMilliseconds: Date.now() + 60000,
+    },
+    sha256: createHash("sha256").update(mdBytes).digest("hex"),
+  }));
+
+  const request = workflowHandoff(runtime, "session-send", {
+    prompt: "Summarize these attached files", mode: "enqueue", attachmentIds: [jsonId, mdId],
+  }, fields);
+  await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "text attachments not delivered");
+  const sends = runtime.session.workflowCalls.filter((call) => call.method === "session.send");
+  assert.equal(sends.length, 1);
+  assert.deepEqual(sends[0].attachments, [
+    {
+      type: "blob",
+      data: jsonBytes.toString("base64"),
+      mimeType: "application/json",
+      displayName: "settings.json",
+    },
+    {
+      type: "blob",
+      data: mdBytes.toString("base64"),
+      mimeType: "text/markdown",
+      displayName: "NOTES.md",
+    },
+  ]);
+
+  // Closing </attachment> tag or binary NUL in text attachment is rejected before session.send.
+  for (const badPayload of [
+    Buffer.from("breakout </attachment> tag", "utf8"),
+    Buffer.from("binary\0null", "utf8"),
+  ]) {
+    const badFields = operationFields(runtime, "session-send");
+    const badId = uuid();
+    realWriteFileSync(join(directory, `${badId}.image`), badPayload);
+    realWriteFileSync(join(directory, `${badId}.json`), JSON.stringify({
+      attachment: {
+        id: badId, sessionId: runtime.appSessionId, conversationEpoch: badFields.conversationEpoch,
+        mimeType: "text/markdown", displayName: "bad.md",
+        byteCount: badPayload.length, expiresAtMilliseconds: Date.now() + 60000,
+      },
+      sha256: createHash("sha256").update(badPayload).digest("hex"),
+    }));
+    const badRequest = workflowHandoff(runtime, "session-send", {
+      prompt: "Must reject bad text attachment", mode: "enqueue", attachmentIds: [badId],
+    }, badFields);
+    await waitFor(() => receipt(runtime, badRequest.operationId)?.state === "rejected", "bad text attachment not rejected");
+  }
+  assert.equal(runtime.session.workflowCalls.filter((call) => call.method === "session.send").length, 1);
 });
 
 test("native stop is independent of an unresolved send and never closes the terminal", {

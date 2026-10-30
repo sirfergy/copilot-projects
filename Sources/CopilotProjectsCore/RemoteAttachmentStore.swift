@@ -4,16 +4,17 @@ import ImageIO
 import CopilotProjectsProtocol
 
 public enum RemoteAttachmentError: Error, LocalizedError {
-    case invalid, unsupportedImage, tooLarge, expired, conflict, full
+    case invalid, unsupportedImage, unsupportedText, tooLarge, expired, conflict, full
 
     public var errorDescription: String? {
         switch self {
-        case .invalid: "Invalid screenshot or conversation."
+        case .invalid: "Invalid attachment or conversation."
         case .unsupportedImage: "Choose a valid PNG or JPEG screenshot (up to 16 megapixels)."
-        case .tooLarge: "Screenshot exceeds the 2 MB upload limit."
-        case .expired: "Screenshot is missing or expired. Remove it and attach it again."
+        case .unsupportedText: "Choose a valid UTF-8 text file (such as JSON or Markdown) up to 512 KB."
+        case .tooLarge: "Attachment exceeds the upload size limit."
+        case .expired: "Attachment is missing or expired. Remove it and attach it again."
         case .conflict: "This upload ID already belongs to different content."
-        case .full: "Screenshot storage is full. Try again after older uploads expire."
+        case .full: "Attachment storage is full. Try again after older uploads expire."
         }
     }
 }
@@ -43,19 +44,44 @@ public struct RemoteAttachmentStore: Sendable {
 
     public func store(
         _ data: Data, id: String, sessionId: String, conversationEpoch: String,
+        mimeType requestedMimeType: String? = nil, displayName: String? = nil,
         now: Date = Date(), limits: RemoteImageCapabilities? = nil
     ) throws -> RemoteAttachment {
         guard RemoteAttachmentContract.validID(id),
               RemoteAttachmentContract.validScope(sessionId: sessionId, conversationEpoch: conversationEpoch),
               !data.isEmpty else { throw RemoteAttachmentError.invalid }
+        if let displayName, !RemoteAttachmentContract.validDisplayName(displayName) {
+            throw RemoteAttachmentError.invalid
+        }
         guard data.count <= RemoteAttachmentContract.maxBytes else { throw RemoteAttachmentError.tooLarge }
         Self.writeLock.lock()
         defer { Self.writeLock.unlock() }
-        let mimeType = try Self.validateImage(data)
-        if let limits {
-            guard limits.isValid, data.count <= limits.maxBytes, limits.mimeTypes.contains(mimeType) else {
+        let payloadData: Data
+        let mimeType: String
+        if let requestedMimeType, !RemoteAttachmentContract.isImageMimeType(requestedMimeType) {
+            guard let canonicalMime = RemoteAttachmentContract.canonicalTextMimeType(forMimeType: requestedMimeType) else {
+                throw RemoteAttachmentError.unsupportedText
+            }
+            guard data.count <= RemoteAttachmentContract.maxTextBytes else {
+                throw RemoteAttachmentError.tooLarge
+            }
+            guard let validatedText = RemoteAttachmentContract.validateTextData(data) else {
+                throw RemoteAttachmentError.unsupportedText
+            }
+            payloadData = validatedText
+            mimeType = canonicalMime
+        } else {
+            let detectedImageMime = try Self.validateImage(data)
+            if let requestedMimeType, requestedMimeType != detectedImageMime {
                 throw RemoteAttachmentError.unsupportedImage
             }
+            if let limits {
+                guard limits.isValid, data.count <= limits.maxBytes, limits.mimeTypes.contains(detectedImageMime) else {
+                    throw RemoteAttachmentError.unsupportedImage
+                }
+            }
+            payloadData = data
+            mimeType = detectedImageMime
         }
         let fm = FileManager.default
         try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -63,26 +89,29 @@ public struct RemoteAttachmentStore: Sendable {
             throw RemoteAttachmentError.invalid
         }
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
-        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let digest = SHA256.hash(data: payloadData).map { String(format: "%02x", $0) }.joined()
         let metadataURL = root.appendingPathComponent("\(id).json")
         if fm.fileExists(atPath: metadataURL.path) {
             let existing = try record(id: id, sessionId: sessionId, conversationEpoch: conversationEpoch, now: now)
-            guard existing.sha256 == digest else { throw RemoteAttachmentError.conflict }
+            guard existing.sha256 == digest,
+                  existing.attachment.mimeType == mimeType,
+                  existing.attachment.displayName == displayName else { throw RemoteAttachmentError.conflict }
             _ = try image(id: id, sessionId: sessionId, conversationEpoch: conversationEpoch, now: now)
             return existing.attachment
         }
         let usage = try cleanExpired(now: now)
-        guard usage.count < Self.maxEntries, usage.bytes + data.count <= Self.maxTotalBytes else {
+        guard usage.count < Self.maxEntries, usage.bytes + payloadData.count <= Self.maxTotalBytes else {
             throw RemoteAttachmentError.full
         }
         let attachment = RemoteAttachment(
             id: id, sessionId: sessionId, conversationEpoch: conversationEpoch,
-            mimeType: mimeType, byteCount: data.count,
-            expiresAtMilliseconds: Int64(now.addingTimeInterval(RemoteAttachmentContract.lifetime).timeIntervalSince1970 * 1_000)
+            mimeType: mimeType, byteCount: payloadData.count,
+            expiresAtMilliseconds: Int64(now.addingTimeInterval(RemoteAttachmentContract.lifetime).timeIntervalSince1970 * 1_000),
+            displayName: displayName
         )
         let imageURL = root.appendingPathComponent("\(id).image")
         do {
-            try data.write(to: imageURL, options: [.atomic])
+            try payloadData.write(to: imageURL, options: [.atomic])
             try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: imageURL.path)
             try JSONEncoder().encode(Record(attachment: attachment, sha256: digest))
                 .write(to: metadataURL, options: [.atomic])
@@ -94,6 +123,20 @@ public struct RemoteAttachmentStore: Sendable {
             throw error
         }
         return attachment
+    }
+
+    public func metadata(
+        id: String, sessionId: String, conversationEpoch: String, now: Date = Date()
+    ) throws -> RemoteAttachment {
+        let record = try record(id: id, sessionId: sessionId, conversationEpoch: conversationEpoch, now: now)
+        let payloadURL = root.appendingPathComponent("\(id).image")
+        let values = try payloadURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true,
+              values.isSymbolicLink != true,
+              values.fileSize == record.attachment.byteCount else {
+            throw RemoteAttachmentError.invalid
+        }
+        return record.attachment
     }
 
     public func image(
