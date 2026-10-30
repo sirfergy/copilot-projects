@@ -378,7 +378,9 @@ final class AppModelTests: XCTestCase {
 
             let bridge = RemoteModelBridge(model: model)
             XCTAssertTrue(bridge.supportsReopenClosedSession)
-            XCTAssertNil(bridge.workspace()?.recentlyClosedSessions)
+            let emptySnapshotData = try JSONEncoder().encode(XCTUnwrap(bridge.workspace()))
+            XCTAssertFalse(String(decoding: emptySnapshotData, as: UTF8.self).contains("recentlyClosedSessions"))
+            XCTAssertNil(try JSONDecoder().decode(RemoteWorkspaceSnapshot.self, from: emptySnapshotData).recentlyClosedSessions)
             XCTAssertEqual(bridge.reopenClosedSession(id: nil), .missing)
 
             XCTAssertTrue(model.destroySession(projectId: projectA.id, sessionId: s1.id))
@@ -396,7 +398,8 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(items[2].hostDisplayName, "Woodhaven")
             XCTAssertNil(items[0].hostId)
             XCTAssertNil(items[0].hostDisplayName)
-            XCTAssertEqual(model.remoteWorkspaceSnapshot().recentlyClosedSessions, items)
+            let snapshotData = try JSONEncoder().encode(model.remoteWorkspaceSnapshot())
+            XCTAssertEqual(try JSONDecoder().decode(RemoteWorkspaceSnapshot.self, from: snapshotData).recentlyClosedSessions, items)
 
             // Reopen a specific non-top entry (s2) by id; newer/older entries remain intact.
             let reopenedS2Id = try XCTUnwrap(model.reopenClosedSession(id: s2.id))
@@ -416,16 +419,36 @@ final class AppModelTests: XCTestCase {
             }
             XCTAssertEqual(reopenedProjectId, projectA.id)
             XCTAssertEqual(model.projects[0].sessions.first?.id, reopenedS1Id)
+            XCTAssertEqual(model.projects[0].sessions.map(\.title), ["First", "Second-Remote", "KeepOpen"])
             XCTAssertEqual(model.recentlyClosedSessionItems.map(\.id), [s3.id, b1.id])
 
-            // Remote reopen with "latest" token reopens the newest remaining entry (s3).
+            // Remote reopen with "latest" token reopens the newest remaining entry (s3) in its original position.
             let remoteLatest = bridge.reopenClosedSession(id: RemoteReopenSessionContract.latestSessionToken)
             guard case let .reopened(projectId: latestProjectId, sessionId: reopenedS3Id) = remoteLatest else {
                 return XCTFail("Expected .reopened for latest, got \(remoteLatest)")
             }
             XCTAssertEqual(latestProjectId, projectA.id)
             XCTAssertEqual(model.capturedResumeLaunches[reopenedS3Id], copilotId)
+            XCTAssertEqual(
+                model.projects[0].sessions.map(\.title),
+                ["First", "Second-Remote", "Third-Copilot", "KeepOpen"]
+            )
             XCTAssertEqual(model.recentlyClosedSessionItems.map(\.id), [b1.id])
+
+            // Closing a later tab (Second-Remote) and then an earlier tab (First) before reopening
+            // Second-Remote by id shifts Second-Remote left while First remains closed.
+            XCTAssertTrue(model.destroySession(projectId: projectA.id, sessionId: reopenedS2Id))
+            XCTAssertTrue(model.destroySession(projectId: projectA.id, sessionId: reopenedS1Id))
+            XCTAssertNotNil(model.reopenClosedSession(id: reopenedS2Id))
+            XCTAssertEqual(
+                model.projects[0].sessions.map(\.title),
+                ["Second-Remote", "Third-Copilot", "KeepOpen"]
+            )
+            XCTAssertNotNil(model.reopenClosedSession(id: reopenedS1Id))
+            XCTAssertEqual(
+                model.projects[0].sessions.map(\.title),
+                ["First", "Second-Remote", "Third-Copilot", "KeepOpen"]
+            )
         }
     }
 }

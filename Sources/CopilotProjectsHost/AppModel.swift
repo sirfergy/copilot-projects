@@ -1744,7 +1744,7 @@ final class AppModel: ObservableObject {
         }) else {
             return nil
         }
-        let entry = recentlyClosedSessions.remove(at: index)
+        var entry = recentlyClosedSessions.remove(at: index)
         guard let pi = projectIndex(entry.projectId) else {
             return nil
         }
@@ -1758,6 +1758,14 @@ final class AppModel: ObservableObject {
             selectSession(projectId: projects[loc.p].id, sessionId: existingId)
             focusActiveTerminal()
             return existingId
+        }
+        for j in index..<recentlyClosedSessions.count
+            where recentlyClosedSessions[j].projectId == entry.projectId {
+            if recentlyClosedSessions[j].sessionIndex < entry.sessionIndex {
+                entry.sessionIndex -= 1
+            } else {
+                recentlyClosedSessions[j].sessionIndex += 1
+            }
         }
         let validParentId = entry.parentSessionId.flatMap { parentId in
             projects[pi].sessions.contains(where: { $0.id == parentId && $0.parentSessionId == nil }) ? parentId : nil
