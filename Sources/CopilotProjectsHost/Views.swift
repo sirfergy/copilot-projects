@@ -1080,15 +1080,16 @@ private struct SessionCreationButtons: View {
                 Button("Review Pull Request…", systemImage: "checkmark.shield") {
                     model.addAdversarialReviewSessionInteractive(toProjectId: project.id)
                 }
-                if !model.recentlyClosedSessionItems.isEmpty {
+                let projectClosedItems = model.recentlyClosedSessionItems(forProjectId: project.id)
+                if !projectClosedItems.isEmpty {
                     Divider()
                     Menu("Recently Closed Sessions") {
                         Button("Reopen Last Closed Session") {
-                            _ = model.reopenClosedSession()
+                            _ = model.reopenClosedSession(inProjectId: project.id)
                         }
                         Divider()
-                        ForEach(model.recentlyClosedSessionItems) { item in
-                            Button("\(item.title) — \(item.projectName)") {
+                        ForEach(projectClosedItems) { item in
+                            Button(item.title) {
                                 _ = model.reopenClosedSession(id: item.id)
                             }
                         }
