@@ -399,6 +399,35 @@ final class ActivityOptimizationTests: XCTestCase {
             ProjectRow(project: projectWithRunning, number: 1, showNumber: false, isDropTarget: false)
         )
     }
+
+    func testSessionStateIndicatorSymbolNamesReflectDisplayStatusAndAttention() {
+        var session = Session(id: "s-1", title: "Alpha", cwd: "/tmp")
+        XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "terminal.fill")
+
+        session.finishedUnseen = true
+        XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "checkmark.circle.fill")
+
+        var failedActivity = snapshot(at: Date(timeIntervalSince1970: 1_787_865_600))
+        failedActivity.lastTurnError = TrackedTurnError(message: "Request timed out")
+        session.agentActivity = failedActivity
+        XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "exclamationmark.triangle.fill")
+
+        session.status = .waiting
+        XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "questionmark.bubble.fill")
+
+        session.status = .running
+        XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "waveform")
+
+        var pendingQuestionActivity = failedActivity
+        pendingQuestionActivity.trackedUserInputs = [
+            TrackedUserInput(
+                requestId: "q-1", question: "Proceed?", choices: ["Yes", "No"],
+                allowFreeform: false, requestedAt: pendingQuestionActivity.updatedAt, agentId: nil
+            )
+        ]
+        session.agentActivity = pendingQuestionActivity
+        XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "questionmark.bubble.fill")
+    }
 }
 
 private extension Date.ISO8601FormatStyle {
