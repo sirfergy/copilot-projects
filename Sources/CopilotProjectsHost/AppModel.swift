@@ -1786,6 +1786,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func recentlyClosedSessionItems(forProjectId projectId: String) -> [RemoteRecentlyClosedSession] {
+        recentlyClosedSessionItems.filter { $0.projectId == projectId }
+    }
+
     private func recordRecentlyClosedSession(
         projectId: String,
         sessionIndex: Int,
@@ -1841,6 +1845,14 @@ final class AppModel: ObservableObject {
             return captured
         }
         return nil
+    }
+
+    @discardableResult
+    func reopenClosedSession(inProjectId projectId: String) -> String? {
+        guard let latest = recentlyClosedSessionItems(forProjectId: projectId).first else {
+            return nil
+        }
+        return reopenClosedSession(id: latest.id)
     }
 
     @discardableResult

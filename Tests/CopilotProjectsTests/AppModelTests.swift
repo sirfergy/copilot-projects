@@ -451,4 +451,51 @@ final class AppModelTests: XCTestCase {
             )
         }
     }
+
+    func testProjectScopedRecentlyClosedSessionItemsAndReopen() throws {
+        try withTempStateDirectory { root in
+            let a1 = Session(title: "A-1", cwd: root.path)
+            let a2 = Session(title: "A-2", cwd: root.path)
+            let projectA = Project(name: "Project A", cwd: root.path, sessions: [a1, a2], selectedSessionId: a1.id)
+            let b1 = Session(title: "B-1", cwd: root.path)
+            let projectB = Project(name: "Project B", cwd: root.path, sessions: [b1], selectedSessionId: b1.id)
+            let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+            try repository.save(PersistedState(projects: [projectA, projectB], selectedProjectId: projectA.id))
+
+            let model = AppModel(
+                stateRepository: repository,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteWrapperExecutable: { "/usr/local/bin/copilot-remote-wrapper" },
+                remoteSessionBackendAvailable: { true },
+                availableHostsProvider: { [.local] },
+                remoteSessionLauncher: { _, _, _ in },
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                model.forcePendingSessionDestroys()
+                model.detachAllClients()
+            }
+
+            XCTAssertTrue(model.destroySession(projectId: projectA.id, sessionId: a1.id))
+            XCTAssertTrue(model.destroySession(projectId: projectA.id, sessionId: a2.id))
+            XCTAssertTrue(model.destroySession(projectId: projectB.id, sessionId: b1.id))
+
+            XCTAssertEqual(model.recentlyClosedSessionItems(forProjectId: projectA.id).map(\.id), [a2.id, a1.id])
+            XCTAssertEqual(model.recentlyClosedSessionItems(forProjectId: projectB.id).map(\.id), [b1.id])
+            XCTAssertTrue(model.recentlyClosedSessionItems(forProjectId: "unknown").isEmpty)
+            XCTAssertNil(model.reopenClosedSession(inProjectId: "unknown"))
+
+            // Reopening in Project A restores A-2 without consuming the newer closed B-1 from Project B.
+            let reopenedA2Id = try XCTUnwrap(model.reopenClosedSession(inProjectId: projectA.id))
+            XCTAssertEqual(model.projects[0].sessions.map(\.id), [reopenedA2Id])
+            XCTAssertEqual(model.projects[0].sessions.map(\.title), ["A-2"])
+            XCTAssertEqual(model.recentlyClosedSessionItems(forProjectId: projectA.id).map(\.id), [a1.id])
+            XCTAssertEqual(model.recentlyClosedSessionItems(forProjectId: projectB.id).map(\.id), [b1.id])
+        }
+    }
 }
