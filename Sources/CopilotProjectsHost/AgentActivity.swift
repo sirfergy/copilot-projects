@@ -74,6 +74,7 @@ struct AgentActivitySnapshot: Codable, Equatable {
     var sessionIdleAtMilliseconds: Int64? = nil
     var workflow: RemoteSessionWorkflow? = nil
     var currentIntent: String? = nil
+    var startingPrompt: String? = nil
     /// The latest request's failure, published only while no request is
     /// running. Decoded leniently: one malformed field must not fail the whole
     /// heartbeat decode.

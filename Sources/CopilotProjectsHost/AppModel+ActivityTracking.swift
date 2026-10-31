@@ -334,6 +334,7 @@ extension AppModel {
         let fm = FileManager.default
         var nextProjects = projects
         var activityChanged = false
+        var startingPromptChanged = false
         var complete = true
         var seenSessionIds: Set<String> = []
         var budgetNotifications: [(projectId: String, sessionId: String)] = []
@@ -381,6 +382,13 @@ extension AppModel {
                    )?.lowercased() {
                     runtimeTrackedOwners[sessionId] = owner.lowercased()
                 }
+                if nextProjects[pi].sessions[si].startingPrompt == nil,
+                   let rawPrompt = snapshot?.startingPrompt,
+                   !rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    nextProjects[pi].sessions[si].startingPrompt = rawPrompt
+                    activityChanged = true
+                    startingPromptChanged = true
+                }
                 if nextProjects[pi].sessions[si].agentActivity != fresh {
                     var previous = nextProjects[pi].sessions[si].agentActivity
                     if let fresh {
@@ -416,6 +424,9 @@ extension AppModel {
                 // Keep one authoritative snapshot, including its latest freshness and
                 // disconnect timestamps, without redrawing for heartbeat-only changes.
                 projectStorage = nextProjects
+            }
+            if startingPromptChanged {
+                save()
             }
             // Drop cache entries for sessions no longer present so the cache can't grow
             // across a long-lived app run that opens and closes many sessions. Filtering

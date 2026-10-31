@@ -395,6 +395,7 @@ if (validSessionId && socketPath) {
     const transcriptEventIds = new Set();
     const queuedTranscriptEvents = [];
     let pendingTranscriptTurn = null;
+    let startingPrompt = null;
     let transcriptAssistantTurnActive = false;
     // `session.idle` is ephemeral, so durable replay cannot tell a failure
     // inside a request from one after it ended. Live delivery records which
@@ -2545,6 +2546,7 @@ if (validSessionId && socketPath) {
             operationReceiptVersion: OPERATION_RECEIPT_VERSION,
             operationReceipts: operationReceiptSnapshot(),
             workflow: workflowSnapshot(),
+            ...(startingPrompt ? { startingPrompt } : {}),
             ...(lastTurnError ? { lastTurnError } : {}),
             ...(reportedError ? { error: reportedError } : {}),
         };
@@ -3928,6 +3930,38 @@ if (validSessionId && socketPath) {
             tools: [],
             isAborted: false,
         };
+        if (kind === "foreground"
+                && startingPrompt === null
+                && pendingTranscriptTurn.userContent.trim().length > 0) {
+            startingPrompt = pendingTranscriptTurn.userContent;
+        }
+    }
+
+    function syncStartingPromptFromTranscript() {
+        if (startingPrompt !== null) return false;
+        for (const { turn } of recentlyDroppedTurns) {
+            if (turn?.kind === "foreground"
+                    && typeof turn.userContent === "string"
+                    && turn.userContent.trim().length > 0) {
+                startingPrompt = turn.userContent;
+                return true;
+            }
+        }
+        for (const turn of transcriptTurns) {
+            if (turn?.kind === "foreground"
+                    && typeof turn.userContent === "string"
+                    && turn.userContent.trim().length > 0) {
+                startingPrompt = turn.userContent;
+                return true;
+            }
+        }
+        if (pendingTranscriptTurn?.kind === "foreground"
+                && typeof pendingTranscriptTurn.userContent === "string"
+                && pendingTranscriptTurn.userContent.trim().length > 0) {
+            startingPrompt = pendingTranscriptTurn.userContent;
+            return true;
+        }
+        return false;
     }
 
     function ensureSyntheticTranscriptTurn(event) {
@@ -4213,6 +4247,7 @@ if (validSessionId && socketPath) {
         latestResumeTranscriptTurnId = null;
         currentModel = model;
         clearTranscriptEventIds();
+        syncStartingPromptFromTranscript();
     }
 
     function processTranscriptEvent(event, live) {
@@ -4677,7 +4712,8 @@ if (validSessionId && socketPath) {
                     recentlyDroppedTurns.map(({ turn }) => turn);
                 durableFallbackModel = currentModel;
             }
-            if (changed || completedBaseline || questionChanged) {
+            const startingPromptRecovered = syncStartingPromptFromTranscript();
+            if (changed || completedBaseline || questionChanged || startingPromptRecovered) {
                 publish();
                 publishTranscript();
             }
@@ -4935,6 +4971,7 @@ if (validSessionId && socketPath) {
         durableReconcileQueued = false;
         transcriptInitialized = false;
         queuedTranscriptEvents.length = 0;
+        startingPrompt = null;
         resetTranscriptReplayState([], null);
 
         durableTranscriptAuthoritative = false;
@@ -5375,6 +5412,12 @@ if (validSessionId && socketPath) {
         currentTurnKind = event.data.source?.startsWith("schedule-")
             ? "scheduled"
             : "foreground";
+        if (classifyUserMessage(event) === "foreground" && startingPrompt === null) {
+            const prompt = boundedText(event.data?.content);
+            if (prompt.trim().length > 0) {
+                startingPrompt = prompt;
+            }
+        }
         setScheduledTurnMarker(currentTurnKind === "scheduled");
         foregroundTurnActive = currentTurnKind !== "scheduled";
         foregroundTransitionAt = normalizedTimestamp(event.timestamp);

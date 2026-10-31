@@ -498,4 +498,244 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(model.recentlyClosedSessionItems(forProjectId: projectB.id).map(\.id), [b1.id])
         }
     }
+
+    func testStartingPromptPersistsAcrossRestartReopenAndPresentAlert() throws {
+        try withTempStateDirectory { root in
+            let project = Project(name: "Alpha", cwd: root.path)
+            let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+            try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+            var presentedAlerts: [(title: String, subtitle: String, text: String, buttons: [String])] = []
+            var nextModalResponse: NSApplication.ModalResponse = .alertSecondButtonReturn
+
+            let makeModel: () -> AppModel = {
+                AppModel(
+                    stateRepository: repository,
+                    isAppActive: { false },
+                    agentActivityDirectory: root,
+                    resumeMarkerDirectory: root,
+                    remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                    remoteSessionBackendAvailable: { true },
+                    remoteSessionLauncher: { _, _, _ in },
+                    kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                    gracefulSessionDestroyer: { _, _ in Task {} },
+                    forcedSessionDestroyer: { _ in },
+                    alertPresenter: { alert in
+                        let scrollView = alert.accessoryView as? NSScrollView
+                        let textView = scrollView?.documentView as? NSTextView
+                        presentedAlerts.append((
+                            title: alert.messageText,
+                            subtitle: alert.informativeText,
+                            text: textView?.string ?? "",
+                            buttons: alert.buttons.map(\.title)
+                        ))
+                        return nextModalResponse
+                    }
+                )
+            }
+
+            let model = makeModel()
+            defer {
+                model.forcePendingSessionDestroys()
+                model.detachAllClients()
+            }
+
+            let initialPrompt = "Investigate flaky CI in AppModelTests\nPreserve multiline details"
+            let sessionId = try model.addCopilotSession(
+                toProjectId: project.id,
+                initialPrompt: initialPrompt
+            )
+            XCTAssertEqual(model.startingPrompt(for: sessionId), initialPrompt)
+            XCTAssertEqual(
+                model.remoteWorkspaceSnapshot().projects.first?.sessions.first?.startingPrompt,
+                initialPrompt
+            )
+
+            // Restarting the app (no in-memory TerminalController) preserves startingPrompt from state.json.
+            let restarted = makeModel()
+            defer {
+                restarted.forcePendingSessionDestroys()
+                restarted.detachAllClients()
+            }
+            XCTAssertNil(restarted.controllers[sessionId])
+            XCTAssertEqual(restarted.startingPrompt(for: sessionId), initialPrompt)
+            XCTAssertEqual(
+                restarted.remoteWorkspaceSnapshot().projects.first?.sessions.first?.startingPrompt,
+                initialPrompt
+            )
+
+            // Presenting starting prompt shows read-only viewer and copies only on primary button.
+            NSPasteboard.general.clearContents()
+            nextModalResponse = .alertSecondButtonReturn
+            restarted.presentStartingPrompt(for: sessionId)
+            XCTAssertEqual(presentedAlerts.count, 1)
+            XCTAssertEqual(presentedAlerts.last?.title, "Starting Prompt")
+            XCTAssertEqual(presentedAlerts.last?.subtitle, "Copilot")
+            XCTAssertEqual(presentedAlerts.last?.text, initialPrompt)
+            XCTAssertEqual(presentedAlerts.last?.buttons, ["Copy Starting Prompt", "Done"])
+            XCTAssertNil(NSPasteboard.general.string(forType: .string))
+
+            nextModalResponse = .alertFirstButtonReturn
+            restarted.presentStartingPrompt(for: sessionId)
+            XCTAssertEqual(NSPasteboard.general.string(forType: .string), initialPrompt)
+
+            // Destroying and reopening the session preserves startingPrompt on the reopened tab.
+            XCTAssertTrue(restarted.destroySession(projectId: project.id, sessionId: sessionId))
+            XCTAssertNil(restarted.startingPrompt(for: sessionId))
+            XCTAssertEqual(restarted.recentlyClosedSessions.last?.startingPrompt, initialPrompt)
+
+            let reopenedId = try XCTUnwrap(restarted.reopenClosedSession())
+            XCTAssertEqual(restarted.startingPrompt(for: reopenedId), initialPrompt)
+            XCTAssertEqual(
+                restarted.remoteWorkspaceSnapshot().projects.first?.sessions.first?.startingPrompt,
+                initialPrompt
+            )
+
+            // Adversarial review session also records its starting review prompt on Session.
+            let reviewId = try XCTUnwrap(
+                restarted.addAdversarialReviewSession(
+                    toProjectId: project.id,
+                    pullRequestURL: "https://github.com/sirfergy/copilot-projects/pull/99"
+                )
+            )
+            let reviewPrompt = try XCTUnwrap(restarted.startingPrompt(for: reviewId))
+            XCTAssertTrue(reviewPrompt.contains("https://github.com/sirfergy/copilot-projects/pull/99"))
+        }
+    }
+
+    func testStartingPromptRecoversFromActivityFirstRemotePromptAndTranscriptFallback() throws {
+        try withTempStateDirectory { root in
+            let sActivity = Session(title: "FromActivity", cwd: root.path)
+            let sRemote = Session(title: "FromRemoteSend", cwd: root.path)
+            let sTranscript = Session(title: "FromTranscript", cwd: root.path)
+            let project = Project(
+                name: "Recovery",
+                cwd: root.path,
+                sessions: [sActivity, sRemote, sTranscript],
+                selectedSessionId: sActivity.id
+            )
+            let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+            try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+            // 1. Plain Session without startingPrompt omits startingPrompt in encoded JSON,
+            // and Session decodes both base64-prefixed and plain JSON startingPrompt values.
+            let rawSessionJSON = String(decoding: try JSONEncoder().encode(sActivity), as: UTF8.self)
+            XCTAssertFalse(rawSessionJSON.contains("startingPrompt"))
+            let plainJSON = Data("""
+            {"id":"s-plain","title":"Copilot","cwd":"/tmp","startingPrompt":"Plain JSON prompt"}
+            """.utf8)
+            XCTAssertEqual(try JSONDecoder().decode(Session.self, from: plainJSON).startingPrompt, "Plain JSON prompt")
+
+            var sentRemotePrompts: [String] = []
+            let model = AppModel(
+                stateRepository: repository,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remotePromptLiveSessions: { _ in [sRemote.id] },
+                remotePromptTarget: { id in
+                    guard id == sRemote.id else { return nil }
+                    return RemotePromptTarget(
+                        activity: .idle,
+                        send: { text in
+                            sentRemotePrompts.append(text)
+                            return true
+                        }
+                    )
+                },
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteSessionBackendAvailable: { true },
+                remoteSessionLauncher: { _, _, _ in },
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
+            )
+            defer {
+                model.forcePendingSessionDestroys()
+                model.detachAllClients()
+            }
+
+            // 2. Tracker agent-activity snapshot populates startingPrompt for a ⌘T session (preserving leading indentation) and persists it.
+            let now = Date(timeIntervalSince1970: 1_787_865_600)
+            var activity = AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(now),
+                foregroundTurnActive: true,
+                scheduledTurnActive: false,
+                activeSubagents: [],
+                schedules: [],
+                idleGeneration: 0,
+                lastIdleAborted: false,
+                lastIdleTurnKind: nil,
+                error: nil
+            )
+            activity.startingPrompt = "  Typed directly in terminal\n    indented line"
+            try JSONEncoder().encode(activity).write(
+                to: root.appendingPathComponent("\(sActivity.id).agent-activity.json"),
+                options: .atomic
+            )
+            model.refreshAgentActivitySnapshots(now: now)
+            XCTAssertEqual(
+                model.startingPrompt(for: sActivity.id),
+                "  Typed directly in terminal\n    indented line"
+            )
+
+            // 3. First remote prompt records startingPrompt, and later prompts do not overwrite it.
+            XCTAssertEqual(model.sendRemotePrompt(sessionId: sRemote.id, value: "First remote prompt"), .sent)
+            XCTAssertEqual(model.sendRemotePrompt(sessionId: sRemote.id, value: "Second follow-up prompt"), .sent)
+            XCTAssertEqual(sentRemotePrompts, ["First remote prompt", "Second follow-up prompt"])
+            XCTAssertEqual(model.startingPrompt(for: sRemote.id), "First remote prompt")
+
+            // 4. Transcript fallback retries after an initial nil lookup before transcript.json exists,
+            // ignores non-foreground turns, and recovers the first foreground turn's userContent.
+            XCTAssertNil(model.startingPrompt(for: sTranscript.id))
+            let transcriptJSON = """
+            {
+              "schemaVersion": 4,
+              "updatedAt": "2026-10-30T00:00:05Z",
+              "copilotSessionId": "11111111-2222-3333-4444-555555555555",
+              "revision": "r1",
+              "turns": [
+                {
+                  "id": "t0",
+                  "startedAt": "2026-10-30T00:00:00Z",
+                  "endedAt": "2026-10-30T00:00:01Z",
+                  "kind": "scheduled",
+                  "userContent": "Scheduled background check",
+                  "assistantMessages": [],
+                  "tools": [],
+                  "isAborted": false
+                },
+                {
+                  "id": "t1",
+                  "startedAt": "2026-10-30T00:00:02Z",
+                  "endedAt": "2026-10-30T00:00:04Z",
+                  "kind": "foreground",
+                  "userContent": "Recovered from transcript turn 1",
+                  "assistantMessages": [],
+                  "tools": [],
+                  "isAborted": false
+                }
+              ]
+            }
+            """
+            try Data(transcriptJSON.utf8).write(
+                to: root.appendingPathComponent("\(sTranscript.id).transcript.json"),
+                options: .atomic
+            )
+            XCTAssertEqual(model.startingPrompt(for: sTranscript.id), "Recovered from transcript turn 1")
+
+            // Verify all three recovered prompts are persisted in state.json.
+            guard case .loaded(let persisted) = repository.load() else {
+                return XCTFail("Expected persisted state to load")
+            }
+            let persistedPrompts = Dictionary(
+                uniqueKeysWithValues: persisted.projects[0].sessions.map { ($0.id, $0.startingPrompt) }
+            )
+            XCTAssertEqual(
+                persistedPrompts[sActivity.id] ?? nil,
+                "  Typed directly in terminal\n    indented line"
+            )
+            XCTAssertEqual(persistedPrompts[sRemote.id] ?? nil, "First remote prompt")
+            XCTAssertEqual(persistedPrompts[sTranscript.id] ?? nil, "Recovered from transcript turn 1")
+        }
+    }
 }

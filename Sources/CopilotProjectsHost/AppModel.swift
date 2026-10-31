@@ -26,6 +26,7 @@ struct RecentlyClosedSession: Equatable, Sendable {
     var pullRequestKeys: [String]?
     var parentSessionId: String?
     var copilotSessionId: String?
+    var startingPrompt: String? = nil
 }
 
 /// Single source of truth. Holds value-type projects/sessions (observed) and live
@@ -475,6 +476,8 @@ final class AppModel: ObservableObject {
     private let forcedSessionDestroyer: ForcedSessionDestroyer
     private let alertPresenter: (NSAlert) -> NSApplication.ModalResponse
     private var pendingSessionDestroys: [String: PendingSessionDestroy] = [:]
+    private var checkedTranscriptStartingPromptSessions: Set<String> = []
+    private var checkedTranscriptStartingPromptSignatures: [String: FileSignature] = [:]
 
     var remoteControlDeliveryEpoch: String { remoteControlDeliveryLedger.epoch }
 
@@ -1455,7 +1458,12 @@ final class AppModel: ObservableObject {
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
         let sessionHostId = resolvedHost.isLocal ? nil : resolvedHost.id
-        let session = Session(title: "Copilot", cwd: cwd, hostId: sessionHostId)
+        let session = Session(
+            title: "Copilot",
+            cwd: cwd,
+            hostId: sessionHostId,
+            startingPrompt: (prompt?.isEmpty == false) ? prompt : nil
+        )
         let previousSelection = projects[pi].selectedSessionId
         projects[pi].sessions.append(session)
         projects[pi].selectedSessionId = session.id
@@ -1474,13 +1482,150 @@ final class AppModel: ObservableObject {
     }
 
     func startingPrompt(for sessionId: String) -> String? {
-        controllers[sessionId]?.startingPrompt
+        guard let loc = locateIndex(sessionId) else { return nil }
+        if let stored = projectStorage[loc.p].sessions[loc.s].startingPrompt, !stored.isEmpty {
+            return stored
+        }
+        if let inMemory = controllers[sessionId]?.startingPrompt, !inMemory.isEmpty {
+            projectStorage[loc.p].sessions[loc.s].startingPrompt = inMemory
+            save()
+            return inMemory
+        }
+        if let activityPrompt = projectStorage[loc.p].sessions[loc.s].agentActivity?.startingPrompt,
+           !activityPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            projectStorage[loc.p].sessions[loc.s].startingPrompt = activityPrompt
+            save()
+            return activityPrompt
+        }
+        if !checkedTranscriptStartingPromptSessions.contains(sessionId),
+           let firstPrompt = loadTranscriptStartingPrompt(sessionId: sessionId) {
+            checkedTranscriptStartingPromptSessions.insert(sessionId)
+            projectStorage[loc.p].sessions[loc.s].startingPrompt = firstPrompt
+            save()
+            return firstPrompt
+        }
+        return nil
+    }
+
+    private func loadTranscriptStartingPrompt(sessionId: String) -> String? {
+        guard let signature = currentTranscriptStartingPromptSignature(sessionId: sessionId) else {
+            return nil
+        }
+        if checkedTranscriptStartingPromptSignatures[sessionId] == signature {
+            return nil
+        }
+        checkedTranscriptStartingPromptSignatures[sessionId] = signature
+        guard let snapshot = loadTranscriptSnapshotForStartingPrompt(sessionId: sessionId) else {
+            return nil
+        }
+        let allTurns = (snapshot.droppedTurns ?? []) + snapshot.turns
+        if let foregroundTurn = allTurns.first(where: {
+            $0.kind == "foreground"
+                && !$0.userContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) {
+            return foregroundTurn.userContent
+        }
+        return nil
+    }
+
+    private func currentTranscriptStartingPromptSignature(sessionId: String) -> FileSignature? {
+        let primaryPath = Paths.transcriptSnapshotPath(sessionId: sessionId)
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: primaryPath) {
+            return FileSignature(attributes: attrs)
+        }
+        let fallbackPath = agentActivityDirectory
+            .appendingPathComponent("\(sessionId).transcript.json").path
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: fallbackPath) {
+            return FileSignature(attributes: attrs)
+        }
+        return nil
+    }
+
+    private func loadTranscriptSnapshotForStartingPrompt(sessionId: String) -> TranscriptSnapshot? {
+        if let settled = TranscriptController.loadRemoteSnapshotIfSettled(sessionId: sessionId),
+           !settled.copilotSessionId.isEmpty {
+            return settled
+        }
+        guard agentActivityDirectory.standardizedFileURL != Paths.sessionsDir.standardizedFileURL,
+              TranscriptController.transcriptOwnerAllowsRead(
+                  sessionId: sessionId,
+                  directory: agentActivityDirectory
+              ) else {
+            return nil
+        }
+        let sealedURL = agentActivityDirectory.appendingPathComponent("\(sessionId).transcript.json")
+        let liveURL = agentActivityDirectory.appendingPathComponent("\(sessionId).transcript-live.json")
+        let liveData = try? Data(contentsOf: liveURL)
+        guard let sealedData = try? Data(contentsOf: sealedURL),
+              let snapshot = TranscriptFiles.snapshot(
+                  sealed: sealedData,
+                  live: liveData,
+                  decoder: Self.transcriptStartingPromptDecoder()
+              ),
+              !snapshot.copilotSessionId.isEmpty,
+              !TranscriptController.isCopilotSessionQuarantined(
+                  sessionId: sessionId,
+                  copilotSessionId: snapshot.copilotSessionId,
+                  directory: agentActivityDirectory
+              ) else {
+            return nil
+        }
+        return snapshot
+    }
+
+    private nonisolated static func transcriptStartingPromptDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let plain = Date.ISO8601FormatStyle()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let value = try container.decode(String.self)
+            if let date = try? fractional.parse(value) { return date }
+            if let date = try? plain.parse(value) { return date }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid ISO-8601 timestamp: \(value)"
+            )
+        }
+        return decoder
     }
 
     func copyStartingPrompt(for sessionId: String) {
         guard let prompt = startingPrompt(for: sessionId) else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(prompt, forType: .string)
+    }
+
+    func presentStartingPrompt(for sessionId: String) {
+        guard let prompt = startingPrompt(for: sessionId) else { return }
+        let alert = NSAlert()
+        alert.messageText = "Starting Prompt"
+        alert.informativeText = locateIndex(sessionId).map { projects[$0.p].sessions[$0.s].title } ?? ""
+
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 440, height: 180))
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.font = .systemFont(ofSize: NSFont.systemFontSize)
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+        textView.autoresizingMask = [.width]
+        textView.string = prompt
+        textView.setAccessibilityLabel("Starting prompt")
+
+        let scrollView = NSScrollView(frame: textView.frame)
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+        scrollView.documentView = textView
+
+        alert.accessoryView = scrollView
+        alert.addButton(withTitle: "Copy Starting Prompt")
+        alert.addButton(withTitle: "Done")
+        if alertPresenter(alert) == .alertFirstButtonReturn {
+            copyStartingPrompt(for: sessionId)
+        }
     }
 
     func addAdversarialReviewSessionInteractive(
@@ -1537,10 +1682,15 @@ final class AppModel: ObservableObject {
 
         let cwd = defaultCwd(forProjectIndex: pi, targetHost: resolvedHost)
         let sessionHostId = resolvedHost.isLocal ? nil : resolvedHost.id
-        let session = Session(title: target.title, cwd: cwd, hostId: sessionHostId)
+        let prompt = pullRequestReviewPrompt(for: target)
+        let session = Session(
+            title: target.title,
+            cwd: cwd,
+            hostId: sessionHostId,
+            startingPrompt: prompt
+        )
         projects[pi].sessions.append(session)
         projects[pi].selectedSessionId = session.id
-        let prompt = pullRequestReviewPrompt(for: target)
         launchSession(
             session.id,
             executable: copilotExecutable,
@@ -1667,6 +1817,8 @@ final class AppModel: ObservableObject {
         runtimeTrackedOwners[sid] = nil
         scheduledSnapshotsSuppressed.remove(sid)
         foregroundIdleGenerationBaselines.removeValue(forKey: sid)
+        checkedTranscriptStartingPromptSessions.remove(sid)
+        checkedTranscriptStartingPromptSignatures.removeValue(forKey: sid)
         let wasSelected = projects[pi].selectedSessionId == sid
         let previousVisibleIds = projects[pi]
             .sessionDisplayItems(expandedParentIds: expandedParentSessionIds)
@@ -1796,6 +1948,7 @@ final class AppModel: ObservableObject {
         session: Session
     ) {
         guard recentlyClosedSessions.last?.originalSessionId != session.id else { return }
+        let resolvedStartingPrompt = startingPrompt(for: session.id) ?? session.startingPrompt
         let entry = RecentlyClosedSession(
             originalSessionId: session.id,
             projectId: projectId,
@@ -1805,7 +1958,8 @@ final class AppModel: ObservableObject {
             hostId: session.hostId,
             pullRequestKeys: session.pullRequestKeys,
             parentSessionId: session.parentSessionId,
-            copilotSessionId: resolvedCopilotSessionId(for: session)
+            copilotSessionId: resolvedCopilotSessionId(for: session),
+            startingPrompt: resolvedStartingPrompt
         )
         recentlyClosedSessions.append(entry)
         if recentlyClosedSessions.count > Self.maxRecentlyClosedSessions {
@@ -1880,6 +2034,11 @@ final class AppModel: ObservableObject {
         if let cid = entry.copilotSessionId,
            let existingId = tabHoldingCopilotSession(cid.lowercased(), now: Date()),
            let loc = locateIndex(existingId) {
+            if projects[loc.p].sessions[loc.s].startingPrompt == nil,
+               let prompt = entry.startingPrompt, !prompt.isEmpty {
+                projects[loc.p].sessions[loc.s].startingPrompt = prompt
+                save()
+            }
             selectedProjectId = projects[loc.p].id
             selectSession(projectId: projects[loc.p].id, sessionId: existingId)
             focusActiveTerminal()
@@ -1908,7 +2067,8 @@ final class AppModel: ObservableObject {
                 )
             },
             pullRequestKeys: entry.pullRequestKeys,
-            parentSessionId: validParentId
+            parentSessionId: validParentId,
+            startingPrompt: entry.startingPrompt
         )
         let insertIndex = min(max(0, entry.sessionIndex), projects[pi].sessions.count)
         projects[pi].sessions.insert(session, at: insertIndex)

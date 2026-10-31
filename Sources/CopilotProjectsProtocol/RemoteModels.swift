@@ -266,6 +266,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     /// Physical memory footprint in bytes of the session's active process tree,
     /// quantized to 10 MB increments (`nil` when unavailable or not sampled).
     public let memoryUsageBytes: Int64?
+    /// Initial prompt that started or first drove this session (`nil` when absent).
+    public let startingPrompt: String?
 
     public init(
         id: String,
@@ -290,7 +292,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         hostId: String? = nil,
         hostDisplayName: String? = nil,
         parentSessionId: String? = nil,
-        memoryUsageBytes: Int64? = nil
+        memoryUsageBytes: Int64? = nil,
+        startingPrompt: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -315,6 +318,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.hostDisplayName = hostDisplayName
         self.parentSessionId = parentSessionId
         self.memoryUsageBytes = memoryUsageBytes
+        self.startingPrompt = startingPrompt
     }
 }
 
