@@ -1005,6 +1005,7 @@ private struct SessionList: View {
                             }
                             if model.startingPrompt(for: session.id) != nil {
                                 Button("Copy Starting Prompt") { model.copyStartingPrompt(for: session.id) }
+                                Button("View Starting Prompt…") { model.presentStartingPrompt(for: session.id) }
                                 Divider()
                             }
                             if session.offersMarkAsRead {

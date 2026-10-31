@@ -401,9 +401,9 @@ Host jumpbox.internal
 In the composer, Return adds a line, `⌘Return` starts Copilot, and Cancel creates
 no session. Failed preflight checks keep your draft. If Copilot or its backend becomes
 unavailable, choosing **New Terminal** discards the draft and opens a plain shell
-without submitting it. If startup fails after a session opens, right-click its row
-and choose **Copy Starting Prompt** before closing it or quitting the app. This
-in-memory copy is never automatically resubmitted.
+without submitting it. Each session remembers its starting prompt across restarts and
+reopened tabs; right-click its row to choose **Copy Starting Prompt** or **View
+Starting Prompt…**. It is never automatically resubmitted.
 
 **Ending a session stops its processes. Quitting the app does not**, when the bundled
 `dtach` backend is available. Closing the last window quits by default; enable

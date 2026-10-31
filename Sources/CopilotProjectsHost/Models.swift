@@ -12,6 +12,7 @@ struct Session: Identifiable, Codable, Equatable {
     var creationFingerprint: String?
     var pullRequestKeys: [String]?
     var parentSessionId: String?
+    var startingPrompt: String? = nil
     /// Persisted only while set, so unmarked sessions keep their saved shape.
     private var manuallyMarkedUnread: Bool?
 
@@ -95,9 +96,11 @@ struct Session: Identifiable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, parentSessionId
+        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, parentSessionId, startingPrompt
         case manuallyMarkedUnread = "markedUnread"
     }
+
+    private static let encodedStartingPromptPrefix = "b64:"
 
     init(
         id: String = UUID().uuidString,
@@ -107,6 +110,7 @@ struct Session: Identifiable, Codable, Equatable {
         creationFingerprint: String? = nil,
         pullRequestKeys: [String]? = nil,
         parentSessionId: String? = nil,
+        startingPrompt: String? = nil,
         memoryUsageBytes: Int64? = nil
     ) {
         self.id = id
@@ -116,7 +120,47 @@ struct Session: Identifiable, Codable, Equatable {
         self.creationFingerprint = creationFingerprint
         self.pullRequestKeys = pullRequestKeys
         self.parentSessionId = parentSessionId
+        self.startingPrompt = startingPrompt
         self.memoryUsageBytes = memoryUsageBytes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.title = try container.decode(String.self, forKey: .title)
+        self.cwd = try container.decode(String.self, forKey: .cwd)
+        self.hostId = try container.decodeIfPresent(String.self, forKey: .hostId)
+        self.creationFingerprint = try container.decodeIfPresent(String.self, forKey: .creationFingerprint)
+        self.pullRequestKeys = try container.decodeIfPresent([String].self, forKey: .pullRequestKeys)
+        self.parentSessionId = try container.decodeIfPresent(String.self, forKey: .parentSessionId)
+        if let rawPrompt = try container.decodeIfPresent(String.self, forKey: .startingPrompt) {
+            if rawPrompt.hasPrefix(Self.encodedStartingPromptPrefix),
+               let data = Data(base64Encoded: String(rawPrompt.dropFirst(Self.encodedStartingPromptPrefix.count))),
+               let decoded = String(data: data, encoding: .utf8) {
+                self.startingPrompt = decoded
+            } else {
+                self.startingPrompt = rawPrompt
+            }
+        } else {
+            self.startingPrompt = nil
+        }
+        self.manuallyMarkedUnread = try container.decodeIfPresent(Bool.self, forKey: .manuallyMarkedUnread)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(cwd, forKey: .cwd)
+        try container.encodeIfPresent(hostId, forKey: .hostId)
+        try container.encodeIfPresent(creationFingerprint, forKey: .creationFingerprint)
+        try container.encodeIfPresent(pullRequestKeys, forKey: .pullRequestKeys)
+        try container.encodeIfPresent(parentSessionId, forKey: .parentSessionId)
+        if let startingPrompt, !startingPrompt.isEmpty {
+            let encoded = Self.encodedStartingPromptPrefix + Data(startingPrompt.utf8).base64EncodedString()
+            try container.encode(encoded, forKey: .startingPrompt)
+        }
+        try container.encodeIfPresent(manuallyMarkedUnread, forKey: .manuallyMarkedUnread)
     }
 }
 

@@ -437,6 +437,10 @@ extension AppModel {
                 }
             }
             projects[loc.p].sessions[loc.s].creationFingerprint = boundFingerprint
+            if projects[loc.p].sessions[loc.s].startingPrompt == nil,
+               let initialPrompt, !initialPrompt.isEmpty {
+                projects[loc.p].sessions[loc.s].startingPrompt = initialPrompt
+            }
             guard persistRemoteCreation(
                 request: request,
                 creationFingerprint: boundFingerprint,
@@ -548,7 +552,8 @@ extension AppModel {
             hostId: sessionHostId,
             creationFingerprint: fingerprint,
             pullRequestKeys: pullRequestKeys,
-            parentSessionId: resolvedParentSessionId
+            parentSessionId: resolvedParentSessionId,
+            startingPrompt: (initialPrompt?.isEmpty == false) ? initialPrompt : nil
         )
         let previousSelection = projects[pi].selectedSessionId
         projects[pi].sessions.append(session)
@@ -780,7 +785,8 @@ extension AppModel {
                             parentSessionId: effectiveParents[session.id],
                             memoryUsageBytes: providedSessionMemory.map {
                                 ProcessTree.quantizeSessionMemoryBytes($0[session.id])
-                            } ?? session.memoryUsageBytes
+                            } ?? session.memoryUsageBytes,
+                            startingPrompt: startingPrompt(for: session.id)
                         )
                     }
                 )
@@ -992,7 +998,21 @@ extension AppModel {
             }
             return .invalid
         }
+        recordStartingPromptIfNeeded(sessionId: sessionId, prompt: value)
         return .sent
+    }
+
+    private func recordStartingPromptIfNeeded(sessionId: String, prompt: String) {
+        let normalized = prompt
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              startingPrompt(for: sessionId) == nil,
+              let loc = locateIndex(sessionId) else {
+            return
+        }
+        projects[loc.p].sessions[loc.s].startingPrompt = normalized
+        save()
     }
 
     /// Whether a remote message may be sent to a session right now. Readiness of the
