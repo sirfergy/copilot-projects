@@ -3939,13 +3939,9 @@ if (validSessionId && socketPath) {
 
     function syncStartingPromptFromTranscript() {
         if (startingPrompt !== null) return false;
-        for (const { turn } of recentlyDroppedTurns) {
-            if (turn?.kind === "foreground"
-                    && typeof turn.userContent === "string"
-                    && turn.userContent.trim().length > 0) {
-                startingPrompt = turn.userContent;
-                return true;
-            }
+        if (recentlyDroppedTurns.length > 0
+                || transcriptTurns.length >= MAX_TRANSCRIPT_TURNS) {
+            return false;
         }
         for (const turn of transcriptTurns) {
             if (turn?.kind === "foreground"
@@ -5412,7 +5408,9 @@ if (validSessionId && socketPath) {
         currentTurnKind = event.data.source?.startsWith("schedule-")
             ? "scheduled"
             : "foreground";
-        if (classifyUserMessage(event) === "foreground" && startingPrompt === null) {
+        if (transcriptInitialized
+                && classifyUserMessage(event) === "foreground"
+                && startingPrompt === null) {
             const prompt = boundedText(event.data?.content);
             if (prompt.trim().length > 0) {
                 startingPrompt = prompt;

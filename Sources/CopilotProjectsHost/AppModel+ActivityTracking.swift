@@ -383,8 +383,10 @@ extension AppModel {
                     runtimeTrackedOwners[sessionId] = owner.lowercased()
                 }
                 if nextProjects[pi].sessions[si].startingPrompt == nil,
-                   let rawPrompt = snapshot?.startingPrompt,
-                   !rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                   let rawPrompt = validatedActivityStartingPrompt(
+                       sessionId: sessionId,
+                       snapshot: snapshot
+                   ) {
                     nextProjects[pi].sessions[si].startingPrompt = rawPrompt
                     activityChanged = true
                     startingPromptChanged = true

@@ -684,9 +684,46 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(sentRemotePrompts, ["First remote prompt", "Second follow-up prompt"])
             XCTAssertEqual(model.startingPrompt(for: sRemote.id), "First remote prompt")
 
-            // 4. Transcript fallback retries after an initial nil lookup before transcript.json exists,
-            // ignores non-foreground turns, and recovers the first foreground turn's userContent.
+            // 4. Transcript fallback ignores truncated transcripts (with droppedTurns), retries when
+            // transcript-live.json or sealed transcript updates, and ignores non-foreground turns.
+            let truncatedTranscriptJSON = """
+            {
+              "schemaVersion": 4,
+              "updatedAt": "2026-10-30T00:00:01Z",
+              "copilotSessionId": "11111111-2222-3333-4444-555555555555",
+              "revision": "r0",
+              "droppedTurns": [
+                {
+                  "id": "dropped-1",
+                  "startedAt": "2026-10-30T00:00:00Z",
+                  "endedAt": "2026-10-30T00:00:01Z",
+                  "kind": "foreground",
+                  "userContent": "Evicted turn",
+                  "assistantMessages": [],
+                  "tools": [],
+                  "isAborted": false
+                }
+              ],
+              "turns": [
+                {
+                  "id": "t201",
+                  "startedAt": "2026-10-30T00:00:02Z",
+                  "endedAt": "2026-10-30T00:00:04Z",
+                  "kind": "foreground",
+                  "userContent": "Follow-up turn after eviction",
+                  "assistantMessages": [],
+                  "tools": [],
+                  "isAborted": false
+                }
+              ]
+            }
+            """
+            try Data(truncatedTranscriptJSON.utf8).write(
+                to: root.appendingPathComponent("\(sTranscript.id).transcript.json"),
+                options: .atomic
+            )
             XCTAssertNil(model.startingPrompt(for: sTranscript.id))
+
             let transcriptJSON = """
             {
               "schemaVersion": 4,

@@ -477,7 +477,7 @@ final class AppModel: ObservableObject {
     private let alertPresenter: (NSAlert) -> NSApplication.ModalResponse
     private var pendingSessionDestroys: [String: PendingSessionDestroy] = [:]
     private var checkedTranscriptStartingPromptSessions: Set<String> = []
-    private var checkedTranscriptStartingPromptSignatures: [String: FileSignature] = [:]
+    private var checkedTranscriptStartingPromptRevisions: [String: String] = [:]
 
     var remoteControlDeliveryEpoch: String { remoteControlDeliveryLedger.epoch }
 
@@ -1491,8 +1491,10 @@ final class AppModel: ObservableObject {
             save()
             return inMemory
         }
-        if let activityPrompt = projectStorage[loc.p].sessions[loc.s].agentActivity?.startingPrompt,
-           !activityPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if let activityPrompt = validatedActivityStartingPrompt(
+            sessionId: sessionId,
+            snapshot: projectStorage[loc.p].sessions[loc.s].agentActivity
+        ) {
             projectStorage[loc.p].sessions[loc.s].startingPrompt = activityPrompt
             save()
             return activityPrompt
@@ -1507,19 +1509,54 @@ final class AppModel: ObservableObject {
         return nil
     }
 
+    func validatedActivityStartingPrompt(
+        sessionId: String,
+        snapshot: AgentActivitySnapshot?
+    ) -> String? {
+        guard let rawPrompt = snapshot?.startingPrompt,
+              !rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              TranscriptController.transcriptOwnerAllowsRead(
+                  sessionId: sessionId,
+                  directory: resumeMarkerDirectory
+              ) else {
+            return nil
+        }
+        if let rawActivityId = snapshot?.copilotSessionId?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !rawActivityId.isEmpty {
+            guard TerminalController.isSafeSessionId(rawActivityId),
+                  !TranscriptController.isCopilotSessionQuarantined(
+                      sessionId: sessionId,
+                      copilotSessionId: rawActivityId,
+                      directory: resumeMarkerDirectory
+                  ) else {
+                return nil
+            }
+            let validatedMarker = validatedCopilotSessionMarker(for: sessionId)
+            guard validatedMarker == nil
+                || validatedMarker?.caseInsensitiveCompare(rawActivityId) == .orderedSame else {
+                return nil
+            }
+        }
+        return rawPrompt
+    }
+
     private func loadTranscriptStartingPrompt(sessionId: String) -> String? {
-        guard let signature = currentTranscriptStartingPromptSignature(sessionId: sessionId) else {
+        guard let revision = currentTranscriptStartingPromptRevision(sessionId: sessionId) else {
             return nil
         }
-        if checkedTranscriptStartingPromptSignatures[sessionId] == signature {
+        if checkedTranscriptStartingPromptRevisions[sessionId] == revision {
             return nil
         }
-        checkedTranscriptStartingPromptSignatures[sessionId] = signature
-        guard let snapshot = loadTranscriptSnapshotForStartingPrompt(sessionId: sessionId) else {
+        let loaded = loadTranscriptSnapshotForStartingPrompt(sessionId: sessionId)
+        guard loaded.settled else { return nil }
+        checkedTranscriptStartingPromptRevisions[sessionId] = revision
+        guard let snapshot = loaded.snapshot,
+              (snapshot.droppedTurns ?? []).isEmpty,
+              snapshot.turns.count < TranscriptSnapshot.maximumRemoteTurnLimit else {
             return nil
         }
-        let allTurns = (snapshot.droppedTurns ?? []) + snapshot.turns
-        if let foregroundTurn = allTurns.first(where: {
+        if let foregroundTurn = snapshot.turns.first(where: {
             $0.kind == "foreground"
                 && !$0.userContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }) {
@@ -1528,30 +1565,53 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    private func currentTranscriptStartingPromptSignature(sessionId: String) -> FileSignature? {
-        let primaryPath = Paths.transcriptSnapshotPath(sessionId: sessionId)
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: primaryPath) {
-            return FileSignature(attributes: attrs)
-        }
-        let fallbackPath = agentActivityDirectory
+    private func currentTranscriptStartingPromptRevision(sessionId: String) -> String? {
+        let primarySealedPath = Paths.transcriptSnapshotPath(sessionId: sessionId)
+        let fallbackSealedPath = agentActivityDirectory
             .appendingPathComponent("\(sessionId).transcript.json").path
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: fallbackPath) {
-            return FileSignature(attributes: attrs)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: primarySealedPath) || fm.fileExists(atPath: fallbackSealedPath) else {
+            return nil
         }
-        return nil
+        let baseRevision = TranscriptController.remoteRevision(sessionId: sessionId).generation
+        guard agentActivityDirectory.standardizedFileURL != Paths.sessionsDir.standardizedFileURL else {
+            return baseRevision
+        }
+        let suffixes = [
+            "transcript.json",
+            "transcript-live.json",
+            "transcript-owner.json",
+            "transcript-quarantine.json",
+        ]
+        let customRevision = suffixes.map { suffix -> String in
+            let path = agentActivityDirectory.appendingPathComponent("\(sessionId).\(suffix)").path
+            guard let attrs = try? fm.attributesOfItem(atPath: path) else { return "missing" }
+            let sig = FileSignature(attributes: attrs)
+            return "\(sig.fileNumber):\(sig.size):\(sig.modifiedAt)"
+        }.joined(separator: "|")
+        return "\(baseRevision)||\(customRevision)"
     }
 
-    private func loadTranscriptSnapshotForStartingPrompt(sessionId: String) -> TranscriptSnapshot? {
-        if let settled = TranscriptController.loadRemoteSnapshotIfSettled(sessionId: sessionId),
-           !settled.copilotSessionId.isEmpty {
-            return settled
+    private func loadTranscriptSnapshotForStartingPrompt(
+        sessionId: String
+    ) -> (snapshot: TranscriptSnapshot?, settled: Bool) {
+        let primarySealedPath = Paths.transcriptSnapshotPath(sessionId: sessionId)
+        if FileManager.default.fileExists(atPath: primarySealedPath) {
+            guard let settled = TranscriptController.loadRemoteSnapshotIfSettled(sessionId: sessionId) else {
+                return (nil, false)
+            }
+            if !settled.copilotSessionId.isEmpty {
+                return (settled, true)
+            }
         }
-        guard agentActivityDirectory.standardizedFileURL != Paths.sessionsDir.standardizedFileURL,
-              TranscriptController.transcriptOwnerAllowsRead(
-                  sessionId: sessionId,
-                  directory: agentActivityDirectory
-              ) else {
-            return nil
+        guard agentActivityDirectory.standardizedFileURL != Paths.sessionsDir.standardizedFileURL else {
+            return (nil, true)
+        }
+        guard TranscriptController.transcriptOwnerAllowsRead(
+            sessionId: sessionId,
+            directory: agentActivityDirectory
+        ) else {
+            return (nil, true)
         }
         let sealedURL = agentActivityDirectory.appendingPathComponent("\(sessionId).transcript.json")
         let liveURL = agentActivityDirectory.appendingPathComponent("\(sessionId).transcript-live.json")
@@ -1568,9 +1628,9 @@ final class AppModel: ObservableObject {
                   copilotSessionId: snapshot.copilotSessionId,
                   directory: agentActivityDirectory
               ) else {
-            return nil
+            return (nil, true)
         }
-        return snapshot
+        return (snapshot, true)
     }
 
     private nonisolated static func transcriptStartingPromptDecoder() -> JSONDecoder {
@@ -1818,7 +1878,7 @@ final class AppModel: ObservableObject {
         scheduledSnapshotsSuppressed.remove(sid)
         foregroundIdleGenerationBaselines.removeValue(forKey: sid)
         checkedTranscriptStartingPromptSessions.remove(sid)
-        checkedTranscriptStartingPromptSignatures.removeValue(forKey: sid)
+        checkedTranscriptStartingPromptRevisions.removeValue(forKey: sid)
         let wasSelected = projects[pi].selectedSessionId == sid
         let previousVisibleIds = projects[pi]
             .sessionDisplayItems(expandedParentIds: expandedParentSessionIds)

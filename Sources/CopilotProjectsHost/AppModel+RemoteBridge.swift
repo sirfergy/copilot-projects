@@ -1437,7 +1437,7 @@ extension AppModel {
             activityDirectory: agentActivityDirectory,
             resumeMarkerDirectory: resumeMarkerDirectory
         )
-        let result = adapter.submit(
+        return adapter.submit(
             sessionId: sessionId,
             kind: kind,
             operation: operation,
@@ -1502,10 +1502,6 @@ extension AppModel {
                 )
             }
         )
-        if result == .accepted, action.kind == .send, let prompt = action.prompt {
-            recordStartingPromptIfNeeded(sessionId: sessionId, prompt: prompt)
-        }
-        return result
     }
 
     private struct SessionActionHandoff: Encodable {
