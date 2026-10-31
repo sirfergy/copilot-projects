@@ -698,12 +698,12 @@ struct ProjectRow: View, Equatable {
         if !descriptions.isEmpty {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 7) {
-                    if running > 0 { activityCount(running, "play.fill", .green) }
+                    if running > 0 { activityCount(running, "waveform", .green) }
                     if background > 0 { activityCount(background, "person.2.fill", .purple) }
-                    if scheduled > 0 { activityCount(scheduled, "clock", .indigo) }
-                    if waiting > 0 { activityCount(waiting, "exclamationmark.circle", .orange) }
+                    if scheduled > 0 { activityCount(scheduled, "clock.arrow.circlepath", .indigo) }
+                    if waiting > 0 { activityCount(waiting, "questionmark.bubble.fill", .orange) }
                     // Same symbol as the session row's failure indicator.
-                    if failed > 0 { activityCount(failed, "exclamationmark.circle.fill", .red) }
+                    if failed > 0 { activityCount(failed, "exclamationmark.triangle.fill", .red) }
                 }
                 .fixedSize()
                 Text(descriptions[0]).lineLimit(1)
@@ -724,14 +724,11 @@ struct ProjectRow: View, Equatable {
     }
 }
 
-/// The indicator at the left of a session tab. A spinner means the agent is busy
-/// (running); orange means it's waiting on your input; a red exclamation means
-/// its latest request failed; blue means it has finished and you haven't viewed
-/// it yet ("ready for interaction"); idle shows nothing.
-/// The 9pt frame keeps the slot a constant size whether or not a dot is shown.
+/// The 18×18 status badge at the left of a session row.
 /// SessionRow suppresses its separate unread dot while this indicator is blue.
 struct SessionStateIndicator: View, Equatable {
     let session: Session
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.session.displayStatus == rhs.session.displayStatus
@@ -739,43 +736,45 @@ struct SessionStateIndicator: View, Equatable {
             && lhs.session.finishedUnseen == rhs.session.finishedUnseen
     }
 
-    var body: some View {
-        statusIndicator
+    static func symbolName(for session: Session) -> String {
+        switch session.displayStatus {
+        case .running:
+            return "waveform"
+        case .waiting:
+            return "questionmark.bubble.fill"
+        case .idle:
+            if session.failedRequest != nil { return "exclamationmark.triangle.fill" }
+            return session.finishedUnseen ? "checkmark.circle.fill" : "terminal.fill"
+        }
     }
 
-    private var statusIndicator: some View {
-        Group {
-            switch kind {
-            case .busy:
-                ProgressView()
-                    .controlSize(.small)
-                    .scaleEffect(0.6)
-            case .dot(let color):
-                Circle()
-                    .fill(color)
-                    .overlay(Circle().stroke(.black.opacity(0.15), lineWidth: 0.5))
-            case .failed:
-                Image(systemName: "exclamationmark.circle.fill")
-                    .resizable()
-                    .scaledToFit()
-                    .foregroundStyle(.red)
-            case .none:
-                Color.clear
-            }
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(badgeTint.opacity(isIdle ? 0.08 : 0.16))
+            Circle()
+                .strokeBorder(badgeTint.opacity(isIdle ? 0.16 : 0.38), lineWidth: 0.75)
+            Image(systemName: Self.symbolName(for: session))
+                .font(.system(size: isIdle ? 8.5 : 10, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(isIdle ? StudioStyle.secondaryText.opacity(0.8) : badgeTint)
+                .symbolEffect(.variableColor.iterative, isActive: session.displayStatus == .running && !reduceMotion)
         }
-        .frame(width: 9, height: 9)
+        .frame(width: 18, height: 18)
         .help(help)
     }
 
-    private enum Kind { case busy, dot(Color), failed, none }
+    private var isIdle: Bool {
+        session.displayStatus == .idle && session.failedRequest == nil && !session.finishedUnseen
+    }
 
-    private var kind: Kind {
+    private var badgeTint: Color {
         switch session.displayStatus {
-        case .running: return .busy
-        case .waiting: return .dot(.orange)
+        case .running: return .green
+        case .waiting: return .orange
         case .idle:
-            if session.failedRequest != nil { return .failed }
-            return session.finishedUnseen ? .dot(.blue) : .none
+            if session.failedRequest != nil { return .red }
+            return session.finishedUnseen ? .blue : .primary
         }
     }
 
@@ -793,15 +792,16 @@ struct SessionStateIndicator: View, Equatable {
 }
 
 /// Shown on a tab and its project's sidebar row while background work is active.
-/// Sized to the reserved 9pt slot so the project name stays aligned.
 struct BackgroundWorkBadge: View {
     var body: some View {
-        Image(systemName: "person.2.fill")
-            .resizable()
-            .scaledToFit()
-            .frame(width: 9, height: 9)
-            .foregroundStyle(.purple)
-            .help("background work active")
+        ZStack {
+            Circle().fill(Color.purple.opacity(0.15))
+            Image(systemName: "person.2.fill")
+                .font(.system(size: 8.5, weight: .semibold))
+                .foregroundStyle(.purple)
+        }
+        .frame(width: 14, height: 14)
+        .help("background work active")
     }
 }
 
@@ -809,12 +809,14 @@ struct ScheduleBadge: View {
     let schedules: [TrackedSchedule]
 
     var body: some View {
-        Image(systemName: "clock.arrow.circlepath")
-            .resizable()
-            .scaledToFit()
-            .frame(width: 10, height: 10)
-            .foregroundStyle(.indigo)
-            .help(schedules.map(\.helpText).joined(separator: "\n\n"))
+        ZStack {
+            Circle().fill(Color.indigo.opacity(0.15))
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 8.5, weight: .semibold))
+                .foregroundStyle(.indigo)
+        }
+        .frame(width: 14, height: 14)
+        .help(schedules.map(\.helpText).joined(separator: "\n\n"))
     }
 }
 
@@ -1383,6 +1385,16 @@ struct SessionRow: View, Equatable {
 
     var stateLabel: String { session.attentionLabel }
 
+    var stateColor: Color {
+        switch session.displayStatus {
+        case .running: return .green
+        case .waiting: return .orange
+        case .idle:
+            if session.failedRequest != nil { return .red }
+            return session.finishedUnseen ? .blue : StudioStyle.secondaryText
+        }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             if isChild {
@@ -1411,6 +1423,8 @@ struct SessionRow: View, Equatable {
                             .help(session.statusText ?? session.title)
                         HStack(spacing: 6) {
                             Text(stateLabel)
+                                .foregroundStyle(stateColor)
+                                .fontWeight(session.displayStatus != .idle || session.failedRequest != nil || session.finishedUnseen ? .medium : .regular)
                                 .lineLimit(1)
                             if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
                                 SessionMemoryBadge(bytes: memoryBytes)
