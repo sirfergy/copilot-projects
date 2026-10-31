@@ -4084,7 +4084,36 @@ test("turn transitions and transient RPC errors keep fresh workflow capabilities
   assert.equal(merged.maxAiCredits, null);
   assert.equal(merged.capabilities.includes("set-session-budget"), false);
 
-  // 5. A user.message after a remote-session heartbeat preserves the remote error until locality recovers.
+  // 5. A runtime activity query timeout preserves fresh workflow capabilities until the observation
+  //    ages past 15s, without advancing observedAtMilliseconds.
+  runtime.session.usageHandler = async () => ({ totalNanoAiu: 11e9 });
+  runtime.session.processingHandler = () => new Promise(() => {});
+  runtime.intervalCallback();
+  await waitForActivity(runtime, (activity) => activity?.error?.includes("timed out"));
+  const afterTimeout = readSnapshot(runtime);
+  assert.equal(afterTimeout.runtimeActivity.processing, null);
+  assert.equal(afterTimeout.workflow.observedAtMilliseconds, heartbeatObservedAt);
+  assert.ok(afterTimeout.workflow.capabilities.includes("session-send"));
+  assert.equal(afterTimeout.workflow.sendReady, true);
+  let releaseExpiredPoll;
+  runtime.session.processingHandler = () => new Promise((resolve) => { releaseExpiredPoll = resolve; });
+  runtime.intervalCallback();
+  Date.now = () => heartbeatObservedAt + 16_000;
+  try {
+    runtime.intervalCallback();
+    const expired = readSnapshot(runtime).workflow;
+    assert.deepEqual(expired.capabilities, []);
+    assert.equal(expired.sendReady, false);
+  } finally {
+    Date.now = originalDateNow;
+  }
+  runtime.session.processingHandler = async () => ({ processing: false });
+  releaseExpiredPoll({ processing: false });
+  await waitForActivity(runtime, (activity) => activity?.processing === false && activity.error === null);
+  assert.ok(readSnapshot(runtime).workflow.capabilities.includes("session-send"));
+
+  // 6. A user.message, transient rejection, or timeout after a remote-session heartbeat preserves
+  //    the remote error and cleared workflow observation until locality recovers.
   runtime.session.metadataHandler = async ({ sessionId }) => ({ sessionId, isRemote: true });
   runtime.intervalCallback();
   await waitForActivity(runtime, (activity) => activity?.error === "remote");
@@ -4097,6 +4126,203 @@ test("turn transitions and transient RPC errors keep fresh workflow capabilities
   assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
   assert.equal(readSnapshot(runtime).workflow.legacyPromptFallback, true);
   releaseRemoteTurn?.({ processing: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  runtime.session.processingHandler = async () => ({ processing: false });
+  let transientRejections = 0;
+  runtime.session.metadataHandler = async () => {
+    transientRejections += 1;
+    throw new Error("transient metadata failure");
+  };
+  runtime.intervalCallback();
+  await waitFor(() => transientRejections > 0, "transient metadata failure did not run");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(readSnapshot(runtime).runtimeActivity.error, "remote");
+  assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
+  runtime.session.metadataHandler = () => new Promise(() => {});
+  runtime.intervalCallback();
+  await new Promise((resolve) => setTimeout(resolve, 2_100));
+  assert.equal(readSnapshot(runtime).runtimeActivity.error, "remote");
+  assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
+  assert.equal(readSnapshot(runtime).workflow.legacyPromptFallback, true);
+
+  // 7. Invalid runtime session metadata also stays sticky across transient failures until valid local metadata returns.
+  runtime.session.metadataHandler = async () => ({ sessionId: uuid(), isRemote: false });
+  runtime.intervalCallback();
+  await waitForActivity(runtime, (activity) => activity?.error === "Error: invalid runtime session metadata");
+  assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
+  let invalidTransientRejections = 0;
+  runtime.session.metadataHandler = async () => {
+    invalidTransientRejections += 1;
+    throw new Error("transient metadata failure");
+  };
+  runtime.intervalCallback();
+  await waitFor(() => invalidTransientRejections > 0, "transient failure after invalid metadata did not run");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(readSnapshot(runtime).runtimeActivity.error, "Error: invalid runtime session metadata");
+  assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
+
+  // 8. Deferred metadata responses arriving after timeout withdraw and restore capabilities
+  //    in sequence order, and recovery while a workflow refresh is in flight retries that refresh.
+  runtime.session.metadataHandler = async ({ sessionId }) => ({ sessionId, isRemote: false });
+  runtime.intervalCallback();
+  await waitForActivity(runtime, (activity) => activity?.processing === false && activity.error === null);
+  await waitFor(
+    () => readSnapshot(runtime).workflow.capabilities.includes("session-send"),
+    "capabilities did not recover before deferred metadata test"
+  );
+  const deferredMetadata = [];
+  runtime.session.metadataHandler = () => new Promise((resolve) => {
+    deferredMetadata.push(resolve);
+  });
+  runtime.intervalCallback();
+  await waitForActivity(runtime, (activity) => activity?.error?.includes("timed out"));
+  assert.ok(readSnapshot(runtime).workflow.capabilities.includes("session-send"));
+  runtime.intervalCallback();
+  await new Promise((resolve) => setTimeout(resolve, 2_100));
+  assert.equal(deferredMetadata.length, 2);
+  // Poll 1 resolves late as remote -> withdraws capabilities.
+  deferredMetadata[0]({ sessionId: runtime.copilotSessionId, isRemote: true });
+  await waitForActivity(runtime, (activity) => activity?.error === "remote");
+  assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
+  // Poll 3 starts and stays deferred so we can test out-of-order late resolution.
+  let resolveOlderRemote;
+  runtime.session.metadataHandler = () => new Promise((resolve) => {
+    resolveOlderRemote ??= resolve;
+  });
+  runtime.intervalCallback();
+  await waitFor(() => resolveOlderRemote, "older deferred poll did not start");
+  // Poll 2 resolves late as local -> releases the remote latch.
+  deferredMetadata[1]({ sessionId: runtime.copilotSessionId, isRemote: false });
+  await waitForActivity(runtime, (activity) => activity?.error?.includes("timed out"));
+  // Wait for Poll 3 (and any in-flight workflow read) to time out, then start Poll 4 with valid local metadata.
+  await new Promise((resolve) => setTimeout(resolve, 3_100));
+  runtime.session.metadataHandler = async ({ sessionId }) => ({
+    sessionId, isRemote: false, sessionLimits: { maxAiCredits: 120 },
+  });
+  runtime.intervalCallback();
+  await waitForActivity(runtime, (activity) => activity?.processing === false && activity.error === null);
+  // Resolving Poll 3 late with remote metadata is ignored because Poll 4 has a newer sequence.
+  resolveOlderRemote({ sessionId: runtime.copilotSessionId, isRemote: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(readSnapshot(runtime).runtimeActivity.error, null);
+  assert.ok(readSnapshot(runtime).workflow.capabilities.includes("session-send"));
+
+  // Hold a workflow refresh open on usage, observe remote -> local recovery, then release usage
+  // and verify the queued workflow refresh retry publishes the recovered limits.
+  let releaseInFlightUsage;
+  runtime.session.usageHandler = () => new Promise((resolve) => {
+    releaseInFlightUsage = resolve;
+  });
+  await runtime.session.emit("session.usage_checkpoint", { totalNanoAiu: 9e9 });
+  await waitFor(() => releaseInFlightUsage, "in-flight workflow usage read did not start");
+  runtime.session.metadataHandler = async ({ sessionId }) => ({ sessionId, isRemote: true });
+  runtime.intervalCallback();
+  await waitForActivity(runtime, (activity) => activity?.error === "remote");
+  assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
+  runtime.session.metadataHandler = async ({ sessionId }) => ({
+    sessionId, isRemote: false, sessionLimits: { maxAiCredits: 150 },
+  });
+  runtime.intervalCallback();
+  await waitForActivity(runtime, (activity) => activity?.processing === false && activity.error === null);
+  runtime.session.usageHandler = async () => ({ totalNanoAiu: 12e9 });
+  releaseInFlightUsage({ totalNanoAiu: 9e9 });
+  await waitFor(
+    () => {
+      const workflow = readSnapshot(runtime).workflow;
+      return workflow.maxAiCredits === 150 && workflow.totalAiCredits === 12;
+    },
+    "queued workflow refresh did not publish recovered capabilities and limits"
+  );
+
+  // 9. A terminal disconnect latches terminalDisconnectError even across turn-revision churn or after timeout.
+  let rejectTurnDisconnect;
+  runtime.session.processingHandler = () => new Promise((_, reject) => {
+    rejectTurnDisconnect = reject;
+  });
+  runtime.intervalCallback();
+  await waitFor(() => rejectTurnDisconnect, "disconnect poll did not start");
+  await runtime.session.emit("assistant.turn_start", { turnId: "disconnect-turn" });
+  rejectTurnDisconnect(new Error("Connection is closed."));
+  await waitFor(
+    () => readSnapshot(runtime).error?.includes("Connection is closed"),
+    "terminal disconnect across turn-revision churn was not published"
+  );
+  assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
+});
+
+for (const handler of ["metadataHandler", "processingHandler"]) {
+  test(`terminal disconnect after ${handler} timeout withdraws workflow capabilities`, {
+    concurrency: false,
+  }, async (t) => {
+    const runtime = await createRuntime(t);
+    await waitForActivity(runtime, (activity) => activity?.processing === false && activity.error === null);
+    assert.ok(readSnapshot(runtime).workflow.capabilities.includes("session-send"));
+    let rejectRequest;
+    runtime.session[handler] = () => new Promise((_, reject) => {
+      rejectRequest = reject;
+    });
+    runtime.intervalCallback();
+    await waitFor(() => rejectRequest, "disconnect poll did not start");
+    await waitForActivity(runtime, (activity) => activity?.error?.includes("timed out"));
+    assert.ok(readSnapshot(runtime).workflow.capabilities.includes("session-send"));
+    rejectRequest(new Error("Connection is closed."));
+    await waitFor(
+      () => readSnapshot(runtime).error?.includes("Connection is closed"),
+      "terminal disconnect after timeout was not published"
+    );
+    assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
+  });
+}
+
+test("late -32601 after runtime activity timeout latches unsupported", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await waitForActivity(runtime, (activity) => activity?.processing === false && activity.error === null);
+  assert.ok(readSnapshot(runtime).workflow.capabilities.includes("session-send"));
+  let rejectProcessing;
+  runtime.session.processingHandler = () => new Promise((_, reject) => {
+    rejectProcessing = reject;
+  });
+  runtime.intervalCallback();
+  await waitFor(() => rejectProcessing, "poll did not start");
+  await waitForActivity(runtime, (activity) => activity?.error?.includes("timed out"));
+  assert.ok(readSnapshot(runtime).workflow.capabilities.includes("session-send"));
+  rejectProcessing(Object.assign(new Error("method not found"), { code: -32601 }));
+  await waitForActivity(runtime, (activity) => activity?.error === "unsupported");
+  assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
+  assert.equal(readSnapshot(runtime).workflow.legacyPromptFallback, true);
+});
+
+test("late workflow metadata reply after 3s timeout withdraws and recovers capabilities", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await workflowReady(runtime);
+  await waitForActivity(runtime, (activity) => activity?.processing === false && activity.error === null);
+  let resolveWorkflowMetadata;
+  runtime.session.metadataHandler = () => new Promise((resolve) => {
+    resolveWorkflowMetadata = resolve;
+  });
+  await runtime.session.emit("session.usage_checkpoint", { totalNanoAiu: 4e9 });
+  await waitFor(() => resolveWorkflowMetadata, "workflow metadata request did not start");
+  await new Promise((resolve) => setTimeout(resolve, 3_100));
+  assert.ok(readSnapshot(runtime).workflow.capabilities.includes("session-send"));
+  resolveWorkflowMetadata({ sessionId: runtime.copilotSessionId, isRemote: true });
+  await waitFor(
+    () => readSnapshot(runtime).workflow.capabilities.length === 0
+      && readSnapshot(runtime).workflow.legacyPromptFallback === true,
+    "late remote workflow metadata did not withdraw capabilities"
+  );
+  runtime.session.metadataHandler = async ({ sessionId }) => ({
+    sessionId, isRemote: false, sessionLimits: { maxAiCredits: 80 },
+  });
+  await runtime.session.emit("session.usage_checkpoint", { totalNanoAiu: 6e9 });
+  await waitFor(
+    () => readSnapshot(runtime).workflow.capabilities.includes("session-send")
+      && readSnapshot(runtime).workflow.maxAiCredits === 80,
+    "workflow metadata recovery did not restore capabilities"
+  );
 });
 
 test("only observed input completions certify the matching sender", {

@@ -682,9 +682,17 @@ final class CoreLogicTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let expected = "D7A1C176-B80F-4E6A-B0B5-378A70ACE162"
+        let attemptsFile = root.appendingPathComponent("attempts.txt")
         let resolver = bin.appendingPathComponent("copilot-projects")
+        // Simulate a transient timeout/signal death (no numeric exit status) on
+        // the first startup resolution attempt, followed by success on retry.
         try """
         #!/bin/sh
+        echo 1 >> '\(attemptsFile.path)'
+        COUNT=$(wc -l < '\(attemptsFile.path)' | tr -d ' ')
+        if [ "$COUNT" -eq 1 ]; then
+          kill -TERM $$
+        fi
         printf '%s\n' '\(expected)'
         """.write(to: resolver, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
@@ -727,6 +735,39 @@ final class CoreLogicTests: XCTestCase {
         let result = try JSONSerialization.jsonObject(with: output) as? [String: Any]
         XCTAssertEqual(result?["appSessionId"] as? String, expected)
         XCTAssertEqual(result?["native"] as? Bool, true)
+        let attempts = try String(contentsOf: attemptsFile, encoding: .utf8)
+            .split(whereSeparator: \.isNewline)
+        XCTAssertEqual(attempts.count, 2)
+
+        // Definitive exit status 1 ("no tab") must fail closed on the first
+        // attempt without retrying or falling back to COPILOT_PROJECTS_SESSION.
+        try Data().write(to: attemptsFile)
+        try """
+        #!/bin/sh
+        echo 1 >> '\(attemptsFile.path)'
+        exit 1
+        """.write(to: resolver, atomically: true, encoding: .utf8)
+
+        let failClosedProcess = Process()
+        let failClosedStdout = Pipe()
+        let failClosedStderr = Pipe()
+        failClosedProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        failClosedProcess.arguments = ["node", script.path]
+        failClosedProcess.environment = process.environment
+        failClosedProcess.standardOutput = failClosedStdout
+        failClosedProcess.standardError = failClosedStderr
+        try failClosedProcess.run()
+        failClosedProcess.waitUntilExit()
+
+        XCTAssertEqual(failClosedProcess.terminationStatus, 0)
+        let failClosedResult = try JSONSerialization.jsonObject(
+            with: failClosedStdout.fileHandleForReading.readDataToEndOfFile()
+        ) as? [String: Any]
+        XCTAssertEqual(failClosedResult?["appSessionId"] as? String, "")
+        XCTAssertEqual(failClosedResult?["native"] as? Bool, true)
+        let failClosedAttempts = try String(contentsOf: attemptsFile, encoding: .utf8)
+            .split(whereSeparator: \.isNewline)
+        XCTAssertEqual(failClosedAttempts.count, 1)
     }
 
     func testCopilotExtensionJavaScriptSyntax() throws {

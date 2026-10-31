@@ -35,7 +35,9 @@ const sessionResolverPath = (() => {
 // a reparented owner become displaceable within one TTL.
 const resolvedTabCache = new Map(); // pid -> { value, at }
 const RESOLVED_TAB_TTL_MS = 5_000;
-function resolveSessionForPid(pid) {
+const STARTUP_RESOLVE_TIMEOUT_MS = 5_000;
+const STARTUP_RESOLVE_ATTEMPTS = 3;
+function resolveSessionForPid(pid, timeoutMs = 1_000) {
     if (!sessionResolverPath || !Number.isInteger(pid) || pid <= 0) return null;
     const cached = resolvedTabCache.get(pid);
     if (cached && Date.now() - cached.at < RESOLVED_TAB_TTL_MS) return cached.value;
@@ -44,7 +46,7 @@ function resolveSessionForPid(pid) {
         const resolved = execFileSync(
             sessionResolverPath,
             ["resolve-session", "--pid", String(pid)],
-            { encoding: "utf8", timeout: 1_000, stdio: ["ignore", "pipe", "ignore"] }
+            { encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "ignore"] }
         ).trim();
         result = sessionIdPattern.test(resolved) ? resolved : "";
     } catch (error) {
@@ -69,7 +71,10 @@ function resolveAppSessionId() {
             native: false,
         };
     }
-    const resolved = resolveSessionForPid(process.pid);
+    let resolved = null;
+    for (let attempt = 0; attempt < STARTUP_RESOLVE_ATTEMPTS && resolved === null; attempt += 1) {
+        resolved = resolveSessionForPid(process.pid, STARTUP_RESOLVE_TIMEOUT_MS);
+    }
     return { sessionId: resolved === null ? "" : resolved, native: true };
 }
 
@@ -334,6 +339,10 @@ if (validSessionId && socketPath) {
         idleAtMilliseconds: null, error: "pending",
     };
     let runtimeActivityUnsupported = false;
+    let runtimeMetadataSeq = 0;
+    let lastSettledMetadataSeq = 0;
+    let runtimeMetadataError = null;
+    let workflowRefreshNeedsRetry = false;
     let runtimeActivityRevision = 0;
     let runtimeActivityRefresh = null;
     let runtimeIdleAtMilliseconds = null;
@@ -1459,6 +1468,39 @@ if (validSessionId && socketPath) {
         }
     }
 
+    function requestWorkflowRefresh() {
+        if (shuttingDown || runtimeActivityUnsupported || workflowRuntime === false
+            || !ownsSharedFiles()) return;
+        if (workflowRefresh?.generation === conversationGeneration) {
+            workflowRefreshNeedsRetry = true;
+            return;
+        }
+        refreshWorkflow(true);
+    }
+
+    function applyMetadataObservation(metadata, seq, expectedSessionId, {
+        refreshWorkflowOnRecovery = true,
+    } = {}) {
+        if (seq <= lastSettledMetadataSeq) return { accepted: false };
+        lastSettledMetadataSeq = seq;
+        if (metadata?.sessionId !== expectedSessionId
+            || typeof metadata?.isRemote !== "boolean") {
+            runtimeMetadataError = "Error: invalid runtime session metadata";
+            return { accepted: true, status: "invalid" };
+        }
+        if (metadata.isRemote) {
+            runtimeMetadataError = "remote";
+            return { accepted: true, status: "remote" };
+        }
+        const recoveredFromNegative = runtimeMetadataError !== null;
+        runtimeMetadataError = null;
+        if (refreshWorkflowOnRecovery && workflowRuntime !== false
+            && (recoveredFromNegative || (workflowObservation && workflowObservation.capabilities.length === 0))) {
+            requestWorkflowRefresh();
+        }
+        return { accepted: true, status: "local", recoveredFromNegative };
+    }
+
     // `heartbeat` marks the poll's own query: even an unchanged result then
     // publishes once when it advances the workflow observation, so remote
     // clients see an observation from this tick rather than the previous one.
@@ -1470,6 +1512,7 @@ if (validSessionId && socketPath) {
             runtimeActivityRefresh.heartbeat ||= heartbeat;
             return;
         }
+        const metadataSeq = ++runtimeMetadataSeq;
         const token = {
             generation: conversationGeneration,
             revision: runtimeActivityRevision,
@@ -1481,35 +1524,33 @@ if (validSessionId && socketPath) {
         runtimeActivityRefresh = token;
         const observedAtMilliseconds = Date.now();
         let timeout = null;
-        const authorityCurrent = () => !shuttingDown
+        let querySettled = false;
+        let settledErrorMessage = null;
+        let metadataOutcome = null;
+        const sessionAuthorityCurrent = () => !shuttingDown
             && token.generation === conversationGeneration
             && token.sessionId === copilotSessionId
             && token.epoch === conversationEpoch
             && ownsSharedFiles();
+        const authorityCurrent = () => sessionAuthorityCurrent()
+            && !runtimeActivityUnsupported;
         const current = () => authorityCurrent()
             && token.revision === runtimeActivityRevision;
-        try {
-            const params = { sessionId: token.sessionId };
-            const values = await Promise.race([
-                Promise.all([
-                    session.connection.sendRequest("session.metadata.snapshot", params),
-                    session.connection.sendRequest("session.metadata.isProcessing", params),
-                ]),
-                new Promise((_, reject) => {
-                    timeout = setTimeout(
-                        () => reject(new Error("runtime activity query timed out")),
-                        2_000
-                    );
-                }),
-            ]);
-            if (!authorityCurrent()) return;
-            const [metadata, processing] = values;
-            if (metadata?.sessionId !== token.sessionId
-                || typeof metadata?.isRemote !== "boolean") {
-                throw new Error("invalid runtime session metadata");
-            }
-            if (metadata.isRemote) {
-                if (!current()) return;
+        const applyUnsupportedRuntimeActivity = () => {
+            if (!sessionAuthorityCurrent() || runtimeActivityUnsupported) return;
+            runtimeActivityUnsupported = true;
+            runtimeActivity = {
+                processing: null, observedAtMilliseconds,
+                idleAtMilliseconds: null, error: "unsupported",
+            };
+            console.error("[copilot-projects] runtime activity API unavailable; using legacy signals");
+            publish();
+        };
+        const applyNegativeMetadataOutcome = (status, force = false) => {
+            if (!authorityCurrent()
+                || runtimeMetadataError !== (status === "remote"
+                    ? "remote" : "Error: invalid runtime session metadata")) return;
+            if (status === "remote") {
                 const changed = runtimeActivity?.error !== "remote";
                 if (changed) {
                     console.error("[copilot-projects] remote session uses legacy activity signals");
@@ -1518,22 +1559,125 @@ if (validSessionId && socketPath) {
                     processing: null, observedAtMilliseconds,
                     idleAtMilliseconds: null, error: "remote",
                 };
-                if (changed || token.forcePublish) publish();
+                if (changed || force) publish();
+                return;
+            }
+            const invalidError = new Error("invalid runtime session metadata");
+            const message = String(invalidError);
+            const changed = runtimeActivity?.error !== message;
+            if (changed) {
+                console.error("[copilot-projects] runtime activity query failed:", invalidError);
+            }
+            runtimeActivity = {
+                processing: null,
+                observedAtMilliseconds, idleAtMilliseconds: null, error: message,
+            };
+            if (changed || force) publish(terminalDisconnectError ?? invalidError);
+        };
+        try {
+            const params = { sessionId: token.sessionId };
+            const observeLateRuntimeFailure = (error) => {
+                if (sessionAuthorityCurrent() && isTerminalDisconnect(error)) {
+                    publish(error);
+                }
+                throw error;
+            };
+            const rawMetadataPromise = session.connection.sendRequest("session.metadata.snapshot", params)
+                .catch(observeLateRuntimeFailure);
+            const processingPromise = session.connection.sendRequest("session.metadata.isProcessing", params)
+                .catch(observeLateRuntimeFailure);
+            const processingRejection = new Promise((_, reject) => {
+                processingPromise.catch((error) => {
+                    if (error?.code === -32601) applyUnsupportedRuntimeActivity();
+                    reject(error);
+                });
+            });
+            processingRejection.catch(() => {});
+            rawMetadataPromise.then(
+                (metadata) => {
+                    if (!authorityCurrent()) return;
+                    const outcome = applyMetadataObservation(
+                        metadata, metadataSeq, token.sessionId
+                    );
+                    metadataOutcome = outcome;
+                    if (!querySettled || !outcome.accepted) return;
+                    if (outcome.status === "remote" || outcome.status === "invalid") {
+                        applyNegativeMetadataOutcome(outcome.status);
+                    } else if (outcome.recoveredFromNegative
+                        && (runtimeActivity?.error === "remote"
+                            || runtimeActivity?.error === "Error: invalid runtime session metadata")) {
+                        runtimeActivity = {
+                            processing: null, observedAtMilliseconds,
+                            idleAtMilliseconds: null,
+                            error: settledErrorMessage ?? "Error: runtime activity query timed out",
+                        };
+                        publish();
+                    }
+                },
+                (error) => {
+                    if (error?.code === -32601) applyUnsupportedRuntimeActivity();
+                }
+            );
+            const metadataAndProcessing = rawMetadataPromise.then(async (metadata) => {
+                if (!authorityCurrent()) return [metadata, null];
+                const outcome = metadataOutcome ?? applyMetadataObservation(
+                    metadata, metadataSeq, token.sessionId
+                );
+                metadataOutcome = outcome;
+                if (outcome.status === "invalid") {
+                    throw new Error("invalid runtime session metadata");
+                }
+                if (outcome.status === "remote" || metadata?.isRemote === true) {
+                    return [metadata, null];
+                }
+                return [metadata, await processingPromise];
+            });
+            const values = await Promise.race([
+                metadataAndProcessing,
+                processingRejection,
+                new Promise((_, reject) => {
+                    timeout = setTimeout(
+                        () => reject(new Error("runtime activity query timed out")),
+                        2_000
+                    );
+                }),
+            ]);
+            querySettled = true;
+            if (!authorityCurrent()) return;
+            const [metadata, processing] = values;
+            if (metadataOutcome?.accepted === false
+                && (metadata?.sessionId !== token.sessionId || metadata?.isRemote !== false)) return;
+            if (metadataOutcome?.status === "remote" || runtimeMetadataError === "remote") {
+                if (metadataOutcome?.accepted) {
+                    applyNegativeMetadataOutcome("remote", token.forcePublish);
+                } else if (token.forcePublish) {
+                    publish();
+                }
+                return;
+            }
+            if (runtimeMetadataError === "Error: invalid runtime session metadata") {
+                if (token.forcePublish) {
+                    publish(terminalDisconnectError ?? new Error("invalid runtime session metadata"));
+                }
                 return;
             }
             let observationAdvanced = false;
-            if (workflowObservation && workflowRuntime && workflowObservation.capabilities.length > 0) {
+            if (metadataOutcome?.accepted && workflowObservation && workflowRuntime
+                && workflowObservation.capabilities.length > 0
+                && metadataSeq >= (workflowObservation.metadataSeq ?? 0)
+                && typeof processing?.processing === "boolean") {
                 // A workflow refresh that settled first can already hold a
                 // newer observation; never replace it with this older read.
                 observationAdvanced = observedAtMilliseconds
                     > workflowObservation.observedAtMilliseconds;
-                if (observationAdvanced) {
+                if (observedAtMilliseconds >= workflowObservation.observedAtMilliseconds) {
                     workflowObservation.observedAtMilliseconds = observedAtMilliseconds;
-                    workflowObservation.limitsKnown = Object.hasOwn(metadata, "sessionLimits")
-                        && (metadata.sessionLimits === null || finiteNonnegative(metadata.sessionLimits?.maxAiCredits));
-                    workflowObservation.maxAiCredits = workflowObservation.limitsKnown
-                        ? metadata.sessionLimits?.maxAiCredits ?? null : null;
                 }
+                workflowObservation.metadataSeq = metadataSeq;
+                workflowObservation.limitsKnown = Object.hasOwn(metadata, "sessionLimits")
+                    && (metadata.sessionLimits === null || finiteNonnegative(metadata.sessionLimits?.maxAiCredits));
+                workflowObservation.maxAiCredits = workflowObservation.limitsKnown
+                    ? metadata.sessionLimits?.maxAiCredits ?? null : null;
             }
             if (!current()) {
                 if (token.heartbeat && observationAdvanced) publish();
@@ -1557,17 +1701,38 @@ if (validSessionId && socketPath) {
             if (changed || token.forcePublish
                 || (token.heartbeat && observationAdvanced)) publish();
         } catch (error) {
-            if (!current()) return;
+            querySettled = true;
+            settledErrorMessage = String(error);
             if (error?.code === -32601) {
-                runtimeActivityUnsupported = true;
-                runtimeActivity = {
-                    processing: null, observedAtMilliseconds,
-                    idleAtMilliseconds: null, error: "unsupported",
-                };
-                console.error("[copilot-projects] runtime activity API unavailable; using legacy signals");
-                publish();
+                applyUnsupportedRuntimeActivity();
                 return;
             }
+            if (error?.message === "invalid runtime session metadata") {
+                if (metadataOutcome?.accepted) {
+                    applyNegativeMetadataOutcome("invalid", token.forcePublish);
+                } else if (token.forcePublish) {
+                    publish(terminalDisconnectError ?? error);
+                }
+                return;
+            }
+            if (!authorityCurrent()) return;
+            if (runtimeMetadataError === "remote"
+                || runtimeMetadataError === "Error: invalid runtime session metadata") {
+                if (runtimeActivity?.error !== runtimeMetadataError) {
+                    runtimeActivity = {
+                        processing: null, observedAtMilliseconds,
+                        idleAtMilliseconds: null, error: runtimeMetadataError,
+                    };
+                    publish(runtimeMetadataError === "remote" && !isTerminalDisconnect(error)
+                        ? undefined : (terminalDisconnectError ?? error));
+                    return;
+                }
+                if (token.forcePublish || isTerminalDisconnect(error)) {
+                    publish(terminalDisconnectError ?? error);
+                }
+                return;
+            }
+            if (!current()) return;
             const message = String(error);
             const changed = runtimeActivity?.error !== message;
             if (changed) {
@@ -1577,12 +1742,13 @@ if (validSessionId && socketPath) {
                 processing: null,
                 observedAtMilliseconds, idleAtMilliseconds: null, error: message,
             };
-            if (changed || token.forcePublish) publish(error);
+            if (changed || token.forcePublish) publish(terminalDisconnectError ?? error);
         } finally {
             if (timeout) clearTimeout(timeout);
             if (runtimeActivityRefresh === token) {
                 runtimeActivityRefresh = null;
-                if (!shuttingDown && token.generation === conversationGeneration
+                if (!shuttingDown && !runtimeActivityUnsupported
+                    && token.generation === conversationGeneration
                     && token.revision !== runtimeActivityRevision) {
                     queueMicrotask(() => refreshRuntimeActivity(true, { heartbeat: token.heartbeat }));
                 }
@@ -1660,7 +1826,10 @@ if (validSessionId && socketPath) {
     function workflowSnapshot() {
         const observation = workflowObservation;
         const fresh = observation
-            && (runtimeActivity?.error == null || runtimeActivity.error === "pending")
+            && !runtimeActivityUnsupported
+            && runtimeMetadataError === null
+            && runtimeActivity?.error !== "remote"
+            && runtimeActivity?.error !== "Error: invalid runtime session metadata"
             && !terminalDisconnectError && Date.now() - observation.observedAtMilliseconds <= 15_000;
         const capabilities = fresh && !bounceRequested ? observation.capabilities.filter(
             (kind) => !unavailableWorkflowActions.has(kind)
@@ -1675,6 +1844,7 @@ if (validSessionId && socketPath) {
                 (model) => model.id === currentModel?.name
             )?.imageAttachments ?? null : null,
             legacyPromptFallback: !bounceRequested && (workflowRuntime === false || runtimeActivityUnsupported
+                || runtimeMetadataError === "remote"
                 || runtimeActivity?.error === "remote"
                 || observation?.legacyPromptFallback === true
                 || unavailableWorkflowActions.has("session-send")),
@@ -1701,6 +1871,7 @@ if (validSessionId && socketPath) {
                 || (!force && workflowObservation && Date.now() - workflowRefreshAt < 30_000)) return;
         const context = workflowContextToken();
         workflowRefresh = context;
+        workflowRefreshNeedsRetry = false;
         const observedAtMilliseconds = Date.now();
         workflowRefreshAt = observedAtMilliseconds;
         try {
@@ -1712,7 +1883,75 @@ if (validSessionId && socketPath) {
                     && (Number(version[2]) > 0 || Number(version[3]) >= 84);
             }
             if (!workflowRuntime) throw new Error("unsupported-runtime");
-            const metadata = await workflowRead("session.metadata.snapshot", {}, context);
+            const workflowMetadataSeq = ++runtimeMetadataSeq;
+            let workflowMetadataSettled = false;
+            let workflowMetadataOutcome = null;
+            const rawWorkflowMetadata = workflowRPC("session.metadata.snapshot", {}, context);
+            rawWorkflowMetadata.then(
+                (metadata) => {
+                    if (!operationAuthorityCurrent(context) || runtimeActivityUnsupported) return;
+                    const outcome = applyMetadataObservation(
+                        metadata, workflowMetadataSeq, context.copilotSessionId,
+                        { refreshWorkflowOnRecovery: workflowMetadataSettled }
+                    );
+                    workflowMetadataOutcome = outcome;
+                    if (!outcome.accepted) return;
+                    if (outcome.status === "local"
+                        && (runtimeActivity?.error === "remote"
+                            || runtimeActivity?.error === "Error: invalid runtime session metadata")) {
+                        runtimeActivity = {
+                            ...runtimeActivity,
+                            processing: null, idleAtMilliseconds: null, error: "pending",
+                        };
+                        if (workflowMetadataSettled) publish();
+                    } else if (workflowMetadataSettled
+                        && (outcome.status === "remote" || outcome.status === "invalid")) {
+                        workflowObservation = {
+                            observedAtMilliseconds, capabilities: [], limitsKnown: false,
+                            legacyPromptFallback: outcome.status === "remote",
+                            error: "Native workflows require a supported local Copilot runtime",
+                        };
+                        publish();
+                    }
+                },
+                (error) => {
+                    if (!operationAuthorityCurrent(context)) return;
+                    if (isTerminalDisconnect(error)) {
+                        publish(error);
+                    } else if (workflowMetadataSettled && error?.code === -32601 && !runtimeActivityUnsupported) {
+                        workflowObservation = {
+                            observedAtMilliseconds, capabilities: [], limitsKnown: false,
+                            legacyPromptFallback: true,
+                            error: "Native workflows require a supported local Copilot runtime",
+                        };
+                        publish();
+                    }
+                }
+            );
+            let metadataTimeout;
+            let metadata;
+            try {
+                metadata = await Promise.race([
+                    rawWorkflowMetadata,
+                    new Promise((_, reject) => {
+                        metadataTimeout = setTimeout(
+                            () => reject(new Error("workflow-read-timeout")),
+                            3_000
+                        );
+                    }),
+                ]);
+            } finally {
+                workflowMetadataSettled = true;
+                clearTimeout(metadataTimeout);
+            }
+            if (!operationAuthorityCurrent(context)) return;
+            const metadataOutcome = workflowMetadataOutcome ?? applyMetadataObservation(
+                metadata, workflowMetadataSeq, context.copilotSessionId,
+                { refreshWorkflowOnRecovery: false }
+            );
+            if (!metadataOutcome.accepted
+                && (metadata?.sessionId !== context.copilotSessionId
+                    || metadata?.isRemote !== false)) return;
             if (metadata?.sessionId !== context.copilotSessionId || typeof metadata.isRemote !== "boolean") {
                 throw new Error("unsupported-session");
             }
@@ -1747,16 +1986,17 @@ if (validSessionId && socketPath) {
                     }
                 })(),
             ]);
-            if (!operationAuthorityCurrent(context)) return;
+            if (!operationAuthorityCurrent(context) || runtimeMetadataError !== null) return;
             const newerHeartbeat = workflowObservation
                 && workflowObservation.capabilities.length > 0
-                && workflowObservation.observedAtMilliseconds > observedAtMilliseconds
+                && (workflowObservation.metadataSeq ?? 0) > workflowMetadataSeq
                 ? workflowObservation : null;
             const effectiveLimitsKnown = newerHeartbeat ? newerHeartbeat.limitsKnown : limitsKnown;
             workflowObservation = {
                 observedAtMilliseconds: newerHeartbeat
-                    ? newerHeartbeat.observedAtMilliseconds
+                    ? Math.max(newerHeartbeat.observedAtMilliseconds, observedAtMilliseconds)
                     : observedAtMilliseconds,
+                metadataSeq: newerHeartbeat ? newerHeartbeat.metadataSeq : workflowMetadataSeq,
                 capabilities: [
                     "session-send", "session-abort", "answer-session-budget",
                     "image-attachments-v1", "file-attachments-v1",
@@ -1783,6 +2023,10 @@ if (validSessionId && socketPath) {
                 if (isTerminalDisconnect(error)) publish(error);
                 return;
             }
+            if ((error?.message === "unsupported-session" || error?.legacyPromptFallback === true)
+                && runtimeMetadataError === null && error?.code !== -32601) {
+                return;
+            }
             workflowObservation = {
                 observedAtMilliseconds, capabilities: [], limitsKnown: false,
                 legacyPromptFallback: error?.legacyPromptFallback === true || error?.code === -32601,
@@ -1791,7 +2035,15 @@ if (validSessionId && socketPath) {
             console.error("[copilot-projects] workflow metadata query failed:", error);
             publish();
         } finally {
-            if (workflowRefresh === context) workflowRefresh = null;
+            if (workflowRefresh === context) {
+                workflowRefresh = null;
+                if (workflowRefreshNeedsRetry && !shuttingDown
+                    && !runtimeActivityUnsupported
+                    && context.generation === conversationGeneration) {
+                    workflowRefreshNeedsRetry = false;
+                    queueMicrotask(() => refreshWorkflow(true));
+                }
+            }
         }
     }
 
@@ -4645,6 +4897,10 @@ if (validSessionId && socketPath) {
         completedPermissionRequests.clear();
         inputCompletions.clear();
         runtimeActivityUnsupported = false;
+        runtimeMetadataSeq = 0;
+        lastSettledMetadataSeq = 0;
+        runtimeMetadataError = null;
+        workflowRefreshNeedsRetry = false;
         runtimeActivity = null;
         invalidateRuntimeActivity();
 
