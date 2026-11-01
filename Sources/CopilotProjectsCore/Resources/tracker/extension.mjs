@@ -3944,12 +3944,11 @@ if (validSessionId && socketPath) {
     function recordPullRequestUrlsFromText(text) {
         if (typeof text !== "string"
                 || text.length === 0
-                || pullRequestKeys.length >= 3
-                || !text.includes("https://github.com/")) {
+                || pullRequestKeys.length >= 3) {
             return false;
         }
         let changed = false;
-        const pattern = /https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]{0,9})(?![A-Za-z0-9_-])/g;
+        const pattern = /https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]{0,9})(?![A-Za-z0-9_%-])/gi;
         let match;
         while ((match = pattern.exec(text)) !== null) {
             const [, owner, repo, number] = match;

@@ -170,7 +170,10 @@ extension AppModel {
                 }
             }
             dismissAnsweredQuestionNotifications(now: now)
-            if changed { updateDockBadge() }
+            if changed {
+                save()
+                updateDockBadge()
+            }
         }
     }
 
@@ -449,6 +452,7 @@ extension AppModel {
                    let transitionMs = effectiveFresh?.foregroundTransitionMilliseconds {
                     nextProjects[pi].sessions[si].runningStartedAtMilliseconds = transitionMs
                     activityChanged = true
+                    startingPromptChanged = true
                 }
 
                 let scheduledMarkerURL = agentActivityDirectory

@@ -2975,6 +2975,7 @@ final class AppModel: ObservableObject {
         } else if let notification, notification != .elicitation {
             elicitationNotificationTokens[sessionId] = nil
         }
+        let previousRunningStart = projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
         if status == .running {
@@ -2993,6 +2994,9 @@ final class AppModel: ObservableObject {
             }
         } else if status == .idle {
             projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds = nil
+        }
+        if projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds != previousRunningStart {
+            save()
         }
         if status == .running || status == .waiting {
             if status == .running {
@@ -3807,10 +3811,13 @@ final class AppModel: ObservableObject {
                 let restored = restoredStatusState(forSession: sid)
                 let status = restored.status
                 let statusTimestamp = restored.statusTimestamp
+                let persistedStart = projects[pi].sessions[si].runningStartedAtMilliseconds.flatMap {
+                    $0 <= (statusTimestamp ?? .max) ? $0 : nil
+                }
                 projects[pi].sessions[si].status = status
-                projects[pi].sessions[si].runningStartedAtMilliseconds = status == .running
-                    ? (statusTimestamp ?? SessionArtifacts.currentStatusTimestamp())
-                    : nil
+                projects[pi].sessions[si].runningStartedAtMilliseconds = status == .idle
+                    ? nil
+                    : (persistedStart ?? statusTimestamp ?? SessionArtifacts.currentStatusTimestamp())
                 if let context = restored.inputWait, let timestamp = statusTimestamp,
                    status == .waiting {
                     inputWaits[sid] = InputWaitState(context: context, timestamp: timestamp)

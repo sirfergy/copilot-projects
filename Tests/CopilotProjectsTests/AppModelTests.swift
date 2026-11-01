@@ -780,9 +780,10 @@ final class AppModelTests: XCTestCase {
         // 1. Contract helpers: extractKeys, shortDisplayLabel, formattedElapsedDuration.
         let extracted = RemotePullRequestsContract.extractKeys(
             from: """
-            Ignore malformed https://github.com/sirfergy/copilot-projects/pull/12abc and
+            Ignore malformed https://github.com/sirfergy/copilot-projects/pull/12abc,
+            https://github.com/sirfergy/copilot-projects/pull/12%33, and
             https://github.com/sirfergy/copilot-projects/pull/12_3, then
-            review https://github.com/SirFergy/Copilot-Projects/pull/270 and
+            review https://GitHub.com/SirFergy/Copilot-Projects/pull/270 and
             duplicate https://github.com/sirfergy/copilot-projects/pull/270/files then
             https://github.com/octocat/hello-world/pull/12?expand=1,
             https://github.com/octocat/hello-world/pull/34#discussion_r1, and
@@ -1046,6 +1047,34 @@ final class AppModelTests: XCTestCase {
             )
             XCTAssertEqual(remotePostWait.runningStartedAtMilliseconds, nextTurnStartMs)
 
+            // Relaunching after tool hooks have advanced statusTimestamp in .status-record.json
+            // restores the persisted original request start timestamp.
+            SessionArtifacts.persistStatus(
+                sessionId: s1.id,
+                status: .running,
+                timestamp: nextTurnStartMs + 15_000,
+                promptStatusTimestamp: nextTurnStartMs + 15_000,
+                sessionsDirectory: root
+            )
+            let relaunched = AppModel(
+                stateRepository: repository,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteSessionBackendAvailable: { true },
+                remoteSessionLauncher: { _, _, _ in },
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                relaunched.forcePendingSessionDestroys()
+                relaunched.detachAllClients()
+            }
+            XCTAssertEqual(relaunched.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
+            XCTAssertEqual(relaunched.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
+
             // Untrusted/mismatched copilotSessionId snapshot must not leak pullRequestKeys into Session or effectivePullRequestKeys.
             let pinnedCopilotId = UUID().uuidString.lowercased()
             let foreignCopilotId = UUID().uuidString.lowercased()
@@ -1101,8 +1130,8 @@ final class AppModelTests: XCTestCase {
             let transcriptTurns = [];
             let pendingTranscriptTurn = null;
             \(extractedJS)
-            assert.equal(recordPullRequestUrlsFromText("Ignore https://github.com/o/r/pull/12abc"), false);
-            assert.equal(recordPullRequestUrlsFromText("Review https://github.com/SirFergy/Copilot-Projects/pull/270"), true);
+            assert.equal(recordPullRequestUrlsFromText("Ignore https://github.com/o/r/pull/12abc and https://github.com/o/r/pull/12%33"), false);
+            assert.equal(recordPullRequestUrlsFromText("Review https://GitHub.com/SirFergy/Copilot-Projects/pull/270"), true);
             assert.equal(recordPullRequestUrlsFromToolResult({
               result: {
                 content: [{ type: "text", text: "Created https://github.com/octocat/hello-world/pull/42\\n" }]

@@ -120,7 +120,7 @@ struct Session: Identifiable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, parentSessionId, startingPrompt
+        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, parentSessionId, startingPrompt, runningStartedAtMilliseconds
         case manuallyMarkedUnread = "markedUnread"
     }
 
@@ -169,6 +169,7 @@ struct Session: Identifiable, Codable, Equatable {
             self.startingPrompt = nil
         }
         self.manuallyMarkedUnread = try container.decodeIfPresent(Bool.self, forKey: .manuallyMarkedUnread)
+        self.runningStartedAtMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .runningStartedAtMilliseconds)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -185,6 +186,7 @@ struct Session: Identifiable, Codable, Equatable {
             try container.encode(encoded, forKey: .startingPrompt)
         }
         try container.encodeIfPresent(manuallyMarkedUnread, forKey: .manuallyMarkedUnread)
+        try container.encodeIfPresent(runningStartedAtMilliseconds, forKey: .runningStartedAtMilliseconds)
     }
 }
 

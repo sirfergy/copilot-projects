@@ -11,7 +11,8 @@ public enum RemotePullRequestsContract {
     public static let retryLifetime: TimeInterval = 24 * 60 * 60
 
     nonisolated(unsafe) private static let pullRequestURLRegex = try? NSRegularExpression(
-        pattern: #"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]{0,9})(?![A-Za-z0-9_-])"#
+        pattern: #"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]{0,9})(?![A-Za-z0-9_%-])"#,
+        options: [.caseInsensitive]
     )
 
     public static func canonicalKey(_ value: String) -> String? {
@@ -28,7 +29,6 @@ public enum RemotePullRequestsContract {
 
     public static func extractKeys(from text: String, limit: Int = 3) -> [String] {
         guard limit > 0,
-              text.contains("https://github.com/"),
               let regex = pullRequestURLRegex else { return [] }
         let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
         var results: [String] = []
