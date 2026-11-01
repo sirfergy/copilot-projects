@@ -397,6 +397,7 @@ if (validSessionId && socketPath) {
     let pendingTranscriptTurn = null;
     let startingPrompt = null;
     let pullRequestKeys = [];
+    const PULL_REQUEST_KEYS_POLICY_TOKEN = "policy:strict-v1";
     const prCreateToolCallIds = new Set();
     let transcriptAssistantTurnActive = false;
     // `session.idle` is ephemeral, so durable replay cannot tell a failure
@@ -2549,7 +2550,9 @@ if (validSessionId && socketPath) {
             operationReceipts: operationReceiptSnapshot(),
             workflow: workflowSnapshot(),
             ...(startingPrompt ? { startingPrompt } : {}),
-            ...(pullRequestKeys.length > 0 ? { pullRequestKeys } : {}),
+            ...(pullRequestKeys.length > 0
+                ? { pullRequestKeys: [PULL_REQUEST_KEYS_POLICY_TOKEN, ...pullRequestKeys] }
+                : {}),
             ...(lastTurnError ? { lastTurnError } : {}),
             ...(reportedError ? { error: reportedError } : {}),
         };
@@ -3982,9 +3985,12 @@ if (validSessionId && socketPath) {
             return false;
         }
         const stripped = command
-            .replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, "__quoted__")
+            .replace(/'([^']*)'|"((?:\\.|[^"\\])*)"/g, (_, s, d) =>
+                /^--dry-run(?:=|$)/.test(s ?? d ?? "") ? "--dry-run" : "__quoted__"
+            )
+            .replace(/\\\r?\n/g, " ")
             .replace(/(?:^|\s)#[^\n]*/g, " ");
-        if (/[;|()`]|<<|\$\(|(?:^|[^&])&(?:$|[^&])|(?:^|&&|\n)\s*&&|&&\s*(?:$|\n)|(?:^|\s)--dry-run\b/.test(stripped)) {
+        if (/[;|()`]|<<|\$|(?:^|[^&])&(?:$|[^&])|(?:^|&&|\n)\s*&&|&&\s*(?:$|\n)|(?:^|\s)--dry-run\b/.test(stripped)) {
             return false;
         }
         const clauses = stripped.split(/\n|&&/).map((clause) => clause.trim()).filter(Boolean);

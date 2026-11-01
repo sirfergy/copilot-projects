@@ -3865,12 +3865,28 @@ final class AppModel: ObservableObject {
         }
         projects = state.projects
         selectedProjectId = state.selectedProjectId ?? state.projects.first?.id
+        let ledgerRecords: [SessionCreationRecord] = {
+            struct LedgerEnvelope: Decodable { var records: [SessionCreationRecord] }
+            let url = (Mirror(reflecting: sessionCreationLedger).children.first { $0.label == "url" }?.value as? URL)
+                ?? Paths.sessionCreationLedgerPath
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            guard let data = try? Data(contentsOf: url),
+                  let decoded = try? decoder.decode(LedgerEnvelope.self, from: data) else {
+                return []
+            }
+            return decoded.records
+        }()
         for pi in projects.indices {
             projects[pi].normalizeParentSessions()
             for si in projects[pi].sessions.indices {
-                projects[pi].sessions[si].pullRequestKeys =
-                    projects[pi].sessions[si].sanitizedPersistedPullRequestKeys()
                 let sid = projects[pi].sessions[si].id
+                projects[pi].sessions[si].pullRequestKeys =
+                    projects[pi].sessions[si].sanitizedPersistedPullRequestKeys(
+                        projectId: projects[pi].id,
+                        copilotSessionId: resumeMarkerValue(sessionId: sid, suffix: "copilot-session"),
+                        ledgerRecords: ledgerRecords.filter { $0.sessionId == sid }
+                    )
                 let restored = restoredStatusState(forSession: sid)
                 let status = restored.status
                 let statusTimestamp = restored.statusTimestamp

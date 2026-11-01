@@ -899,6 +899,29 @@ final class AppModelTests: XCTestCase {
             // merges into Session.pullRequestKeys (capped at 5, effective capped at 3) and survives expiry.
             let now = Date(timeIntervalSince1970: 1_788_000_010)
             let transitionDate = Date(timeIntervalSince1970: 1_788_000_005)
+            // Legacy snapshot without extraction-policy provenance token must not populate or persist pullRequestKeys.
+            let legacySnapshot = AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(now),
+                foregroundTurnActive: true,
+                foregroundTransitionAt: Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(transitionDate),
+                scheduledTurnActive: false,
+                activeSubagents: [],
+                schedules: [],
+                idleGeneration: 0,
+                lastIdleAborted: false,
+                lastIdleTurnKind: nil,
+                error: nil,
+                pullRequestKeys: ["sirfergy/copilot-projects#990"]
+            )
+            try JSONEncoder().encode(legacySnapshot).write(
+                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
+                options: .atomic
+            )
+            model.refreshAgentActivitySnapshots(now: now)
+            XCTAssertNil(model.projects[0].sessions[0].pullRequestKeys)
+            XCTAssertEqual(model.projects[0].sessions[0].effectivePullRequestKeys, ["sirfergy/copilot-projects#101"])
+
             var activity = AgentActivitySnapshot(
                 schemaVersion: 1,
                 updatedAt: Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(now),
@@ -912,6 +935,7 @@ final class AppModelTests: XCTestCase {
                 lastIdleTurnKind: nil,
                 error: nil,
                 pullRequestKeys: [
+                    Session.activityPullRequestPolicyToken,
                     "sirfergy/copilot-projects#202",
                     "sirfergy/copilot-projects#203",
                     "sirfergy/copilot-projects#204",
@@ -1233,21 +1257,66 @@ final class AppModelTests: XCTestCase {
                 cwd: root.path,
                 pullRequestKeys: ["sirfergy/copilot-projects#991", "sirfergy/copilot-projects#992"]
             )
+            let ordinaryFingerprintedSession = Session(
+                id: "ordinary-fingerprinted",
+                title: "Copilot",
+                cwd: root.path,
+                creationFingerprint: SessionCreationRecord.fingerprint(
+                    projectId: "p",
+                    kind: .copilot,
+                    initialPrompt: "Investigate build failure",
+                    pullRequestURL: nil
+                ),
+                pullRequestKeys: ["sirfergy/copilot-projects#993"],
+                startingPrompt: "Investigate build failure"
+            )
+            let resumedCopilotId = UUID().uuidString.lowercased()
+            try Data("\(resumedCopilotId)\n".utf8).write(
+                to: root.appendingPathComponent("pr-fingerprint.copilot-session"),
+                options: .atomic
+            )
             let resumeRequest = RemotePullRequestSessionRequest(
                 requestId: UUID(),
                 kind: "resume",
                 projectId: "p",
                 pullRequestKeys: ["sirfergy/copilot-projects#301", "sirfergy/copilot-projects#302"],
-                copilotSessionId: UUID().uuidString.lowercased()
+                copilotSessionId: resumedCopilotId
             )
             var prFingerprintSession = Session(
                 id: "pr-fingerprint",
                 title: "Copilot",
                 cwd: root.path,
                 creationFingerprint: SessionCreationRecord.pullRequestFingerprint(resumeRequest),
-                pullRequestKeys: ["sirfergy/copilot-projects#301", "sirfergy/copilot-projects#302"]
+                pullRequestKeys: [
+                    "sirfergy/copilot-projects#301",
+                    "sirfergy/copilot-projects#302",
+                    "sirfergy/copilot-projects#998",
+                ]
             )
             prFingerprintSession.verifiedPullRequestKeys = nil
+            let existingBoundCopilotId = UUID().uuidString.lowercased()
+            try Data("\(existingBoundCopilotId)\n".utf8).write(
+                to: root.appendingPathComponent("existing-bound.copilot-session"),
+                options: .atomic
+            )
+            let secondaryRequest = RemotePullRequestSessionRequest(
+                requestId: UUID(),
+                kind: "resume",
+                projectId: "p",
+                pullRequestKeys: ["sirfergy/copilot-projects#303"],
+                copilotSessionId: existingBoundCopilotId
+            )
+            let sanitizeLedger = SessionCreationLedger(url: root.appendingPathComponent("sanitize-ledger.json"))
+            try sanitizeLedger.remember(
+                SessionCreationRecord(
+                    requestId: secondaryRequest.requestId.uuidString,
+                    projectId: "p",
+                    sessionId: "existing-bound",
+                    createdAt: Date(),
+                    creationFingerprint: SessionCreationRecord.pullRequestFingerprint(secondaryRequest)
+                ),
+                now: Date()
+            )
             var existingBoundSession = Session(
                 id: "existing-bound",
                 title: "Copilot",
@@ -1258,9 +1327,10 @@ final class AppModelTests: XCTestCase {
                     initialPrompt: "Ship feature",
                     pullRequestURL: nil
                 ),
+                pullRequestKeys: ["sirfergy/copilot-projects#303", "sirfergy/copilot-projects#997"],
                 startingPrompt: "Ship feature"
             )
-            existingBoundSession.pullRequestKeys = ["sirfergy/copilot-projects#303"]
+            existingBoundSession.verifiedPullRequestKeys = nil
             let promptBackedSession = Session(
                 id: "prompt-backed",
                 title: "Feature Work",
@@ -1281,10 +1351,12 @@ final class AppModelTests: XCTestCase {
             )
             let sanitizeRepo = StateRepository(path: root.appendingPathComponent("sanitize-state.json"))
             let sanitizeProject = Project(
+                id: "p",
                 name: "Sanitize",
                 cwd: root.path,
                 sessions: [
                     staleScrapedSession,
+                    ordinaryFingerprintedSession,
                     prFingerprintSession,
                     existingBoundSession,
                     promptBackedSession,
@@ -1301,6 +1373,7 @@ final class AppModelTests: XCTestCase {
                 remoteCopilotExecutable: { "/usr/local/bin/copilot" },
                 remoteSessionBackendAvailable: { true },
                 remoteSessionLauncher: { _, _, _ in },
+                sessionCreationLedger: sanitizeLedger,
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
                 gracefulSessionDestroyer: { _, _ in Task {} },
                 forcedSessionDestroyer: { _ in }
@@ -1311,6 +1384,7 @@ final class AppModelTests: XCTestCase {
             }
             let loadedSessions = sanitizedModel.projects[0].sessions
             XCTAssertNil(loadedSessions.first(where: { $0.id == "stale-scraped" })?.pullRequestKeys)
+            XCTAssertNil(loadedSessions.first(where: { $0.id == "ordinary-fingerprinted" })?.pullRequestKeys)
             XCTAssertEqual(
                 loadedSessions.first(where: { $0.id == "pr-fingerprint" })?.pullRequestKeys,
                 ["sirfergy/copilot-projects#301", "sirfergy/copilot-projects#302"]
@@ -1424,12 +1498,12 @@ final class AppModelTests: XCTestCase {
               "bash",
               { command: "printf 'https://github.com/octocat/hello-world/pull/909\\n' && gh pr create --fill" },
               true,
-              { content: "https://github.com/octocat/hello-world/pull/909\nhttps://github.com/octocat/hello-world/pull/42" }
+              { content: "https://github.com/octocat/hello-world/pull/909\\nhttps://github.com/octocat/hello-world/pull/42" }
             );
             runTool(
               "t-quoted-subcommand",
               "bash",
-              { command: "gh pr \"view\" create --json url --jq .url" },
+              { command: 'gh pr "view" create --json url --jq .url' },
               true,
               { content: "https://github.com/octocat/hello-world/pull/908" }
             );
@@ -1440,14 +1514,21 @@ final class AppModelTests: XCTestCase {
               true,
               { content: "https://github.com/octocat/hello-world/pull/910" }
             );
+            runTool(
+              "t-quoted-dry-run",
+              "bash",
+              { command: 'gh pr create "--dry-run" --title T --body \\'See https://github.com/octocat/hello-world/pull/911\\'' },
+              true,
+              { content: "https://github.com/octocat/hello-world/pull/911" }
+            );
             runTool("t-create-fail", "bash", { command: "gh pr create --fill" }, false, {
               content: "https://github.com/octocat/hello-world/pull/904"
             });
             assert.deepEqual(pullRequestKeys, ["sirfergy/copilot-projects#270"]);
             assert.equal(publishCount, 0);
 
-            // Successful gh pr create in bash (including --repo/-R flags) DOES populate pullRequestKeys.
-            runTool("t-create-ok", "bash", { command: "GH_TOKEN=x gh --repo octocat/hello-world pr create --title T" }, true, {
+            // Successful gh pr create in bash (including --repo/-R flags and backslash line continuations) DOES populate pullRequestKeys.
+            runTool("t-create-ok", "bash", { command: "GH_TOKEN=x gh --repo octocat/hello-world pr create \\\\\\n  --title T" }, true, {
               content: [{ type: "text", text: "Created https://github.com/octocat/hello-world/pull/42\\n" }]
             });
             assert.equal(publishCount, 1);

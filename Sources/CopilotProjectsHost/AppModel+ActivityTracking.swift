@@ -408,15 +408,19 @@ extension AppModel {
                 }
                 var effectiveFresh = fresh
                 if let snapshotKeys = snapshot?.pullRequestKeys, !snapshotKeys.isEmpty {
-                    if isActivitySnapshotTrustedForSessionMetadata(
-                        sessionId: sessionId,
-                        snapshot: snapshot
-                    ) {
+                    if let freshKeys = fresh?.pullRequestKeys,
+                       freshKeys.contains(Session.activityPullRequestPolicyToken),
+                       isActivitySnapshotTrustedForSessionMetadata(
+                           sessionId: sessionId,
+                           snapshot: fresh
+                       ) {
+                        let canonicalFresh = Session.canonicalPullRequestKeys(freshKeys, limit: 5)
+                        effectiveFresh?.pullRequestKeys = canonicalFresh
                         let existing = Session.canonicalPullRequestKeys(
                             nextProjects[pi].sessions[si].pullRequestKeys, limit: 5
                         )
                         let merged = Session.canonicalPullRequestKeys(
-                            (existing ?? []) + snapshotKeys, limit: 5
+                            (existing ?? []) + (canonicalFresh ?? []), limit: 5
                         )
                         if merged != existing {
                             nextProjects[pi].sessions[si].pullRequestKeys = merged
