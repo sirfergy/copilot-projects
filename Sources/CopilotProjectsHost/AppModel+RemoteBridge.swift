@@ -729,6 +729,21 @@ extension AppModel {
                             for: session, foreground: foreground, now: promptNow
                         )
                         let remoteHost = resolvedRemoteHost(for: session, in: hosts)
+                        let resolvedStartingPrompt = startingPrompt(for: session.id)
+                        var effectiveSession = session
+                        effectiveSession.status = status
+                        if effectiveSession.startingPrompt == nil {
+                            effectiveSession.startingPrompt = resolvedStartingPrompt
+                        }
+                        let effectivePRKeys = effectiveSession.effectivePullRequestKeys
+                        let runningStartedAt: Int64? = status == .running
+                            ? (effectiveSession.effectiveRunningStartedAtMilliseconds
+                                ?? trustedForegroundTransitionMilliseconds(
+                                    sessionId: session.id,
+                                    snapshot: effectiveSession.agentActivity
+                                )
+                                ?? sessionSemantics.statusClock.timestamp(for: session.id))
+                            : nil
                         return RemoteSessionSnapshot(
                             id: session.id,
                             title: session.title,
@@ -786,7 +801,9 @@ extension AppModel {
                             memoryUsageBytes: providedSessionMemory.map {
                                 ProcessTree.quantizeSessionMemoryBytes($0[session.id])
                             } ?? session.memoryUsageBytes,
-                            startingPrompt: startingPrompt(for: session.id)
+                            startingPrompt: resolvedStartingPrompt,
+                            runningStartedAtMilliseconds: runningStartedAt,
+                            pullRequestKeys: effectivePRKeys.isEmpty ? nil : effectivePRKeys
                         )
                     }
                 )

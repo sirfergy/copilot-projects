@@ -36,6 +36,9 @@ struct Session: Identifiable, Codable, Equatable {
     var status: SessionStatus = .idle
     var statusIsRuntimeDerived = false
     var statusText: String? = nil
+    var runningStartedAtMilliseconds: Int64? = nil
+    var runningStatusTimestampMilliseconds: Int64? = nil
+    var runningRequestIdentity: String? = nil
     var hasUnread: Bool = false
     /// The agent went active → idle while you weren't looking at this session, so it
     /// has finished and is waiting for you to come back. Cleared when you view it.
@@ -67,6 +70,25 @@ struct Session: Identifiable, Codable, Equatable {
     /// Keep that lifecycle state separate from the attention shown to the user.
     var displayStatus: SessionStatus { hasPendingInput ? .waiting : status }
 
+    var effectiveRunningStartedAtMilliseconds: Int64? {
+        displayStatus == .running ? runningStartedAtMilliseconds : nil
+    }
+
+    var effectivePullRequestKeys: [String] {
+        let candidates = (pullRequestKeys ?? [])
+            + (agentActivity?.pullRequestKeys ?? [])
+            + (startingPrompt.map { RemotePullRequestsContract.extractKeys(from: $0, limit: 3) } ?? [])
+        var result: [String] = []
+        var seen: Set<String> = []
+        for raw in candidates {
+            guard let canonical = RemotePullRequestsContract.canonicalKey(raw),
+                  seen.insert(canonical).inserted else { continue }
+            result.append(canonical)
+            if result.count >= 3 { break }
+        }
+        return result
+    }
+
     /// The latest request failed and the session has been idle since.
     var failedRequest: TranscriptTurnError? {
         displayStatus == .idle ? agentActivity?.remoteLastError() : nil
@@ -97,6 +119,7 @@ struct Session: Identifiable, Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, parentSessionId, startingPrompt
+        case runningStartedAtMilliseconds, runningStatusTimestampMilliseconds, runningRequestIdentity
         case manuallyMarkedUnread = "markedUnread"
     }
 
@@ -145,6 +168,9 @@ struct Session: Identifiable, Codable, Equatable {
             self.startingPrompt = nil
         }
         self.manuallyMarkedUnread = try container.decodeIfPresent(Bool.self, forKey: .manuallyMarkedUnread)
+        self.runningStartedAtMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .runningStartedAtMilliseconds)
+        self.runningStatusTimestampMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .runningStatusTimestampMilliseconds)
+        self.runningRequestIdentity = try container.decodeIfPresent(String.self, forKey: .runningRequestIdentity)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -161,6 +187,9 @@ struct Session: Identifiable, Codable, Equatable {
             try container.encode(encoded, forKey: .startingPrompt)
         }
         try container.encodeIfPresent(manuallyMarkedUnread, forKey: .manuallyMarkedUnread)
+        try container.encodeIfPresent(runningStartedAtMilliseconds, forKey: .runningStartedAtMilliseconds)
+        try container.encodeIfPresent(runningStatusTimestampMilliseconds, forKey: .runningStatusTimestampMilliseconds)
+        try container.encodeIfPresent(runningRequestIdentity, forKey: .runningRequestIdentity)
     }
 }
 

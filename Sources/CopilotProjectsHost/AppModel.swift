@@ -1515,11 +1515,25 @@ final class AppModel: ObservableObject {
     ) -> String? {
         guard let rawPrompt = snapshot?.startingPrompt,
               !rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              isActivitySnapshotTrustedForSessionMetadata(
+                  sessionId: sessionId,
+                  snapshot: snapshot
+              ) else {
+            return nil
+        }
+        return rawPrompt
+    }
+
+    func isActivitySnapshotTrustedForSessionMetadata(
+        sessionId: String,
+        snapshot: AgentActivitySnapshot?
+    ) -> Bool {
+        guard snapshot != nil,
               TranscriptController.transcriptOwnerAllowsRead(
                   sessionId: sessionId,
                   directory: resumeMarkerDirectory
               ) else {
-            return nil
+            return false
         }
         if let rawActivityId = snapshot?.copilotSessionId?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1530,15 +1544,42 @@ final class AppModel: ObservableObject {
                       copilotSessionId: rawActivityId,
                       directory: resumeMarkerDirectory
                   ) else {
-                return nil
+                return false
             }
             let validatedMarker = validatedCopilotSessionMarker(for: sessionId)
             guard validatedMarker == nil
                 || validatedMarker?.caseInsensitiveCompare(rawActivityId) == .orderedSame else {
-                return nil
+                return false
             }
         }
-        return rawPrompt
+        return true
+    }
+
+    func trustedForegroundTransitionMilliseconds(
+        sessionId: String,
+        snapshot: AgentActivitySnapshot?
+    ) -> Int64? {
+        guard snapshot?.foregroundTurnActive == true,
+              snapshot?.reportsTerminalDisconnect == false,
+              isActivitySnapshotTrustedForSessionMetadata(sessionId: sessionId, snapshot: snapshot) else {
+            return nil
+        }
+        return snapshot?.foregroundTransitionMilliseconds
+    }
+
+    func trustedRunningRequestIdentity(
+        sessionId: String,
+        snapshot: AgentActivitySnapshot?
+    ) -> String? {
+        guard let snapshot,
+              snapshot.foregroundTurnActive,
+              !snapshot.reportsTerminalDisconnect,
+              isActivitySnapshotTrustedForSessionMetadata(sessionId: sessionId, snapshot: snapshot),
+              let epoch = snapshot.conversationEpoch?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !epoch.isEmpty else {
+            return nil
+        }
+        return "\(epoch):\(snapshot.idleGeneration)"
     }
 
     private func loadTranscriptStartingPrompt(sessionId: String) -> String? {
@@ -1747,6 +1788,9 @@ final class AppModel: ObservableObject {
             title: target.title,
             cwd: cwd,
             hostId: sessionHostId,
+            pullRequestKeys: RemotePullRequestsContract
+                .canonicalKey("\(target.owner)/\(target.repository)#\(target.number)")
+                .map { [$0] },
             startingPrompt: prompt
         )
         projects[pi].sessions.append(session)
@@ -2841,6 +2885,13 @@ final class AppModel: ObservableObject {
             source: source
         ) else { return }
         projectStorage[loc.p].sessions[loc.s].statusIsRuntimeDerived = false
+        if status != .idle,
+           projectStorage[loc.p].sessions[loc.s].runningStartedAtMilliseconds != nil,
+           let timestamp,
+           projectStorage[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds != timestamp {
+            projectStorage[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = timestamp
+            scheduleSave()
+        }
         withCoalescedProjectPublications {
         if status == .waiting {
             if case .loaded(let record) = SessionArtifacts.loadStatusRecord(
@@ -2958,8 +3009,48 @@ final class AppModel: ObservableObject {
         } else if let notification, notification != .elicitation {
             elicitationNotificationTokens[sessionId] = nil
         }
+        let previousRunningStart = projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds
+        let previousRunningClock = projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds
+        let previousRequestIdentity = projects[loc.p].sessions[loc.s].runningRequestIdentity
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
+        if status == .running {
+            if projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds == nil {
+                let activeTransitionMs: Int64? = {
+                    guard let transitionMs = trustedForegroundTransitionMilliseconds(
+                        sessionId: sessionId,
+                        snapshot: projects[loc.p].sessions[loc.s].agentActivity
+                    ),
+                    transitionMs >= (previousTimestamp ?? .min) else {
+                        return nil
+                    }
+                    return transitionMs
+                }()
+                projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds =
+                    [timestamp, activeTransitionMs].compactMap { $0 }.min()
+                    ?? SessionArtifacts.currentStatusTimestamp()
+                if activeTransitionMs != nil {
+                    projects[loc.p].sessions[loc.s].runningRequestIdentity = trustedRunningRequestIdentity(
+                        sessionId: sessionId,
+                        snapshot: projects[loc.p].sessions[loc.s].agentActivity
+                    )
+                }
+            }
+            if let timestamp {
+                projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = timestamp
+            }
+        } else if status == .waiting, let timestamp {
+            projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = timestamp
+        } else if status == .idle {
+            projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds = nil
+            projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = nil
+            projects[loc.p].sessions[loc.s].runningRequestIdentity = nil
+        }
+        if projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds != previousRunningStart
+            || projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds != previousRunningClock
+            || projects[loc.p].sessions[loc.s].runningRequestIdentity != previousRequestIdentity {
+            save()
+        }
         if status == .running || status == .waiting {
             if status == .running {
                 projects[loc.p].sessions[loc.s].scheduledTurnActive = false
@@ -2998,8 +3089,13 @@ final class AppModel: ObservableObject {
                 sessionId: sessionId,
                 status: status,
                 timestamp: clocks.status,
-                promptStatusTimestamp: clocks.promptSafety
+                promptStatusTimestamp: clocks.promptSafety,
+                sessionsDirectory: agentActivityDirectory
             )
+            if status != .idle {
+                projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = clocks.status
+                save()
+            }
             if status == .waiting, previous == .waiting, notification == nil {
                 refreshRetainedPermissionClocks(sessionId: sessionId, previousTimestamp: previousTimestamp)
             }
@@ -3383,6 +3479,15 @@ final class AppModel: ObservableObject {
         session.status = restoredStatus
         session.statusIsRuntimeDerived = restore.status == .waiting
         session.statusText = restore.statusText
+        session.runningStartedAtMilliseconds = restoredStatus == .running
+            ? (session.runningStartedAtMilliseconds
+                ?? trustedForegroundTransitionMilliseconds(sessionId: sessionId, snapshot: session.agentActivity)
+                ?? restore.statusTimestamp)
+            : nil
+        if restoredStatus == .idle {
+            session.runningStatusTimestampMilliseconds = nil
+            session.runningRequestIdentity = nil
+        }
         session.scheduledTurnActive = restore.scheduledTurnActive
         session.finishedUnseen = restore.finishedUnseen
         session.turnCompleted = restore.turnCompleted
@@ -3766,7 +3871,37 @@ final class AppModel: ObservableObject {
                 let restored = restoredStatusState(forSession: sid)
                 let status = restored.status
                 let statusTimestamp = restored.statusTimestamp
+                let diskSnapshot: AgentActivitySnapshot? = {
+                    let url = agentActivityDirectory.appendingPathComponent("\(sid).agent-activity.json")
+                    guard let data = try? Data(contentsOf: url),
+                          let decoded = try? JSONDecoder().decode(AgentActivitySnapshot.self, from: data) else {
+                        return nil
+                    }
+                    return decoded
+                }()
+                let diskRequestIdentity = trustedRunningRequestIdentity(sessionId: sid, snapshot: diskSnapshot)
+                let matchesRequestIdentity = diskRequestIdentity != nil
+                    && diskRequestIdentity == projects[pi].sessions[si].runningRequestIdentity
+                let matchesPersistedRequest = statusTimestamp != nil
+                    && (projects[pi].sessions[si].runningStatusTimestampMilliseconds == statusTimestamp
+                        || matchesRequestIdentity)
+                let persistedStart = matchesPersistedRequest
+                    ? projects[pi].sessions[si].runningStartedAtMilliseconds.flatMap {
+                        $0 <= (statusTimestamp ?? .max) ? $0 : nil
+                    }
+                    : nil
                 projects[pi].sessions[si].status = status
+                projects[pi].sessions[si].runningStartedAtMilliseconds = status == .idle
+                    ? nil
+                    : (persistedStart ?? statusTimestamp ?? SessionArtifacts.currentStatusTimestamp())
+                projects[pi].sessions[si].runningStatusTimestampMilliseconds = status == .idle
+                    ? nil
+                    : statusTimestamp
+                if status == .idle {
+                    projects[pi].sessions[si].runningRequestIdentity = nil
+                } else if persistedStart == nil {
+                    projects[pi].sessions[si].runningRequestIdentity = diskRequestIdentity
+                }
                 if let context = restored.inputWait, let timestamp = statusTimestamp,
                    status == .waiting {
                     inputWaits[sid] = InputWaitState(context: context, timestamp: timestamp)

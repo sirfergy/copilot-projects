@@ -75,6 +75,7 @@ struct AgentActivitySnapshot: Codable, Equatable {
     var workflow: RemoteSessionWorkflow? = nil
     var currentIntent: String? = nil
     var startingPrompt: String? = nil
+    var pullRequestKeys: [String]? = nil
     /// The latest request's failure, published only while no request is
     /// running. Decoded leniently: one malformed field must not fail the whole
     /// heartbeat decode.

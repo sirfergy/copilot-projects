@@ -10,6 +10,11 @@ public enum RemotePullRequestsContract {
     /// Client retries expire before the host's seven-day creation ledger.
     public static let retryLifetime: TimeInterval = 24 * 60 * 60
 
+    nonisolated(unsafe) private static let pullRequestURLRegex = try? NSRegularExpression(
+        pattern: #"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]{0,9})(?![A-Za-z0-9_%-])"#,
+        options: [.caseInsensitive]
+    )
+
     public static func canonicalKey(_ value: String) -> String? {
         let parts = value.split(separator: "#", omittingEmptySubsequences: false)
         guard parts.count == 2 else { return nil }
@@ -20,6 +25,59 @@ public enum RemotePullRequestsContract {
               ),
               target.owner == repository[0], target.repository == repository[1] else { return nil }
         return "\(target.owner.lowercased())/\(target.repository.lowercased())#\(number)"
+    }
+
+    public static func extractKeys(from text: String, limit: Int = 3) -> [String] {
+        guard limit > 0,
+              let regex = pullRequestURLRegex else { return [] }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        var results: [String] = []
+        var seen: Set<String> = []
+        regex.enumerateMatches(in: text, options: [], range: nsRange) { match, _, stop in
+            guard let match,
+                  match.numberOfRanges == 4,
+                  let ownerRange = Range(match.range(at: 1), in: text),
+                  let repoRange = Range(match.range(at: 2), in: text),
+                  let numberRange = Range(match.range(at: 3), in: text),
+                  let key = canonicalKey("\(text[ownerRange])/\(text[repoRange])#\(text[numberRange])") else {
+                return
+            }
+            if seen.insert(key).inserted {
+                results.append(key)
+                if results.count >= limit {
+                    stop.pointee = true
+                }
+            }
+        }
+        return results
+    }
+
+    public static func shortDisplayLabel(for key: String) -> String {
+        if let canonical = canonicalKey(key), let hash = canonical.lastIndex(of: "#") {
+            return String(canonical[hash...])
+        }
+        if let hash = key.lastIndex(of: "#") {
+            return String(key[hash...])
+        }
+        return key
+    }
+
+    public static func formattedElapsedDuration(
+        fromMilliseconds startMs: Int64,
+        nowMilliseconds nowMs: Int64
+    ) -> String? {
+        guard startMs > 0, nowMs >= startMs else { return nil }
+        let seconds = Int((nowMs - startMs) / 1_000)
+        if seconds < 60 {
+            return "\(max(1, seconds))s"
+        }
+        let minutes = seconds / 60
+        if minutes < 60 {
+            return "\(minutes)m"
+        }
+        let hours = minutes / 60
+        let remMinutes = minutes % 60
+        return remMinutes == 0 ? "\(hours)h" : "\(hours)h \(remMinutes)m"
     }
 
     public static func pullRequestURL(for key: String) -> String? {

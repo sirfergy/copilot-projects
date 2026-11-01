@@ -775,4 +775,460 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(persistedPrompts[sTranscript.id] ?? nil, "Recovered from transcript turn 1")
         }
     }
+
+    func testTurnElapsedTimerAndLinkedPullRequestPillsEndToEnd() throws {
+        // 1. Contract helpers: extractKeys, shortDisplayLabel, formattedElapsedDuration.
+        let extracted = RemotePullRequestsContract.extractKeys(
+            from: """
+            Ignore malformed https://github.com/sirfergy/copilot-projects/pull/12abc,
+            https://github.com/sirfergy/copilot-projects/pull/12%33, and
+            https://github.com/sirfergy/copilot-projects/pull/12_3, then
+            review https://GitHub.com/SirFergy/Copilot-Projects/pull/270 and
+            duplicate https://github.com/sirfergy/copilot-projects/pull/270/files then
+            https://github.com/octocat/hello-world/pull/12?expand=1,
+            https://github.com/octocat/hello-world/pull/34#discussion_r1, and
+            https://github.com/octocat/hello-world/pull/56
+            """,
+            limit: 3
+        )
+        XCTAssertEqual(
+            extracted,
+            [
+                "sirfergy/copilot-projects#270",
+                "octocat/hello-world#12",
+                "octocat/hello-world#34",
+            ]
+        )
+        XCTAssertEqual(
+            RemotePullRequestsContract.shortDisplayLabel(for: "sirfergy/copilot-projects#270"),
+            "#270"
+        )
+        XCTAssertNil(RemotePullRequestsContract.formattedElapsedDuration(fromMilliseconds: 0, nowMilliseconds: 1_000))
+        XCTAssertNil(RemotePullRequestsContract.formattedElapsedDuration(fromMilliseconds: 2_000, nowMilliseconds: 1_000))
+        XCTAssertEqual(
+            RemotePullRequestsContract.formattedElapsedDuration(fromMilliseconds: 1_000, nowMilliseconds: 1_000),
+            "1s"
+        )
+        XCTAssertEqual(
+            RemotePullRequestsContract.formattedElapsedDuration(fromMilliseconds: 1_000, nowMilliseconds: 46_000),
+            "45s"
+        )
+        XCTAssertEqual(
+            RemotePullRequestsContract.formattedElapsedDuration(fromMilliseconds: 1_000, nowMilliseconds: 121_000),
+            "2m"
+        )
+        XCTAssertEqual(
+            RemotePullRequestsContract.formattedElapsedDuration(fromMilliseconds: 1_000, nowMilliseconds: 3_601_000),
+            "1h"
+        )
+        XCTAssertEqual(
+            RemotePullRequestsContract.formattedElapsedDuration(fromMilliseconds: 1_000, nowMilliseconds: 3_901_000),
+            "1h 5m"
+        )
+
+        try withTempStateDirectory { root in
+            let s1 = Session(
+                title: "Feature Work",
+                cwd: root.path,
+                startingPrompt: "Investigate https://github.com/sirfergy/copilot-projects/pull/101"
+            )
+            let project = Project(
+                name: "Alpha",
+                cwd: root.path,
+                sessions: [s1],
+                selectedSessionId: s1.id
+            )
+            let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+            try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+            let model = AppModel(
+                stateRepository: repository,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteSessionBackendAvailable: { true },
+                remoteSessionLauncher: { _, _, _ in },
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                model.forcePendingSessionDestroys()
+                model.detachAllClients()
+            }
+
+            // 2. Starting prompt PR URL extraction + adversarial review session PR key assignment.
+            XCTAssertEqual(model.projects[0].sessions[0].effectivePullRequestKeys, ["sirfergy/copilot-projects#101"])
+
+            let reviewSessionId = try XCTUnwrap(
+                model.addAdversarialReviewSession(
+                    toProjectId: project.id,
+                    pullRequestURL: "https://github.com/SirFergy/Copilot-Projects/pull/270"
+                )
+            )
+            let reviewSession = try XCTUnwrap(model.projects[0].sessions.first(where: { $0.id == reviewSessionId }))
+            XCTAssertEqual(reviewSession.pullRequestKeys, ["sirfergy/copilot-projects#270"])
+            XCTAssertEqual(reviewSession.effectivePullRequestKeys, ["sirfergy/copilot-projects#270"])
+
+            // 3. Running status sets runningStartedAtMilliseconds and remoteWorkspaceSnapshot exposes both fields.
+            let hookStartMs: Int64 = 1_788_000_000_000
+            model.setStatus(
+                sessionId: s1.id,
+                status: .running,
+                text: "Working",
+                timestamp: hookStartMs,
+                source: "user-prompt"
+            )
+            XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, hookStartMs)
+            XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, hookStartMs)
+
+            // Tracker snapshot foregroundTransitionAt across multiple assistant.turn_start iterations
+            // does not reset the request's runningStartedAtMilliseconds, and snapshot.pullRequestKeys
+            // merges into Session.pullRequestKeys (capped at 5, effective capped at 3).
+            let now = Date(timeIntervalSince1970: 1_788_000_010)
+            let transitionDate = Date(timeIntervalSince1970: 1_788_000_005)
+            var activity = AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(now),
+                foregroundTurnActive: true,
+                foregroundTransitionAt: Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(transitionDate),
+                scheduledTurnActive: false,
+                activeSubagents: [],
+                schedules: [],
+                idleGeneration: 0,
+                lastIdleAborted: false,
+                lastIdleTurnKind: nil,
+                error: nil,
+                pullRequestKeys: [
+                    "sirfergy/copilot-projects#202",
+                    "sirfergy/copilot-projects#203",
+                    "sirfergy/copilot-projects#204",
+                    "sirfergy/copilot-projects#205",
+                    "sirfergy/copilot-projects#206",
+                    "sirfergy/copilot-projects#207",
+                ]
+            )
+            try JSONEncoder().encode(activity).write(
+                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
+                options: .atomic
+            )
+            model.refreshAgentActivitySnapshots(now: now)
+
+            let updatedS1 = model.projects[0].sessions[0]
+            XCTAssertEqual(updatedS1.pullRequestKeys?.count, 5)
+            XCTAssertEqual(
+                updatedS1.effectivePullRequestKeys,
+                [
+                    "sirfergy/copilot-projects#202",
+                    "sirfergy/copilot-projects#203",
+                    "sirfergy/copilot-projects#204",
+                ]
+            )
+            XCTAssertEqual(updatedS1.runningStartedAtMilliseconds, hookStartMs)
+            XCTAssertEqual(updatedS1.effectiveRunningStartedAtMilliseconds, hookStartMs)
+
+            let remoteRunning = try XCTUnwrap(
+                model.remoteWorkspaceSnapshot().projects.first?.sessions.first(where: { $0.id == s1.id })
+            )
+            XCTAssertEqual(remoteRunning.runningStartedAtMilliseconds, hookStartMs)
+            XCTAssertEqual(
+                remoteRunning.pullRequestKeys,
+                [
+                    "sirfergy/copilot-projects#202",
+                    "sirfergy/copilot-projects#203",
+                    "sirfergy/copilot-projects#204",
+                ]
+            )
+
+            // Subsequent tool-loop assistant.turn_start iteration rewrites foregroundTransitionAt,
+            // but both local and remote projections preserve the initial request start timestamp.
+            let secondIterationNow = Date(timeIntervalSince1970: 1_788_000_016)
+            activity.updatedAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(secondIterationNow)
+            activity.foregroundTransitionAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                .format(Date(timeIntervalSince1970: 1_788_000_015))
+            try JSONEncoder().encode(activity).write(
+                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
+                options: .atomic
+            )
+            model.refreshAgentActivitySnapshots(now: secondIterationNow)
+            XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, hookStartMs)
+            XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, hookStartMs)
+            let remoteSecondIteration = try XCTUnwrap(
+                model.remoteWorkspaceSnapshot().projects.first?.sessions.first(where: { $0.id == s1.id })
+            )
+            XCTAssertEqual(remoteSecondIteration.runningStartedAtMilliseconds, hookStartMs)
+
+            // Pending question flips displayStatus to .waiting and hides effectiveRunningStartedAtMilliseconds.
+            activity.trackedUserInputs = [
+                TrackedUserInput(
+                    requestId: "req-1",
+                    question: "Proceed?",
+                    choices: ["Yes"],
+                    allowFreeform: false,
+                    requestedAt: Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(now)
+                )
+            ]
+            var waitingSession = updatedS1
+            waitingSession.agentActivity = activity
+            XCTAssertEqual(waitingSession.displayStatus, .waiting)
+            XCTAssertNil(waitingSession.effectiveRunningStartedAtMilliseconds)
+
+            // Transitioning to .idle clears runningStartedAtMilliseconds, and a subsequent turn start does not
+            // mistake an old idle snapshot's foregroundTransitionAt for the new turn's start time.
+            var idleSnapshot = activity
+            idleSnapshot.trackedUserInputs = nil
+            idleSnapshot.foregroundTurnActive = false
+            idleSnapshot.foregroundTransitionAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                .format(Date(timeIntervalSince1970: 1_788_000_020))
+            try JSONEncoder().encode(idleSnapshot).write(
+                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
+                options: .atomic
+            )
+            model.refreshAgentActivitySnapshots(now: Date(timeIntervalSince1970: 1_788_000_021))
+            model.setStatus(
+                sessionId: s1.id,
+                status: .idle,
+                text: nil,
+                timestamp: hookStartMs + 20_000,
+                source: "session-idle"
+            )
+            XCTAssertNil(model.projects[0].sessions[0].runningStartedAtMilliseconds)
+            XCTAssertNil(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds)
+            let remoteIdle = try XCTUnwrap(
+                model.remoteWorkspaceSnapshot().projects.first?.sessions.first(where: { $0.id == s1.id })
+            )
+            XCTAssertNil(remoteIdle.runningStartedAtMilliseconds)
+
+            let nextTurnStartMs: Int64 = 1_788_000_060_000
+            model.setStatus(
+                sessionId: s1.id,
+                status: .running,
+                text: "Next turn",
+                timestamp: nextTurnStartMs,
+                source: "user-prompt"
+            )
+            XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
+            XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
+
+            // Transient permission wait preserves pre-wait runningStartedAtMilliseconds across .waiting -> .running,
+            // including when a post-wait assistant.turn_start snapshot arrives with a newer foregroundTransitionAt.
+            model.setStatus(
+                sessionId: s1.id,
+                status: .waiting,
+                text: "Needs permission",
+                timestamp: nextTurnStartMs + 5_000,
+                source: "permission",
+                notification: .permission
+            )
+            XCTAssertNil(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds)
+            model.setStatus(
+                sessionId: s1.id,
+                status: .running,
+                text: "Resumed after permission",
+                timestamp: nextTurnStartMs + 10_000,
+                source: "tool"
+            )
+            var postWaitActivity = idleSnapshot
+            postWaitActivity.conversationEpoch = "\(s1.id):1"
+            postWaitActivity.updatedAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                .format(Date(timeIntervalSince1970: 1_788_000_073))
+            postWaitActivity.foregroundTurnActive = true
+            postWaitActivity.foregroundTransitionAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                .format(Date(timeIntervalSince1970: 1_788_000_072))
+            try JSONEncoder().encode(postWaitActivity).write(
+                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
+                options: .atomic
+            )
+            model.refreshAgentActivitySnapshots(now: Date(timeIntervalSince1970: 1_788_000_073))
+            XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
+            XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
+            let remotePostWait = try XCTUnwrap(
+                model.remoteWorkspaceSnapshot().projects.first?.sessions.first(where: { $0.id == s1.id })
+            )
+            XCTAssertEqual(remotePostWait.runningStartedAtMilliseconds, nextTurnStartMs)
+
+            // Relaunching after an off-host tool hook (where statusTimestamp advances in .status-record.json
+            // while the active snapshot's idleGeneration is unchanged) preserves the original request start,
+            // and timestamp-less status transitions persist clocks.status so relaunch preserves the start too.
+            SessionArtifacts.persistStatus(
+                sessionId: s1.id,
+                status: .running,
+                timestamp: nextTurnStartMs + 15_000,
+                promptStatusTimestamp: nextTurnStartMs + 15_000,
+                sessionsDirectory: root
+            )
+            let relaunched = AppModel(
+                stateRepository: repository,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteSessionBackendAvailable: { true },
+                remoteSessionLauncher: { _, _, _ in },
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                relaunched.forcePendingSessionDestroys()
+                relaunched.detachAllClients()
+            }
+            XCTAssertEqual(relaunched.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
+            XCTAssertEqual(relaunched.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
+
+            // Timestamp-less waiting -> running sequence updates runningStatusTimestampMilliseconds from clocks.status.
+            relaunched.setStatus(sessionId: s1.id, status: .waiting, text: "Wait", notification: .permission)
+            relaunched.setStatus(sessionId: s1.id, status: .running, text: "Resume")
+            let relaunchedTimestampless = AppModel(
+                stateRepository: repository,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteSessionBackendAvailable: { true },
+                remoteSessionLauncher: { _, _, _ in },
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                relaunchedTimestampless.forcePendingSessionDestroys()
+                relaunchedTimestampless.detachAllClients()
+            }
+            XCTAssertEqual(relaunchedTimestampless.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
+
+            // Off-host CLI restart or new request (even if idleGeneration resets to 0 under a new conversationEpoch)
+            // starts a fresh timer at the new request's timestamp.
+            let offHostTurnStartMs = SessionArtifacts.currentStatusTimestamp() + 60_000
+            var newOffHostActivity = postWaitActivity
+            newOffHostActivity.conversationEpoch = "\(s1.id):2"
+            newOffHostActivity.idleGeneration = 0
+            try JSONEncoder().encode(newOffHostActivity).write(
+                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
+                options: .atomic
+            )
+            SessionArtifacts.persistStatus(
+                sessionId: s1.id,
+                status: .running,
+                timestamp: offHostTurnStartMs,
+                promptStatusTimestamp: offHostTurnStartMs,
+                sessionsDirectory: root
+            )
+            let relaunchedOffHost = AppModel(
+                stateRepository: repository,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteSessionBackendAvailable: { true },
+                remoteSessionLauncher: { _, _, _ in },
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                relaunchedOffHost.forcePendingSessionDestroys()
+                relaunchedOffHost.detachAllClients()
+            }
+            XCTAssertEqual(relaunchedOffHost.projects[0].sessions[0].runningStartedAtMilliseconds, offHostTurnStartMs)
+            XCTAssertEqual(relaunchedOffHost.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, offHostTurnStartMs)
+
+            // Untrusted/mismatched copilotSessionId snapshot must not leak pullRequestKeys or foregroundTransitionAt.
+            let pinnedCopilotId = UUID().uuidString.lowercased()
+            let foreignCopilotId = UUID().uuidString.lowercased()
+            try Data("\(pinnedCopilotId)\n".utf8).write(
+                to: root.appendingPathComponent("\(reviewSessionId).copilot-session"),
+                options: .atomic
+            )
+            var foreignSnapshot = idleSnapshot
+            foreignSnapshot.updatedAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                .format(Date(timeIntervalSince1970: 1_788_000_051))
+            foreignSnapshot.copilotSessionId = foreignCopilotId
+            foreignSnapshot.foregroundTurnActive = true
+            foreignSnapshot.foregroundTransitionAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                .format(Date(timeIntervalSince1970: 1_788_000_050))
+            foreignSnapshot.pullRequestKeys = ["evil/foreign#999"]
+            try JSONEncoder().encode(foreignSnapshot).write(
+                to: root.appendingPathComponent("\(reviewSessionId).agent-activity.json"),
+                options: .atomic
+            )
+            model.refreshAgentActivitySnapshots(now: Date(timeIntervalSince1970: 1_788_000_051))
+            model.setStatus(
+                sessionId: reviewSessionId,
+                status: .running,
+                text: "Reviewing",
+                timestamp: 1_788_000_080_000,
+                source: "user-prompt"
+            )
+            let refreshedReview = try XCTUnwrap(
+                model.projects[0].sessions.first(where: { $0.id == reviewSessionId })
+            )
+            XCTAssertEqual(refreshedReview.pullRequestKeys, ["sirfergy/copilot-projects#270"])
+            XCTAssertEqual(refreshedReview.effectivePullRequestKeys, ["sirfergy/copilot-projects#270"])
+            XCTAssertEqual(refreshedReview.runningStartedAtMilliseconds, 1_788_000_080_000)
+            XCTAssertEqual(refreshedReview.effectiveRunningStartedAtMilliseconds, 1_788_000_080_000)
+
+            // 4. SessionRow Equatable and VoiceOver accessibilityStatus include running elapsed time and PR keys.
+            var rowSessionA = Session(id: "row-1", title: "Row", cwd: root.path)
+            rowSessionA.status = .running
+            rowSessionA.runningStartedAtMilliseconds = 1_000
+            var rowSessionB = rowSessionA
+            rowSessionB.runningStartedAtMilliseconds = 2_000
+            XCTAssertNotEqual(
+                SessionRow(session: rowSessionA, isActive: false, onSelect: {}, onClose: {}),
+                SessionRow(session: rowSessionB, isActive: false, onSelect: {}, onClose: {})
+            )
+            XCTAssertEqual(
+                SessionRow(session: rowSessionA, isActive: true, onSelect: {}, onClose: {})
+                    .accessibilityStatus(nowMilliseconds: 181_000),
+                "Selected, Running 3m"
+            )
+            var rowSessionC = rowSessionA
+            rowSessionC.pullRequestKeys = ["sirfergy/copilot-projects#270"]
+            XCTAssertNotEqual(
+                SessionRow(session: rowSessionA, isActive: false, onSelect: {}, onClose: {}),
+                SessionRow(session: rowSessionC, isActive: false, onSelect: {}, onClose: {})
+            )
+
+            // 5. Shipped tracker extension extracts PR URLs from foreground prompts, tool results, and transcript sync.
+            let script = CopilotExtension.script
+            let startIdx = try XCTUnwrap(script.range(of: "function recordPullRequestUrlsFromText(")?.lowerBound)
+            let endIdx = try XCTUnwrap(script.range(of: "function syncStartingPromptFromTranscript(")?.lowerBound)
+            let extractedJS = String(script[startIdx..<endIdx])
+            let harnessURL = root.appendingPathComponent("pr-extract-test.mjs")
+            let harnessSource = """
+            import assert from "node:assert/strict";
+            let pullRequestKeys = [];
+            let transcriptTurns = [];
+            let pendingTranscriptTurn = null;
+            \(extractedJS)
+            assert.equal(recordPullRequestUrlsFromText("Ignore https://github.com/o/r/pull/12abc and https://github.com/o/r/pull/12%33"), false);
+            assert.equal(recordPullRequestUrlsFromText("Review https://GitHub.com/SirFergy/Copilot-Projects/pull/270"), true);
+            assert.equal(recordPullRequestUrlsFromToolResult({
+              result: {
+                content: [{ type: "text", text: "Created https://github.com/octocat/hello-world/pull/42\\n" }]
+              }
+            }), true);
+            transcriptTurns = [
+              { kind: "scheduled", userContent: "https://github.com/octocat/hello-world/pull/999" },
+              { kind: "foreground", userContent: "See https://github.com/octocat/hello-world/pull/43 and https://github.com/octocat/hello-world/pull/44" }
+            ];
+            assert.equal(syncPullRequestKeysFromTranscript(), true);
+            assert.deepEqual(pullRequestKeys, [
+              "sirfergy/copilot-projects#270",
+              "octocat/hello-world#42",
+              "octocat/hello-world#43"
+            ]);
+            """
+            try Data(harnessSource.utf8).write(to: harnessURL, options: .atomic)
+            try requireNodeForJavaScriptTests()
+            let node = Process()
+            node.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            node.arguments = ["node", harnessURL.path]
+            try node.run()
+            node.waitUntilExit()
+            XCTAssertEqual(node.terminationStatus, 0)
+        }
+    }
 }
