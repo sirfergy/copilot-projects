@@ -70,10 +70,10 @@ struct Session: Identifiable, Codable, Equatable {
 
     var effectiveRunningStartedAtMilliseconds: Int64? {
         guard displayStatus == .running else { return nil }
-        if agentActivity?.foregroundTurnActive == true {
-            return agentActivity?.foregroundTransitionMilliseconds ?? runningStartedAtMilliseconds
-        }
         return runningStartedAtMilliseconds
+            ?? (agentActivity?.foregroundTurnActive == true
+                ? agentActivity?.foregroundTransitionMilliseconds
+                : nil)
     }
 
     var effectivePullRequestKeys: [String] {

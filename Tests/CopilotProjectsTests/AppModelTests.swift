@@ -882,8 +882,9 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, hookStartMs)
             XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, hookStartMs)
 
-            // Tracker snapshot foregroundTransitionAt overrides hook timestamp when foregroundTurnActive == true,
-            // and snapshot.pullRequestKeys merges into Session.pullRequestKeys (capped at 5, effective capped at 3).
+            // Tracker snapshot foregroundTransitionAt across multiple assistant.turn_start iterations
+            // does not reset the request's runningStartedAtMilliseconds, and snapshot.pullRequestKeys
+            // merges into Session.pullRequestKeys (capped at 5, effective capped at 3).
             let now = Date(timeIntervalSince1970: 1_788_000_010)
             let transitionDate = Date(timeIntervalSince1970: 1_788_000_005)
             var activity = AgentActivitySnapshot(
@@ -923,12 +924,13 @@ final class AppModelTests: XCTestCase {
                     "sirfergy/copilot-projects#204",
                 ]
             )
-            XCTAssertEqual(updatedS1.effectiveRunningStartedAtMilliseconds, 1_788_000_005_000)
+            XCTAssertEqual(updatedS1.runningStartedAtMilliseconds, hookStartMs)
+            XCTAssertEqual(updatedS1.effectiveRunningStartedAtMilliseconds, hookStartMs)
 
             let remoteRunning = try XCTUnwrap(
                 model.remoteWorkspaceSnapshot().projects.first?.sessions.first(where: { $0.id == s1.id })
             )
-            XCTAssertEqual(remoteRunning.runningStartedAtMilliseconds, 1_788_000_005_000)
+            XCTAssertEqual(remoteRunning.runningStartedAtMilliseconds, hookStartMs)
             XCTAssertEqual(
                 remoteRunning.pullRequestKeys,
                 [
@@ -937,6 +939,24 @@ final class AppModelTests: XCTestCase {
                     "sirfergy/copilot-projects#204",
                 ]
             )
+
+            // Subsequent tool-loop assistant.turn_start iteration rewrites foregroundTransitionAt,
+            // but both local and remote projections preserve the initial request start timestamp.
+            let secondIterationNow = Date(timeIntervalSince1970: 1_788_000_016)
+            activity.updatedAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(secondIterationNow)
+            activity.foregroundTransitionAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                .format(Date(timeIntervalSince1970: 1_788_000_015))
+            try JSONEncoder().encode(activity).write(
+                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
+                options: .atomic
+            )
+            model.refreshAgentActivitySnapshots(now: secondIterationNow)
+            XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, hookStartMs)
+            XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, hookStartMs)
+            let remoteSecondIteration = try XCTUnwrap(
+                model.remoteWorkspaceSnapshot().projects.first?.sessions.first(where: { $0.id == s1.id })
+            )
+            XCTAssertEqual(remoteSecondIteration.runningStartedAtMilliseconds, hookStartMs)
 
             // Pending question flips displayStatus to .waiting and hides effectiveRunningStartedAtMilliseconds.
             activity.trackedUserInputs = [
@@ -990,7 +1010,8 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
             XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
 
-            // Transient permission wait preserves pre-wait runningStartedAtMilliseconds across .waiting -> .running.
+            // Transient permission wait preserves pre-wait runningStartedAtMilliseconds across .waiting -> .running,
+            // including when a post-wait assistant.turn_start snapshot arrives with a newer foregroundTransitionAt.
             model.setStatus(
                 sessionId: s1.id,
                 status: .waiting,
@@ -1007,8 +1028,23 @@ final class AppModelTests: XCTestCase {
                 timestamp: nextTurnStartMs + 10_000,
                 source: "tool"
             )
+            var postWaitActivity = idleSnapshot
+            postWaitActivity.updatedAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                .format(Date(timeIntervalSince1970: 1_788_000_073))
+            postWaitActivity.foregroundTurnActive = true
+            postWaitActivity.foregroundTransitionAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                .format(Date(timeIntervalSince1970: 1_788_000_072))
+            try JSONEncoder().encode(postWaitActivity).write(
+                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
+                options: .atomic
+            )
+            model.refreshAgentActivitySnapshots(now: Date(timeIntervalSince1970: 1_788_000_073))
             XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
             XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
+            let remotePostWait = try XCTUnwrap(
+                model.remoteWorkspaceSnapshot().projects.first?.sessions.first(where: { $0.id == s1.id })
+            )
+            XCTAssertEqual(remotePostWait.runningStartedAtMilliseconds, nextTurnStartMs)
 
             // Untrusted/mismatched copilotSessionId snapshot must not leak pullRequestKeys into Session or effectivePullRequestKeys.
             let pinnedCopilotId = UUID().uuidString.lowercased()
@@ -1031,7 +1067,7 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(refreshedReview.pullRequestKeys, ["sirfergy/copilot-projects#270"])
             XCTAssertEqual(refreshedReview.effectivePullRequestKeys, ["sirfergy/copilot-projects#270"])
 
-            // 4. SessionRow Equatable compares effectiveRunningStartedAtMilliseconds and effectivePullRequestKeys.
+            // 4. SessionRow Equatable and VoiceOver accessibilityStatus include running elapsed time and PR keys.
             var rowSessionA = Session(id: "row-1", title: "Row", cwd: root.path)
             rowSessionA.status = .running
             rowSessionA.runningStartedAtMilliseconds = 1_000
@@ -1040,6 +1076,11 @@ final class AppModelTests: XCTestCase {
             XCTAssertNotEqual(
                 SessionRow(session: rowSessionA, isActive: false, onSelect: {}, onClose: {}),
                 SessionRow(session: rowSessionB, isActive: false, onSelect: {}, onClose: {})
+            )
+            XCTAssertEqual(
+                SessionRow(session: rowSessionA, isActive: true, onSelect: {}, onClose: {})
+                    .accessibilityStatus(nowMilliseconds: 181_000),
+                "Selected, Running 3m"
             )
             var rowSessionC = rowSessionA
             rowSessionC.pullRequestKeys = ["sirfergy/copilot-projects#270"]
@@ -1079,6 +1120,7 @@ final class AppModelTests: XCTestCase {
             ]);
             """
             try Data(harnessSource.utf8).write(to: harnessURL, options: .atomic)
+            try requireNodeForJavaScriptTests()
             let node = Process()
             node.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             node.arguments = ["node", harnessURL.path]

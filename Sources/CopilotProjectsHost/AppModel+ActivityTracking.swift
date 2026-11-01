@@ -443,6 +443,13 @@ extension AppModel {
                     activityChanged = activityChanged || previous != effectiveFresh
                     nextProjects[pi].sessions[si].agentActivity = effectiveFresh
                 }
+                if nextProjects[pi].sessions[si].status != .idle,
+                   nextProjects[pi].sessions[si].runningStartedAtMilliseconds == nil,
+                   effectiveFresh?.foregroundTurnActive == true,
+                   let transitionMs = effectiveFresh?.foregroundTransitionMilliseconds {
+                    nextProjects[pi].sessions[si].runningStartedAtMilliseconds = transitionMs
+                    activityChanged = true
+                }
 
                 let scheduledMarkerURL = agentActivityDirectory
                     .appendingPathComponent("\(sessionId).scheduled-turn", isDirectory: false)

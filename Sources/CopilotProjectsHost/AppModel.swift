@@ -2982,14 +2982,13 @@ final class AppModel: ObservableObject {
                 let activeTransitionMs: Int64? = {
                     guard projects[loc.p].sessions[loc.s].agentActivity?.foregroundTurnActive == true,
                           let transitionMs = projects[loc.p].sessions[loc.s].agentActivity?.foregroundTransitionMilliseconds,
-                          transitionMs >= (timestamp ?? .min) else {
+                          transitionMs >= (previousTimestamp ?? .min) else {
                         return nil
                     }
                     return transitionMs
                 }()
                 projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds =
-                    activeTransitionMs
-                    ?? timestamp
+                    [timestamp, activeTransitionMs].compactMap { $0 }.min()
                     ?? SessionArtifacts.currentStatusTimestamp()
             }
         } else if status == .idle {

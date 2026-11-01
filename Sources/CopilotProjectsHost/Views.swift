@@ -1435,11 +1435,16 @@ struct SessionRow: View, Equatable {
             || !session.finishedUnseen || session.failedRequest != nil)
     }
 
-    var accessibilityStatus: String {
+    var accessibilityStatus: String { accessibilityStatus() }
+
+    func accessibilityStatus(nowMilliseconds: Int64 = SessionArtifacts.currentStatusTimestamp()) -> String {
         var states: [String] = []
         if isActive { states.append("Selected") }
         if isChild { states.append("Child session") }
-        states.append(stateLabel)
+        let elapsed = session.effectiveRunningStartedAtMilliseconds.flatMap {
+            RemotePullRequestsContract.formattedElapsedDuration(fromMilliseconds: $0, nowMilliseconds: nowMilliseconds)
+        }
+        states.append(elapsed.map { "\(stateLabel) \($0)" } ?? stateLabel)
         if let hostLabel = hostDisplayName ?? session.hostId, !hostLabel.isEmpty {
             states.append("Running on \(hostLabel)")
         }
@@ -1590,9 +1595,17 @@ struct SessionRow: View, Equatable {
                         action: onToggleExpand
                     )
                 }
-                Button(session.title, action: onSelect)
-                    .accessibilityValue(accessibilityStatus)
-                    .accessibilityAddTraits(isActive ? .isSelected : [])
+                if session.effectiveRunningStartedAtMilliseconds != nil {
+                    TimelineView(.periodic(from: .now, by: 15)) { context in
+                        Button(session.title, action: onSelect)
+                            .accessibilityValue(accessibilityStatus(nowMilliseconds: Int64(context.date.timeIntervalSince1970 * 1_000)))
+                            .accessibilityAddTraits(isActive ? .isSelected : [])
+                    }
+                } else {
+                    Button(session.title, action: onSelect)
+                        .accessibilityValue(accessibilityStatus)
+                        .accessibilityAddTraits(isActive ? .isSelected : [])
+                }
                 ForEach(Array(session.effectivePullRequestKeys.prefix(2)), id: \.self) { key in
                     if let urlString = RemotePullRequestsContract.pullRequestURL(for: key),
                        let url = URL(string: urlString) {

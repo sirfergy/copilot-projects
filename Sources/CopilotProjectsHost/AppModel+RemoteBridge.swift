@@ -731,16 +731,13 @@ extension AppModel {
                         let remoteHost = resolvedRemoteHost(for: session, in: hosts)
                         let resolvedStartingPrompt = startingPrompt(for: session.id)
                         var effectiveSession = session
+                        effectiveSession.status = status
                         if effectiveSession.startingPrompt == nil {
                             effectiveSession.startingPrompt = resolvedStartingPrompt
                         }
                         let effectivePRKeys = effectiveSession.effectivePullRequestKeys
                         let runningStartedAt: Int64? = status == .running
                             ? (effectiveSession.effectiveRunningStartedAtMilliseconds
-                                ?? (effectiveSession.agentActivity?.foregroundTurnActive == true
-                                    ? effectiveSession.agentActivity?.foregroundTransitionMilliseconds
-                                    : nil)
-                                ?? effectiveSession.runningStartedAtMilliseconds
                                 ?? sessionSemantics.statusClock.timestamp(for: session.id))
                             : nil
                         return RemoteSessionSnapshot(
