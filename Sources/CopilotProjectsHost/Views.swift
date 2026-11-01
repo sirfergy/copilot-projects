@@ -631,6 +631,7 @@ struct ProjectRow: View, Equatable {
             && lhs.project.defaultHostId == rhs.project.defaultHostId
             && lhs.project.sessions.count == rhs.project.sessions.count
             && lhs.project.hasUnread == rhs.project.hasUnread
+            && lhs.project.sessions.filter(\.isUnread).count == rhs.project.sessions.filter(\.isUnread).count
             && lhs.project.runningCount == rhs.project.runningCount
             && lhs.project.backgroundWorkCount == rhs.project.backgroundWorkCount
             && lhs.project.scheduledCount == rhs.project.scheduledCount
@@ -659,9 +660,28 @@ struct ProjectRow: View, Equatable {
             if showNumber, let number {
                 NumberBadge(number: number)
             } else if project.hasUnread {
-                Image(systemName: "bell.badge.fill")
-                    .foregroundStyle(.blue)
-                    .font(.caption)
+                let unreadCount = project.sessions.filter(\.isUnread).count
+                HStack(spacing: 3) {
+                    Image(systemName: "bell.badge.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text(unreadCount, format: .number)
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                }
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color.accentColor.opacity(0.18))
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(Color.accentColor.opacity(0.42), lineWidth: 0.5)
+                )
+                .help("\(unreadCount) unread session\(unreadCount == 1 ? "" : "s")")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(unreadCount) unread session\(unreadCount == 1 ? "" : "s")")
             }
         }
         .padding(.vertical, 5)
@@ -725,7 +745,7 @@ struct ProjectRow: View, Equatable {
 }
 
 /// The 18×18 status badge at the left of a session row.
-/// SessionRow suppresses its separate unread dot while this indicator is blue.
+/// SessionRow suppresses its separate unread badge when completion already shows the blue checkmark.
 struct SessionStateIndicator: View, Equatable {
     let session: Session
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -735,6 +755,8 @@ struct SessionStateIndicator: View, Equatable {
             && lhs.session.failedRequest == rhs.session.failedRequest
             && lhs.session.finishedUnseen == rhs.session.finishedUnseen
             && lhs.session.hasBackgroundWork == rhs.session.hasBackgroundWork
+            && lhs.session.isUnread == rhs.session.isUnread
+            && lhs.session.markedUnread == rhs.session.markedUnread
     }
 
     static func symbolName(for session: Session) -> String {
@@ -747,6 +769,9 @@ struct SessionStateIndicator: View, Equatable {
             if session.failedRequest != nil { return "exclamationmark.triangle.fill" }
             if session.finishedUnseen { return "checkmark.circle.fill" }
             if session.hasBackgroundWork { return "sparkles" }
+            if session.isUnread {
+                return session.markedUnread ? "envelope.badge.fill" : "bell.badge.fill"
+            }
             return "terminal.fill"
         }
     }
@@ -777,6 +802,7 @@ struct SessionStateIndicator: View, Equatable {
             && session.failedRequest == nil
             && !session.finishedUnseen
             && !session.hasBackgroundWork
+            && !session.isUnread
     }
 
     private var badgeTint: Color {
@@ -787,6 +813,7 @@ struct SessionStateIndicator: View, Equatable {
             if session.failedRequest != nil { return .red }
             if session.finishedUnseen { return .blue }
             if session.hasBackgroundWork { return .purple }
+            if session.isUnread { return .accentColor }
             return .primary
         }
     }
@@ -801,6 +828,9 @@ struct SessionStateIndicator: View, Equatable {
             }
             if session.finishedUnseen { return "finished — ready for you" }
             if session.hasBackgroundWork { return "background work active" }
+            if session.isUnread {
+                return session.markedUnread ? "marked unread" : "unread — ready for you"
+            }
             return "idle"
         }
     }
@@ -864,6 +894,35 @@ struct ScheduleBadge: View, Equatable {
         )
         .help(schedules.map(\.helpText).joined(separator: "\n\n"))
         .accessibilityIdentifier("session-schedule-badge")
+    }
+}
+
+struct UnreadBadge: View, Equatable {
+    var isMarkedUnread: Bool = false
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: isMarkedUnread ? "envelope.badge.fill" : "bell.badge.fill")
+                .font(.system(size: 8.5, weight: .semibold))
+            Text("unread")
+                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+        }
+        .foregroundStyle(Color.accentColor)
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1.5)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.accentColor.opacity(0.16))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.38), lineWidth: 0.5)
+        )
+        .help(isMarkedUnread ? "marked unread" : "unread activity")
+        .accessibilityHidden(true)
+        .accessibilityIdentifier("session-unread-badge")
     }
 }
 
@@ -1471,15 +1530,16 @@ struct SessionRow: View, Equatable {
             && lhs.session.failedRequest == rhs.session.failedRequest
             && lhs.session.finishedUnseen == rhs.session.finishedUnseen
             && lhs.session.isUnread == rhs.session.isUnread
+            && lhs.session.markedUnread == rhs.session.markedUnread
             && lhs.session.hasBackgroundWork == rhs.session.hasBackgroundWork
             && lhs.session.schedules == rhs.session.schedules
     }
 
     var showsUnreadIndicator: Bool {
-        // Avoid duplicating the idle completion dot unless the tab-number hint
-        // or a failure indicator hides it.
+        // Avoid duplicating the idle completion dot unless the tab-number hint,
+        // a manual unread mark, or a failure indicator applies.
         session.isUnread && (showNumber || session.displayStatus != .idle
-            || !session.finishedUnseen || session.failedRequest != nil)
+            || !session.finishedUnseen || session.failedRequest != nil || session.markedUnread)
     }
 
     var accessibilityStatus: String { accessibilityStatus() }
@@ -1563,10 +1623,7 @@ struct SessionRow: View, Equatable {
                             if session.hasBackgroundWork { BackgroundWorkBadge() }
                             if !session.schedules.isEmpty { ScheduleBadge(schedules: session.schedules) }
                             if showsUnreadIndicator {
-                                Image(systemName: "circle.fill")
-                                    .font(.system(size: 6))
-                                    .foregroundStyle(.blue)
-                                    .accessibilityHidden(true)
+                                UnreadBadge(isMarkedUnread: session.markedUnread)
                             }
                         }
                         .font(.caption)
