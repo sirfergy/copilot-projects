@@ -132,6 +132,15 @@ extension AppModel {
                         updated.status = status
                         updated.statusIsRuntimeDerived = true
                         updated.statusText = nil
+                        if status == .running {
+                            updated.runningStartedAtMilliseconds = updated.runningStartedAtMilliseconds
+                                ?? (updated.agentActivity?.foregroundTurnActive == true
+                                    ? updated.agentActivity?.foregroundTransitionMilliseconds
+                                    : nil)
+                                ?? Int64(now.timeIntervalSince1970 * 1_000)
+                        } else if status == .idle {
+                            updated.runningStartedAtMilliseconds = nil
+                        }
                         sessionSemantics.activityTracker.reset(sessionId: session.id)
                         if status == .running {
                             updated.finishedUnseen = false
@@ -391,17 +400,48 @@ extension AppModel {
                     activityChanged = true
                     startingPromptChanged = true
                 }
-                if nextProjects[pi].sessions[si].agentActivity != fresh {
-                    var previous = nextProjects[pi].sessions[si].agentActivity
-                    if let fresh {
-                        previous?.updatedAt = fresh.updatedAt
-                        previous?.runtimeActivity?.observedAtMilliseconds =
-                            fresh.runtimeActivity?.observedAtMilliseconds
-                        previous?.workflow?.observedAtMilliseconds =
-                            fresh.workflow?.observedAtMilliseconds ?? 0
+                var effectiveFresh = fresh
+                if let snapshotKeys = snapshot?.pullRequestKeys, !snapshotKeys.isEmpty {
+                    var merged = (nextProjects[pi].sessions[si].pullRequestKeys ?? [])
+                        .compactMap(RemotePullRequestsContract.canonicalKey)
+                    let hasNewCandidate = merged.count < 5 && snapshotKeys.contains { raw in
+                        guard let canonical = RemotePullRequestsContract.canonicalKey(raw) else { return false }
+                        return !merged.contains(canonical)
                     }
-                    activityChanged = activityChanged || previous != fresh
-                    nextProjects[pi].sessions[si].agentActivity = fresh
+                    if hasNewCandidate {
+                        if isActivitySnapshotTrustedForSessionMetadata(
+                            sessionId: sessionId,
+                            snapshot: snapshot
+                        ) {
+                            var mergedChanged = false
+                            for raw in snapshotKeys {
+                                guard merged.count < 5,
+                                      let canonical = RemotePullRequestsContract.canonicalKey(raw),
+                                      !merged.contains(canonical) else { continue }
+                                merged.append(canonical)
+                                mergedChanged = true
+                            }
+                            if mergedChanged {
+                                nextProjects[pi].sessions[si].pullRequestKeys = merged
+                                activityChanged = true
+                                startingPromptChanged = true
+                            }
+                        } else {
+                            effectiveFresh?.pullRequestKeys = nil
+                        }
+                    }
+                }
+                if nextProjects[pi].sessions[si].agentActivity != effectiveFresh {
+                    var previous = nextProjects[pi].sessions[si].agentActivity
+                    if let effectiveFresh {
+                        previous?.updatedAt = effectiveFresh.updatedAt
+                        previous?.runtimeActivity?.observedAtMilliseconds =
+                            effectiveFresh.runtimeActivity?.observedAtMilliseconds
+                        previous?.workflow?.observedAtMilliseconds =
+                            effectiveFresh.workflow?.observedAtMilliseconds ?? 0
+                    }
+                    activityChanged = activityChanged || previous != effectiveFresh
+                    nextProjects[pi].sessions[si].agentActivity = effectiveFresh
                 }
 
                 let scheduledMarkerURL = agentActivityDirectory
@@ -751,6 +791,7 @@ extension AppModel {
             var updated = projects[pi].sessions[si]
             updated.status = .idle
             updated.statusText = nil
+            updated.runningStartedAtMilliseconds = nil
             if markFinished,
                projects[pi].effectiveParentSessionId(for: sid) == nil,
                !isVisible(projectIndex: pi, sessionIndex: si) {

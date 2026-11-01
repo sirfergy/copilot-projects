@@ -91,9 +91,10 @@ discards it. Closing the drawer or switching sessions dismisses that preview.
 - **Projects, sessions, and work.** Choose a project, scan its vertically listed
   sessions, and work in the terminal beside them. Hide the project column to
   reclaim space; background sessions keep running.
-- **Attention at a glance.** Running and waiting indicators, unread markers,
-  failed-request markers, and native notifications help you find the session
-  that needs you. Pending
+- **Attention at a glance.** Running and waiting indicators (including a live
+  turn elapsed timer while running and clickable `#PR` pills when linked to pull
+  requests), unread markers, failed-request markers, and native notifications help
+  you find the session that needs you. Pending
   questions keep the waiting indicator visible even while other activity continues.
 - **Session details.** Read completed turns as Markdown and see usage,
   background agents, and schedules when the

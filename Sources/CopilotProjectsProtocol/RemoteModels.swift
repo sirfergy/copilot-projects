@@ -268,6 +268,10 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     public let memoryUsageBytes: Int64?
     /// Initial prompt that started or first drove this session (`nil` when absent).
     public let startingPrompt: String?
+    /// Start timestamp in Unix milliseconds of the current running turn (`nil` when not running).
+    public let runningStartedAtMilliseconds: Int64?
+    /// Canonical pull request keys (`owner/repo#number`) linked to this session (`nil` when none).
+    public let pullRequestKeys: [String]?
 
     public init(
         id: String,
@@ -293,7 +297,9 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         hostDisplayName: String? = nil,
         parentSessionId: String? = nil,
         memoryUsageBytes: Int64? = nil,
-        startingPrompt: String? = nil
+        startingPrompt: String? = nil,
+        runningStartedAtMilliseconds: Int64? = nil,
+        pullRequestKeys: [String]? = nil
     ) {
         self.id = id
         self.title = title
@@ -319,6 +325,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.parentSessionId = parentSessionId
         self.memoryUsageBytes = memoryUsageBytes
         self.startingPrompt = startingPrompt
+        self.runningStartedAtMilliseconds = runningStartedAtMilliseconds
+        self.pullRequestKeys = pullRequestKeys
     }
 }
 

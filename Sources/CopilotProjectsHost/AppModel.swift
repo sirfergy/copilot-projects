@@ -1515,11 +1515,25 @@ final class AppModel: ObservableObject {
     ) -> String? {
         guard let rawPrompt = snapshot?.startingPrompt,
               !rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              isActivitySnapshotTrustedForSessionMetadata(
+                  sessionId: sessionId,
+                  snapshot: snapshot
+              ) else {
+            return nil
+        }
+        return rawPrompt
+    }
+
+    func isActivitySnapshotTrustedForSessionMetadata(
+        sessionId: String,
+        snapshot: AgentActivitySnapshot?
+    ) -> Bool {
+        guard snapshot != nil,
               TranscriptController.transcriptOwnerAllowsRead(
                   sessionId: sessionId,
                   directory: resumeMarkerDirectory
               ) else {
-            return nil
+            return false
         }
         if let rawActivityId = snapshot?.copilotSessionId?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1530,15 +1544,15 @@ final class AppModel: ObservableObject {
                       copilotSessionId: rawActivityId,
                       directory: resumeMarkerDirectory
                   ) else {
-                return nil
+                return false
             }
             let validatedMarker = validatedCopilotSessionMarker(for: sessionId)
             guard validatedMarker == nil
                 || validatedMarker?.caseInsensitiveCompare(rawActivityId) == .orderedSame else {
-                return nil
+                return false
             }
         }
-        return rawPrompt
+        return true
     }
 
     private func loadTranscriptStartingPrompt(sessionId: String) -> String? {
@@ -1747,6 +1761,9 @@ final class AppModel: ObservableObject {
             title: target.title,
             cwd: cwd,
             hostId: sessionHostId,
+            pullRequestKeys: RemotePullRequestsContract
+                .canonicalKey("\(target.owner)/\(target.repository)#\(target.number)")
+                .map { [$0] },
             startingPrompt: prompt
         )
         projects[pi].sessions.append(session)
@@ -2960,6 +2977,24 @@ final class AppModel: ObservableObject {
         }
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
+        if status == .running {
+            if projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds == nil {
+                let activeTransitionMs: Int64? = {
+                    guard projects[loc.p].sessions[loc.s].agentActivity?.foregroundTurnActive == true,
+                          let transitionMs = projects[loc.p].sessions[loc.s].agentActivity?.foregroundTransitionMilliseconds,
+                          transitionMs >= (timestamp ?? .min) else {
+                        return nil
+                    }
+                    return transitionMs
+                }()
+                projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds =
+                    activeTransitionMs
+                    ?? timestamp
+                    ?? SessionArtifacts.currentStatusTimestamp()
+            }
+        } else if status == .idle {
+            projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds = nil
+        }
         if status == .running || status == .waiting {
             if status == .running {
                 projects[loc.p].sessions[loc.s].scheduledTurnActive = false
@@ -3383,6 +3418,13 @@ final class AppModel: ObservableObject {
         session.status = restoredStatus
         session.statusIsRuntimeDerived = restore.status == .waiting
         session.statusText = restore.statusText
+        session.runningStartedAtMilliseconds = restoredStatus == .running
+            ? (session.runningStartedAtMilliseconds
+                ?? (session.agentActivity?.foregroundTurnActive == true
+                    ? session.agentActivity?.foregroundTransitionMilliseconds
+                    : nil)
+                ?? restore.statusTimestamp)
+            : nil
         session.scheduledTurnActive = restore.scheduledTurnActive
         session.finishedUnseen = restore.finishedUnseen
         session.turnCompleted = restore.turnCompleted
@@ -3767,6 +3809,9 @@ final class AppModel: ObservableObject {
                 let status = restored.status
                 let statusTimestamp = restored.statusTimestamp
                 projects[pi].sessions[si].status = status
+                projects[pi].sessions[si].runningStartedAtMilliseconds = status == .running
+                    ? (statusTimestamp ?? SessionArtifacts.currentStatusTimestamp())
+                    : nil
                 if let context = restored.inputWait, let timestamp = statusTimestamp,
                    status == .waiting {
                     inputWaits[sid] = InputWaitState(context: context, timestamp: timestamp)

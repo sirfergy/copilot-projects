@@ -396,6 +396,7 @@ if (validSessionId && socketPath) {
     const queuedTranscriptEvents = [];
     let pendingTranscriptTurn = null;
     let startingPrompt = null;
+    let pullRequestKeys = [];
     let transcriptAssistantTurnActive = false;
     // `session.idle` is ephemeral, so durable replay cannot tell a failure
     // inside a request from one after it ended. Live delivery records which
@@ -2547,6 +2548,7 @@ if (validSessionId && socketPath) {
             operationReceipts: operationReceiptSnapshot(),
             workflow: workflowSnapshot(),
             ...(startingPrompt ? { startingPrompt } : {}),
+            ...(pullRequestKeys.length > 0 ? { pullRequestKeys } : {}),
             ...(lastTurnError ? { lastTurnError } : {}),
             ...(reportedError ? { error: reportedError } : {}),
         };
@@ -3931,10 +3933,84 @@ if (validSessionId && socketPath) {
             isAborted: false,
         };
         if (kind === "foreground"
-                && startingPrompt === null
                 && pendingTranscriptTurn.userContent.trim().length > 0) {
-            startingPrompt = pendingTranscriptTurn.userContent;
+            if (startingPrompt === null) {
+                startingPrompt = pendingTranscriptTurn.userContent;
+            }
+            recordPullRequestUrlsFromText(pendingTranscriptTurn.userContent);
         }
+    }
+
+    function recordPullRequestUrlsFromText(text) {
+        if (typeof text !== "string"
+                || text.length === 0
+                || pullRequestKeys.length >= 3
+                || !text.includes("https://github.com/")) {
+            return false;
+        }
+        let changed = false;
+        const pattern = /https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]{0,9})(?![A-Za-z0-9_-])/g;
+        let match;
+        while ((match = pattern.exec(text)) !== null) {
+            const [, owner, repo, number] = match;
+            if (owner === "." || owner === ".." || repo === "." || repo === "..") {
+                continue;
+            }
+            const key = `${owner.toLowerCase()}/${repo.toLowerCase()}#${Number(number)}`;
+            if (!pullRequestKeys.includes(key)) {
+                pullRequestKeys.push(key);
+                changed = true;
+                if (pullRequestKeys.length >= 3) break;
+            }
+        }
+        return changed;
+    }
+
+    function recordPullRequestUrlsFromToolResult(data) {
+        if (!data || typeof data !== "object" || pullRequestKeys.length >= 3) {
+            return false;
+        }
+        const before = pullRequestKeys.length;
+        const result = data.result;
+        if (typeof result === "string") {
+            recordPullRequestUrlsFromText(result);
+        } else if (result && typeof result === "object") {
+            if (typeof result.content === "string") {
+                recordPullRequestUrlsFromText(result.content);
+            }
+            for (const list of [result.content, result.contents]) {
+                if (!Array.isArray(list)) continue;
+                for (const item of list) {
+                    if (typeof item === "string") {
+                        recordPullRequestUrlsFromText(item);
+                    } else if (item && typeof item === "object") {
+                        recordPullRequestUrlsFromText(item.text);
+                        recordPullRequestUrlsFromText(item.content);
+                    }
+                }
+            }
+            if (typeof result.detailedContent === "string") {
+                recordPullRequestUrlsFromText(result.detailedContent);
+            }
+        }
+        if (typeof data.content === "string") {
+            recordPullRequestUrlsFromText(data.content);
+        }
+        return pullRequestKeys.length !== before;
+    }
+
+    function syncPullRequestKeysFromTranscript() {
+        let changed = false;
+        for (const turn of transcriptTurns) {
+            if (turn?.kind === "foreground" && typeof turn.userContent === "string") {
+                changed = recordPullRequestUrlsFromText(turn.userContent) || changed;
+            }
+        }
+        if (pendingTranscriptTurn?.kind === "foreground"
+                && typeof pendingTranscriptTurn.userContent === "string") {
+            changed = recordPullRequestUrlsFromText(pendingTranscriptTurn.userContent) || changed;
+        }
+        return changed;
     }
 
     function syncStartingPromptFromTranscript() {
@@ -4244,6 +4320,7 @@ if (validSessionId && socketPath) {
         currentModel = model;
         clearTranscriptEventIds();
         syncStartingPromptFromTranscript();
+        syncPullRequestKeysFromTranscript();
     }
 
     function processTranscriptEvent(event, live) {
@@ -4260,10 +4337,14 @@ if (validSessionId && socketPath) {
         case "user.message": {
             const kind = classifyUserMessage(event);
             if (kind) {
+                const prCountBefore = pullRequestKeys.length;
                 latestResumeTranscriptTurnId = null;
                 finishTranscriptTurn(false, event.timestamp);
                 startTranscriptTurn(event, kind);
-                if (live) publishTranscript();
+                if (live) {
+                    if (pullRequestKeys.length !== prCountBefore) publish();
+                    publishTranscript();
+                }
             } else if (isRemoteCommandMessage(event)) {
                 finishTranscriptTurn(false, event.timestamp);
                 if (live) publishTranscript();
@@ -4324,6 +4405,7 @@ if (validSessionId && socketPath) {
         }
         case "tool.execution_complete": {
             ensureSyntheticTranscriptTurn(event);
+            const prChanged = recordPullRequestUrlsFromToolResult(event.data);
             const toolId = boundedMetadataText(event.data.toolCallId);
             let tool = pendingTranscriptTurn.tools.find(
                 (candidate) => candidate.id === toolId
@@ -4342,7 +4424,10 @@ if (validSessionId && socketPath) {
                 pendingTranscriptTurn.tools.push(tool);
             }
             if (tool) tool.success = event.data.success === true;
-            if (live) schedulePublishTranscript();
+            if (live) {
+                if (prChanged) publish();
+                schedulePublishTranscript();
+            }
             break;
         }
         case "session.task_complete": {
@@ -4709,7 +4794,12 @@ if (validSessionId && socketPath) {
                 durableFallbackModel = currentModel;
             }
             const startingPromptRecovered = syncStartingPromptFromTranscript();
-            if (changed || completedBaseline || questionChanged || startingPromptRecovered) {
+            const pullRequestsRecovered = syncPullRequestKeysFromTranscript();
+            if (changed
+                    || completedBaseline
+                    || questionChanged
+                    || startingPromptRecovered
+                    || pullRequestsRecovered) {
                 publish();
                 publishTranscript();
             }
@@ -4968,6 +5058,7 @@ if (validSessionId && socketPath) {
         transcriptInitialized = false;
         queuedTranscriptEvents.length = 0;
         startingPrompt = null;
+        pullRequestKeys = [];
         resetTranscriptReplayState([], null);
 
         durableTranscriptAuthoritative = false;

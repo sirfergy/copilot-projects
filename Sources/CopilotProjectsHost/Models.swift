@@ -36,6 +36,7 @@ struct Session: Identifiable, Codable, Equatable {
     var status: SessionStatus = .idle
     var statusIsRuntimeDerived = false
     var statusText: String? = nil
+    var runningStartedAtMilliseconds: Int64? = nil
     var hasUnread: Bool = false
     /// The agent went active → idle while you weren't looking at this session, so it
     /// has finished and is waiting for you to come back. Cleared when you view it.
@@ -66,6 +67,29 @@ struct Session: Identifiable, Codable, Equatable {
     /// Activity hooks can report running while a question is still unanswered.
     /// Keep that lifecycle state separate from the attention shown to the user.
     var displayStatus: SessionStatus { hasPendingInput ? .waiting : status }
+
+    var effectiveRunningStartedAtMilliseconds: Int64? {
+        guard displayStatus == .running else { return nil }
+        if agentActivity?.foregroundTurnActive == true {
+            return agentActivity?.foregroundTransitionMilliseconds ?? runningStartedAtMilliseconds
+        }
+        return runningStartedAtMilliseconds
+    }
+
+    var effectivePullRequestKeys: [String] {
+        let candidates = (pullRequestKeys ?? [])
+            + (agentActivity?.pullRequestKeys ?? [])
+            + (startingPrompt.map { RemotePullRequestsContract.extractKeys(from: $0, limit: 3) } ?? [])
+        var result: [String] = []
+        var seen: Set<String> = []
+        for raw in candidates {
+            guard let canonical = RemotePullRequestsContract.canonicalKey(raw),
+                  seen.insert(canonical).inserted else { continue }
+            result.append(canonical)
+            if result.count >= 3 { break }
+        }
+        return result
+    }
 
     /// The latest request failed and the session has been idle since.
     var failedRequest: TranscriptTurnError? {

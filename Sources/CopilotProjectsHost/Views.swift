@@ -1005,6 +1005,18 @@ private struct SessionList: View {
                                 }
                                 Divider()
                             }
+                            let prKeys = session.effectivePullRequestKeys
+                            if !prKeys.isEmpty {
+                                ForEach(prKeys, id: \.self) { key in
+                                    if let urlString = RemotePullRequestsContract.pullRequestURL(for: key),
+                                       let url = URL(string: urlString) {
+                                        Button("Open Pull Request \(RemotePullRequestsContract.shortDisplayLabel(for: key))") {
+                                            NSWorkspace.shared.open(url)
+                                        }
+                                    }
+                                }
+                                Divider()
+                            }
                             if model.startingPrompt(for: session.id) != nil {
                                 Button("Copy Starting Prompt") { model.copyStartingPrompt(for: session.id) }
                                 Button("View Starting Prompt…") { model.presentStartingPrompt(for: session.id) }
@@ -1321,6 +1333,65 @@ struct SessionMemoryBadge: View, Equatable {
     }
 }
 
+struct RunningElapsedLabel: View, Equatable {
+    let startedAtMilliseconds: Int64
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 15)) { context in
+            let nowMs = Int64(context.date.timeIntervalSince1970 * 1_000)
+            if let elapsed = RemotePullRequestsContract.formattedElapsedDuration(
+                fromMilliseconds: startedAtMilliseconds,
+                nowMilliseconds: nowMs
+            ) {
+                Text("· \(elapsed)")
+                    .monospacedDigit()
+                    .foregroundStyle(.green.opacity(0.85))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .accessibilityIdentifier("session-running-elapsed-label")
+            }
+        }
+    }
+}
+
+struct PullRequestBadge: View, Equatable {
+    let key: String
+
+    var body: some View {
+        let shortLabel = RemotePullRequestsContract.shortDisplayLabel(for: key)
+        Button {
+            if let urlString = RemotePullRequestsContract.pullRequestURL(for: key),
+               let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.triangle.pull")
+                    .font(.system(size: 9, weight: .medium))
+                Text(shortLabel)
+                    .font(.system(size: 10, weight: .medium))
+                    .monospacedDigit()
+            }
+            .foregroundStyle(StudioStyle.secondaryText)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(StudioStyle.raised)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Open \(key) on GitHub")
+        .accessibilityIdentifier("session-pr-badge-\(key)")
+    }
+}
+
 struct SessionRow: View, Equatable {
     let session: Session
     var hostDisplayName: String? = nil
@@ -1348,6 +1419,8 @@ struct SessionRow: View, Equatable {
             && lhs.session.memoryUsageBytes == rhs.session.memoryUsageBytes
             && lhs.session.statusText == rhs.session.statusText
             && lhs.session.displayStatus == rhs.session.displayStatus
+            && lhs.session.effectiveRunningStartedAtMilliseconds == rhs.session.effectiveRunningStartedAtMilliseconds
+            && lhs.session.effectivePullRequestKeys == rhs.session.effectivePullRequestKeys
             && lhs.session.failedRequest == rhs.session.failedRequest
             && lhs.session.finishedUnseen == rhs.session.finishedUnseen
             && lhs.session.isUnread == rhs.session.isUnread
@@ -1426,6 +1499,10 @@ struct SessionRow: View, Equatable {
                                 .foregroundStyle(stateColor)
                                 .fontWeight(session.displayStatus != .idle || session.failedRequest != nil || session.finishedUnseen ? .medium : .regular)
                                 .lineLimit(1)
+                            if session.displayStatus == .running,
+                               let startedAt = session.effectiveRunningStartedAtMilliseconds {
+                                RunningElapsedLabel(startedAtMilliseconds: startedAt)
+                            }
                             if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
                                 SessionMemoryBadge(bytes: memoryBytes)
                             }
@@ -1457,8 +1534,17 @@ struct SessionRow: View, Equatable {
                                 .help("\(isExpanded ? "Collapse" : "Expand") (\(childSummary.label))")
                                 .accessibilityIdentifier("session-child-summary")
                         }
-                        if let hostLabel = hostDisplayName ?? session.hostId, !hostLabel.isEmpty {
-                            HostBadge(name: hostLabel)
+                        let prKeys = Array(session.effectivePullRequestKeys.prefix(2))
+                        let hostLabel = (hostDisplayName ?? session.hostId).flatMap { $0.isEmpty ? nil : $0 }
+                        if hostLabel != nil || !prKeys.isEmpty {
+                            HStack(spacing: 5) {
+                                if let hostLabel {
+                                    HostBadge(name: hostLabel)
+                                }
+                                ForEach(prKeys, id: \.self) { key in
+                                    PullRequestBadge(key: key)
+                                }
+                            }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1507,6 +1593,14 @@ struct SessionRow: View, Equatable {
                 Button(session.title, action: onSelect)
                     .accessibilityValue(accessibilityStatus)
                     .accessibilityAddTraits(isActive ? .isSelected : [])
+                ForEach(Array(session.effectivePullRequestKeys.prefix(2)), id: \.self) { key in
+                    if let urlString = RemotePullRequestsContract.pullRequestURL(for: key),
+                       let url = URL(string: urlString) {
+                        Button("Open \(key) on GitHub") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                }
                 Button("End \(session.title)", action: onClose)
             }
         }
