@@ -734,6 +734,7 @@ struct SessionStateIndicator: View, Equatable {
         lhs.session.displayStatus == rhs.session.displayStatus
             && lhs.session.failedRequest == rhs.session.failedRequest
             && lhs.session.finishedUnseen == rhs.session.finishedUnseen
+            && lhs.session.hasBackgroundWork == rhs.session.hasBackgroundWork
     }
 
     static func symbolName(for session: Session) -> String {
@@ -744,11 +745,17 @@ struct SessionStateIndicator: View, Equatable {
             return "questionmark.bubble.fill"
         case .idle:
             if session.failedRequest != nil { return "exclamationmark.triangle.fill" }
-            return session.finishedUnseen ? "checkmark.circle.fill" : "terminal.fill"
+            if session.finishedUnseen { return "checkmark.circle.fill" }
+            if session.hasBackgroundWork { return "sparkles" }
+            return "terminal.fill"
         }
     }
 
     var body: some View {
+        let isBackgroundIdle = session.displayStatus == .idle
+            && session.failedRequest == nil
+            && !session.finishedUnseen
+            && session.hasBackgroundWork
         ZStack {
             Circle()
                 .fill(badgeTint.opacity(isIdle ? 0.08 : 0.16))
@@ -759,13 +766,17 @@ struct SessionStateIndicator: View, Equatable {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(isIdle ? StudioStyle.secondaryText.opacity(0.8) : badgeTint)
                 .symbolEffect(.variableColor.iterative, isActive: session.displayStatus == .running && !reduceMotion)
+                .symbolEffect(.pulse, isActive: isBackgroundIdle && !reduceMotion)
         }
         .frame(width: 18, height: 18)
         .help(help)
     }
 
     private var isIdle: Bool {
-        session.displayStatus == .idle && session.failedRequest == nil && !session.finishedUnseen
+        session.displayStatus == .idle
+            && session.failedRequest == nil
+            && !session.finishedUnseen
+            && !session.hasBackgroundWork
     }
 
     private var badgeTint: Color {
@@ -774,7 +785,9 @@ struct SessionStateIndicator: View, Equatable {
         case .waiting: return .orange
         case .idle:
             if session.failedRequest != nil { return .red }
-            return session.finishedUnseen ? .blue : .primary
+            if session.finishedUnseen { return .blue }
+            if session.hasBackgroundWork { return .purple }
+            return .primary
         }
     }
 
@@ -786,37 +799,71 @@ struct SessionStateIndicator: View, Equatable {
             if let failure = session.failedRequest {
                 return "request failed — \(failure.message)"
             }
-            return session.finishedUnseen ? "finished — ready for you" : "idle"
+            if session.finishedUnseen { return "finished — ready for you" }
+            if session.hasBackgroundWork { return "background work active" }
+            return "idle"
         }
     }
 }
 
 /// Shown on a tab and its project's sidebar row while background work is active.
-struct BackgroundWorkBadge: View {
+struct BackgroundWorkBadge: View, Equatable {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    static func == (lhs: Self, rhs: Self) -> Bool { true }
+
     var body: some View {
-        ZStack {
-            Circle().fill(Color.purple.opacity(0.15))
-            Image(systemName: "person.2.fill")
+        HStack(spacing: 3) {
+            Image(systemName: "sparkles")
                 .font(.system(size: 8.5, weight: .semibold))
-                .foregroundStyle(.purple)
+                .symbolEffect(.pulse, isActive: !reduceMotion)
+            Text("bg")
+                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
         }
-        .frame(width: 14, height: 14)
+        .foregroundStyle(.purple)
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1.5)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.purple.opacity(0.16))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(Color.purple.opacity(0.38), lineWidth: 0.5)
+        )
         .help("background work active")
+        .accessibilityIdentifier("session-background-work-badge")
     }
 }
 
-struct ScheduleBadge: View {
+struct ScheduleBadge: View, Equatable {
     let schedules: [TrackedSchedule]
 
     var body: some View {
-        ZStack {
-            Circle().fill(Color.indigo.opacity(0.15))
+        HStack(spacing: 3) {
             Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: 8.5, weight: .semibold))
-                .foregroundStyle(.indigo)
+            Text(schedules.count > 1 ? "\(schedules.count)" : "sched")
+                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                .monospacedDigit()
         }
-        .frame(width: 14, height: 14)
+        .foregroundStyle(.indigo)
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1.5)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.indigo.opacity(0.16))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(Color.indigo.opacity(0.38), lineWidth: 0.5)
+        )
         .help(schedules.map(\.helpText).joined(separator: "\n\n"))
+        .accessibilityIdentifier("session-schedule-badge")
     }
 }
 
@@ -1469,7 +1516,9 @@ struct SessionRow: View, Equatable {
         case .waiting: return .orange
         case .idle:
             if session.failedRequest != nil { return .red }
-            return session.finishedUnseen ? .blue : StudioStyle.secondaryText
+            if session.finishedUnseen { return .blue }
+            if session.hasBackgroundWork { return .purple }
+            return StudioStyle.secondaryText
         }
     }
 
