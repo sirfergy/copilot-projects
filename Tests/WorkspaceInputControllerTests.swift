@@ -625,10 +625,30 @@ final class WorkspaceInputControllerTests: XCTestCase {
             XCTAssertNil(input.handleKeyDown(shiftReturn))
             XCTAssertEqual(process.sendCount, sends + 1)
 
+            for footer in [
+                "Autopilot · Allow All    GPT-6.1 Sol · Max",
+                "Autopilot · Allow All GPT-6.1 Sol · Max",
+                "Interactive · Manual Approval · @ files · # issues    GPT-6.1 Sol",
+                "◎ Working   esc cancel    GPT-6.1 Sol · Max",
+                "◎ Running tests esc esc interrupt · ctrl+q enqueue GPT-6.1 Sol",
+                "◎ Running tests ctrl+c interrupt · ctrl+q enqueue GPT-6.1 Sol",
+                "esc again to clear input GPT-6.1 Sol",
+            ] {
+                view.feed(text: "\r\n" + footer)
+                for modifiers in [NSEvent.ModifierFlags.command, .shift] {
+                    let event = try key("\r", code: 36, modifiers: modifiers)
+                    let before = process.sendCount
+                    XCTAssertNil(input.handleKeyDown(event), footer)
+                    XCTAssertEqual(process.sendCount, before + 1, footer)
+                    XCTAssertTrue(view.terminalInputStateSnapshot()?.keyboardEnhancementFlags.isEmpty == true)
+                }
+            }
+
+            let acceptedSends = process.sendCount
             for shellLine in ["zsh ~/working %", "~/src % echo esc stop agents"] {
                 view.feed(text: "\r\n" + shellLine)
                 XCTAssertNotNil(input.handleKeyDown(shiftReturn), shellLine)
-                XCTAssertEqual(process.sendCount, sends + 1, shellLine)
+                XCTAssertEqual(process.sendCount, acceptedSends, shellLine)
             }
         }
     }
