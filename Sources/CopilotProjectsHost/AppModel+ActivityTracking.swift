@@ -142,6 +142,7 @@ extension AppModel {
                         } else if status == .idle {
                             updated.runningStartedAtMilliseconds = nil
                             updated.runningStatusTimestampMilliseconds = nil
+                            updated.runningIdleGeneration = nil
                         }
                         sessionSemantics.activityTracker.reset(sessionId: session.id)
                         if status == .running {
@@ -448,15 +449,26 @@ extension AppModel {
                     activityChanged = activityChanged || previous != effectiveFresh
                     nextProjects[pi].sessions[si].agentActivity = effectiveFresh
                 }
-                if nextProjects[pi].sessions[si].status != .idle,
-                   nextProjects[pi].sessions[si].runningStartedAtMilliseconds == nil,
-                   let transitionMs = trustedForegroundTransitionMilliseconds(
-                       sessionId: sessionId,
-                       snapshot: effectiveFresh
-                   ) {
-                    nextProjects[pi].sessions[si].runningStartedAtMilliseconds = transitionMs
-                    activityChanged = true
-                    startingPromptChanged = true
+                if nextProjects[pi].sessions[si].status != .idle {
+                    if nextProjects[pi].sessions[si].runningStartedAtMilliseconds == nil,
+                       let transitionMs = trustedForegroundTransitionMilliseconds(
+                           sessionId: sessionId,
+                           snapshot: effectiveFresh
+                       ) {
+                        nextProjects[pi].sessions[si].runningStartedAtMilliseconds = transitionMs
+                        activityChanged = true
+                        startingPromptChanged = true
+                    }
+                    if nextProjects[pi].sessions[si].runningIdleGeneration == nil,
+                       let effectiveFresh,
+                       let transitionMs = trustedForegroundTransitionMilliseconds(
+                           sessionId: sessionId,
+                           snapshot: effectiveFresh
+                       ),
+                       transitionMs >= (nextProjects[pi].sessions[si].runningStartedAtMilliseconds ?? .min) {
+                        nextProjects[pi].sessions[si].runningIdleGeneration = effectiveFresh.idleGeneration
+                        startingPromptChanged = true
+                    }
                 }
 
                 let scheduledMarkerURL = agentActivityDirectory
@@ -808,6 +820,7 @@ extension AppModel {
             updated.statusText = nil
             updated.runningStartedAtMilliseconds = nil
             updated.runningStatusTimestampMilliseconds = nil
+            updated.runningIdleGeneration = nil
             if markFinished,
                projects[pi].effectiveParentSessionId(for: sid) == nil,
                !isVisible(projectIndex: pi, sessionIndex: si) {

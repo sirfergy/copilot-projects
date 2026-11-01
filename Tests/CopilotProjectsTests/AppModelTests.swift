@@ -1047,9 +1047,9 @@ final class AppModelTests: XCTestCase {
             )
             XCTAssertEqual(remotePostWait.runningStartedAtMilliseconds, nextTurnStartMs)
 
-            // Relaunching after in-host tool hooks have advanced statusTimestamp in .status-record.json
-            // restores the persisted original request start timestamp, whereas an off-host idle-to-running
-            // transition while the host was closed starts a fresh timer at the new request's timestamp.
+            // Relaunching after an off-host tool hook (where statusTimestamp advances in .status-record.json
+            // while the active snapshot's idleGeneration is unchanged) preserves the original request start,
+            // and timestamp-less status transitions persist clocks.status so relaunch preserves the start too.
             SessionArtifacts.persistStatus(
                 sessionId: s1.id,
                 status: .running,
@@ -1057,14 +1057,6 @@ final class AppModelTests: XCTestCase {
                 promptStatusTimestamp: nextTurnStartMs + 15_000,
                 sessionsDirectory: root
             )
-            model.setStatus(
-                sessionId: s1.id,
-                status: .running,
-                text: "Resumed after permission",
-                timestamp: nextTurnStartMs + 15_000,
-                source: "tool"
-            )
-            model.save()
             let relaunched = AppModel(
                 stateRepository: repository,
                 isAppActive: { false },
@@ -1084,7 +1076,36 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(relaunched.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
             XCTAssertEqual(relaunched.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
 
-            let offHostTurnStartMs = nextTurnStartMs + 60_000
+            // Timestamp-less waiting -> running sequence updates runningStatusTimestampMilliseconds from clocks.status.
+            relaunched.setStatus(sessionId: s1.id, status: .waiting, text: "Wait", notification: .permission)
+            relaunched.setStatus(sessionId: s1.id, status: .running, text: "Resume")
+            let relaunchedTimestampless = AppModel(
+                stateRepository: repository,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteSessionBackendAvailable: { true },
+                remoteSessionLauncher: { _, _, _ in },
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                relaunchedTimestampless.forcePendingSessionDestroys()
+                relaunchedTimestampless.detachAllClients()
+            }
+            XCTAssertEqual(relaunchedTimestampless.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
+
+            // Off-host idle-to-running transition (where idleGeneration advanced and a new request started)
+            // starts a fresh timer at the new request's timestamp.
+            let offHostTurnStartMs = SessionArtifacts.currentStatusTimestamp() + 60_000
+            var newOffHostActivity = postWaitActivity
+            newOffHostActivity.idleGeneration = 1
+            try JSONEncoder().encode(newOffHostActivity).write(
+                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
+                options: .atomic
+            )
             SessionArtifacts.persistStatus(
                 sessionId: s1.id,
                 status: .running,

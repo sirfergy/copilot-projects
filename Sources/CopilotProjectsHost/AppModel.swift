@@ -2995,6 +2995,7 @@ final class AppModel: ObservableObject {
         }
         let previousRunningStart = projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds
         let previousRunningClock = projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds
+        let previousIdleGen = projects[loc.p].sessions[loc.s].runningIdleGeneration
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
         if status == .running {
@@ -3012,6 +3013,10 @@ final class AppModel: ObservableObject {
                 projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds =
                     [timestamp, activeTransitionMs].compactMap { $0 }.min()
                     ?? SessionArtifacts.currentStatusTimestamp()
+                if activeTransitionMs != nil,
+                   let snapshot = projects[loc.p].sessions[loc.s].agentActivity {
+                    projects[loc.p].sessions[loc.s].runningIdleGeneration = snapshot.idleGeneration
+                }
             }
             if let timestamp {
                 projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = timestamp
@@ -3021,9 +3026,11 @@ final class AppModel: ObservableObject {
         } else if status == .idle {
             projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds = nil
             projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = nil
+            projects[loc.p].sessions[loc.s].runningIdleGeneration = nil
         }
         if projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds != previousRunningStart
-            || projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds != previousRunningClock {
+            || projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds != previousRunningClock
+            || projects[loc.p].sessions[loc.s].runningIdleGeneration != previousIdleGen {
             save()
         }
         if status == .running || status == .waiting {
@@ -3064,8 +3071,13 @@ final class AppModel: ObservableObject {
                 sessionId: sessionId,
                 status: status,
                 timestamp: clocks.status,
-                promptStatusTimestamp: clocks.promptSafety
+                promptStatusTimestamp: clocks.promptSafety,
+                sessionsDirectory: agentActivityDirectory
             )
+            if status != .idle {
+                projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = clocks.status
+                save()
+            }
             if status == .waiting, previous == .waiting, notification == nil {
                 refreshRetainedPermissionClocks(sessionId: sessionId, previousTimestamp: previousTimestamp)
             }
@@ -3456,6 +3468,7 @@ final class AppModel: ObservableObject {
             : nil
         if restoredStatus == .idle {
             session.runningStatusTimestampMilliseconds = nil
+            session.runningIdleGeneration = nil
         }
         session.scheduledTurnActive = restore.scheduledTurnActive
         session.finishedUnseen = restore.finishedUnseen
@@ -3840,8 +3853,21 @@ final class AppModel: ObservableObject {
                 let restored = restoredStatusState(forSession: sid)
                 let status = restored.status
                 let statusTimestamp = restored.statusTimestamp
+                let diskSnapshot: AgentActivitySnapshot? = {
+                    let url = agentActivityDirectory.appendingPathComponent("\(sid).agent-activity.json")
+                    guard let data = try? Data(contentsOf: url),
+                          let decoded = try? JSONDecoder().decode(AgentActivitySnapshot.self, from: data),
+                          isActivitySnapshotTrustedForSessionMetadata(sessionId: sid, snapshot: decoded) else {
+                        return nil
+                    }
+                    return decoded
+                }()
+                let matchesIdleGeneration = diskSnapshot?.foregroundTurnActive == true
+                    && projects[pi].sessions[si].runningIdleGeneration != nil
+                    && diskSnapshot?.idleGeneration == projects[pi].sessions[si].runningIdleGeneration
                 let matchesPersistedRequest = statusTimestamp != nil
-                    && projects[pi].sessions[si].runningStatusTimestampMilliseconds == statusTimestamp
+                    && (projects[pi].sessions[si].runningStatusTimestampMilliseconds == statusTimestamp
+                        || matchesIdleGeneration)
                 let persistedStart = matchesPersistedRequest
                     ? projects[pi].sessions[si].runningStartedAtMilliseconds.flatMap {
                         $0 <= (statusTimestamp ?? .max) ? $0 : nil
@@ -3854,6 +3880,12 @@ final class AppModel: ObservableObject {
                 projects[pi].sessions[si].runningStatusTimestampMilliseconds = status == .idle
                     ? nil
                     : statusTimestamp
+                if status == .idle {
+                    projects[pi].sessions[si].runningIdleGeneration = nil
+                } else if persistedStart == nil {
+                    projects[pi].sessions[si].runningIdleGeneration =
+                        diskSnapshot?.foregroundTurnActive == true ? diskSnapshot?.idleGeneration : nil
+                }
                 if let context = restored.inputWait, let timestamp = statusTimestamp,
                    status == .waiting {
                     inputWaits[sid] = InputWaitState(context: context, timestamp: timestamp)
