@@ -142,7 +142,7 @@ extension AppModel {
                         } else if status == .idle {
                             updated.runningStartedAtMilliseconds = nil
                             updated.runningStatusTimestampMilliseconds = nil
-                            updated.runningIdleGeneration = nil
+                            updated.runningRequestIdentity = nil
                         }
                         sessionSemantics.activityTracker.reset(sessionId: session.id)
                         if status == .running {
@@ -449,24 +449,26 @@ extension AppModel {
                     activityChanged = activityChanged || previous != effectiveFresh
                     nextProjects[pi].sessions[si].agentActivity = effectiveFresh
                 }
-                if nextProjects[pi].sessions[si].status != .idle {
-                    if nextProjects[pi].sessions[si].runningStartedAtMilliseconds == nil,
-                       let transitionMs = trustedForegroundTransitionMilliseconds(
-                           sessionId: sessionId,
-                           snapshot: effectiveFresh
-                       ) {
+                if nextProjects[pi].sessions[si].status != .idle,
+                   let transitionMs = trustedForegroundTransitionMilliseconds(
+                       sessionId: sessionId,
+                       snapshot: effectiveFresh
+                   ) {
+                    let identity = trustedRunningRequestIdentity(sessionId: sessionId, snapshot: effectiveFresh)
+                    let existingIdentity = nextProjects[pi].sessions[si].runningRequestIdentity
+                    let isNewRequest = existingIdentity != nil
+                        && identity != nil
+                        && existingIdentity != identity
+                        && transitionMs >= (nextProjects[pi].sessions[si].runningStartedAtMilliseconds ?? .min)
+                    if nextProjects[pi].sessions[si].runningStartedAtMilliseconds == nil || isNewRequest {
                         nextProjects[pi].sessions[si].runningStartedAtMilliseconds = transitionMs
                         activityChanged = true
                         startingPromptChanged = true
                     }
-                    if nextProjects[pi].sessions[si].runningIdleGeneration == nil,
-                       let effectiveFresh,
-                       let transitionMs = trustedForegroundTransitionMilliseconds(
-                           sessionId: sessionId,
-                           snapshot: effectiveFresh
-                       ),
+                    if let identity,
+                       existingIdentity == nil || isNewRequest,
                        transitionMs >= (nextProjects[pi].sessions[si].runningStartedAtMilliseconds ?? .min) {
-                        nextProjects[pi].sessions[si].runningIdleGeneration = effectiveFresh.idleGeneration
+                        nextProjects[pi].sessions[si].runningRequestIdentity = identity
                         startingPromptChanged = true
                     }
                 }
@@ -820,7 +822,7 @@ extension AppModel {
             updated.statusText = nil
             updated.runningStartedAtMilliseconds = nil
             updated.runningStatusTimestampMilliseconds = nil
-            updated.runningIdleGeneration = nil
+            updated.runningRequestIdentity = nil
             if markFinished,
                projects[pi].effectiveParentSessionId(for: sid) == nil,
                !isVisible(projectIndex: pi, sessionIndex: si) {

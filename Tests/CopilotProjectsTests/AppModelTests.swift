@@ -1030,6 +1030,7 @@ final class AppModelTests: XCTestCase {
                 source: "tool"
             )
             var postWaitActivity = idleSnapshot
+            postWaitActivity.conversationEpoch = "\(s1.id):1"
             postWaitActivity.updatedAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
                 .format(Date(timeIntervalSince1970: 1_788_000_073))
             postWaitActivity.foregroundTurnActive = true
@@ -1097,11 +1098,12 @@ final class AppModelTests: XCTestCase {
             }
             XCTAssertEqual(relaunchedTimestampless.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
 
-            // Off-host idle-to-running transition (where idleGeneration advanced and a new request started)
+            // Off-host CLI restart or new request (even if idleGeneration resets to 0 under a new conversationEpoch)
             // starts a fresh timer at the new request's timestamp.
             let offHostTurnStartMs = SessionArtifacts.currentStatusTimestamp() + 60_000
             var newOffHostActivity = postWaitActivity
-            newOffHostActivity.idleGeneration = 1
+            newOffHostActivity.conversationEpoch = "\(s1.id):2"
+            newOffHostActivity.idleGeneration = 0
             try JSONEncoder().encode(newOffHostActivity).write(
                 to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
                 options: .atomic
