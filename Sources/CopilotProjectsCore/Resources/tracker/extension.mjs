@@ -3986,7 +3986,7 @@ if (validSessionId && socketPath) {
         }
         let unsafeQuotedExpansion = false;
         const stripped = command
-            .replace(/\\\r?\n/g, "")
+            .replace(data.toolName === "powershell" ? /`\r?\n/g : /\\\r?\n/g, "")
             .replace(/(?:^|\s)#[^\n]*|'([^']*)'|"((?:\\.|[^"\\])*)"/g, (_, s, d) => {
                 if (s === undefined && d === undefined) {
                     return " ";

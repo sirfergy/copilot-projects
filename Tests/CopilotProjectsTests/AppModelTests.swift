@@ -1318,7 +1318,7 @@ final class AppModelTests: XCTestCase {
                 creationFingerprint: SessionCreationRecord.fingerprint(
                     projectId: "p",
                     kind: .copilot,
-                    initialPrompt: "Ship feature",
+                    initialPrompt: "Inspect https://github.com/sirfergy/copilot-projects/pull/300",
                     pullRequestURL: nil
                 ),
                 pullRequestKeys: [
@@ -1326,10 +1326,11 @@ final class AppModelTests: XCTestCase {
                     "sirfergy/copilot-projects#102",
                     "sirfergy/copilot-projects#103",
                     "sirfergy/copilot-projects#104",
+                    "sirfergy/copilot-projects#300",
                     "sirfergy/copilot-projects#303",
                     "sirfergy/copilot-projects#304",
                 ],
-                startingPrompt: "Ship feature"
+                startingPrompt: "Inspect https://github.com/sirfergy/copilot-projects/pull/300"
             )
             existingBoundSession.verifiedPullRequestKeys = nil
             var promptBackedSession = Session(
@@ -1385,9 +1386,12 @@ final class AppModelTests: XCTestCase {
                 corruptLedgerModel.forcePendingSessionDestroys()
                 corruptLedgerModel.detachAllClients()
             }
-            // While ledger is malformed, unverified legacy keys are hidden rather than displayed or verified.
+            // While ledger is malformed, unverified legacy keys are hidden while prompt-backed keys remain visible.
             XCTAssertNil(corruptLedgerModel.projects[0].sessions.first(where: { $0.id == "stale-scraped" })?.pullRequestKeys)
-            XCTAssertNil(corruptLedgerModel.projects[0].sessions.first(where: { $0.id == "existing-bound" })?.pullRequestKeys)
+            XCTAssertEqual(
+                corruptLedgerModel.projects[0].sessions.first(where: { $0.id == "existing-bound" })?.pullRequestKeys,
+                ["sirfergy/copilot-projects#300"]
+            )
             var cleanSaveState = try XCTUnwrap(
                 {
                     if case .loaded(let loaded) = sanitizeRepo.load() { return loaded }
@@ -1433,7 +1437,11 @@ final class AppModelTests: XCTestCase {
             )
             XCTAssertEqual(
                 loadedSessions.first(where: { $0.id == "existing-bound" })?.pullRequestKeys,
-                ["sirfergy/copilot-projects#303", "sirfergy/copilot-projects#304"]
+                [
+                    "sirfergy/copilot-projects#300",
+                    "sirfergy/copilot-projects#303",
+                    "sirfergy/copilot-projects#304",
+                ]
             )
             XCTAssertEqual(
                 loadedSessions.first(where: { $0.id == "prompt-backed" })?.pullRequestKeys,

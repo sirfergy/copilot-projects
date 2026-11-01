@@ -94,8 +94,10 @@ struct Session: Identifiable, Codable, Equatable {
         copilotSessionId: String? = nil,
         ledgerRecords: [SessionCreationRecord]? = []
     ) {
-        let hadExplicitVerified = verifiedPullRequestKeys != nil
-        let combined = (pullRequestKeys ?? []) + (hadExplicitVerified ? [] : (pendingLedgerPullRequestKeys ?? []))
+        let hasPendingCandidates = verifiedPullRequestKeys == nil
+            || pendingLedgerPullRequestKeys?.isEmpty == false
+        let combined = (pullRequestKeys ?? [])
+            + (hasPendingCandidates ? (pendingLedgerPullRequestKeys ?? []) : [])
         guard let canonicalKeys = Self.canonicalPullRequestKeys(combined) else {
             pendingLedgerPullRequestKeys = nil
             pullRequestKeys = nil
@@ -109,7 +111,7 @@ struct Session: Identifiable, Codable, Equatable {
             copilotSessionId: copilotSessionId,
             ledgerRecords: ledgerRecords ?? []
         ) ?? []
-        if ledgerRecords == nil, !hadExplicitVerified {
+        if hasPendingCandidates {
             let unverified = canonicalKeys.filter { !filtered.contains($0) }
             pendingLedgerPullRequestKeys = unverified.isEmpty ? nil : unverified
         } else {
@@ -128,9 +130,11 @@ struct Session: Identifiable, Codable, Equatable {
            creationFingerprint == "original" || creationFingerprint?.hasPrefix("pull-requests:") == true {
             return canonicalKeys
         }
+        let checkFingerprints = verifiedPullRequestKeys == nil
+            || pendingLedgerPullRequestKeys?.isEmpty == false
         let verifiedKeys = Set(Self.canonicalPullRequestKeys(verifiedPullRequestKeys) ?? [])
             .union(
-                verifiedPullRequestKeys == nil
+                checkFingerprints
                     ? Self.fingerprintVerifiedKeys(
                         canonicalKeys: canonicalKeys,
                         creationFingerprint: creationFingerprint,
