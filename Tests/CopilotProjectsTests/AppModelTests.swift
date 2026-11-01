@@ -785,9 +785,8 @@ final class AppModelTests: XCTestCase {
             https://github.com/sirfergy/copilot-projects/pull/12_3, then
             review https://GitHub.com/SirFergy/Copilot-Projects/pull/270 and
             duplicate https://github.com/sirfergy/copilot-projects/pull/270/files then
-            https://github.com/octocat/hello-world/pull/12?expand=1,
-            https://github.com/octocat/hello-world/pull/34#discussion_r1, and
-            https://github.com/octocat/hello-world/pull/56
+            https://github.com/octocat/hello-world/pull/12?expand=1 and
+            https://github.com/octocat/hello-world/pull/34#discussion_r1
             """,
             limit: 3
         )
@@ -798,6 +797,18 @@ final class AppModelTests: XCTestCase {
                 "octocat/hello-world#12",
                 "octocat/hello-world#34",
             ]
+        )
+        XCTAssertEqual(
+            RemotePullRequestsContract.extractKeys(
+                from: """
+                https://github.com/sirfergy/copilot-projects/pull/270
+                https://github.com/octocat/hello-world/pull/12
+                https://github.com/octocat/hello-world/pull/34
+                https://github.com/octocat/hello-world/pull/56
+                """,
+                limit: 3
+            ),
+            []
         )
         XCTAssertEqual(
             RemotePullRequestsContract.shortDisplayLabel(for: "sirfergy/copilot-projects#270"),
@@ -885,7 +896,7 @@ final class AppModelTests: XCTestCase {
 
             // Tracker snapshot foregroundTransitionAt across multiple assistant.turn_start iterations
             // does not reset the request's runningStartedAtMilliseconds, and snapshot.pullRequestKeys
-            // merges into Session.pullRequestKeys (capped at 5, effective capped at 3).
+            // are reflected via Session.effectivePullRequestKeys without mutating persisted Session.pullRequestKeys.
             let now = Date(timeIntervalSince1970: 1_788_000_010)
             let transitionDate = Date(timeIntervalSince1970: 1_788_000_005)
             var activity = AgentActivitySnapshot(
@@ -916,7 +927,7 @@ final class AppModelTests: XCTestCase {
             model.refreshAgentActivitySnapshots(now: now)
 
             let updatedS1 = model.projects[0].sessions[0]
-            XCTAssertEqual(updatedS1.pullRequestKeys?.count, 5)
+            XCTAssertNil(updatedS1.pullRequestKeys)
             XCTAssertEqual(
                 updatedS1.effectivePullRequestKeys,
                 [
@@ -1206,25 +1217,172 @@ final class AppModelTests: XCTestCase {
                 .purple
             )
 
-            // 5. Shipped tracker extension extracts PR URLs from foreground prompts, tool results, and transcript sync.
+            // 4b. sanitizedPersistedPullRequestKeys() strips unbacked tool-scraped keys on load
+            // while preserving pull-requests: fingerprint keys, startingPrompt keys, and Review Pull Request title keys.
+            let staleScrapedSession = Session(
+                id: "stale-scraped",
+                title: "shell",
+                cwd: root.path,
+                pullRequestKeys: ["sirfergy/copilot-projects#991", "sirfergy/copilot-projects#992"]
+            )
+            let prFingerprintSession = Session(
+                id: "pr-fingerprint",
+                title: "Copilot",
+                cwd: root.path,
+                creationFingerprint: "pull-requests:goal-1",
+                pullRequestKeys: ["sirfergy/copilot-projects#301", "sirfergy/copilot-projects#302"]
+            )
+            let promptBackedSession = Session(
+                id: "prompt-backed",
+                title: "Feature Work",
+                cwd: root.path,
+                pullRequestKeys: ["sirfergy/copilot-projects#401", "sirfergy/copilot-projects#999"],
+                startingPrompt: "Please inspect https://github.com/sirfergy/copilot-projects/pull/401"
+            )
+            let titleBackedSession = Session(
+                id: "title-backed",
+                title: "Review SirFergy/Copilot-Projects#501",
+                cwd: root.path,
+                pullRequestKeys: [
+                    "sirfergy/copilot-projects#501",
+                    "octocat/hello-world#501",
+                    "sirfergy/copilot-projects#50",
+                    "sirfergy/copilot-projects#999",
+                ]
+            )
+            let sanitizeRepo = StateRepository(path: root.appendingPathComponent("sanitize-state.json"))
+            let sanitizeProject = Project(
+                name: "Sanitize",
+                cwd: root.path,
+                sessions: [
+                    staleScrapedSession,
+                    prFingerprintSession,
+                    promptBackedSession,
+                    titleBackedSession,
+                ],
+                selectedSessionId: staleScrapedSession.id
+            )
+            try sanitizeRepo.save(PersistedState(projects: [sanitizeProject], selectedProjectId: sanitizeProject.id))
+            let sanitizedModel = AppModel(
+                stateRepository: sanitizeRepo,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteSessionBackendAvailable: { true },
+                remoteSessionLauncher: { _, _, _ in },
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                sanitizedModel.forcePendingSessionDestroys()
+                sanitizedModel.detachAllClients()
+            }
+            let loadedSessions = sanitizedModel.projects[0].sessions
+            XCTAssertNil(loadedSessions.first(where: { $0.id == "stale-scraped" })?.pullRequestKeys)
+            XCTAssertEqual(
+                loadedSessions.first(where: { $0.id == "pr-fingerprint" })?.pullRequestKeys,
+                ["sirfergy/copilot-projects#301", "sirfergy/copilot-projects#302"]
+            )
+            XCTAssertEqual(
+                loadedSessions.first(where: { $0.id == "prompt-backed" })?.pullRequestKeys,
+                ["sirfergy/copilot-projects#401"]
+            )
+            XCTAssertEqual(
+                loadedSessions.first(where: { $0.id == "title-backed" })?.pullRequestKeys,
+                ["sirfergy/copilot-projects#501"]
+            )
+
+            // 5. Shipped tracker extension extracts PR URLs from foreground prompts (<= 3 distinct PRs),
+            // ignores read-only tool outputs, and records PR URLs only from successful gh pr create commands.
             let script = CopilotExtension.script
             let startIdx = try XCTUnwrap(script.range(of: "function recordPullRequestUrlsFromText(")?.lowerBound)
             let endIdx = try XCTUnwrap(script.range(of: "function syncStartingPromptFromTranscript(")?.lowerBound)
             let extractedJS = String(script[startIdx..<endIdx])
+            let eventStartIdx = try XCTUnwrap(
+                script.range(of: "function processTranscriptEvent(event, live) {")?.lowerBound
+            )
+            let eventEndIdx = try XCTUnwrap(script.range(of: "function replayHistoryEvent(")?.lowerBound)
+            let processEventJS = String(script[eventStartIdx..<eventEndIdx])
             let harnessURL = root.appendingPathComponent("pr-extract-test.mjs")
             let harnessSource = """
             import assert from "node:assert/strict";
             let pullRequestKeys = [];
+            const prCreateToolCallIds = new Set();
             let transcriptTurns = [];
             let pendingTranscriptTurn = null;
+            let transcriptAssistantTurnActive = false;
+            let transcriptPromptPhase = false;
+            let latestResumeTranscriptTurnId = null;
+            let synthesizedTaskCompletionContent = null;
+            const PROMPT_HOOK_TYPES = new Set();
+            const REQUEST_ACTIVITY_EVENT_TYPES = new Set();
+            const liveRequestOpeners = new Set();
+            const MAX_TRANSCRIPT_TOOLS = 64;
+            let publishCount = 0;
+            function rememberTranscriptEvent() { return true; }
+            function ensureSyntheticTranscriptTurn() {
+              if (!pendingTranscriptTurn) pendingTranscriptTurn = { assistantMessages: [], tools: [] };
+            }
+            function clearRecoveredTranscriptError() {}
+            function boundedMetadataText(v) { return typeof v === "string" ? v : ""; }
+            function durableAskUserMessage() { return null; }
+            function toolTitle(data) { return data?.toolName || "Tool"; }
+            function schedulePublishTranscript() {}
+            function publishTranscript() {}
+            function publish() { publishCount += 1; }
             \(extractedJS)
+            \(processEventJS)
             assert.equal(recordPullRequestUrlsFromText("Ignore https://github.com/o/r/pull/12abc and https://github.com/o/r/pull/12%33"), false);
+            assert.equal(recordPullRequestUrlsFromText(
+              "https://github.com/o/r/pull/1 https://github.com/o/r/pull/2 https://github.com/o/r/pull/3 https://github.com/o/r/pull/4"
+            ), false);
+            assert.deepEqual(pullRequestKeys, []);
             assert.equal(recordPullRequestUrlsFromText("Review https://GitHub.com/SirFergy/Copilot-Projects/pull/270"), true);
-            assert.equal(recordPullRequestUrlsFromToolResult({
-              result: {
-                content: [{ type: "text", text: "Created https://github.com/octocat/hello-world/pull/42\\n" }]
-              }
-            }), true);
+
+            let runTool = (id, toolName, args, success, result) => {
+              processTranscriptEvent({
+                id: `${id}-start`,
+                type: "tool.execution_start",
+                data: { toolCallId: id, toolName, arguments: args }
+              }, true);
+              processTranscriptEvent({
+                id: `${id}-done`,
+                type: "tool.execution_complete",
+                data: { toolCallId: id, success, result }
+              }, true);
+            };
+
+            // Read-only tools (session_store_sql, view, gh pr list) and quoted/failed commands must NOT populate pullRequestKeys.
+            runTool("t-sql", "session_store_sql", { query: "SELECT 1" }, true, {
+              content: "Found https://github.com/octocat/hello-world/pull/901"
+            });
+            runTool("t-view", "view", { path: "/tmp/doc.md" }, true, {
+              content: "See https://github.com/octocat/hello-world/pull/902"
+            });
+            runTool("t-list", "bash", { command: "gh pr list --limit 10" }, true, {
+              content: "https://github.com/octocat/hello-world/pull/903"
+            });
+            runTool(
+              "t-quoted",
+              "bash",
+              { command: "printf '%s\\n' 'gh pr create https://github.com/octocat/hello-world/pull/905' # gh pr create" },
+              true,
+              { content: "gh pr create https://github.com/octocat/hello-world/pull/905" }
+            );
+            runTool("t-create-fail", "bash", { command: "gh pr create --fill" }, false, {
+              content: "https://github.com/octocat/hello-world/pull/904"
+            });
+            assert.deepEqual(pullRequestKeys, ["sirfergy/copilot-projects#270"]);
+            assert.equal(publishCount, 0);
+
+            // Successful gh pr create in bash DOES populate pullRequestKeys.
+            runTool("t-create-ok", "bash", { command: "GH_TOKEN=x gh pr create --title T" }, true, {
+              content: [{ type: "text", text: "Created https://github.com/octocat/hello-world/pull/42\\n" }]
+            });
+            assert.equal(publishCount, 1);
+
             transcriptTurns = [
               { kind: "scheduled", userContent: "https://github.com/octocat/hello-world/pull/999" },
               { kind: "foreground", userContent: "See https://github.com/octocat/hello-world/pull/43 and https://github.com/octocat/hello-world/pull/44" }

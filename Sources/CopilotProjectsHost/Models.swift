@@ -89,6 +89,40 @@ struct Session: Identifiable, Codable, Equatable {
         return result
     }
 
+    func sanitizedPersistedPullRequestKeys() -> [String]? {
+        guard let pullRequestKeys, !pullRequestKeys.isEmpty else { return nil }
+        if creationFingerprint?.hasPrefix("pull-requests:") == true || creationFingerprint == "original" {
+            return pullRequestKeys
+        }
+        let promptKeys = Set(
+            startingPrompt.map { RemotePullRequestsContract.extractKeys(from: $0, limit: 3) } ?? []
+        )
+        var result: [String] = []
+        var seen: Set<String> = []
+        for raw in pullRequestKeys {
+            guard let canonical = RemotePullRequestsContract.canonicalKey(raw),
+                  seen.insert(canonical).inserted else { continue }
+            if promptKeys.contains(canonical)
+                || Self.title(title, matchesPullRequestKey: canonical) {
+                result.append(canonical)
+            }
+        }
+        return result.isEmpty ? nil : result
+    }
+
+    private static func title(_ title: String, matchesPullRequestKey canonicalKey: String) -> Bool {
+        let escapedKey = NSRegularExpression.escapedPattern(for: canonicalKey)
+        let fullPattern = #"(?<![A-Za-z0-9_./-])"# + escapedKey + #"(?![A-Za-z0-9_%-])"#
+        if title.range(of: fullPattern, options: [.regularExpression, .caseInsensitive]) != nil {
+            return true
+        }
+        let shortLabel = RemotePullRequestsContract.shortDisplayLabel(for: canonicalKey)
+        guard shortLabel.hasPrefix("#"), shortLabel.count > 1 else { return false }
+        let escapedShort = NSRegularExpression.escapedPattern(for: shortLabel)
+        let shortPattern = #"(?<![A-Za-z0-9_./-])"# + escapedShort + #"(?![0-9])"#
+        return title.range(of: shortPattern, options: [.regularExpression]) != nil
+    }
+
     /// The latest request failed and the session has been idle since.
     var failedRequest: TranscriptTurnError? {
         displayStatus == .idle ? agentActivity?.remoteLastError() : nil

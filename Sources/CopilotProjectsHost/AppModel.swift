@@ -3867,6 +3867,8 @@ final class AppModel: ObservableObject {
         for pi in projects.indices {
             projects[pi].normalizeParentSessions()
             for si in projects[pi].sessions.indices {
+                projects[pi].sessions[si].pullRequestKeys =
+                    projects[pi].sessions[si].sanitizedPersistedPullRequestKeys()
                 let sid = projects[pi].sessions[si].id
                 let restored = restoredStatusState(forSession: sid)
                 let status = restored.status

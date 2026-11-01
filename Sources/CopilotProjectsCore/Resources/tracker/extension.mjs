@@ -397,6 +397,7 @@ if (validSessionId && socketPath) {
     let pendingTranscriptTurn = null;
     let startingPrompt = null;
     let pullRequestKeys = [];
+    const prCreateToolCallIds = new Set();
     let transcriptAssistantTurnActive = false;
     // `session.idle` is ephemeral, so durable replay cannot tell a failure
     // inside a request from one after it ended. Live delivery records which
@@ -3947,7 +3948,7 @@ if (validSessionId && socketPath) {
                 || pullRequestKeys.length >= 3) {
             return false;
         }
-        let changed = false;
+        const matches = [];
         const pattern = /https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]{0,9})(?![A-Za-z0-9_%-])/gi;
         let match;
         while ((match = pattern.exec(text)) !== null) {
@@ -3956,6 +3957,13 @@ if (validSessionId && socketPath) {
                 continue;
             }
             const key = `${owner.toLowerCase()}/${repo.toLowerCase()}#${Number(number)}`;
+            if (!matches.includes(key)) {
+                matches.push(key);
+                if (matches.length > 3) return false;
+            }
+        }
+        let changed = false;
+        for (const key of matches) {
             if (!pullRequestKeys.includes(key)) {
                 pullRequestKeys.push(key);
                 changed = true;
@@ -3963,6 +3971,21 @@ if (validSessionId && socketPath) {
             }
         }
         return changed;
+    }
+
+    function isGhPrCreateCommand(data) {
+        if (data?.toolName !== "bash" && data?.toolName !== "powershell") {
+            return false;
+        }
+        const command = data?.arguments?.command;
+        if (typeof command !== "string" || command.length === 0) {
+            return false;
+        }
+        const stripped = command
+            .replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, " ")
+            .replace(/(?:^|\s)#[^\n]*/g, " ");
+        return /(?:^|[;&|()\n])\s*(?:(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)?(?:command\s+)?gh\s+pr\s+create\b/
+            .test(stripped);
     }
 
     function recordPullRequestUrlsFromToolResult(data) {
@@ -4318,6 +4341,7 @@ if (validSessionId && socketPath) {
         latestResumeTranscriptTurnId = null;
         currentModel = model;
         clearTranscriptEventIds();
+        prCreateToolCallIds.clear();
         syncStartingPromptFromTranscript();
         syncPullRequestKeysFromTranscript();
     }
@@ -4375,6 +4399,9 @@ if (validSessionId && socketPath) {
             ensureSyntheticTranscriptTurn(event);
             clearRecoveredTranscriptError();
             const toolId = boundedMetadataText(event.data.toolCallId);
+            if (toolId && isGhPrCreateCommand(event.data)) {
+                prCreateToolCallIds.add(toolId);
+            }
             const existing = pendingTranscriptTurn.tools.find(
                 (tool) => tool.id === toolId
             );
@@ -4404,8 +4431,10 @@ if (validSessionId && socketPath) {
         }
         case "tool.execution_complete": {
             ensureSyntheticTranscriptTurn(event);
-            const prChanged = recordPullRequestUrlsFromToolResult(event.data);
             const toolId = boundedMetadataText(event.data.toolCallId);
+            const prChanged = prCreateToolCallIds.delete(toolId)
+                && event.data?.success === true
+                && recordPullRequestUrlsFromToolResult(event.data);
             let tool = pendingTranscriptTurn.tools.find(
                 (candidate) => candidate.id === toolId
             );
@@ -5058,6 +5087,7 @@ if (validSessionId && socketPath) {
         queuedTranscriptEvents.length = 0;
         startingPrompt = null;
         pullRequestKeys = [];
+        prCreateToolCallIds.clear();
         resetTranscriptReplayState([], null);
 
         durableTranscriptAuthoritative = false;
