@@ -10,7 +10,13 @@ struct Session: Identifiable, Codable, Equatable {
     var cwd: String
     var hostId: String?
     var creationFingerprint: String?
-    var pullRequestKeys: [String]?
+    var pullRequestKeys: [String]? {
+        didSet {
+            verifiedPullRequestKeys = Self.canonicalPullRequestKeys(pullRequestKeys)
+        }
+    }
+    var verifiedPullRequestKeys: [String]?
+    var pendingLedgerPullRequestKeys: [String]?
     var parentSessionId: String?
     var startingPrompt: String? = nil
     /// Persisted only while set, so unmarked sessions keep their saved shape.
@@ -74,19 +80,180 @@ struct Session: Identifiable, Codable, Equatable {
         displayStatus == .running ? runningStartedAtMilliseconds : nil
     }
 
+    static let activityPullRequestPolicyToken = "policy:strict-v1"
+
     var effectivePullRequestKeys: [String] {
         let candidates = (pullRequestKeys ?? [])
             + (agentActivity?.pullRequestKeys ?? [])
             + (startingPrompt.map { RemotePullRequestsContract.extractKeys(from: $0, limit: 3) } ?? [])
+        return Self.canonicalPullRequestKeys(candidates, limit: 3) ?? []
+    }
+
+    mutating func sanitizePersistedPullRequestKeys(
+        projectId: String? = nil,
+        copilotSessionId: String? = nil,
+        ledgerRecords: [SessionCreationRecord]? = []
+    ) {
+        let hasPendingCandidates = verifiedPullRequestKeys == nil
+            || pendingLedgerPullRequestKeys?.isEmpty == false
+        let combined = (pullRequestKeys ?? [])
+            + (hasPendingCandidates ? (pendingLedgerPullRequestKeys ?? []) : [])
+        guard let canonicalKeys = Self.canonicalPullRequestKeys(combined) else {
+            pendingLedgerPullRequestKeys = nil
+            pullRequestKeys = nil
+            return
+        }
+        var probe = self
+        probe.pullRequestKeys = canonicalKeys
+        probe.verifiedPullRequestKeys = verifiedPullRequestKeys
+        let filtered = probe.sanitizedPersistedPullRequestKeys(
+            projectId: projectId,
+            copilotSessionId: copilotSessionId,
+            ledgerRecords: ledgerRecords ?? []
+        ) ?? []
+        if hasPendingCandidates {
+            let unverified = canonicalKeys.filter { !filtered.contains($0) }
+            pendingLedgerPullRequestKeys = unverified.isEmpty ? nil : unverified
+        } else {
+            pendingLedgerPullRequestKeys = nil
+        }
+        pullRequestKeys = filtered.isEmpty ? nil : filtered
+    }
+
+    func sanitizedPersistedPullRequestKeys(
+        projectId: String? = nil,
+        copilotSessionId: String? = nil,
+        ledgerRecords: [SessionCreationRecord] = []
+    ) -> [String]? {
+        guard let canonicalKeys = Self.canonicalPullRequestKeys(pullRequestKeys) else { return nil }
+        if verifiedPullRequestKeys == nil,
+           creationFingerprint == "original" || creationFingerprint?.hasPrefix("pull-requests:") == true {
+            return canonicalKeys
+        }
+        let checkFingerprints = verifiedPullRequestKeys == nil
+            || pendingLedgerPullRequestKeys?.isEmpty == false
+        let verifiedKeys = Set(Self.canonicalPullRequestKeys(verifiedPullRequestKeys) ?? [])
+            .union(
+                checkFingerprints
+                    ? Self.fingerprintVerifiedKeys(
+                        canonicalKeys: canonicalKeys,
+                        creationFingerprint: creationFingerprint,
+                        projectId: projectId,
+                        startingPrompt: startingPrompt,
+                        copilotSessionId: copilotSessionId,
+                        ledgerRecords: ledgerRecords
+                    )
+                    : []
+            )
+        let promptKeys = Set(
+            startingPrompt.map { RemotePullRequestsContract.extractKeys(from: $0, limit: 3) } ?? []
+        )
+        let filtered = canonicalKeys.filter { canonical in
+            verifiedKeys.contains(canonical)
+                || promptKeys.contains(canonical)
+                || Self.title(title, matchesPullRequestKey: canonical, allKeys: canonicalKeys)
+        }
+        return filtered.isEmpty ? nil : filtered
+    }
+
+    private static func fingerprintVerifiedKeys(
+        canonicalKeys: [String],
+        creationFingerprint: String?,
+        projectId: String?,
+        startingPrompt: String?,
+        copilotSessionId: String?,
+        ledgerRecords: [SessionCreationRecord]
+    ) -> Set<String> {
+        let cid = copilotSessionId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var targets: [(projectId: String, fingerprint: String)] = []
+        if let projectId, !projectId.isEmpty, let creationFingerprint, !creationFingerprint.isEmpty {
+            targets.append((projectId, creationFingerprint))
+        }
+        for record in ledgerRecords {
+            if let fp = record.creationFingerprint, !fp.isEmpty, !record.projectId.isEmpty {
+                targets.append((record.projectId, fp))
+            }
+        }
+        guard !targets.isEmpty else { return [] }
+        let bounded = Array(canonicalKeys.prefix(12))
+        var subsets: [[String]] = [canonicalKeys] + canonicalKeys.map { [$0] }
+        if let promptBatch = startingPrompt.map({
+            RemotePullRequestsContract.extractKeys(from: $0, limit: RemotePullRequestsContract.maximumKeys)
+        }), !promptBatch.isEmpty {
+            subsets.append(promptBatch)
+        }
+        for mask in 1..<(1 << bounded.count) {
+            let sub = bounded.enumerated().compactMap { (mask & (1 << $0.offset)) != 0 ? $0.element : nil }
+            subsets.append(sub)
+            if canonicalKeys.count > bounded.count, sub.count <= 5 {
+                let drop = Set(sub)
+                subsets.append(canonicalKeys.filter { !drop.contains($0) })
+            }
+        }
+        let pairBound = min(canonicalKeys.count, 16)
+        for i in 0..<pairBound where i + 1 < pairBound {
+            for j in (i + 1)..<pairBound {
+                subsets.append([canonicalKeys[i], canonicalKeys[j]])
+            }
+        }
+        let sliceBound = min(canonicalKeys.count, 20)
+        if sliceBound >= 2 {
+            for start in 0..<(sliceBound - 1) {
+                for end in (start + 2)...sliceBound {
+                    subsets.append(Array(canonicalKeys[start..<end]))
+                }
+            }
+        }
+        let fingerprintsByProject = Dictionary(grouping: targets, by: { $0.projectId })
+            .mapValues { Set($0.map { $0.fingerprint }) }
+        let requestId = UUID()
+        let allKeys = Set(canonicalKeys)
+        var matched: Set<String> = []
+        for subset in subsets where !subset.isEmpty {
+            for (projectId, fingerprints) in fingerprintsByProject {
+                let startFP = SessionCreationRecord.pullRequestFingerprint(
+                    .init(requestId: requestId, kind: "start", projectId: projectId, pullRequestKeys: subset)
+                )
+                if fingerprints.contains(startFP) {
+                    matched.formUnion(subset)
+                } else if let cid, !cid.isEmpty {
+                    let resumeFP = SessionCreationRecord.pullRequestFingerprint(
+                        .init(
+                            requestId: requestId, kind: "resume", projectId: projectId,
+                            pullRequestKeys: subset, copilotSessionId: cid
+                        )
+                    )
+                    if fingerprints.contains(resumeFP) {
+                        matched.formUnion(subset)
+                    }
+                }
+                if allKeys.isSubset(of: matched) { return matched }
+            }
+        }
+        return matched
+    }
+
+    static func canonicalPullRequestKeys(_ keys: [String]?, limit: Int = .max) -> [String]? {
+        guard let keys, !keys.isEmpty, limit > 0 else { return nil }
         var result: [String] = []
         var seen: Set<String> = []
-        for raw in candidates {
+        for raw in keys {
             guard let canonical = RemotePullRequestsContract.canonicalKey(raw),
                   seen.insert(canonical).inserted else { continue }
             result.append(canonical)
-            if result.count >= 3 { break }
+            if result.count >= limit { break }
         }
-        return result
+        return result.isEmpty ? nil : result
+    }
+
+    private static func title(
+        _ title: String,
+        matchesPullRequestKey canonicalKey: String,
+        allKeys: [String]
+    ) -> Bool {
+        let escapedKey = NSRegularExpression.escapedPattern(for: canonicalKey)
+        let fullPattern = #"(?<![A-Za-z0-9_./-])"# + escapedKey + #"(?![A-Za-z0-9_%-])"#
+        return title.range(of: fullPattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     /// The latest request failed and the session has been idle since.
@@ -118,7 +285,8 @@ struct Session: Identifiable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, parentSessionId, startingPrompt
+        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, verifiedPullRequestKeys
+        case pendingLedgerPullRequestKeys, parentSessionId, startingPrompt
         case runningStartedAtMilliseconds, runningStatusTimestampMilliseconds, runningRequestIdentity
         case manuallyMarkedUnread = "markedUnread"
     }
@@ -132,6 +300,7 @@ struct Session: Identifiable, Codable, Equatable {
         hostId: String? = nil,
         creationFingerprint: String? = nil,
         pullRequestKeys: [String]? = nil,
+        verifiedPullRequestKeys: [String]? = nil,
         parentSessionId: String? = nil,
         startingPrompt: String? = nil,
         memoryUsageBytes: Int64? = nil
@@ -142,6 +311,7 @@ struct Session: Identifiable, Codable, Equatable {
         self.hostId = hostId
         self.creationFingerprint = creationFingerprint
         self.pullRequestKeys = pullRequestKeys
+        self.verifiedPullRequestKeys = Self.canonicalPullRequestKeys(verifiedPullRequestKeys ?? pullRequestKeys)
         self.parentSessionId = parentSessionId
         self.startingPrompt = startingPrompt
         self.memoryUsageBytes = memoryUsageBytes
@@ -155,6 +325,12 @@ struct Session: Identifiable, Codable, Equatable {
         self.hostId = try container.decodeIfPresent(String.self, forKey: .hostId)
         self.creationFingerprint = try container.decodeIfPresent(String.self, forKey: .creationFingerprint)
         self.pullRequestKeys = try container.decodeIfPresent([String].self, forKey: .pullRequestKeys)
+        self.verifiedPullRequestKeys = Self.canonicalPullRequestKeys(
+            try container.decodeIfPresent([String].self, forKey: .verifiedPullRequestKeys)
+        )
+        self.pendingLedgerPullRequestKeys = Self.canonicalPullRequestKeys(
+            try container.decodeIfPresent([String].self, forKey: .pendingLedgerPullRequestKeys)
+        )
         self.parentSessionId = try container.decodeIfPresent(String.self, forKey: .parentSessionId)
         if let rawPrompt = try container.decodeIfPresent(String.self, forKey: .startingPrompt) {
             if rawPrompt.hasPrefix(Self.encodedStartingPromptPrefix),
@@ -181,6 +357,8 @@ struct Session: Identifiable, Codable, Equatable {
         try container.encodeIfPresent(hostId, forKey: .hostId)
         try container.encodeIfPresent(creationFingerprint, forKey: .creationFingerprint)
         try container.encodeIfPresent(pullRequestKeys, forKey: .pullRequestKeys)
+        try container.encodeIfPresent(verifiedPullRequestKeys, forKey: .verifiedPullRequestKeys)
+        try container.encodeIfPresent(pendingLedgerPullRequestKeys, forKey: .pendingLedgerPullRequestKeys)
         try container.encodeIfPresent(parentSessionId, forKey: .parentSessionId)
         if let startingPrompt, !startingPrompt.isEmpty {
             let encoded = Self.encodedStartingPromptPrefix + Data(startingPrompt.utf8).base64EncodedString()

@@ -397,6 +397,8 @@ if (validSessionId && socketPath) {
     let pendingTranscriptTurn = null;
     let startingPrompt = null;
     let pullRequestKeys = [];
+    const PULL_REQUEST_KEYS_POLICY_TOKEN = "policy:strict-v1";
+    const prCreateToolCallIds = new Set();
     let transcriptAssistantTurnActive = false;
     // `session.idle` is ephemeral, so durable replay cannot tell a failure
     // inside a request from one after it ended. Live delivery records which
@@ -2548,7 +2550,9 @@ if (validSessionId && socketPath) {
             operationReceipts: operationReceiptSnapshot(),
             workflow: workflowSnapshot(),
             ...(startingPrompt ? { startingPrompt } : {}),
-            ...(pullRequestKeys.length > 0 ? { pullRequestKeys } : {}),
+            ...(pullRequestKeys.length > 0
+                ? { pullRequestKeys: [PULL_REQUEST_KEYS_POLICY_TOKEN, ...pullRequestKeys] }
+                : {}),
             ...(lastTurnError ? { lastTurnError } : {}),
             ...(reportedError ? { error: reportedError } : {}),
         };
@@ -3947,7 +3951,7 @@ if (validSessionId && socketPath) {
                 || pullRequestKeys.length >= 3) {
             return false;
         }
-        let changed = false;
+        const matches = [];
         const pattern = /https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]{0,9})(?![A-Za-z0-9_%-])/gi;
         let match;
         while ((match = pattern.exec(text)) !== null) {
@@ -3956,6 +3960,13 @@ if (validSessionId && socketPath) {
                 continue;
             }
             const key = `${owner.toLowerCase()}/${repo.toLowerCase()}#${Number(number)}`;
+            if (!matches.includes(key)) {
+                matches.push(key);
+                if (matches.length > 3) return false;
+            }
+        }
+        let changed = false;
+        for (const key of matches) {
             if (!pullRequestKeys.includes(key)) {
                 pullRequestKeys.push(key);
                 changed = true;
@@ -3963,6 +3974,39 @@ if (validSessionId && socketPath) {
             }
         }
         return changed;
+    }
+
+    function isGhPrCreateCommand(data) {
+        if (data?.toolName !== "bash" && data?.toolName !== "powershell") {
+            return false;
+        }
+        const command = data?.arguments?.command;
+        if (typeof command !== "string" || command.length === 0) {
+            return false;
+        }
+        let unsafeQuotedExpansion = false;
+        const stripped = command
+            .replace(data.toolName === "powershell" ? /`\r?\n/g : /\\\r?\n/g, "")
+            .replace(/(?:^|\s)#[^\n]*|'([^']*)'|"((?:\\.|[^"\\])*)"/g, (_, s, d) => {
+                if (s === undefined && d === undefined) {
+                    return " ";
+                }
+                if (d !== undefined && /[$`]/.test(d)) {
+                    unsafeQuotedExpansion = true;
+                }
+                return /^--dry-run(?:=|$)/.test(s ?? d ?? "") ? "--dry-run" : "__quoted__";
+            });
+        if (unsafeQuotedExpansion) {
+            return false;
+        }
+        if (/[;|()`\\{}]|<<|\$|[^\s=]__quoted__|__quoted__\S|(?:^|[^&])&(?:$|[^&])|(?:^|&&|\n)\s*&&|&&\s*(?:$|\n)|(?:^|\s)--dry-run\b/.test(stripped)) {
+            return false;
+        }
+        const clauses = stripped.split(/\n|&&/).map((clause) => clause.trim()).filter(Boolean);
+        if (clauses.length === 0 || clauses.slice(0, -1).some((clause) => !/^(?:export\s+[A-Za-z_][A-Za-z0-9_]*=\S*(?:\s+[A-Za-z_][A-Za-z0-9_]*=\S*)*|cd\s+\S+)$/.test(clause))) {
+            return false;
+        }
+        return /^(?:(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)?(?:command\s+)?gh\s+(?:(?:--repo(?:=|\s+)|-R\s*)\S+\s+)*pr\s+create\b/.test(clauses[clauses.length - 1]);
     }
 
     function recordPullRequestUrlsFromToolResult(data) {
@@ -4318,6 +4362,7 @@ if (validSessionId && socketPath) {
         latestResumeTranscriptTurnId = null;
         currentModel = model;
         clearTranscriptEventIds();
+        prCreateToolCallIds.clear();
         syncStartingPromptFromTranscript();
         syncPullRequestKeysFromTranscript();
     }
@@ -4375,6 +4420,9 @@ if (validSessionId && socketPath) {
             ensureSyntheticTranscriptTurn(event);
             clearRecoveredTranscriptError();
             const toolId = boundedMetadataText(event.data.toolCallId);
+            if (toolId && isGhPrCreateCommand(event.data)) {
+                prCreateToolCallIds.add(toolId);
+            }
             const existing = pendingTranscriptTurn.tools.find(
                 (tool) => tool.id === toolId
             );
@@ -4404,8 +4452,10 @@ if (validSessionId && socketPath) {
         }
         case "tool.execution_complete": {
             ensureSyntheticTranscriptTurn(event);
-            const prChanged = recordPullRequestUrlsFromToolResult(event.data);
             const toolId = boundedMetadataText(event.data.toolCallId);
+            const prChanged = prCreateToolCallIds.delete(toolId)
+                && event.data?.success === true
+                && recordPullRequestUrlsFromToolResult(event.data);
             let tool = pendingTranscriptTurn.tools.find(
                 (candidate) => candidate.id === toolId
             );
@@ -5058,6 +5108,7 @@ if (validSessionId && socketPath) {
         queuedTranscriptEvents.length = 0;
         startingPrompt = null;
         pullRequestKeys = [];
+        prCreateToolCallIds.clear();
         resetTranscriptReplayState([], null);
 
         durableTranscriptAuthoritative = false;

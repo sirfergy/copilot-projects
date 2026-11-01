@@ -408,33 +408,27 @@ extension AppModel {
                 }
                 var effectiveFresh = fresh
                 if let snapshotKeys = snapshot?.pullRequestKeys, !snapshotKeys.isEmpty {
-                    var merged = (nextProjects[pi].sessions[si].pullRequestKeys ?? [])
-                        .compactMap(RemotePullRequestsContract.canonicalKey)
-                    let hasNewCandidate = merged.count < 5 && snapshotKeys.contains { raw in
-                        guard let canonical = RemotePullRequestsContract.canonicalKey(raw) else { return false }
-                        return !merged.contains(canonical)
-                    }
-                    if hasNewCandidate {
-                        if isActivitySnapshotTrustedForSessionMetadata(
-                            sessionId: sessionId,
-                            snapshot: snapshot
-                        ) {
-                            var mergedChanged = false
-                            for raw in snapshotKeys {
-                                guard merged.count < 5,
-                                      let canonical = RemotePullRequestsContract.canonicalKey(raw),
-                                      !merged.contains(canonical) else { continue }
-                                merged.append(canonical)
-                                mergedChanged = true
-                            }
-                            if mergedChanged {
-                                nextProjects[pi].sessions[si].pullRequestKeys = merged
-                                activityChanged = true
-                                startingPromptChanged = true
-                            }
-                        } else {
-                            effectiveFresh?.pullRequestKeys = nil
+                    if snapshot?.schemaVersion == AgentActivitySnapshot.currentSchemaVersion,
+                       snapshotKeys.contains(Session.activityPullRequestPolicyToken),
+                       isActivitySnapshotTrustedForSessionMetadata(
+                           sessionId: sessionId,
+                           snapshot: snapshot
+                       ) {
+                        let canonicalFresh = Session.canonicalPullRequestKeys(snapshotKeys, limit: 5)
+                        effectiveFresh?.pullRequestKeys = canonicalFresh
+                        let existing = Session.canonicalPullRequestKeys(
+                            nextProjects[pi].sessions[si].pullRequestKeys, limit: 5
+                        )
+                        let merged = Session.canonicalPullRequestKeys(
+                            (existing ?? []) + (canonicalFresh ?? []), limit: 5
+                        )
+                        if merged != existing {
+                            nextProjects[pi].sessions[si].pullRequestKeys = merged
+                            activityChanged = true
+                            startingPromptChanged = true
                         }
+                    } else {
+                        effectiveFresh?.pullRequestKeys = nil
                     }
                 }
                 if nextProjects[pi].sessions[si].agentActivity != effectiveFresh {

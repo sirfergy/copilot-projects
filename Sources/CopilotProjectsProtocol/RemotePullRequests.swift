@@ -33,6 +33,7 @@ public enum RemotePullRequestsContract {
         let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
         var results: [String] = []
         var seen: Set<String> = []
+        var exceededLimit = false
         regex.enumerateMatches(in: text, options: [], range: nsRange) { match, _, stop in
             guard let match,
                   match.numberOfRanges == 4,
@@ -43,13 +44,15 @@ public enum RemotePullRequestsContract {
                 return
             }
             if seen.insert(key).inserted {
-                results.append(key)
                 if results.count >= limit {
+                    exceededLimit = true
                     stop.pointee = true
+                    return
                 }
+                results.append(key)
             }
         }
-        return results
+        return exceededLimit ? [] : results
     }
 
     public static func shortDisplayLabel(for key: String) -> String {

@@ -2171,6 +2171,7 @@ final class AppModel: ObservableObject {
                 )
             },
             pullRequestKeys: entry.pullRequestKeys,
+            verifiedPullRequestKeys: entry.pullRequestKeys,
             parentSessionId: validParentId,
             startingPrompt: entry.startingPrompt
         )
@@ -3864,10 +3865,33 @@ final class AppModel: ObservableObject {
         }
         projects = state.projects
         selectedProjectId = state.selectedProjectId ?? state.projects.first?.id
+        let ledgerRecords: [SessionCreationRecord]? = {
+            struct LedgerEnvelope: Decodable { var records: [SessionCreationRecord] }
+            let url = (Mirror(reflecting: sessionCreationLedger).children.first { $0.label == "url" }?.value as? URL)
+                ?? Paths.sessionCreationLedgerPath
+            let contents: Data?
+            do {
+                contents = try CreationLedgerFile.read(from: url)
+            } catch {
+                return nil
+            }
+            guard let data = contents else { return [] }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            guard let decoded = try? decoder.decode(LedgerEnvelope.self, from: data) else {
+                return nil
+            }
+            return decoded.records
+        }()
         for pi in projects.indices {
             projects[pi].normalizeParentSessions()
             for si in projects[pi].sessions.indices {
                 let sid = projects[pi].sessions[si].id
+                projects[pi].sessions[si].sanitizePersistedPullRequestKeys(
+                    projectId: projects[pi].id,
+                    copilotSessionId: resumeMarkerValue(sessionId: sid, suffix: "copilot-session"),
+                    ledgerRecords: ledgerRecords.map { records in records.filter { $0.sessionId == sid } }
+                )
                 let restored = restoredStatusState(forSession: sid)
                 let status = restored.status
                 let statusTimestamp = restored.statusTimestamp
