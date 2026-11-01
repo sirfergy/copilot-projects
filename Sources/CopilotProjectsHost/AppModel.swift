@@ -2171,6 +2171,7 @@ final class AppModel: ObservableObject {
                 )
             },
             pullRequestKeys: entry.pullRequestKeys,
+            verifiedPullRequestKeys: entry.pullRequestKeys,
             parentSessionId: validParentId,
             startingPrompt: entry.startingPrompt
         )

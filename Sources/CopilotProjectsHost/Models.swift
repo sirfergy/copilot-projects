@@ -10,7 +10,12 @@ struct Session: Identifiable, Codable, Equatable {
     var cwd: String
     var hostId: String?
     var creationFingerprint: String?
-    var pullRequestKeys: [String]?
+    var pullRequestKeys: [String]? {
+        didSet {
+            verifiedPullRequestKeys = Self.canonicalPullRequestKeys(pullRequestKeys)
+        }
+    }
+    var verifiedPullRequestKeys: [String]?
     var parentSessionId: String?
     var startingPrompt: String? = nil
     /// Persisted only while set, so unmarked sessions keep their saved shape.
@@ -78,34 +83,35 @@ struct Session: Identifiable, Codable, Equatable {
         let candidates = (pullRequestKeys ?? [])
             + (agentActivity?.pullRequestKeys ?? [])
             + (startingPrompt.map { RemotePullRequestsContract.extractKeys(from: $0, limit: 3) } ?? [])
-        var result: [String] = []
-        var seen: Set<String> = []
-        for raw in candidates {
-            guard let canonical = RemotePullRequestsContract.canonicalKey(raw),
-                  seen.insert(canonical).inserted else { continue }
-            result.append(canonical)
-            if result.count >= 3 { break }
-        }
-        return result
+        return Self.canonicalPullRequestKeys(candidates, limit: 3) ?? []
     }
 
     func sanitizedPersistedPullRequestKeys() -> [String]? {
-        guard let pullRequestKeys, !pullRequestKeys.isEmpty else { return nil }
-        if creationFingerprint?.hasPrefix("pull-requests:") == true || creationFingerprint == "original" {
-            return pullRequestKeys
+        guard let canonicalKeys = Self.canonicalPullRequestKeys(pullRequestKeys) else { return nil }
+        if verifiedPullRequestKeys == nil, let creationFingerprint, !creationFingerprint.isEmpty {
+            return canonicalKeys
         }
+        let verifiedKeys = Set(Self.canonicalPullRequestKeys(verifiedPullRequestKeys) ?? [])
         let promptKeys = Set(
             startingPrompt.map { RemotePullRequestsContract.extractKeys(from: $0, limit: 3) } ?? []
         )
+        let filtered = canonicalKeys.filter { canonical in
+            verifiedKeys.contains(canonical)
+                || promptKeys.contains(canonical)
+                || Self.title(title, matchesPullRequestKey: canonical)
+        }
+        return filtered.isEmpty ? nil : filtered
+    }
+
+    static func canonicalPullRequestKeys(_ keys: [String]?, limit: Int = .max) -> [String]? {
+        guard let keys, !keys.isEmpty, limit > 0 else { return nil }
         var result: [String] = []
         var seen: Set<String> = []
-        for raw in pullRequestKeys {
+        for raw in keys {
             guard let canonical = RemotePullRequestsContract.canonicalKey(raw),
                   seen.insert(canonical).inserted else { continue }
-            if promptKeys.contains(canonical)
-                || Self.title(title, matchesPullRequestKey: canonical) {
-                result.append(canonical)
-            }
+            result.append(canonical)
+            if result.count >= limit { break }
         }
         return result.isEmpty ? nil : result
     }
@@ -119,7 +125,7 @@ struct Session: Identifiable, Codable, Equatable {
         let shortLabel = RemotePullRequestsContract.shortDisplayLabel(for: canonicalKey)
         guard shortLabel.hasPrefix("#"), shortLabel.count > 1 else { return false }
         let escapedShort = NSRegularExpression.escapedPattern(for: shortLabel)
-        let shortPattern = #"(?<![A-Za-z0-9_./-])"# + escapedShort + #"(?![0-9])"#
+        let shortPattern = #"(?<![A-Za-z0-9_./-])"# + escapedShort + #"(?![A-Za-z0-9_%-])"#
         return title.range(of: shortPattern, options: [.regularExpression]) != nil
     }
 
@@ -152,7 +158,8 @@ struct Session: Identifiable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, parentSessionId, startingPrompt
+        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, verifiedPullRequestKeys
+        case parentSessionId, startingPrompt
         case runningStartedAtMilliseconds, runningStatusTimestampMilliseconds, runningRequestIdentity
         case manuallyMarkedUnread = "markedUnread"
     }
@@ -166,6 +173,7 @@ struct Session: Identifiable, Codable, Equatable {
         hostId: String? = nil,
         creationFingerprint: String? = nil,
         pullRequestKeys: [String]? = nil,
+        verifiedPullRequestKeys: [String]? = nil,
         parentSessionId: String? = nil,
         startingPrompt: String? = nil,
         memoryUsageBytes: Int64? = nil
@@ -176,6 +184,9 @@ struct Session: Identifiable, Codable, Equatable {
         self.hostId = hostId
         self.creationFingerprint = creationFingerprint
         self.pullRequestKeys = pullRequestKeys
+        self.verifiedPullRequestKeys = Self.canonicalPullRequestKeys(
+            verifiedPullRequestKeys ?? (creationFingerprint != nil ? pullRequestKeys : nil)
+        )
         self.parentSessionId = parentSessionId
         self.startingPrompt = startingPrompt
         self.memoryUsageBytes = memoryUsageBytes
@@ -189,6 +200,9 @@ struct Session: Identifiable, Codable, Equatable {
         self.hostId = try container.decodeIfPresent(String.self, forKey: .hostId)
         self.creationFingerprint = try container.decodeIfPresent(String.self, forKey: .creationFingerprint)
         self.pullRequestKeys = try container.decodeIfPresent([String].self, forKey: .pullRequestKeys)
+        self.verifiedPullRequestKeys = Self.canonicalPullRequestKeys(
+            try container.decodeIfPresent([String].self, forKey: .verifiedPullRequestKeys)
+        )
         self.parentSessionId = try container.decodeIfPresent(String.self, forKey: .parentSessionId)
         if let rawPrompt = try container.decodeIfPresent(String.self, forKey: .startingPrompt) {
             if rawPrompt.hasPrefix(Self.encodedStartingPromptPrefix),
@@ -215,6 +229,7 @@ struct Session: Identifiable, Codable, Equatable {
         try container.encodeIfPresent(hostId, forKey: .hostId)
         try container.encodeIfPresent(creationFingerprint, forKey: .creationFingerprint)
         try container.encodeIfPresent(pullRequestKeys, forKey: .pullRequestKeys)
+        try container.encodeIfPresent(verifiedPullRequestKeys, forKey: .verifiedPullRequestKeys)
         try container.encodeIfPresent(parentSessionId, forKey: .parentSessionId)
         if let startingPrompt, !startingPrompt.isEmpty {
             let encoded = Self.encodedStartingPromptPrefix + Data(startingPrompt.utf8).base64EncodedString()

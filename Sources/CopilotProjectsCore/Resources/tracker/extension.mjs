@@ -3982,10 +3982,16 @@ if (validSessionId && socketPath) {
             return false;
         }
         const stripped = command
-            .replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, " ")
+            .replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, "__quoted__")
             .replace(/(?:^|\s)#[^\n]*/g, " ");
-        return /(?:^|[;&|()\n])\s*(?:(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)?(?:command\s+)?gh\s+pr\s+create\b/
-            .test(stripped);
+        if (/[;|()`]|<<|\$\(|(?:^|[^&])&(?:$|[^&])|(?:^|&&|\n)\s*&&|&&\s*(?:$|\n)|(?:^|\s)--dry-run\b/.test(stripped)) {
+            return false;
+        }
+        const clauses = stripped.split(/\n|&&/).map((clause) => clause.trim()).filter(Boolean);
+        if (clauses.length === 0 || clauses.slice(0, -1).some((clause) => !/^(?:export\s+[A-Za-z_][A-Za-z0-9_]*=\S*(?:\s+[A-Za-z_][A-Za-z0-9_]*=\S*)*|cd\s+\S+)$/.test(clause))) {
+            return false;
+        }
+        return /^(?:(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s*)*)?(?:command\s+)?gh\s+(?:(?:--repo(?:=|\s+)|-R\s*)\S+\s+)*pr\s+create\b/.test(clauses[clauses.length - 1]);
     }
 
     function recordPullRequestUrlsFromToolResult(data) {

@@ -896,7 +896,7 @@ final class AppModelTests: XCTestCase {
 
             // Tracker snapshot foregroundTransitionAt across multiple assistant.turn_start iterations
             // does not reset the request's runningStartedAtMilliseconds, and snapshot.pullRequestKeys
-            // are reflected via Session.effectivePullRequestKeys without mutating persisted Session.pullRequestKeys.
+            // merges into Session.pullRequestKeys (capped at 5, effective capped at 3) and survives expiry.
             let now = Date(timeIntervalSince1970: 1_788_000_010)
             let transitionDate = Date(timeIntervalSince1970: 1_788_000_005)
             var activity = AgentActivitySnapshot(
@@ -927,7 +927,7 @@ final class AppModelTests: XCTestCase {
             model.refreshAgentActivitySnapshots(now: now)
 
             let updatedS1 = model.projects[0].sessions[0]
-            XCTAssertNil(updatedS1.pullRequestKeys)
+            XCTAssertEqual(updatedS1.pullRequestKeys?.count, 5)
             XCTAssertEqual(
                 updatedS1.effectivePullRequestKeys,
                 [
@@ -1087,6 +1087,14 @@ final class AppModelTests: XCTestCase {
             }
             XCTAssertEqual(relaunched.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
             XCTAssertEqual(relaunched.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
+            XCTAssertEqual(
+                relaunched.projects[0].sessions[0].effectivePullRequestKeys,
+                [
+                    "sirfergy/copilot-projects#202",
+                    "sirfergy/copilot-projects#203",
+                    "sirfergy/copilot-projects#204",
+                ]
+            )
 
             // Timestamp-less waiting -> running sequence updates runningStatusTimestampMilliseconds from clocks.status.
             relaunched.setStatus(sessionId: s1.id, status: .waiting, text: "Wait", notification: .permission)
@@ -1218,20 +1226,41 @@ final class AppModelTests: XCTestCase {
             )
 
             // 4b. sanitizedPersistedPullRequestKeys() strips unbacked tool-scraped keys on load
-            // while preserving pull-requests: fingerprint keys, startingPrompt keys, and Review Pull Request title keys.
+            // while preserving resumed/explicit PR bindings, startingPrompt keys, and Review Pull Request title keys.
             let staleScrapedSession = Session(
                 id: "stale-scraped",
                 title: "shell",
                 cwd: root.path,
                 pullRequestKeys: ["sirfergy/copilot-projects#991", "sirfergy/copilot-projects#992"]
             )
-            let prFingerprintSession = Session(
+            let resumeRequest = RemotePullRequestSessionRequest(
+                requestId: UUID(),
+                kind: "resume",
+                projectId: "p",
+                pullRequestKeys: ["sirfergy/copilot-projects#301", "sirfergy/copilot-projects#302"],
+                copilotSessionId: UUID().uuidString.lowercased()
+            )
+            var prFingerprintSession = Session(
                 id: "pr-fingerprint",
                 title: "Copilot",
                 cwd: root.path,
-                creationFingerprint: "pull-requests:goal-1",
+                creationFingerprint: SessionCreationRecord.pullRequestFingerprint(resumeRequest),
                 pullRequestKeys: ["sirfergy/copilot-projects#301", "sirfergy/copilot-projects#302"]
             )
+            prFingerprintSession.verifiedPullRequestKeys = nil
+            var existingBoundSession = Session(
+                id: "existing-bound",
+                title: "Copilot",
+                cwd: root.path,
+                creationFingerprint: SessionCreationRecord.fingerprint(
+                    projectId: "p",
+                    kind: .copilot,
+                    initialPrompt: "Ship feature",
+                    pullRequestURL: nil
+                ),
+                startingPrompt: "Ship feature"
+            )
+            existingBoundSession.pullRequestKeys = ["sirfergy/copilot-projects#303"]
             let promptBackedSession = Session(
                 id: "prompt-backed",
                 title: "Feature Work",
@@ -1257,6 +1286,7 @@ final class AppModelTests: XCTestCase {
                 sessions: [
                     staleScrapedSession,
                     prFingerprintSession,
+                    existingBoundSession,
                     promptBackedSession,
                     titleBackedSession,
                 ],
@@ -1284,6 +1314,10 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(
                 loadedSessions.first(where: { $0.id == "pr-fingerprint" })?.pullRequestKeys,
                 ["sirfergy/copilot-projects#301", "sirfergy/copilot-projects#302"]
+            )
+            XCTAssertEqual(
+                loadedSessions.first(where: { $0.id == "existing-bound" })?.pullRequestKeys,
+                ["sirfergy/copilot-projects#303"]
             )
             XCTAssertEqual(
                 loadedSessions.first(where: { $0.id == "prompt-backed" })?.pullRequestKeys,
@@ -1371,14 +1405,49 @@ final class AppModelTests: XCTestCase {
               true,
               { content: "gh pr create https://github.com/octocat/hello-world/pull/905" }
             );
+            runTool(
+              "t-heredoc",
+              "bash",
+              { command: "cat <<'EOF'\\ngh pr create https://github.com/octocat/hello-world/pull/906\\nEOF" },
+              true,
+              { content: "gh pr create https://github.com/octocat/hello-world/pull/906" }
+            );
+            runTool(
+              "t-compound-skip",
+              "bash",
+              { command: "false && gh pr create --fill; gh pr list --limit 10" },
+              true,
+              { content: "https://github.com/octocat/hello-world/pull/907" }
+            );
+            runTool(
+              "t-compound-printf",
+              "bash",
+              { command: "printf 'https://github.com/octocat/hello-world/pull/909\\n' && gh pr create --fill" },
+              true,
+              { content: "https://github.com/octocat/hello-world/pull/909\nhttps://github.com/octocat/hello-world/pull/42" }
+            );
+            runTool(
+              "t-quoted-subcommand",
+              "bash",
+              { command: "gh pr \"view\" create --json url --jq .url" },
+              true,
+              { content: "https://github.com/octocat/hello-world/pull/908" }
+            );
+            runTool(
+              "t-dry-run",
+              "bash",
+              { command: "gh pr create --dry-run --title T --body 'See https://github.com/octocat/hello-world/pull/910'" },
+              true,
+              { content: "https://github.com/octocat/hello-world/pull/910" }
+            );
             runTool("t-create-fail", "bash", { command: "gh pr create --fill" }, false, {
               content: "https://github.com/octocat/hello-world/pull/904"
             });
             assert.deepEqual(pullRequestKeys, ["sirfergy/copilot-projects#270"]);
             assert.equal(publishCount, 0);
 
-            // Successful gh pr create in bash DOES populate pullRequestKeys.
-            runTool("t-create-ok", "bash", { command: "GH_TOKEN=x gh pr create --title T" }, true, {
+            // Successful gh pr create in bash (including --repo/-R flags) DOES populate pullRequestKeys.
+            runTool("t-create-ok", "bash", { command: "GH_TOKEN=x gh --repo octocat/hello-world pr create --title T" }, true, {
               content: [{ type: "text", text: "Created https://github.com/octocat/hello-world/pull/42\\n" }]
             });
             assert.equal(publishCount, 1);

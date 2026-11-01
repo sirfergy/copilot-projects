@@ -407,12 +407,25 @@ extension AppModel {
                     startingPromptChanged = true
                 }
                 var effectiveFresh = fresh
-                if let snapshotKeys = snapshot?.pullRequestKeys, !snapshotKeys.isEmpty,
-                   !isActivitySnapshotTrustedForSessionMetadata(
-                       sessionId: sessionId,
-                       snapshot: snapshot
-                   ) {
-                    effectiveFresh?.pullRequestKeys = nil
+                if let snapshotKeys = snapshot?.pullRequestKeys, !snapshotKeys.isEmpty {
+                    if isActivitySnapshotTrustedForSessionMetadata(
+                        sessionId: sessionId,
+                        snapshot: snapshot
+                    ) {
+                        let existing = Session.canonicalPullRequestKeys(
+                            nextProjects[pi].sessions[si].pullRequestKeys, limit: 5
+                        )
+                        let merged = Session.canonicalPullRequestKeys(
+                            (existing ?? []) + snapshotKeys, limit: 5
+                        )
+                        if merged != existing {
+                            nextProjects[pi].sessions[si].pullRequestKeys = merged
+                            activityChanged = true
+                            startingPromptChanged = true
+                        }
+                    } else {
+                        effectiveFresh?.pullRequestKeys = nil
+                    }
                 }
                 if nextProjects[pi].sessions[si].agentActivity != effectiveFresh {
                     var previous = nextProjects[pi].sessions[si].agentActivity
