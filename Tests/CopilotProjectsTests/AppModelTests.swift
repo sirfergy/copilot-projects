@@ -1305,7 +1305,13 @@ final class AppModelTests: XCTestCase {
                 requestId: UUID(),
                 kind: "resume",
                 projectId: "p",
-                pullRequestKeys: ["sirfergy/copilot-projects#303", "sirfergy/copilot-projects#304"],
+                pullRequestKeys: [
+                    "sirfergy/copilot-projects#101",
+                    "sirfergy/copilot-projects#103",
+                    "sirfergy/copilot-projects#105",
+                    "sirfergy/copilot-projects#107",
+                    "sirfergy/copilot-projects#109",
+                ],
                 copilotSessionId: existingBoundCopilotId
             )
             let sanitizeLedgerURL = root.appendingPathComponent("sanitize-ledger.json")
@@ -1326,9 +1332,13 @@ final class AppModelTests: XCTestCase {
                     "sirfergy/copilot-projects#102",
                     "sirfergy/copilot-projects#103",
                     "sirfergy/copilot-projects#104",
+                    "sirfergy/copilot-projects#105",
+                    "sirfergy/copilot-projects#106",
+                    "sirfergy/copilot-projects#107",
+                    "sirfergy/copilot-projects#108",
+                    "sirfergy/copilot-projects#109",
+                    "sirfergy/copilot-projects#110",
                     "sirfergy/copilot-projects#300",
-                    "sirfergy/copilot-projects#303",
-                    "sirfergy/copilot-projects#304",
                 ],
                 startingPrompt: "Inspect https://github.com/sirfergy/copilot-projects/pull/300"
             )
@@ -1439,8 +1449,11 @@ final class AppModelTests: XCTestCase {
                 loadedSessions.first(where: { $0.id == "existing-bound" })?.pullRequestKeys,
                 [
                     "sirfergy/copilot-projects#300",
-                    "sirfergy/copilot-projects#303",
-                    "sirfergy/copilot-projects#304",
+                    "sirfergy/copilot-projects#101",
+                    "sirfergy/copilot-projects#103",
+                    "sirfergy/copilot-projects#105",
+                    "sirfergy/copilot-projects#107",
+                    "sirfergy/copilot-projects#109",
                 ]
             )
             XCTAssertEqual(

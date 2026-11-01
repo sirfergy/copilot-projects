@@ -175,7 +175,7 @@ struct Session: Identifiable, Codable, Equatable {
             }
         }
         guard !targets.isEmpty else { return [] }
-        let bounded = Array(canonicalKeys.prefix(8))
+        let bounded = Array(canonicalKeys.prefix(12))
         var subsets: [[String]] = [canonicalKeys] + canonicalKeys.map { [$0] }
         if let promptBatch = startingPrompt.map({
             RemotePullRequestsContract.extractKeys(from: $0, limit: RemotePullRequestsContract.maximumKeys)
@@ -204,27 +204,30 @@ struct Session: Identifiable, Codable, Equatable {
                 }
             }
         }
+        let fingerprintsByProject = Dictionary(grouping: targets, by: { $0.projectId })
+            .mapValues { Set($0.map { $0.fingerprint }) }
+        let requestId = UUID()
+        let allKeys = Set(canonicalKeys)
         var matched: Set<String> = []
         for subset in subsets where !subset.isEmpty {
-            for target in targets {
+            for (projectId, fingerprints) in fingerprintsByProject {
                 let startFP = SessionCreationRecord.pullRequestFingerprint(
-                    .init(requestId: UUID(), kind: "start", projectId: target.projectId, pullRequestKeys: subset)
+                    .init(requestId: requestId, kind: "start", projectId: projectId, pullRequestKeys: subset)
                 )
-                if startFP == target.fingerprint {
+                if fingerprints.contains(startFP) {
                     matched.formUnion(subset)
-                    continue
-                }
-                if let cid, !cid.isEmpty {
+                } else if let cid, !cid.isEmpty {
                     let resumeFP = SessionCreationRecord.pullRequestFingerprint(
                         .init(
-                            requestId: UUID(), kind: "resume", projectId: target.projectId,
+                            requestId: requestId, kind: "resume", projectId: projectId,
                             pullRequestKeys: subset, copilotSessionId: cid
                         )
                     )
-                    if resumeFP == target.fingerprint {
+                    if fingerprints.contains(resumeFP) {
                         matched.formUnion(subset)
                     }
                 }
+                if allKeys.isSubset(of: matched) { return matched }
             }
         }
         return matched
