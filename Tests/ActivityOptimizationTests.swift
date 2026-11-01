@@ -398,14 +398,58 @@ final class ActivityOptimizationTests: XCTestCase {
             ProjectRow(project: projectA, number: 1, showNumber: false, isDropTarget: false),
             ProjectRow(project: projectWithRunning, number: 1, showNumber: false, isDropTarget: false)
         )
+
+        var unreadSecond = second
+        unreadSecond.hasUnread = true
+        var markedUnreadSecond = unreadSecond
+        markedUnreadSecond.markedUnread = true
+        XCTAssertNotEqual(SessionStateIndicator(session: second), SessionStateIndicator(session: unreadSecond))
+        XCTAssertNotEqual(SessionStateIndicator(session: unreadSecond), SessionStateIndicator(session: markedUnreadSecond))
+        XCTAssertNotEqual(
+            SessionRow(session: unreadSecond, isActive: true, number: 1, showNumber: false, onSelect: {}, onClose: {}),
+            SessionRow(session: markedUnreadSecond, isActive: true, number: 1, showNumber: false, onSelect: {}, onClose: {})
+        )
+
+        var unreadFirst = first
+        unreadFirst.hasUnread = true
+        let projectOneUnread = Project(
+            id: "p-1", name: "Repo", cwd: "/tmp",
+            sessions: [unreadFirst, second], selectedSessionId: first.id
+        )
+        let projectTwoUnread = Project(
+            id: "p-1", name: "Repo", cwd: "/tmp",
+            sessions: [unreadFirst, unreadSecond], selectedSessionId: first.id
+        )
+        XCTAssertNotEqual(
+            ProjectRow(project: projectOneUnread, number: 1, showNumber: false, isDropTarget: false),
+            ProjectRow(project: projectTwoUnread, number: 1, showNumber: false, isDropTarget: false)
+        )
     }
 
     func testSessionStateIndicatorSymbolNamesReflectDisplayStatusAndAttention() {
         var session = Session(id: "s-1", title: "Alpha", cwd: "/tmp")
         XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "terminal.fill")
 
+        session.hasUnread = true
+        XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "bell.badge.fill")
+
+        session.markedUnread = true
+        XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "envelope.badge.fill")
+
+        session.backgroundAgentsActive = true
+        XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "sparkles")
+        session.backgroundAgentsActive = false
+
         session.finishedUnseen = true
         XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "checkmark.circle.fill")
+        XCTAssertTrue(
+            SessionRow(session: session, isActive: false, onSelect: {}, onClose: {}).showsUnreadIndicator,
+            "A finished session that is also manually marked unread keeps its UnreadBadge"
+        )
+        session.markedUnread = false
+        XCTAssertFalse(
+            SessionRow(session: session, isActive: false, onSelect: {}, onClose: {}).showsUnreadIndicator
+        )
 
         var failedActivity = snapshot(at: Date(timeIntervalSince1970: 1_787_865_600))
         failedActivity.lastTurnError = TrackedTurnError(message: "Request timed out")
