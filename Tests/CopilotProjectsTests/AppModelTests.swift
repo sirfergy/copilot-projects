@@ -1251,13 +1251,14 @@ final class AppModelTests: XCTestCase {
 
             // 4b. sanitizedPersistedPullRequestKeys() strips unbacked tool-scraped keys on load
             // while preserving resumed/explicit PR bindings, startingPrompt keys, and Review Pull Request title keys.
-            let staleScrapedSession = Session(
+            var staleScrapedSession = Session(
                 id: "stale-scraped",
                 title: "shell",
                 cwd: root.path,
                 pullRequestKeys: ["sirfergy/copilot-projects#991", "sirfergy/copilot-projects#992"]
             )
-            let ordinaryFingerprintedSession = Session(
+            staleScrapedSession.verifiedPullRequestKeys = nil
+            var ordinaryFingerprintedSession = Session(
                 id: "ordinary-fingerprinted",
                 title: "Copilot",
                 cwd: root.path,
@@ -1270,6 +1271,7 @@ final class AppModelTests: XCTestCase {
                 pullRequestKeys: ["sirfergy/copilot-projects#993"],
                 startingPrompt: "Investigate build failure"
             )
+            ordinaryFingerprintedSession.verifiedPullRequestKeys = nil
             let resumedCopilotId = UUID().uuidString.lowercased()
             try Data("\(resumedCopilotId)\n".utf8).write(
                 to: root.appendingPathComponent("pr-fingerprint.copilot-session"),
@@ -1306,17 +1308,9 @@ final class AppModelTests: XCTestCase {
                 pullRequestKeys: ["sirfergy/copilot-projects#303", "sirfergy/copilot-projects#304"],
                 copilotSessionId: existingBoundCopilotId
             )
-            let sanitizeLedger = SessionCreationLedger(url: root.appendingPathComponent("sanitize-ledger.json"))
-            try sanitizeLedger.remember(
-                SessionCreationRecord(
-                    requestId: secondaryRequest.requestId.uuidString,
-                    projectId: "p",
-                    sessionId: "existing-bound",
-                    createdAt: Date(),
-                    creationFingerprint: SessionCreationRecord.pullRequestFingerprint(secondaryRequest)
-                ),
-                now: Date()
-            )
+            let sanitizeLedgerURL = root.appendingPathComponent("sanitize-ledger.json")
+            try Data("corrupt".utf8).write(to: sanitizeLedgerURL, options: .atomic)
+            let sanitizeLedger = SessionCreationLedger(url: sanitizeLedgerURL)
             var existingBoundSession = Session(
                 id: "existing-bound",
                 title: "Copilot",
@@ -1338,14 +1332,15 @@ final class AppModelTests: XCTestCase {
                 startingPrompt: "Ship feature"
             )
             existingBoundSession.verifiedPullRequestKeys = nil
-            let promptBackedSession = Session(
+            var promptBackedSession = Session(
                 id: "prompt-backed",
                 title: "Feature Work",
                 cwd: root.path,
                 pullRequestKeys: ["sirfergy/copilot-projects#401", "sirfergy/copilot-projects#999"],
                 startingPrompt: "Please inspect https://github.com/sirfergy/copilot-projects/pull/401"
             )
-            let titleBackedSession = Session(
+            promptBackedSession.verifiedPullRequestKeys = nil
+            var titleBackedSession = Session(
                 id: "title-backed",
                 title: "Review SirFergy/Copilot-Projects#501",
                 cwd: root.path,
@@ -1356,6 +1351,7 @@ final class AppModelTests: XCTestCase {
                     "sirfergy/copilot-projects#999",
                 ]
             )
+            titleBackedSession.verifiedPullRequestKeys = nil
             let sanitizeRepo = StateRepository(path: root.appendingPathComponent("sanitize-state.json"))
             let sanitizeProject = Project(
                 id: "p",
@@ -1372,6 +1368,45 @@ final class AppModelTests: XCTestCase {
                 selectedSessionId: staleScrapedSession.id
             )
             try sanitizeRepo.save(PersistedState(projects: [sanitizeProject], selectedProjectId: sanitizeProject.id))
+            let corruptLedgerModel = AppModel(
+                stateRepository: sanitizeRepo,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteSessionBackendAvailable: { true },
+                remoteSessionLauncher: { _, _, _ in },
+                sessionCreationLedger: sanitizeLedger,
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                corruptLedgerModel.forcePendingSessionDestroys()
+                corruptLedgerModel.detachAllClients()
+            }
+            // While ledger is malformed, unverified legacy keys are hidden rather than displayed or verified.
+            XCTAssertNil(corruptLedgerModel.projects[0].sessions.first(where: { $0.id == "stale-scraped" })?.pullRequestKeys)
+            XCTAssertNil(corruptLedgerModel.projects[0].sessions.first(where: { $0.id == "existing-bound" })?.pullRequestKeys)
+            var cleanSaveState = try XCTUnwrap(
+                {
+                    if case .loaded(let loaded) = sanitizeRepo.load() { return loaded }
+                    return nil
+                }()
+            )
+            cleanSaveState.projects = corruptLedgerModel.projects
+            try sanitizeRepo.save(cleanSaveState)
+            try? FileManager.default.removeItem(at: sanitizeLedgerURL)
+            try sanitizeLedger.remember(
+                SessionCreationRecord(
+                    requestId: secondaryRequest.requestId.uuidString,
+                    projectId: "p",
+                    sessionId: "existing-bound",
+                    createdAt: Date(),
+                    creationFingerprint: SessionCreationRecord.pullRequestFingerprint(secondaryRequest)
+                ),
+                now: Date()
+            )
             let sanitizedModel = AppModel(
                 stateRepository: sanitizeRepo,
                 isAppActive: { false },

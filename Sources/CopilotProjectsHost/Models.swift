@@ -16,6 +16,7 @@ struct Session: Identifiable, Codable, Equatable {
         }
     }
     var verifiedPullRequestKeys: [String]?
+    var pendingLedgerPullRequestKeys: [String]?
     var parentSessionId: String?
     var startingPrompt: String? = nil
     /// Persisted only while set, so unmarked sessions keep their saved shape.
@@ -86,6 +87,35 @@ struct Session: Identifiable, Codable, Equatable {
             + (agentActivity?.pullRequestKeys ?? [])
             + (startingPrompt.map { RemotePullRequestsContract.extractKeys(from: $0, limit: 3) } ?? [])
         return Self.canonicalPullRequestKeys(candidates, limit: 3) ?? []
+    }
+
+    mutating func sanitizePersistedPullRequestKeys(
+        projectId: String? = nil,
+        copilotSessionId: String? = nil,
+        ledgerRecords: [SessionCreationRecord]? = []
+    ) {
+        let hadExplicitVerified = verifiedPullRequestKeys != nil
+        let combined = (pullRequestKeys ?? []) + (hadExplicitVerified ? [] : (pendingLedgerPullRequestKeys ?? []))
+        guard let canonicalKeys = Self.canonicalPullRequestKeys(combined) else {
+            pendingLedgerPullRequestKeys = nil
+            pullRequestKeys = nil
+            return
+        }
+        var probe = self
+        probe.pullRequestKeys = canonicalKeys
+        probe.verifiedPullRequestKeys = verifiedPullRequestKeys
+        let filtered = probe.sanitizedPersistedPullRequestKeys(
+            projectId: projectId,
+            copilotSessionId: copilotSessionId,
+            ledgerRecords: ledgerRecords ?? []
+        ) ?? []
+        if ledgerRecords == nil, !hadExplicitVerified {
+            let unverified = canonicalKeys.filter { !filtered.contains($0) }
+            pendingLedgerPullRequestKeys = unverified.isEmpty ? nil : unverified
+        } else {
+            pendingLedgerPullRequestKeys = nil
+        }
+        pullRequestKeys = filtered.isEmpty ? nil : filtered
     }
 
     func sanitizedPersistedPullRequestKeys(
@@ -162,6 +192,14 @@ struct Session: Identifiable, Codable, Equatable {
                 subsets.append([canonicalKeys[i], canonicalKeys[j]])
             }
         }
+        let sliceBound = min(canonicalKeys.count, 20)
+        if sliceBound >= 2 {
+            for start in 0..<(sliceBound - 1) {
+                for end in (start + 2)...sliceBound {
+                    subsets.append(Array(canonicalKeys[start..<end]))
+                }
+            }
+        }
         var matched: Set<String> = []
         for subset in subsets where !subset.isEmpty {
             for target in targets {
@@ -208,17 +246,7 @@ struct Session: Identifiable, Codable, Equatable {
     ) -> Bool {
         let escapedKey = NSRegularExpression.escapedPattern(for: canonicalKey)
         let fullPattern = #"(?<![A-Za-z0-9_./-])"# + escapedKey + #"(?![A-Za-z0-9_%-])"#
-        if title.range(of: fullPattern, options: [.regularExpression, .caseInsensitive]) != nil {
-            return true
-        }
-        let shortLabel = RemotePullRequestsContract.shortDisplayLabel(for: canonicalKey)
-        guard shortLabel.hasPrefix("#"), shortLabel.count > 1,
-              allKeys.filter({ RemotePullRequestsContract.shortDisplayLabel(for: $0) == shortLabel }).count == 1 else {
-            return false
-        }
-        let escapedShort = NSRegularExpression.escapedPattern(for: shortLabel)
-        let shortPattern = #"(?<![A-Za-z0-9_./-])"# + escapedShort + #"(?![A-Za-z0-9_%-])"#
-        return title.range(of: shortPattern, options: [.regularExpression]) != nil
+        return title.range(of: fullPattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     /// The latest request failed and the session has been idle since.
@@ -251,7 +279,7 @@ struct Session: Identifiable, Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, verifiedPullRequestKeys
-        case parentSessionId, startingPrompt
+        case pendingLedgerPullRequestKeys, parentSessionId, startingPrompt
         case runningStartedAtMilliseconds, runningStatusTimestampMilliseconds, runningRequestIdentity
         case manuallyMarkedUnread = "markedUnread"
     }
@@ -276,7 +304,7 @@ struct Session: Identifiable, Codable, Equatable {
         self.hostId = hostId
         self.creationFingerprint = creationFingerprint
         self.pullRequestKeys = pullRequestKeys
-        self.verifiedPullRequestKeys = Self.canonicalPullRequestKeys(verifiedPullRequestKeys)
+        self.verifiedPullRequestKeys = Self.canonicalPullRequestKeys(verifiedPullRequestKeys ?? pullRequestKeys)
         self.parentSessionId = parentSessionId
         self.startingPrompt = startingPrompt
         self.memoryUsageBytes = memoryUsageBytes
@@ -292,6 +320,9 @@ struct Session: Identifiable, Codable, Equatable {
         self.pullRequestKeys = try container.decodeIfPresent([String].self, forKey: .pullRequestKeys)
         self.verifiedPullRequestKeys = Self.canonicalPullRequestKeys(
             try container.decodeIfPresent([String].self, forKey: .verifiedPullRequestKeys)
+        )
+        self.pendingLedgerPullRequestKeys = Self.canonicalPullRequestKeys(
+            try container.decodeIfPresent([String].self, forKey: .pendingLedgerPullRequestKeys)
         )
         self.parentSessionId = try container.decodeIfPresent(String.self, forKey: .parentSessionId)
         if let rawPrompt = try container.decodeIfPresent(String.self, forKey: .startingPrompt) {
@@ -320,6 +351,7 @@ struct Session: Identifiable, Codable, Equatable {
         try container.encodeIfPresent(creationFingerprint, forKey: .creationFingerprint)
         try container.encodeIfPresent(pullRequestKeys, forKey: .pullRequestKeys)
         try container.encodeIfPresent(verifiedPullRequestKeys, forKey: .verifiedPullRequestKeys)
+        try container.encodeIfPresent(pendingLedgerPullRequestKeys, forKey: .pendingLedgerPullRequestKeys)
         try container.encodeIfPresent(parentSessionId, forKey: .parentSessionId)
         if let startingPrompt, !startingPrompt.isEmpty {
             let encoded = Self.encodedStartingPromptPrefix + Data(startingPrompt.utf8).base64EncodedString()

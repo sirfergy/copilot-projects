@@ -3987,17 +3987,19 @@ if (validSessionId && socketPath) {
         let unsafeQuotedExpansion = false;
         const stripped = command
             .replace(/\\\r?\n/g, "")
-            .replace(/'([^']*)'|"((?:\\.|[^"\\])*)"/g, (_, s, d) => {
+            .replace(/(?:^|\s)#[^\n]*|'([^']*)'|"((?:\\.|[^"\\])*)"/g, (_, s, d) => {
+                if (s === undefined && d === undefined) {
+                    return " ";
+                }
                 if (d !== undefined && /[$`]/.test(d)) {
                     unsafeQuotedExpansion = true;
                 }
                 return /^--dry-run(?:=|$)/.test(s ?? d ?? "") ? "--dry-run" : "__quoted__";
-            })
-            .replace(/(?:^|\s)#[^\n]*/g, " ");
+            });
         if (unsafeQuotedExpansion) {
             return false;
         }
-        if (/[;|()`\\]|<<|\$|[^\s=]__quoted__|__quoted__\S|(?:^|[^&])&(?:$|[^&])|(?:^|&&|\n)\s*&&|&&\s*(?:$|\n)|(?:^|\s)--dry-run\b/.test(stripped)) {
+        if (/[;|()`\\{}]|<<|\$|[^\s=]__quoted__|__quoted__\S|(?:^|[^&])&(?:$|[^&])|(?:^|&&|\n)\s*&&|&&\s*(?:$|\n)|(?:^|\s)--dry-run\b/.test(stripped)) {
             return false;
         }
         const clauses = stripped.split(/\n|&&/).map((clause) => clause.trim()).filter(Boolean);
