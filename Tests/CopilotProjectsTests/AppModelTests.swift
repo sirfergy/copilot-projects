@@ -1303,7 +1303,7 @@ final class AppModelTests: XCTestCase {
                 requestId: UUID(),
                 kind: "resume",
                 projectId: "p",
-                pullRequestKeys: ["sirfergy/copilot-projects#303"],
+                pullRequestKeys: ["sirfergy/copilot-projects#303", "sirfergy/copilot-projects#304"],
                 copilotSessionId: existingBoundCopilotId
             )
             let sanitizeLedger = SessionCreationLedger(url: root.appendingPathComponent("sanitize-ledger.json"))
@@ -1327,7 +1327,14 @@ final class AppModelTests: XCTestCase {
                     initialPrompt: "Ship feature",
                     pullRequestURL: nil
                 ),
-                pullRequestKeys: ["sirfergy/copilot-projects#303", "sirfergy/copilot-projects#997"],
+                pullRequestKeys: [
+                    "sirfergy/copilot-projects#101",
+                    "sirfergy/copilot-projects#102",
+                    "sirfergy/copilot-projects#103",
+                    "sirfergy/copilot-projects#104",
+                    "sirfergy/copilot-projects#303",
+                    "sirfergy/copilot-projects#304",
+                ],
                 startingPrompt: "Ship feature"
             )
             existingBoundSession.verifiedPullRequestKeys = nil
@@ -1391,7 +1398,7 @@ final class AppModelTests: XCTestCase {
             )
             XCTAssertEqual(
                 loadedSessions.first(where: { $0.id == "existing-bound" })?.pullRequestKeys,
-                ["sirfergy/copilot-projects#303"]
+                ["sirfergy/copilot-projects#303", "sirfergy/copilot-projects#304"]
             )
             XCTAssertEqual(
                 loadedSessions.first(where: { $0.id == "prompt-backed" })?.pullRequestKeys,
@@ -1520,6 +1527,20 @@ final class AppModelTests: XCTestCase {
               { command: 'gh pr create "--dry-run" --title T --body \\'See https://github.com/octocat/hello-world/pull/911\\'' },
               true,
               { content: "https://github.com/octocat/hello-world/pull/911" }
+            );
+            runTool(
+              "t-partially-quoted-dry-run",
+              "bash",
+              { command: "gh pr create --dry-'run' --title T --body 'See https://github.com/octocat/hello-world/pull/912'" },
+              true,
+              { content: "https://github.com/octocat/hello-world/pull/912" }
+            );
+            runTool(
+              "t-expanded-dry-run",
+              "bash",
+              { command: 'export MODE=--dry-run && gh pr create "$MODE" --title T --body \\'See https://github.com/octocat/hello-world/pull/913\\'' },
+              true,
+              { content: "https://github.com/octocat/hello-world/pull/913" }
             );
             runTool("t-create-fail", "bash", { command: "gh pr create --fill" }, false, {
               content: "https://github.com/octocat/hello-world/pull/904"

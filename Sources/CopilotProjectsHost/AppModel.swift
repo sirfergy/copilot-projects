@@ -3865,15 +3865,16 @@ final class AppModel: ObservableObject {
         }
         projects = state.projects
         selectedProjectId = state.selectedProjectId ?? state.projects.first?.id
-        let ledgerRecords: [SessionCreationRecord] = {
+        let ledgerRecords: [SessionCreationRecord]? = {
             struct LedgerEnvelope: Decodable { var records: [SessionCreationRecord] }
             let url = (Mirror(reflecting: sessionCreationLedger).children.first { $0.label == "url" }?.value as? URL)
                 ?? Paths.sessionCreationLedgerPath
+            guard FileManager.default.fileExists(atPath: url.path) else { return [] }
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             guard let data = try? Data(contentsOf: url),
                   let decoded = try? decoder.decode(LedgerEnvelope.self, from: data) else {
-                return []
+                return nil
             }
             return decoded.records
         }()
@@ -3881,12 +3882,14 @@ final class AppModel: ObservableObject {
             projects[pi].normalizeParentSessions()
             for si in projects[pi].sessions.indices {
                 let sid = projects[pi].sessions[si].id
-                projects[pi].sessions[si].pullRequestKeys =
-                    projects[pi].sessions[si].sanitizedPersistedPullRequestKeys(
-                        projectId: projects[pi].id,
-                        copilotSessionId: resumeMarkerValue(sessionId: sid, suffix: "copilot-session"),
-                        ledgerRecords: ledgerRecords.filter { $0.sessionId == sid }
-                    )
+                if let ledgerRecords {
+                    projects[pi].sessions[si].pullRequestKeys =
+                        projects[pi].sessions[si].sanitizedPersistedPullRequestKeys(
+                            projectId: projects[pi].id,
+                            copilotSessionId: resumeMarkerValue(sessionId: sid, suffix: "copilot-session"),
+                            ledgerRecords: ledgerRecords.filter { $0.sessionId == sid }
+                        )
+                }
                 let restored = restoredStatusState(forSession: sid)
                 let status = restored.status
                 let statusTimestamp = restored.statusTimestamp

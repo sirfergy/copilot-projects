@@ -105,6 +105,7 @@ struct Session: Identifiable, Codable, Equatable {
                         canonicalKeys: canonicalKeys,
                         creationFingerprint: creationFingerprint,
                         projectId: projectId,
+                        startingPrompt: startingPrompt,
                         copilotSessionId: copilotSessionId,
                         ledgerRecords: ledgerRecords
                     )
@@ -125,9 +126,11 @@ struct Session: Identifiable, Codable, Equatable {
         canonicalKeys: [String],
         creationFingerprint: String?,
         projectId: String?,
+        startingPrompt: String?,
         copilotSessionId: String?,
         ledgerRecords: [SessionCreationRecord]
     ) -> Set<String> {
+        let cid = copilotSessionId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var targets: [(projectId: String, fingerprint: String)] = []
         if let projectId, !projectId.isEmpty, let creationFingerprint, !creationFingerprint.isEmpty {
             targets.append((projectId, creationFingerprint))
@@ -138,14 +141,29 @@ struct Session: Identifiable, Codable, Equatable {
             }
         }
         guard !targets.isEmpty else { return [] }
-        let bounded = Array(canonicalKeys.prefix(5))
+        let bounded = Array(canonicalKeys.prefix(8))
         var subsets: [[String]] = [canonicalKeys] + canonicalKeys.map { [$0] }
-        for mask in 1..<(1 << bounded.count) {
-            subsets.append(bounded.enumerated().compactMap { (mask & (1 << $0.offset)) != 0 ? $0.element : nil })
+        if let promptBatch = startingPrompt.map({
+            RemotePullRequestsContract.extractKeys(from: $0, limit: RemotePullRequestsContract.maximumKeys)
+        }), !promptBatch.isEmpty {
+            subsets.append(promptBatch)
         }
-        let cid = copilotSessionId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for mask in 1..<(1 << bounded.count) {
+            let sub = bounded.enumerated().compactMap { (mask & (1 << $0.offset)) != 0 ? $0.element : nil }
+            subsets.append(sub)
+            if canonicalKeys.count > bounded.count, sub.count <= 5 {
+                let drop = Set(sub)
+                subsets.append(canonicalKeys.filter { !drop.contains($0) })
+            }
+        }
+        let pairBound = min(canonicalKeys.count, 16)
+        for i in 0..<pairBound where i + 1 < pairBound {
+            for j in (i + 1)..<pairBound {
+                subsets.append([canonicalKeys[i], canonicalKeys[j]])
+            }
+        }
         var matched: Set<String> = []
-        for subset in subsets {
+        for subset in subsets where !subset.isEmpty {
             for target in targets {
                 let startFP = SessionCreationRecord.pullRequestFingerprint(
                     .init(requestId: UUID(), kind: "start", projectId: target.projectId, pullRequestKeys: subset)
