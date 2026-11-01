@@ -1191,6 +1191,21 @@ final class AppModelTests: XCTestCase {
                 SessionRow(session: rowSessionC, isActive: false, onSelect: {}, onClose: {})
             )
 
+            // Idle session with active background work uses sparkles symbol and purple stateColor.
+            var idlePlain = Session(id: "row-bg", title: "Background", cwd: root.path)
+            XCTAssertEqual(SessionStateIndicator.symbolName(for: idlePlain), "terminal.fill")
+            var idleWithBg = idlePlain
+            idleWithBg.backgroundAgentsActive = true
+            XCTAssertEqual(SessionStateIndicator.symbolName(for: idleWithBg), "sparkles")
+            XCTAssertNotEqual(
+                SessionStateIndicator(session: idlePlain),
+                SessionStateIndicator(session: idleWithBg)
+            )
+            XCTAssertEqual(
+                SessionRow(session: idleWithBg, isActive: false, onSelect: {}, onClose: {}).stateColor,
+                .purple
+            )
+
             // 5. Shipped tracker extension extracts PR URLs from foreground prompts, tool results, and transcript sync.
             let script = CopilotExtension.script
             let startIdx = try XCTUnwrap(script.range(of: "function recordPullRequestUrlsFromText(")?.lowerBound)
