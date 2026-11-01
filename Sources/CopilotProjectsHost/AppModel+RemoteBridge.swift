@@ -738,6 +738,10 @@ extension AppModel {
                         let effectivePRKeys = effectiveSession.effectivePullRequestKeys
                         let runningStartedAt: Int64? = status == .running
                             ? (effectiveSession.effectiveRunningStartedAtMilliseconds
+                                ?? trustedForegroundTransitionMilliseconds(
+                                    sessionId: session.id,
+                                    snapshot: effectiveSession.agentActivity
+                                )
                                 ?? sessionSemantics.statusClock.timestamp(for: session.id))
                             : nil
                         return RemoteSessionSnapshot(

@@ -134,12 +134,14 @@ extension AppModel {
                         updated.statusText = nil
                         if status == .running {
                             updated.runningStartedAtMilliseconds = updated.runningStartedAtMilliseconds
-                                ?? (updated.agentActivity?.foregroundTurnActive == true
-                                    ? updated.agentActivity?.foregroundTransitionMilliseconds
-                                    : nil)
+                                ?? trustedForegroundTransitionMilliseconds(
+                                    sessionId: session.id,
+                                    snapshot: updated.agentActivity
+                                )
                                 ?? Int64(now.timeIntervalSince1970 * 1_000)
                         } else if status == .idle {
                             updated.runningStartedAtMilliseconds = nil
+                            updated.runningStatusTimestampMilliseconds = nil
                         }
                         sessionSemantics.activityTracker.reset(sessionId: session.id)
                         if status == .running {
@@ -448,8 +450,10 @@ extension AppModel {
                 }
                 if nextProjects[pi].sessions[si].status != .idle,
                    nextProjects[pi].sessions[si].runningStartedAtMilliseconds == nil,
-                   effectiveFresh?.foregroundTurnActive == true,
-                   let transitionMs = effectiveFresh?.foregroundTransitionMilliseconds {
+                   let transitionMs = trustedForegroundTransitionMilliseconds(
+                       sessionId: sessionId,
+                       snapshot: effectiveFresh
+                   ) {
                     nextProjects[pi].sessions[si].runningStartedAtMilliseconds = transitionMs
                     activityChanged = true
                     startingPromptChanged = true
@@ -803,6 +807,7 @@ extension AppModel {
             updated.status = .idle
             updated.statusText = nil
             updated.runningStartedAtMilliseconds = nil
+            updated.runningStatusTimestampMilliseconds = nil
             if markFinished,
                projects[pi].effectiveParentSessionId(for: sid) == nil,
                !isVisible(projectIndex: pi, sessionIndex: si) {

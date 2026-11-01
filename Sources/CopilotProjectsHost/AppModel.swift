@@ -1555,6 +1555,17 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    func trustedForegroundTransitionMilliseconds(
+        sessionId: String,
+        snapshot: AgentActivitySnapshot?
+    ) -> Int64? {
+        guard snapshot?.foregroundTurnActive == true,
+              isActivitySnapshotTrustedForSessionMetadata(sessionId: sessionId, snapshot: snapshot) else {
+            return nil
+        }
+        return snapshot?.foregroundTransitionMilliseconds
+    }
+
     private func loadTranscriptStartingPrompt(sessionId: String) -> String? {
         guard let revision = currentTranscriptStartingPromptRevision(sessionId: sessionId) else {
             return nil
@@ -2858,6 +2869,13 @@ final class AppModel: ObservableObject {
             source: source
         ) else { return }
         projectStorage[loc.p].sessions[loc.s].statusIsRuntimeDerived = false
+        if status != .idle,
+           projectStorage[loc.p].sessions[loc.s].runningStartedAtMilliseconds != nil,
+           let timestamp,
+           projectStorage[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds != timestamp {
+            projectStorage[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = timestamp
+            scheduleSave()
+        }
         withCoalescedProjectPublications {
         if status == .waiting {
             if case .loaded(let record) = SessionArtifacts.loadStatusRecord(
@@ -2976,14 +2994,17 @@ final class AppModel: ObservableObject {
             elicitationNotificationTokens[sessionId] = nil
         }
         let previousRunningStart = projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds
+        let previousRunningClock = projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
         if status == .running {
             if projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds == nil {
                 let activeTransitionMs: Int64? = {
-                    guard projects[loc.p].sessions[loc.s].agentActivity?.foregroundTurnActive == true,
-                          let transitionMs = projects[loc.p].sessions[loc.s].agentActivity?.foregroundTransitionMilliseconds,
-                          transitionMs >= (previousTimestamp ?? .min) else {
+                    guard let transitionMs = trustedForegroundTransitionMilliseconds(
+                        sessionId: sessionId,
+                        snapshot: projects[loc.p].sessions[loc.s].agentActivity
+                    ),
+                    transitionMs >= (previousTimestamp ?? .min) else {
                         return nil
                     }
                     return transitionMs
@@ -2992,10 +3013,17 @@ final class AppModel: ObservableObject {
                     [timestamp, activeTransitionMs].compactMap { $0 }.min()
                     ?? SessionArtifacts.currentStatusTimestamp()
             }
+            if let timestamp {
+                projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = timestamp
+            }
+        } else if status == .waiting, let timestamp {
+            projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = timestamp
         } else if status == .idle {
             projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds = nil
+            projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = nil
         }
-        if projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds != previousRunningStart {
+        if projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds != previousRunningStart
+            || projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds != previousRunningClock {
             save()
         }
         if status == .running || status == .waiting {
@@ -3423,11 +3451,12 @@ final class AppModel: ObservableObject {
         session.statusText = restore.statusText
         session.runningStartedAtMilliseconds = restoredStatus == .running
             ? (session.runningStartedAtMilliseconds
-                ?? (session.agentActivity?.foregroundTurnActive == true
-                    ? session.agentActivity?.foregroundTransitionMilliseconds
-                    : nil)
+                ?? trustedForegroundTransitionMilliseconds(sessionId: sessionId, snapshot: session.agentActivity)
                 ?? restore.statusTimestamp)
             : nil
+        if restoredStatus == .idle {
+            session.runningStatusTimestampMilliseconds = nil
+        }
         session.scheduledTurnActive = restore.scheduledTurnActive
         session.finishedUnseen = restore.finishedUnseen
         session.turnCompleted = restore.turnCompleted
@@ -3811,13 +3840,20 @@ final class AppModel: ObservableObject {
                 let restored = restoredStatusState(forSession: sid)
                 let status = restored.status
                 let statusTimestamp = restored.statusTimestamp
-                let persistedStart = projects[pi].sessions[si].runningStartedAtMilliseconds.flatMap {
-                    $0 <= (statusTimestamp ?? .max) ? $0 : nil
-                }
+                let matchesPersistedRequest = statusTimestamp != nil
+                    && projects[pi].sessions[si].runningStatusTimestampMilliseconds == statusTimestamp
+                let persistedStart = matchesPersistedRequest
+                    ? projects[pi].sessions[si].runningStartedAtMilliseconds.flatMap {
+                        $0 <= (statusTimestamp ?? .max) ? $0 : nil
+                    }
+                    : nil
                 projects[pi].sessions[si].status = status
                 projects[pi].sessions[si].runningStartedAtMilliseconds = status == .idle
                     ? nil
                     : (persistedStart ?? statusTimestamp ?? SessionArtifacts.currentStatusTimestamp())
+                projects[pi].sessions[si].runningStatusTimestampMilliseconds = status == .idle
+                    ? nil
+                    : statusTimestamp
                 if let context = restored.inputWait, let timestamp = statusTimestamp,
                    status == .waiting {
                     inputWaits[sid] = InputWaitState(context: context, timestamp: timestamp)

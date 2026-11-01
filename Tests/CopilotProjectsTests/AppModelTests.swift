@@ -1047,8 +1047,9 @@ final class AppModelTests: XCTestCase {
             )
             XCTAssertEqual(remotePostWait.runningStartedAtMilliseconds, nextTurnStartMs)
 
-            // Relaunching after tool hooks have advanced statusTimestamp in .status-record.json
-            // restores the persisted original request start timestamp.
+            // Relaunching after in-host tool hooks have advanced statusTimestamp in .status-record.json
+            // restores the persisted original request start timestamp, whereas an off-host idle-to-running
+            // transition while the host was closed starts a fresh timer at the new request's timestamp.
             SessionArtifacts.persistStatus(
                 sessionId: s1.id,
                 status: .running,
@@ -1056,6 +1057,14 @@ final class AppModelTests: XCTestCase {
                 promptStatusTimestamp: nextTurnStartMs + 15_000,
                 sessionsDirectory: root
             )
+            model.setStatus(
+                sessionId: s1.id,
+                status: .running,
+                text: "Resumed after permission",
+                timestamp: nextTurnStartMs + 15_000,
+                source: "tool"
+            )
+            model.save()
             let relaunched = AppModel(
                 stateRepository: repository,
                 isAppActive: { false },
@@ -1075,7 +1084,34 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(relaunched.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
             XCTAssertEqual(relaunched.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
 
-            // Untrusted/mismatched copilotSessionId snapshot must not leak pullRequestKeys into Session or effectivePullRequestKeys.
+            let offHostTurnStartMs = nextTurnStartMs + 60_000
+            SessionArtifacts.persistStatus(
+                sessionId: s1.id,
+                status: .running,
+                timestamp: offHostTurnStartMs,
+                promptStatusTimestamp: offHostTurnStartMs,
+                sessionsDirectory: root
+            )
+            let relaunchedOffHost = AppModel(
+                stateRepository: repository,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                remoteSessionBackendAvailable: { true },
+                remoteSessionLauncher: { _, _, _ in },
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                relaunchedOffHost.forcePendingSessionDestroys()
+                relaunchedOffHost.detachAllClients()
+            }
+            XCTAssertEqual(relaunchedOffHost.projects[0].sessions[0].runningStartedAtMilliseconds, offHostTurnStartMs)
+            XCTAssertEqual(relaunchedOffHost.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, offHostTurnStartMs)
+
+            // Untrusted/mismatched copilotSessionId snapshot must not leak pullRequestKeys or foregroundTransitionAt.
             let pinnedCopilotId = UUID().uuidString.lowercased()
             let foreignCopilotId = UUID().uuidString.lowercased()
             try Data("\(pinnedCopilotId)\n".utf8).write(
@@ -1083,18 +1119,32 @@ final class AppModelTests: XCTestCase {
                 options: .atomic
             )
             var foreignSnapshot = idleSnapshot
+            foreignSnapshot.updatedAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                .format(Date(timeIntervalSince1970: 1_788_000_051))
             foreignSnapshot.copilotSessionId = foreignCopilotId
+            foreignSnapshot.foregroundTurnActive = true
+            foreignSnapshot.foregroundTransitionAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                .format(Date(timeIntervalSince1970: 1_788_000_050))
             foreignSnapshot.pullRequestKeys = ["evil/foreign#999"]
             try JSONEncoder().encode(foreignSnapshot).write(
                 to: root.appendingPathComponent("\(reviewSessionId).agent-activity.json"),
                 options: .atomic
             )
-            model.refreshAgentActivitySnapshots(now: Date(timeIntervalSince1970: 1_788_000_021))
+            model.refreshAgentActivitySnapshots(now: Date(timeIntervalSince1970: 1_788_000_051))
+            model.setStatus(
+                sessionId: reviewSessionId,
+                status: .running,
+                text: "Reviewing",
+                timestamp: 1_788_000_080_000,
+                source: "user-prompt"
+            )
             let refreshedReview = try XCTUnwrap(
                 model.projects[0].sessions.first(where: { $0.id == reviewSessionId })
             )
             XCTAssertEqual(refreshedReview.pullRequestKeys, ["sirfergy/copilot-projects#270"])
             XCTAssertEqual(refreshedReview.effectivePullRequestKeys, ["sirfergy/copilot-projects#270"])
+            XCTAssertEqual(refreshedReview.runningStartedAtMilliseconds, 1_788_000_080_000)
+            XCTAssertEqual(refreshedReview.effectiveRunningStartedAtMilliseconds, 1_788_000_080_000)
 
             // 4. SessionRow Equatable and VoiceOver accessibilityStatus include running elapsed time and PR keys.
             var rowSessionA = Session(id: "row-1", title: "Row", cwd: root.path)

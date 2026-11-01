@@ -37,6 +37,7 @@ struct Session: Identifiable, Codable, Equatable {
     var statusIsRuntimeDerived = false
     var statusText: String? = nil
     var runningStartedAtMilliseconds: Int64? = nil
+    var runningStatusTimestampMilliseconds: Int64? = nil
     var hasUnread: Bool = false
     /// The agent went active → idle while you weren't looking at this session, so it
     /// has finished and is waiting for you to come back. Cleared when you view it.
@@ -69,11 +70,7 @@ struct Session: Identifiable, Codable, Equatable {
     var displayStatus: SessionStatus { hasPendingInput ? .waiting : status }
 
     var effectiveRunningStartedAtMilliseconds: Int64? {
-        guard displayStatus == .running else { return nil }
-        return runningStartedAtMilliseconds
-            ?? (agentActivity?.foregroundTurnActive == true
-                ? agentActivity?.foregroundTransitionMilliseconds
-                : nil)
+        displayStatus == .running ? runningStartedAtMilliseconds : nil
     }
 
     var effectivePullRequestKeys: [String] {
@@ -120,7 +117,8 @@ struct Session: Identifiable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, parentSessionId, startingPrompt, runningStartedAtMilliseconds
+        case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, parentSessionId, startingPrompt
+        case runningStartedAtMilliseconds, runningStatusTimestampMilliseconds
         case manuallyMarkedUnread = "markedUnread"
     }
 
@@ -170,6 +168,7 @@ struct Session: Identifiable, Codable, Equatable {
         }
         self.manuallyMarkedUnread = try container.decodeIfPresent(Bool.self, forKey: .manuallyMarkedUnread)
         self.runningStartedAtMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .runningStartedAtMilliseconds)
+        self.runningStatusTimestampMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .runningStatusTimestampMilliseconds)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -187,6 +186,7 @@ struct Session: Identifiable, Codable, Equatable {
         }
         try container.encodeIfPresent(manuallyMarkedUnread, forKey: .manuallyMarkedUnread)
         try container.encodeIfPresent(runningStartedAtMilliseconds, forKey: .runningStartedAtMilliseconds)
+        try container.encodeIfPresent(runningStatusTimestampMilliseconds, forKey: .runningStatusTimestampMilliseconds)
     }
 }
 
