@@ -843,28 +843,23 @@ struct BackgroundWorkBadge: View, Equatable {
     static func == (lhs: Self, rhs: Self) -> Bool { true }
 
     var body: some View {
-        HStack(spacing: 3) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 8.5, weight: .semibold))
-                .symbolEffect(.pulse, isActive: !reduceMotion)
-            Text("bg")
-                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
-        }
-        .foregroundStyle(.purple)
-        .lineLimit(1)
-        .fixedSize(horizontal: true, vertical: false)
-        .padding(.horizontal, 5)
-        .padding(.vertical, 1.5)
-        .background(
-            Capsule(style: .continuous)
-                .fill(Color.purple.opacity(0.16))
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .strokeBorder(Color.purple.opacity(0.38), lineWidth: 0.5)
-        )
-        .help("background work active")
-        .accessibilityIdentifier("session-background-work-badge")
+        Image(systemName: "sparkles")
+            .font(.system(size: 8.5, weight: .semibold))
+            .symbolEffect(.pulse, isActive: !reduceMotion)
+            .foregroundStyle(.purple)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.purple.opacity(0.16))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(Color.purple.opacity(0.38), lineWidth: 0.5)
+            )
+            .help("background work active")
+            .accessibilityIdentifier("session-background-work-badge")
     }
 }
 
@@ -875,9 +870,11 @@ struct ScheduleBadge: View, Equatable {
         HStack(spacing: 3) {
             Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: 8.5, weight: .semibold))
-            Text(schedules.count > 1 ? "\(schedules.count)" : "sched")
-                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
-                .monospacedDigit()
+            if schedules.count > 1 {
+                Text("\(schedules.count)")
+                    .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+            }
         }
         .foregroundStyle(.indigo)
         .lineLimit(1)
@@ -1449,7 +1446,7 @@ struct RunningElapsedLabel: View, Equatable {
                 fromMilliseconds: startedAtMilliseconds,
                 nowMilliseconds: nowMs
             ) {
-                Text("· \(elapsed)")
+                Text(elapsed)
                     .monospacedDigit()
                     .foregroundStyle(.green.opacity(0.85))
                     .lineLimit(1)
@@ -1608,26 +1605,32 @@ struct SessionRow: View, Equatable {
                             .font(.body.weight(.medium))
                             .lineLimit(2)
                             .help(session.statusText ?? session.title)
-                        HStack(spacing: 6) {
-                            Text(stateLabel)
-                                .foregroundStyle(stateColor)
-                                .fontWeight(session.displayStatus != .idle || session.failedRequest != nil || session.finishedUnseen ? .medium : .regular)
-                                .lineLimit(1)
-                            if session.displayStatus == .running,
-                               let startedAt = session.effectiveRunningStartedAtMilliseconds {
-                                RunningElapsedLabel(startedAtMilliseconds: startedAt)
+                        let showsRunningElapsed = session.displayStatus == .running
+                            && session.effectiveRunningStartedAtMilliseconds != nil
+                        let showsBackgroundBadge = session.hasBackgroundWork
+                            && SessionStateIndicator.symbolName(for: session) != "sparkles"
+                        if showsRunningElapsed
+                            || (session.memoryUsageBytes ?? 0) > 0
+                            || showsBackgroundBadge
+                            || !session.schedules.isEmpty
+                            || showsUnreadIndicator {
+                            HStack(spacing: 6) {
+                                if showsRunningElapsed,
+                                   let startedAt = session.effectiveRunningStartedAtMilliseconds {
+                                    RunningElapsedLabel(startedAtMilliseconds: startedAt)
+                                }
+                                if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
+                                    SessionMemoryBadge(bytes: memoryBytes)
+                                }
+                                if showsBackgroundBadge { BackgroundWorkBadge() }
+                                if !session.schedules.isEmpty { ScheduleBadge(schedules: session.schedules) }
+                                if showsUnreadIndicator {
+                                    UnreadBadge(isMarkedUnread: session.markedUnread)
+                                }
                             }
-                            if let memoryBytes = session.memoryUsageBytes, memoryBytes > 0 {
-                                SessionMemoryBadge(bytes: memoryBytes)
-                            }
-                            if session.hasBackgroundWork { BackgroundWorkBadge() }
-                            if !session.schedules.isEmpty { ScheduleBadge(schedules: session.schedules) }
-                            if showsUnreadIndicator {
-                                UnreadBadge(isMarkedUnread: session.markedUnread)
-                            }
+                            .font(.caption)
+                            .foregroundStyle(StudioStyle.secondaryText)
                         }
-                        .font(.caption)
-                        .foregroundStyle(StudioStyle.secondaryText)
                         if let childSummary {
                             Text(childSummary.label)
                                 .font(.caption2.weight(.medium))
@@ -1661,7 +1664,7 @@ struct SessionRow: View, Equatable {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
                 .contentShape(Rectangle())
                 .gesture(
                     TapGesture(count: 1)
