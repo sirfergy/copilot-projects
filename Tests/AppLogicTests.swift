@@ -8633,6 +8633,81 @@ final class AppLogicTests: XCTestCase {
         )
     }
 
+    func testMarkdownParserParsesDetailsAndSummaryBlocks() {
+        let inlineSummaryMarkdown = """
+        <details><summary>KQL Queries</summary>
+
+        ```kql
+        let _start = datetime(2026-01-01);
+        ```
+        </details>
+        """
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: inlineSummaryMarkdown),
+            [
+                .details(MarkdownDetails(
+                    summary: "KQL Queries",
+                    body: "```kql\nlet _start = datetime(2026-01-01);\n```",
+                    isOpen: false
+                )),
+            ]
+        )
+
+        let openWithoutSummaryMarkdown = """
+        <details open>
+        Expanded body paragraph.
+        </details>
+        """
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: openWithoutSummaryMarkdown),
+            [
+                .details(MarkdownDetails(
+                    summary: "Details",
+                    body: "Expanded body paragraph.",
+                    isOpen: true
+                )),
+            ]
+        )
+
+        let fencedClosingTagMarkdown = """
+        <details>
+        <summary>Example HTML</summary>
+
+        ```html
+        <details>
+        </details>
+        ```
+
+        Trailing note.
+        </details>
+        """
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: fencedClosingTagMarkdown),
+            [
+                .details(MarkdownDetails(
+                    summary: "Example HTML",
+                    body: "```html\n<details>\n</details>\n```\n\nTrailing note.",
+                    isOpen: false
+                )),
+            ]
+        )
+
+        let listFollowedByDetails = """
+        - first item
+        <details>
+        <summary>More</summary>
+        Hidden
+        </details>
+        """
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: listFollowedByDetails),
+            [
+                .list([MarkdownListItem(marker: "\u{2022}", text: "first item", depth: 0)]),
+                .details(MarkdownDetails(summary: "More", body: "Hidden", isOpen: false)),
+            ]
+        )
+    }
+
     func testMarkdownRenderingLimitsPreventStructuralAmplification() {
         XCTAssertTrue(MarkdownParser.isWithinRenderingLimits("# Heading\n\nBody"))
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
@@ -8677,6 +8752,13 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
             Array(repeating: wrappedTableUnit, count: 10).joined(separator: "\n\n")
         ))
+        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
+            "<details>\n<summary>Huge table</summary>\n\n\(wideHeader)\n\(wideDelimiter)\n\(sparseRows)\n</details>"
+        ))
+        let fiveDeepDetails = String(repeating: "<details>\n", count: 5)
+            + "Inner"
+            + String(repeating: "\n</details>", count: 5)
+        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(fiveDeepDetails))
     }
 
     @MainActor

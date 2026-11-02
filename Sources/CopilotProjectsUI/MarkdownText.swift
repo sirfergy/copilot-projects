@@ -47,6 +47,19 @@ public struct MarkdownTable: Equatable, Sendable {
     }
 }
 
+/// A collapsible HTML `<details>` / `<summary>` disclosure block.
+public struct MarkdownDetails: Equatable, Sendable {
+    public let summary: String
+    public let body: String
+    public let isOpen: Bool
+
+    public init(summary: String, body: String, isOpen: Bool = false) {
+        self.summary = summary
+        self.body = body
+        self.isOpen = isOpen
+    }
+}
+
 /// A single block-level element parsed from Markdown.
 public enum MarkdownBlock: Equatable, Sendable {
     case heading(level: Int, text: String)
@@ -55,6 +68,7 @@ public enum MarkdownBlock: Equatable, Sendable {
     case quote(String)
     case list([MarkdownListItem])
     case table(MarkdownTable)
+    case details(MarkdownDetails)
 }
 
 /// Bounded, thread-safe LRU cache keyed by raw Markdown text so repeated view
@@ -219,6 +233,7 @@ public enum MarkdownParser {
     private static let maximumRenderedPipes = 1_000
     private static let maximumInlineMarkers = 2_000
     public static let maximumRenderedTableCells = 1_000
+    public static let maximumDetailsNestingDepth = 4
 
     public static let maxBlockCacheEntries = 256
     public static let maxInlineCacheEntries = 1_024
@@ -260,9 +275,21 @@ public enum MarkdownParser {
         return isWithinTableCellLimits(blocks(from: text))
     }
 
-    public static func isWithinTableCellLimits(_ blocks: [MarkdownBlock]) -> Bool {
+    public static func isWithinTableCellLimits(_ blocks: [MarkdownBlock], depth: Int = 0) -> Bool {
         var totalCells = 0
+        return isWithinTableCellLimits(blocks, depth: depth, totalCells: &totalCells)
+    }
+
+    private static func isWithinTableCellLimits(
+        _ blocks: [MarkdownBlock], depth: Int, totalCells: inout Int
+    ) -> Bool {
         for block in blocks {
+            if case let .details(details) = block {
+                guard depth + 1 <= maximumDetailsNestingDepth,
+                      isWithinTableCellLimits(self.blocks(from: details.body), depth: depth + 1, totalCells: &totalCells)
+                else { return false }
+                continue
+            }
             guard case let .table(table) = block else { continue }
             let columns = max(table.header.count, 1)
             for row in [table.header] + table.rows {
@@ -337,6 +364,72 @@ public enum MarkdownParser {
             if trimmed.isEmpty {
                 flushParagraph()
                 index += 1
+                continue
+            }
+
+            if let openTag = parseDetailsOpenTag(trimmed) {
+                flushParagraph()
+                index += 1
+                var summaryText = openTag.inlineSummary
+                if summaryText == nil {
+                    var lookahead = index
+                    while lookahead < lines.count, lines[lookahead].trimmingCharacters(in: .whitespaces).isEmpty { lookahead += 1 }
+                    if lookahead < lines.count,
+                       lines[lookahead].trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("<summary>") {
+                        for endIdx in lookahead..<lines.count {
+                            let candidate = lines[endIdx].trimmingCharacters(in: .whitespaces)
+                            let candidateLower = candidate.lowercased()
+                            if candidateLower.hasSuffix("</summary>"),
+                               !(endIdx == lookahead && candidate.count < "<summary></summary>".count) {
+                                let joined = lines[lookahead...endIdx].map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " ")
+                                summaryText = String(joined.dropFirst("<summary>".count).dropLast("</summary>".count))
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                index = endIdx + 1
+                                break
+                            }
+                            if candidateLower == "</details>" || parseDetailsOpenTag(candidate) != nil || fenceLength(candidate) != nil { break }
+                        }
+                    }
+                }
+                var bodyLines: [String] = []
+                var depth = 1
+                var innerFence: Int?
+                while index < lines.count {
+                    let currentLine = lines[index]
+                    let currentTrimmed = currentLine.trimmingCharacters(in: .whitespaces)
+                    index += 1
+                    if let activeFence = innerFence {
+                        if isClosingFence(currentTrimmed, activeFence) { innerFence = nil }
+                        bodyLines.append(currentLine)
+                        continue
+                    }
+                    if let fence = fenceLength(currentTrimmed) {
+                        innerFence = fence
+                        bodyLines.append(currentLine)
+                        continue
+                    }
+                    let lowerCurrent = currentTrimmed.lowercased()
+                    if parseDetailsOpenTag(currentTrimmed) != nil, !lowerCurrent.hasSuffix("</details>") {
+                        depth += 1
+                    } else if lowerCurrent.hasSuffix("</details>"),
+                              let closeRange = currentLine.range(of: "</details>", options: [.caseInsensitive, .backwards]) {
+                        depth -= 1
+                        if depth == 0 {
+                            let prefix = String(currentLine[..<closeRange.lowerBound])
+                            if !prefix.trimmingCharacters(in: .whitespaces).isEmpty { bodyLines.append(prefix) }
+                            break
+                        }
+                    }
+                    bodyLines.append(currentLine)
+                }
+                while bodyLines.first?.trimmingCharacters(in: .whitespaces).isEmpty == true { bodyLines.removeFirst() }
+                while bodyLines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { bodyLines.removeLast() }
+                let resolved = (summaryText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                blocks.append(.details(MarkdownDetails(
+                    summary: resolved.isEmpty ? "Details" : resolved,
+                    body: bodyLines.joined(separator: "\n"),
+                    isOpen: openTag.isOpen
+                )))
                 continue
             }
 
@@ -460,6 +553,27 @@ public enum MarkdownParser {
         fenceLength(trimmed) != nil
             || headingLevel(trimmed) != nil
             || trimmed.hasPrefix(">")
+            || parseDetailsOpenTag(trimmed) != nil
+    }
+
+    private static func parseDetailsOpenTag(_ trimmed: String) -> (isOpen: Bool, inlineSummary: String?)? {
+        let lower = trimmed.lowercased()
+        guard lower.hasPrefix("<details") else { return nil }
+        let afterKeyword = trimmed.dropFirst("<details".count)
+        guard let next = afterKeyword.first, next == ">" || next.isWhitespace,
+              let closeBracket = afterKeyword.firstIndex(of: ">") else { return nil }
+        let attr = afterKeyword[..<closeBracket].trimmingCharacters(in: .whitespaces).lowercased()
+        guard attr.isEmpty || attr == "open" || attr == #"open="""# || attr == "open=''"
+                || attr == #"open="open""# || attr == "open='open'" else { return nil }
+        let remainder = String(afterKeyword[afterKeyword.index(after: closeBracket)...])
+            .trimmingCharacters(in: .whitespaces)
+        if remainder.isEmpty { return (!attr.isEmpty, nil) }
+        let remLower = remainder.lowercased()
+        guard remLower.hasPrefix("<summary>"), remLower.hasSuffix("</summary>"),
+              remainder.count >= "<summary></summary>".count else { return nil }
+        let summary = String(remainder.dropFirst("<summary>".count).dropLast("</summary>".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (!attr.isEmpty, summary)
     }
 
     private static func listItem(from line: String) -> MarkdownListItem? {
@@ -567,10 +681,10 @@ private typealias PlatformColor = NSColor
 /// inline code) as native views with standard platform text selection controls.
 public struct MarkdownText: View, Equatable {
     public let text: String
+    private var nestingDepth = 0
 
-    public init(text: String) {
-        self.text = text
-    }
+    public init(text: String) { self.text = text }
+    fileprivate init(text: String, nestingDepth: Int) { self.text = text; self.nestingDepth = nestingDepth }
 
     public static let quoteBarAttribute = NSAttributedString.Key(
         "CopilotProjects.MarkdownQuoteBar"
@@ -631,6 +745,7 @@ public struct MarkdownText: View, Equatable {
         case prose([ProsePart])
         case codeBlock(String)
         case table(MarkdownTable)
+        case details(MarkdownDetails)
     }
 
     fileprivate struct RenderKey: Equatable {
@@ -649,6 +764,11 @@ public struct MarkdownText: View, Equatable {
             makeCodeBlockAttributedText(code, styleContext: key.styleContext)
         case let .table(table):
             makeTableAttributedText(table, styleContext: key.styleContext, layoutDirection: key.layoutDirection)
+        case let .details(details):
+            makePlainAttributedText(
+                [details.summary.isEmpty ? "Details" : details.summary, details.body].filter { !$0.isEmpty }.joined(separator: "\n"),
+                styleContext: key.styleContext
+            )
         }
     }
 
@@ -693,6 +813,9 @@ public struct MarkdownText: View, Equatable {
             case let .table(table):
                 flushProse()
                 result.append(.table(table))
+            case let .details(details):
+                flushProse()
+                result.append(.details(details))
             }
         }
         flushProse()
@@ -719,6 +842,8 @@ public struct MarkdownText: View, Equatable {
             )
         case let .table(table):
             tableView(table)
+        case let .details(details):
+            MarkdownDetailsView(details: details, nestingDepth: nestingDepth + 1)
         }
     }
 
@@ -740,7 +865,7 @@ public struct MarkdownText: View, Equatable {
     private static let minCellWidth: CGFloat = 36
     private static let tableColumnSpacing: CGFloat = 14
 
-    private static var containerBackgroundColor: Color {
+    fileprivate static var containerBackgroundColor: Color {
         #if canImport(UIKit) && !os(watchOS)
         Color(uiColor: .tertiarySystemBackground)
         #else
@@ -781,6 +906,53 @@ public struct MarkdownText: View, Equatable {
     private func inline(_ string: String) -> AttributedString {
         MarkdownParser.inline(string)
     }
+}
+
+private struct MarkdownDetailsView: View {
+    let details: MarkdownDetails
+    let nestingDepth: Int
+    @State private var isExpanded: Bool
+
+    init(details: MarkdownDetails, nestingDepth: Int) {
+        self.details = details
+        self.nestingDepth = nestingDepth
+        _isExpanded = State(initialValue: details.isOpen)
+    }
+
+    var body: some View {
+        let attributedSummary = MarkdownParser.inline(details.summary.isEmpty ? "Details" : details.summary)
+        VStack(alignment: .leading, spacing: 6) {
+            Button { isExpanded.toggle() } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary).rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Text(attributedSummary).font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary).multilineTextAlignment(.leading)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(attributedSummary.characters))
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            .accessibilityHint(isExpanded ? "Double-tap to collapse" : "Double-tap to expand")
+
+            if isExpanded, nestingDepth <= MarkdownParser.maximumDetailsNestingDepth, !details.body.isEmpty {
+                MarkdownText(text: details.body, nestingDepth: nestingDepth)
+                    .padding(.leading, 10).padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .overlay(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 1.5).fill(Color.secondary.opacity(0.35)).frame(width: 2)
+                    }
+            }
+        }
+        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+        .background(MarkdownText.containerBackgroundColor, in: RoundedRectangle(cornerRadius: 8))
+        .onChange(of: details.isOpen) { _, newValue in isExpanded = newValue }
+    }
+}
+
+extension MarkdownText {
 
     fileprivate struct StyleContext: Equatable {
         let dynamicTypeSize: DynamicTypeSize
