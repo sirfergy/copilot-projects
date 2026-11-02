@@ -719,7 +719,7 @@ struct ProjectRow: View, Equatable {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 7) {
                     if running > 0 { activityCount(running, "waveform", .green) }
-                    if background > 0 { activityCount(background, "person.2.fill", .purple) }
+                    if background > 0 { activityCount(background, "sparkles", .purple) }
                     if scheduled > 0 { activityCount(scheduled, "clock.arrow.circlepath", .indigo) }
                     if waiting > 0 { activityCount(waiting, "questionmark.bubble.fill", .orange) }
                     // Same symbol as the session row's failure indicator.
