@@ -425,10 +425,15 @@ final class SessionWorkflowTests: XCTestCase {
         )
         XCTAssertNil(model.projects[0].sessions[0].parentSessionId)
 
-        // Mark all sessions read in project.
+        // Mark all sessions read in project and persist cleared manual marks in a single save.
+        model.projects[0].sessions[2].markedUnread = true
         XCTAssertTrue(model.projects[0].sessions.contains(where: \.offersMarkAsRead))
         model.markAllSessionsRead(inProjectId: project.id)
         XCTAssertFalse(model.projects[0].sessions.contains(where: \.offersMarkAsRead))
+        guard case .loaded(let persisted) = repository.load() else {
+            return XCTFail("Expected persisted state to load")
+        }
+        XCTAssertFalse(persisted.projects[0].sessions.contains(where: \.markedUnread))
     }
 
     func testCLISendSessionPromptCommandAndValidation() throws {

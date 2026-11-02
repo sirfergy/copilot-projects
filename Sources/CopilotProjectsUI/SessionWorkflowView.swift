@@ -102,7 +102,8 @@ public struct SessionWorkflowView: View {
                             HStack {
                                 Text(schedule).font(.caption)
                                 Spacer()
-                                if workflow.supports(.send) {
+                                if workflow.supports(.send),
+                                   workflow.schedules.filter({ $0 == schedule }).count == 1 {
                                     Button("Run Now") {
                                         submit(RemoteSessionAction(
                                             kind: .send,

@@ -1277,9 +1277,6 @@ private struct SessionCreationButtons: View {
                     Button("Bounce Idle Sessions") {
                         model.bounceIdleSessions(inProjectId: project.id)
                     }
-                    Button("Reload MCPs on Idle Sessions") {
-                        model.reloadMCPsOnIdleSessions(inProjectId: project.id)
-                    }
                     Button("Mark All Sessions as Read") {
                         model.markAllSessionsRead(inProjectId: project.id)
                     }

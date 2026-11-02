@@ -2802,44 +2802,38 @@ final class AppModel: ObservableObject {
     }
 
     func markAllSessionsRead(inProjectId pid: String) {
-        guard let pi = projectIndex(pid) else { return }
-        let sessionIds = projects[pi].sessions.filter(\.offersMarkAsRead).map(\.id)
-        guard !sessionIds.isEmpty else { return }
+        guard let pi = projectIndex(pid),
+              projects[pi].sessions.contains(where: \.offersMarkAsRead) else { return }
+        var clearedMark = false
         withCoalescedProjectPublications {
-            for sessionId in sessionIds {
-                markSessionRead(sessionId: sessionId)
+            for si in projects[pi].sessions.indices where projects[pi].sessions[si].offersMarkAsRead {
+                projects[pi].sessions[si].hasUnread = false
+                projects[pi].sessions[si].finishedUnseen = false
+                if projects[pi].sessions[si].markedUnread {
+                    projects[pi].sessions[si].markedUnread = false
+                    clearedMark = true
+                }
             }
         }
+        updateDockBadge()
+        if clearedMark { save() }
     }
 
     func bounceIdleSessions(inProjectId pid: String) {
-        performActionOnIdleSessions(inProjectId: pid, action: RemoteSessionAction(kind: .bounce))
-    }
-
-    func reloadMCPsOnIdleSessions(inProjectId pid: String) {
-        performActionOnIdleSessions(
-            inProjectId: pid,
-            action: RemoteSessionAction(kind: .send, prompt: "/mcp reload", mode: .immediate)
-        )
-    }
-
-    private func performActionOnIdleSessions(inProjectId pid: String, action: RemoteSessionAction) {
         guard let pi = projectIndex(pid) else { return }
         let sessionIds = projects[pi].sessions
             .filter { $0.displayStatus == .idle && !$0.hasBackgroundWork }
             .map(\.id)
-        for sessionId in sessionIds where sessionWorkflow(sessionId: sessionId)?.supports(action.kind) == true {
+        for sessionId in sessionIds where sessionWorkflow(sessionId: sessionId)?.supports(.bounce) == true {
             let epoch = sessionOperationProjection(sessionId: sessionId).conversationEpoch
             Task { @MainActor in
                 guard let loc = self.locateIndex(sessionId),
                       self.projects[loc.p].sessions[loc.s].displayStatus == .idle,
                       !self.projects[loc.p].sessions[loc.s].hasBackgroundWork,
-                      let workflow = self.sessionWorkflow(sessionId: sessionId),
-                      workflow.supports(action.kind),
-                      action.kind != .send || workflow.sendReady else { return }
+                      self.sessionWorkflow(sessionId: sessionId)?.supports(.bounce) == true else { return }
                 _ = await performLocalSessionAction(
                     sessionId: sessionId,
-                    action: action,
+                    action: RemoteSessionAction(kind: .bounce),
                     expectedConversationEpoch: epoch
                 )
             }
