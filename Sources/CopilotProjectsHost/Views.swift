@@ -243,36 +243,57 @@ struct FleetStatusBar: View {
         let ready = model.totalReady
         HStack(spacing: 10) {
             if running > 0 {
-                pill(.running, help: "Jump to next running session") {
-                    Text("\(running) running").foregroundStyle(.green)
+                pill(
+                    .running,
+                    help: "Jump to next running session",
+                    accessibilityLabel: "\(running) running"
+                ) {
+                    fleetCount(running, "waveform", .green)
                 }
             }
             if background > 0 {
-                pill(.background, help: "Jump to next background-work session") {
-                    HStack(spacing: 4) {
-                        BackgroundWorkBadge()
-                        Text("\(background) background").foregroundStyle(.purple)
-                    }
+                pill(
+                    .background,
+                    help: "Jump to next background-work session",
+                    accessibilityLabel: "\(background) background"
+                ) {
+                    fleetCount(background, "sparkles", .purple)
                 }
             }
             if scheduled > 0 {
-                pill(.scheduled, help: "Jump to next scheduled session") {
-                    Text("\(scheduled) scheduled").foregroundStyle(.indigo)
+                pill(
+                    .scheduled,
+                    help: "Jump to next scheduled session",
+                    accessibilityLabel: "\(scheduled) scheduled"
+                ) {
+                    fleetCount(scheduled, "clock.arrow.circlepath", .indigo)
                 }
             }
             if waiting > 0 {
-                pill(.waiting, help: "Jump to next session waiting for input (⇧⌘A)") {
-                    Text("\(waiting) waiting").foregroundStyle(.orange)
+                pill(
+                    .waiting,
+                    help: "Jump to next session waiting for input (⇧⌘A)",
+                    accessibilityLabel: "\(waiting) waiting"
+                ) {
+                    fleetCount(waiting, "questionmark.bubble.fill", .orange)
                 }
             }
             if failed > 0 {
-                pill(.failed, help: "Jump to next session with a failed request (⇧⌘A)") {
-                    Text("\(failed) failed").foregroundStyle(.red)
+                pill(
+                    .failed,
+                    help: "Jump to next session with a failed request (⇧⌘A)",
+                    accessibilityLabel: "\(failed) failed"
+                ) {
+                    fleetCount(failed, "exclamationmark.triangle.fill", .red)
                 }
             }
             if ready > 0 {
-                pill(.ready, help: "Jump to next finished session (⇧⌘A)") {
-                    Text("\(ready) ready").foregroundStyle(.blue)
+                pill(
+                    .ready,
+                    help: "Jump to next finished session (⇧⌘A)",
+                    accessibilityLabel: "\(ready) ready"
+                ) {
+                    fleetCount(ready, "checkmark.circle.fill", .blue)
                 }
             }
             if running == 0, background == 0, scheduled == 0, waiting == 0, failed == 0, ready == 0 {
@@ -297,9 +318,18 @@ struct FleetStatusBar: View {
         )
     }
 
+    private func fleetCount(_ count: Int, _ symbol: String, _ color: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+            Text(count, format: .number)
+        }
+        .foregroundStyle(color)
+    }
+
     private func pill<Label: View>(
         _ kind: FleetActivityKind,
         help: String,
+        accessibilityLabel: String,
         @ViewBuilder label: () -> Label
     ) -> some View {
         Button {
@@ -309,6 +339,8 @@ struct FleetStatusBar: View {
         }
         .buttonStyle(.plain)
         .help(help)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityIdentifier("fleet-status-\(kind.rawValue)")
     }
 }
