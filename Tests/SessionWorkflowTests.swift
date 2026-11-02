@@ -357,4 +357,140 @@ final class SessionWorkflowTests: XCTestCase {
             operation: CLIOperationRequest(operationId: "missing-attachment", conversationEpoch: "epoch-1")
         ), .invalid)
     }
+
+    @MainActor
+    func testGroupSessionUnderParentAndMarkAllSessionsRead() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions")
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+
+        var parentSession = Session(title: "Coordinator", cwd: root.path)
+        parentSession.markedUnread = true
+        var standaloneSession = Session(title: "Track 1", cwd: root.path)
+        standaloneSession.hasUnread = true
+        var secondChildSession = Session(title: "Track 2", cwd: root.path)
+        secondChildSession.finishedUnseen = true
+
+        let project = Project(
+            name: "Grouping & Read Test",
+            cwd: root.path,
+            sessions: [parentSession, standaloneSession, secondChildSession],
+            selectedSessionId: parentSession.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        let model = AppModel(
+            stateRepository: repository,
+            persistPermissionStatus: { _, _, _, _ in },
+            isAppActive: { false },
+            agentActivityDirectory: sessions,
+            resumeMarkerDirectory: sessions,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
+        )
+        model.projects[0].sessions[1].hasUnread = true
+        model.projects[0].sessions[2].finishedUnseen = true
+
+        // Cannot group a session under itself.
+        model.groupSessionUnderParent(
+            projectId: project.id,
+            sessionId: standaloneSession.id,
+            parentSessionId: standaloneSession.id
+        )
+        XCTAssertNil(model.projects[0].sessions[1].parentSessionId)
+
+        // Group standaloneSession under parentSession.
+        model.groupSessionUnderParent(
+            projectId: project.id,
+            sessionId: standaloneSession.id,
+            parentSessionId: parentSession.id
+        )
+        XCTAssertEqual(model.projects[0].sessions[1].parentSessionId, parentSession.id)
+        XCTAssertTrue(model.isParentSessionExpanded(parentSession.id))
+
+        // Cannot group a session under a child session, nor reparent a parent that already has children.
+        model.groupSessionUnderParent(
+            projectId: project.id,
+            sessionId: secondChildSession.id,
+            parentSessionId: standaloneSession.id
+        )
+        XCTAssertNil(model.projects[0].sessions[2].parentSessionId)
+
+        model.groupSessionUnderParent(
+            projectId: project.id,
+            sessionId: parentSession.id,
+            parentSessionId: secondChildSession.id
+        )
+        XCTAssertNil(model.projects[0].sessions[0].parentSessionId)
+
+        // Mark all sessions read in project.
+        XCTAssertTrue(model.projects[0].sessions.contains(where: \.offersMarkAsRead))
+        model.markAllSessionsRead(inProjectId: project.id)
+        XCTAssertFalse(model.projects[0].sessions.contains(where: \.offersMarkAsRead))
+    }
+
+    func testCLISendSessionPromptCommandAndValidation() throws {
+        XCTAssertTrue(CLIMain.isCommand("send-session-prompt"))
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let socketPath = root.appendingPathComponent("control.sock").path
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var received: [ControlRequest] = []
+        var nextResponse = ControlResponse.success("op-123", code: "accepted")
+        let server = ControlServer(socketPath: socketPath) { request in
+            received.append(request)
+            return nextResponse
+        }
+        XCTAssertTrue(server.start())
+        defer { server.stop() }
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["COPILOT_PROJECTS_SOCKET"] = socketPath
+
+        // Inline prompt with auto-generated requestId.
+        XCTAssertEqual(CLIMain.run([
+            "send-session-prompt", "--session", "s1", "--prompt", "Keep going!",
+        ], environment: environment), 0)
+        XCTAssertEqual(received.count, 1)
+        XCTAssertEqual(received.last?.command, "send-session-prompt")
+        XCTAssertEqual(received.last?.sessionId, "s1")
+        XCTAssertNil(received.last?.projectId)
+        XCTAssertEqual(received.last?.prompt, "Keep going!")
+        XCTAssertNotNil(received.last?.requestId.flatMap(UUID.init(uuidString:)))
+
+        // Prompt file with explicit project and request-id.
+        let promptFile = root.appendingPathComponent("prompt.txt")
+        try Data("Run full test suite".utf8).write(to: promptFile)
+        let explicitId = UUID()
+        XCTAssertEqual(CLIMain.run([
+            "send-session-prompt",
+            "--session", "s1",
+            "--project", "p1",
+            "--request-id", explicitId.uuidString,
+            "--prompt-file", promptFile.path,
+        ], environment: environment), 0)
+        XCTAssertEqual(received.last?.projectId, "p1")
+        XCTAssertEqual(received.last?.requestId, explicitId.uuidString)
+        XCTAssertEqual(received.last?.prompt, "Run full test suite")
+
+        // Validation failures return exit code 2 without hitting the server.
+        let sentCount = received.count
+        let rejected: [[String]] = [
+            ["send-session-prompt"],
+            ["send-session-prompt", "--session", "s1"],
+            ["send-session-prompt", "--session", "s1", "--prompt", "hi", "--prompt-file", promptFile.path],
+            ["send-session-prompt", "--session", "s1", "--prompt", ""],
+            ["send-session-prompt", "--session", "s1", "--request-id", "not-a-uuid", "--prompt", "hi"],
+            ["send-session-prompt", "--session", "s1", "--prompt", "hi", "--unknown-flag"],
+        ]
+        for args in rejected {
+            XCTAssertEqual(CLIMain.run(args, environment: environment), 2, args.joined(separator: " "))
+        }
+        XCTAssertEqual(received.count, sentCount)
+    }
 }

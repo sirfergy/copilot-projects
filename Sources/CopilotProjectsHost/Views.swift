@@ -983,7 +983,7 @@ struct DetailView: View {
                         await model.performLocalSessionAction(
                             sessionId: sessionId,
                             action: action,
-                            expectedConversationEpoch: action.kind == .send
+                            expectedConversationEpoch: (action.kind == .send && action.attachmentIds?.isEmpty == false)
                                 ? (composer.attachedEpoch ?? operation.conversationEpoch)
                                 : operation.conversationEpoch
                         )
@@ -1107,6 +1107,24 @@ private struct SessionList: View {
                                     model.ungroupSession(projectId: project.id, sessionId: session.id)
                                 }
                                 Divider()
+                            } else if item.childSummary == nil {
+                                let candidateParents = project.sessions.filter {
+                                    $0.id != session.id && $0.parentSessionId == nil
+                                }
+                                if !candidateParents.isEmpty {
+                                    Menu("Group Under Parent") {
+                                        ForEach(candidateParents) { parent in
+                                            Button(parent.title) {
+                                                model.groupSessionUnderParent(
+                                                    projectId: project.id,
+                                                    sessionId: session.id,
+                                                    parentSessionId: parent.id
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Divider()
+                                }
                             }
                             let prKeys = session.effectivePullRequestKeys
                             if !prKeys.isEmpty {
@@ -1252,6 +1270,18 @@ private struct SessionCreationButtons: View {
                                 }
                             }
                         }
+                    }
+                }
+                Divider()
+                Menu("Fleet Actions") {
+                    Button("Bounce Idle Sessions") {
+                        model.bounceIdleSessions(inProjectId: project.id)
+                    }
+                    Button("Reload MCPs on Idle Sessions") {
+                        model.reloadMCPsOnIdleSessions(inProjectId: project.id)
+                    }
+                    Button("Mark All Sessions as Read") {
+                        model.markAllSessionsRead(inProjectId: project.id)
                     }
                 }
                 Divider()

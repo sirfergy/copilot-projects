@@ -17,6 +17,7 @@ public enum CLIMain {
         "new-project",
         "new-session",
         "new-copilot-session",
+        "send-session-prompt",
         "close-session",
         "rename-project",
         "focus",
@@ -115,6 +116,8 @@ public enum CLIMain {
             return resolveSession(rest)
         case "new-copilot-session":
             return newCopilotSession(rest, environment: environment)
+        case "send-session-prompt":
+            return sendSessionPrompt(rest, environment: environment)
         case "close-session":
             return closeSession(rest, environment: environment)
         default:
@@ -277,18 +280,7 @@ public enum CLIMain {
             fail(usage)
             return 2
         }
-        let promptData: Data
-        do {
-            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: promptPath))
-            defer { try? handle.close() }
-            promptData = try handle.read(upToCount: maximumPromptBytes + 1) ?? Data()
-        } catch {
-            fail("could not read prompt file: \(error.localizedDescription)")
-            return 2
-        }
-        guard promptData.count <= maximumPromptBytes,
-              let prompt = String(data: promptData, encoding: .utf8) else {
-            fail("prompt file must be UTF-8 and at most \(maximumPromptBytes) bytes")
+        guard let prompt = readPromptFile(atPath: promptPath) else {
             return 2
         }
 
@@ -303,6 +295,89 @@ public enum CLIMain {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             req.parentSessionId = (rawParent?.isEmpty == false) ? rawParent : nil
         }
+        return sendAutomationRequest(req, environment: environment)
+    }
+
+    // MARK: - send-session-prompt (automation)
+
+    private static func sendSessionPrompt(_ args: [String], environment: [String: String]) -> Int32 {
+        let usage = "usage: copilot-projects send-session-prompt --session ID [--project ID] "
+            + "[--request-id UUID] (--prompt TEXT | --prompt-file PATH)"
+        let parsed = parseFlags(args)
+        let allowed: Set<String> = ["session", "project", "request-id", "prompt", "prompt-file"]
+        let unknown = parsed.flags.keys.filter { !allowed.contains($0) }.sorted()
+        guard unknown.isEmpty, parsed.positionals.isEmpty else {
+            let extras = unknown.map { "--\($0)" } + parsed.positionals
+            fail("send-session-prompt: unexpected \(extras.joined(separator: " "))\n\(usage)")
+            return 2
+        }
+        guard let sessionId = parsed.flags["session"], !sessionId.isEmpty,
+              parsed.flags["project"].map({ !$0.isEmpty }) ?? true,
+              (parsed.flags["prompt"] != nil) != (parsed.flags["prompt-file"] != nil) else {
+            fail(usage)
+            return 2
+        }
+        let requestId: UUID
+        if let rawRequestId = parsed.flags["request-id"] {
+            guard let parsedId = UUID(uuidString: rawRequestId) else {
+                fail(usage)
+                return 2
+            }
+            requestId = parsedId
+        } else {
+            requestId = UUID()
+        }
+        let prompt: String
+        if let inlinePrompt = parsed.flags["prompt"] {
+            guard !inlinePrompt.isEmpty else {
+                fail(usage)
+                return 2
+            }
+            guard inlinePrompt.utf8.count <= maximumPromptBytes else {
+                fail("prompt must be UTF-8 and at most \(maximumPromptBytes) bytes")
+                return 2
+            }
+            prompt = inlinePrompt
+        } else if let promptPath = parsed.flags["prompt-file"], !promptPath.isEmpty {
+            guard let decoded = readPromptFile(atPath: promptPath) else {
+                return 2
+            }
+            prompt = decoded
+        } else {
+            fail(usage)
+            return 2
+        }
+
+        var req = ControlRequest(command: "send-session-prompt")
+        req.sessionId = sessionId
+        req.projectId = parsed.flags["project"]
+        req.requestId = requestId.uuidString
+        req.prompt = prompt
+        return sendAutomationRequest(req, environment: environment)
+    }
+
+    private static func readPromptFile(atPath promptPath: String) -> String? {
+        let promptData: Data
+        do {
+            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: promptPath))
+            defer { try? handle.close() }
+            promptData = try handle.read(upToCount: maximumPromptBytes + 1) ?? Data()
+        } catch {
+            fail("could not read prompt file: \(error.localizedDescription)")
+            return nil
+        }
+        guard promptData.count <= maximumPromptBytes,
+              let prompt = String(data: promptData, encoding: .utf8) else {
+            fail("prompt file must be UTF-8 and at most \(maximumPromptBytes) bytes")
+            return nil
+        }
+        return prompt
+    }
+
+    private static func sendAutomationRequest(
+        _ req: ControlRequest,
+        environment: [String: String]
+    ) -> Int32 {
         do {
             let socketPath = Env.socket(environment) ?? Paths.socketPath
             let resp = try ControlClient(socketPath: socketPath).send(req)
@@ -592,6 +667,8 @@ public enum CLIMain {
           copilot-projects new-session             Add a session to a project [--cwd DIR] [--project ID] [--host HOST]
           copilot-projects new-copilot-session     Start Copilot with a prompt, idempotent by request id
               --project ID --request-id UUID --prompt-file PATH [--title T] [--host HOST] [--parent-session ID | --no-parent]
+          copilot-projects send-session-prompt     Send or queue a prompt into an existing session
+              --session ID [--project ID] [--request-id UUID] (--prompt TEXT | --prompt-file PATH)
           copilot-projects set-default-host [host] Set default host for a project [--project ID]
           copilot-projects close-session           End an idle session that is not the selected tab
               --session ID [--project ID]

@@ -2788,6 +2788,64 @@ final class AppModel: ObservableObject {
         save()
     }
 
+    func groupSessionUnderParent(projectId pid: String, sessionId sid: String, parentSessionId parentId: String) {
+        guard sid != parentId,
+              let pi = projectIndex(pid),
+              let si = projects[pi].sessions.firstIndex(where: { $0.id == sid }),
+              let parentIndex = projects[pi].sessions.firstIndex(where: { $0.id == parentId }),
+              projects[pi].sessions[parentIndex].parentSessionId == nil,
+              !projects[pi].sessions.contains(where: { $0.parentSessionId == sid }) else { return }
+        projects[pi].sessions[si].parentSessionId = parentId
+        expandedParentSessionIds.insert(parentId)
+        projects[pi].normalizeParentSessions()
+        save()
+    }
+
+    func markAllSessionsRead(inProjectId pid: String) {
+        guard let pi = projectIndex(pid) else { return }
+        let sessionIds = projects[pi].sessions.filter(\.offersMarkAsRead).map(\.id)
+        guard !sessionIds.isEmpty else { return }
+        withCoalescedProjectPublications {
+            for sessionId in sessionIds {
+                markSessionRead(sessionId: sessionId)
+            }
+        }
+    }
+
+    func bounceIdleSessions(inProjectId pid: String) {
+        performActionOnIdleSessions(inProjectId: pid, action: RemoteSessionAction(kind: .bounce))
+    }
+
+    func reloadMCPsOnIdleSessions(inProjectId pid: String) {
+        performActionOnIdleSessions(
+            inProjectId: pid,
+            action: RemoteSessionAction(kind: .send, prompt: "/mcp reload", mode: .immediate)
+        )
+    }
+
+    private func performActionOnIdleSessions(inProjectId pid: String, action: RemoteSessionAction) {
+        guard let pi = projectIndex(pid) else { return }
+        let sessionIds = projects[pi].sessions
+            .filter { $0.displayStatus == .idle && !$0.hasBackgroundWork }
+            .map(\.id)
+        for sessionId in sessionIds where sessionWorkflow(sessionId: sessionId)?.supports(action.kind) == true {
+            let epoch = sessionOperationProjection(sessionId: sessionId).conversationEpoch
+            Task { @MainActor in
+                guard let loc = self.locateIndex(sessionId),
+                      self.projects[loc.p].sessions[loc.s].displayStatus == .idle,
+                      !self.projects[loc.p].sessions[loc.s].hasBackgroundWork,
+                      let workflow = self.sessionWorkflow(sessionId: sessionId),
+                      workflow.supports(action.kind),
+                      action.kind != .send || workflow.sendReady else { return }
+                _ = await performLocalSessionAction(
+                    sessionId: sessionId,
+                    action: action,
+                    expectedConversationEpoch: epoch
+                )
+            }
+        }
+    }
+
     func setNumberHint(_ hint: NumberHint) {
         if numberHint != hint { numberHint = hint }
     }

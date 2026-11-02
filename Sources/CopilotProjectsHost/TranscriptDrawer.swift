@@ -195,12 +195,43 @@ private struct TranscriptPromptComposerView: View {
     let onPreview: (TranscriptImagePreviewItem) -> Void
     @FocusState private var promptFocused: Bool
 
+    private static let quickReplies: [(label: String, prompt: String)] = [
+        ("Approve", "Approve"),
+        ("Post", "Post"),
+        ("Merge when ready", "Merge when ready"),
+        ("Request CCR", "Request CCR and when green mark ready"),
+        ("Max review", "Do a max review"),
+        ("Keep going", "Keep going!"),
+        ("No bloat?", "No bloat or over-engineering?"),
+    ]
+
     private var liveWorkflow: RemoteSessionWorkflow? {
         workflowProvider?() ?? workflow
     }
 
     private var liveOperation: AgentOperationProjection {
         operationProvider?() ?? operation
+    }
+
+    private func canSendQuickReply(
+        workflow: RemoteSessionWorkflow?,
+        operation: AgentOperationProjection,
+        now: Date
+    ) -> Bool {
+        guard composer.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              composer.attachments.isEmpty,
+              !composer.isSending,
+              !composer.isAttaching,
+              composer.pendingOperationId == nil,
+              operation.support == .receipts,
+              let epoch = operation.conversationEpoch,
+              !epoch.isEmpty,
+              let workflow,
+              workflow.supports(.send, at: now),
+              workflow.sendReady else {
+            return false
+        }
+        return true
     }
 
     private func blockedMessage(now: Date) -> String? {
@@ -257,6 +288,27 @@ private struct TranscriptPromptComposerView: View {
                             .accessibilityLabel("Dismiss attachment status")
                         }
                     }
+                }
+
+                if canSendQuickReply(workflow: currentWorkflow, operation: currentOperation, now: now) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(Self.quickReplies, id: \.label) { item in
+                                Button(item.label) {
+                                    guard canSendQuickReply(
+                                        workflow: liveWorkflow,
+                                        operation: liveOperation,
+                                        now: Date()
+                                    ) else { return }
+                                    composer.prompt = item.prompt
+                                    submitPrompt()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("desktop-quick-reply-strip")
                 }
 
                 HStack(spacing: 8) {

@@ -99,16 +99,48 @@ public struct SessionWorkflowView: View {
                 if !workflow.schedules.isEmpty {
                     DisclosureGroup("\(workflow.schedules.count) schedules") {
                         ForEach(Array(workflow.schedules.enumerated()), id: \.offset) { _, schedule in
-                            Text(schedule).font(.caption)
+                            HStack {
+                                Text(schedule).font(.caption)
+                                Spacer()
+                                if workflow.supports(.send) {
+                                    Button("Run Now") {
+                                        submit(RemoteSessionAction(
+                                            kind: .send,
+                                            prompt: "Run scheduled task \(schedule) now",
+                                            mode: .immediate
+                                        ))
+                                    }
+                                    .controlSize(.small)
+                                    .disabled(!enabled(.send))
+                                    Button("Stop", role: .destructive) {
+                                        submit(RemoteSessionAction(
+                                            kind: .send,
+                                            prompt: "Stop schedule \(schedule) using manage_schedule",
+                                            mode: .immediate
+                                        ))
+                                    }
+                                    .controlSize(.small)
+                                    .disabled(!enabled(.send))
+                                }
+                            }
                         }
                     }
                 }
                 if workflow.supports(.abort) {
-                    Button("Stop task", role: .destructive) {
-                        submit(RemoteSessionAction(kind: .abort))
+                    HStack {
+                        Button("Stop task", role: .destructive) {
+                            submit(RemoteSessionAction(kind: .abort))
+                        }
+                        .disabled(!enabled(.abort))
+                        .help("Request Copilot cancellation without closing this terminal session")
+                        if workflow.supports(.send) {
+                            Button("Stop & Poke") {
+                                submitStopAndPoke()
+                            }
+                            .disabled(!enabled(.abort) || !enabled(.send))
+                            .accessibilityIdentifier("workflow-stop-and-poke")
+                        }
                     }
-                    .disabled(!enabled(.abort))
-                    .help("Request Copilot cancellation without closing this terminal session")
                 }
                 if let message {
                     Text(message).font(.caption).textSelection(.enabled)
@@ -142,7 +174,11 @@ public struct SessionWorkflowView: View {
     }
 
     private func enabled(_ kind: RemoteSessionActionKind) -> Bool {
-        canWrite && workflow.supports(kind) && !pending.contains(kind) && uncertain[kind] == nil
+        canWrite
+            && workflow.supports(kind)
+            && (kind != .send || workflow.sendReady)
+            && !pending.contains(kind)
+            && uncertain[kind] == nil
     }
 
     private func submit(_ action: RemoteSessionAction) {
@@ -156,6 +192,30 @@ public struct SessionWorkflowView: View {
                 uncertain[action.kind] = id
             }
             message = result.message ?? (result.state == .applied ? "Accepted by Copilot." : "Action was not applied.")
+        }
+    }
+
+    private func submitStopAndPoke() {
+        let abortAction = RemoteSessionAction(kind: .abort)
+        let pokeAction = RemoteSessionAction(kind: .send, prompt: "Keep going!", mode: .enqueue)
+        guard abortAction.isValid, pokeAction.isValid, enabled(.abort), enabled(.send) else { return }
+        pending.insert(.abort)
+        pending.insert(.send)
+        message = "Waiting for Copilot to confirm..."
+        Task { @MainActor in
+            let abortResult = await onAction(abortAction)
+            pending.remove(.abort)
+            guard abortResult.state == .applied else {
+                pending.remove(.send)
+                message = abortResult.message ?? "Action was not applied."
+                return
+            }
+            let pokeResult = await onAction(pokeAction)
+            pending.remove(.send)
+            if pokeResult.state == .indeterminate, let id = pokeResult.operationId {
+                uncertain[.send] = id
+            }
+            message = pokeResult.message ?? (pokeResult.state == .applied ? "Accepted by Copilot." : "Action was not applied.")
         }
     }
 }
