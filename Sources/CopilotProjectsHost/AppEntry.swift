@@ -8,6 +8,7 @@ struct CopilotProjectsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @AppStorage(HostLifetimePolicy.settingKey) private var keepRunning = false
     @AppStorage(NotificationsAppLauncher.startsWithHostKey) private var startsNotifications = false
+    @AppStorage(TranscriptPromptComposerView.showQuickReplyChipsKey) private var showQuickReplyChips = true
     @State private var showsProjects = true
 
     var body: some Scene {
@@ -19,6 +20,7 @@ struct CopilotProjectsApp: App {
         .commands {
             WorkspaceCommands(model: appDelegate.model, input: appDelegate.input,
                               keepRunning: $keepRunning, startsNotifications: $startsNotifications,
+                              showQuickReplyChips: $showQuickReplyChips,
                               showsProjects: $showsProjects)
         }
         MenuBarExtra("Copilot Projects", systemImage: "terminal", isInserted: $keepRunning) {
@@ -136,6 +138,7 @@ private struct WorkspaceCommands: Commands {
     @ObservedObject var input: WorkspaceInputController
     @Binding var keepRunning: Bool
     @Binding var startsNotifications: Bool
+    @Binding var showQuickReplyChips: Bool
     @Binding var showsProjects: Bool
 
     var body: some Commands {
@@ -147,6 +150,7 @@ private struct WorkspaceCommands: Commands {
         CommandGroup(after: .appSettings) {
             Toggle("Keep Running When Window Closes", isOn: $keepRunning)
             Toggle("Start Notifications with Copilot Projects", isOn: $startsNotifications)
+            Toggle("Show Quick-Reply Suggestions", isOn: $showQuickReplyChips)
             Divider()
             SSHHostsSettingsMenu(model: model, isSheetPresented: input.hasWorkspaceSheet)
             Button("Pull Request Review Prompt…") {

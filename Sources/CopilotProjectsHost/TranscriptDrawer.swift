@@ -185,7 +185,9 @@ private struct TranscriptDrawer: View {
     }
 }
 
-private struct TranscriptPromptComposerView: View {
+struct TranscriptPromptComposerView: View {
+    static let showQuickReplyChipsKey = "showQuickReplyChips"
+
     @ObservedObject var composer: DesktopSessionPromptComposer
     let workflow: RemoteSessionWorkflow?
     let operation: AgentOperationProjection
@@ -193,6 +195,7 @@ private struct TranscriptPromptComposerView: View {
     let operationProvider: (() -> AgentOperationProjection)?
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
     let onPreview: (TranscriptImagePreviewItem) -> Void
+    @AppStorage(Self.showQuickReplyChipsKey) private var showQuickReplyChips = true
     @FocusState private var promptFocused: Bool
 
     private static let quickReplies: [(label: String, prompt: String)] = [
@@ -218,7 +221,8 @@ private struct TranscriptPromptComposerView: View {
         operation: AgentOperationProjection,
         now: Date
     ) -> Bool {
-        guard composer.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        guard showQuickReplyChips,
+              composer.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               composer.attachments.isEmpty,
               !composer.isSending,
               !composer.isAttaching,
