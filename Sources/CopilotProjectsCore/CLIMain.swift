@@ -18,6 +18,7 @@ public enum CLIMain {
         "new-session",
         "new-copilot-session",
         "send-session-prompt",
+        "set-parent-session",
         "close-session",
         "rename-project",
         "focus",
@@ -118,6 +119,8 @@ public enum CLIMain {
             return newCopilotSession(rest, environment: environment)
         case "send-session-prompt":
             return sendSessionPrompt(rest, environment: environment)
+        case "set-parent-session":
+            return setParentSession(rest, environment: environment)
         case "close-session":
             return closeSession(rest, environment: environment)
         default:
@@ -392,6 +395,40 @@ public enum CLIMain {
             fail("\(error)")
             return 1
         }
+    }
+
+    // MARK: - set-parent-session (automation)
+
+    private static func setParentSession(_ args: [String], environment: [String: String]) -> Int32 {
+        let usage = "usage: copilot-projects set-parent-session --session ID "
+            + "[--parent-session ID | --no-parent] [--project ID]"
+        let parsed = parseFlags(args)
+        let allowed: Set<String> = ["session", "project", "parent-session", "no-parent"]
+        let unknown = parsed.flags.keys.filter { !allowed.contains($0) }.sorted()
+        guard unknown.isEmpty, parsed.positionals.isEmpty else {
+            let extras = unknown.map { "--\($0)" } + parsed.positionals
+            fail("set-parent-session: unexpected \(extras.joined(separator: " "))\n\(usage)")
+            return 2
+        }
+        let parentSessionId = parsed.flags["parent-session"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let projectId = parsed.flags["project"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let sessionId = parsed.flags["session"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionId.isEmpty,
+              projectId.map({ !$0.isEmpty }) ?? true,
+              (parsed.flags["no-parent"] ?? "").isEmpty,
+              !(parentSessionId != nil && parsed.flags["no-parent"] != nil),
+              parentSessionId.map({ !$0.isEmpty }) ?? true else {
+            fail(usage)
+            return 2
+        }
+
+        var req = ControlRequest(command: "set-parent-session")
+        req.sessionId = sessionId
+        req.projectId = projectId
+        req.parentSessionId = (parsed.flags["no-parent"] == nil) ? parentSessionId : nil
+        return sendAutomationRequest(req, environment: environment)
     }
 
     // MARK: - close-session (automation)
@@ -669,6 +706,8 @@ public enum CLIMain {
               --project ID --request-id UUID --prompt-file PATH [--title T] [--host HOST] [--parent-session ID | --no-parent]
           copilot-projects send-session-prompt     Send or queue a prompt into an existing session
               --session ID [--project ID] [--request-id UUID] (--prompt TEXT | --prompt-file PATH)
+          copilot-projects set-parent-session      Group a session under a parent or ungroup it
+              --session ID [--parent-session ID | --no-parent] [--project ID]
           copilot-projects set-default-host [host] Set default host for a project [--project ID]
           copilot-projects close-session           End an idle session that is not the selected tab
               --session ID [--project ID]

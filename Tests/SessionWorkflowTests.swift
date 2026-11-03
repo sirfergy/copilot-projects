@@ -498,4 +498,140 @@ final class SessionWorkflowTests: XCTestCase {
         }
         XCTAssertEqual(received.count, sentCount)
     }
+
+    @MainActor
+    func testSetParentSessionAndCLICommand() throws {
+        XCTAssertTrue(CLIMain.isCommand("set-parent-session"))
+
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions")
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+
+        let parent1 = Session(title: "Parent 1", cwd: root.path)
+        let parent2 = Session(title: "Parent 2", cwd: root.path)
+        let child = Session(title: "Child", cwd: root.path, parentSessionId: parent1.id)
+        let project = Project(
+            name: "Reparent Test",
+            cwd: root.path,
+            sessions: [parent1, parent2, child],
+            selectedSessionId: parent1.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        let model = AppModel(
+            stateRepository: repository,
+            persistPermissionStatus: { _, _, _, _ in },
+            isAppActive: { false },
+            agentActivityDirectory: sessions,
+            resumeMarkerDirectory: sessions,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
+        )
+
+        // Reparent child from parent1 to parent2 in-place.
+        let reparented = model.setParentSession(
+            projectId: project.id,
+            sessionId: child.id,
+            parentSessionId: parent2.id
+        )
+        XCTAssertTrue(reparented.ok)
+        XCTAssertEqual(reparented.code, "reparented")
+        XCTAssertEqual(reparented.text, child.id)
+        XCTAssertEqual(model.projects[0].sessions[2].parentSessionId, parent2.id)
+        XCTAssertTrue(model.isParentSessionExpanded(parent2.id))
+
+        // Reject self-parenting, nested parenting (under a child), and reparenting a parent that has children.
+        XCTAssertEqual(
+            model.setParentSession(projectId: project.id, sessionId: child.id, parentSessionId: child.id).code,
+            "bad-request"
+        )
+        XCTAssertEqual(
+            model.setParentSession(projectId: project.id, sessionId: parent1.id, parentSessionId: child.id).code,
+            "bad-request"
+        )
+        XCTAssertEqual(
+            model.setParentSession(projectId: project.id, sessionId: parent2.id, parentSessionId: parent1.id).code,
+            "bad-request"
+        )
+        XCTAssertEqual(
+            model.setParentSession(projectId: "   ", sessionId: child.id, parentSessionId: parent1.id).code,
+            "bad-request"
+        )
+        XCTAssertEqual(
+            model.setParentSession(projectId: "missing-project", sessionId: child.id, parentSessionId: parent1.id).code,
+            "unknown-project"
+        )
+        XCTAssertEqual(
+            model.setParentSession(projectId: project.id, sessionId: "missing-session", parentSessionId: parent1.id).code,
+            "gone"
+        )
+        XCTAssertEqual(
+            model.handle(ControlRequest(command: "set-parent-session")).code,
+            "bad-request"
+        )
+        var routedReq = ControlRequest(command: "set-parent-session")
+        routedReq.projectId = project.id
+        routedReq.sessionId = child.id
+        routedReq.parentSessionId = parent1.id
+        XCTAssertEqual(model.handle(routedReq).code, "reparented")
+        XCTAssertEqual(model.projects[0].sessions[2].parentSessionId, parent1.id)
+
+        // Ungroup when parentSessionId is nil.
+        let ungrouped = model.setParentSession(
+            projectId: project.id,
+            sessionId: child.id,
+            parentSessionId: nil
+        )
+        XCTAssertTrue(ungrouped.ok)
+        XCTAssertEqual(ungrouped.code, "reparented")
+        XCTAssertNil(model.projects[0].sessions[2].parentSessionId)
+
+        // Verify CLI command wiring over a control socket.
+        let socketPath = root.appendingPathComponent("control.sock").path
+        var received: [ControlRequest] = []
+        let server = ControlServer(socketPath: socketPath) { request in
+            received.append(request)
+            return .success(request.sessionId, code: "reparented")
+        }
+        XCTAssertTrue(server.start())
+        defer { server.stop() }
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["COPILOT_PROJECTS_SOCKET"] = socketPath
+
+        XCTAssertEqual(CLIMain.run([
+            "set-parent-session",
+            "--session", child.id,
+            "--parent-session", parent2.id,
+            "--project", project.id,
+        ], environment: environment), 0)
+        XCTAssertEqual(received.last?.command, "set-parent-session")
+        XCTAssertEqual(received.last?.sessionId, child.id)
+        XCTAssertEqual(received.last?.parentSessionId, parent2.id)
+        XCTAssertEqual(received.last?.projectId, project.id)
+
+        XCTAssertEqual(CLIMain.run([
+            "set-parent-session",
+            "--session", child.id,
+            "--no-parent",
+        ], environment: environment), 0)
+        XCTAssertEqual(received.last?.command, "set-parent-session")
+        XCTAssertEqual(received.last?.sessionId, child.id)
+        XCTAssertNil(received.last?.parentSessionId)
+        XCTAssertNil(received.last?.projectId)
+
+        let countBeforeRejected = received.count
+        for badArgs in [
+            ["set-parent-session"],
+            ["set-parent-session", "--session", ""],
+            ["set-parent-session", "--session", child.id, "--parent-session", parent2.id, "--no-parent"],
+            ["set-parent-session", "--session", child.id, "--parent-session", ""],
+            ["set-parent-session", "--session", child.id, "--no-parent", "--unknown"],
+        ] {
+            XCTAssertEqual(CLIMain.run(badArgs, environment: environment), 2, badArgs.joined(separator: " "))
+        }
+        XCTAssertEqual(received.count, countBeforeRejected)
+    }
 }

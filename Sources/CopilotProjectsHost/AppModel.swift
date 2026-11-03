@@ -252,6 +252,13 @@ final class AppModel: ObservableObject {
                 prompt: prompt
             )
         },
+        setParentSession: { [unowned self] request in
+            self.setParentSession(
+                projectId: request.projectId,
+                sessionId: request.sessionId ?? "",
+                parentSessionId: request.parentSessionId
+            )
+        },
         listHosts: { [unowned self] in self.renderHosts() },
         setDefaultHost: { [unowned self] request in
             guard let pid = self.resolveProject(request) else { return .failure("no project") }
@@ -2789,16 +2796,60 @@ final class AppModel: ObservableObject {
     }
 
     func groupSessionUnderParent(projectId pid: String, sessionId sid: String, parentSessionId parentId: String) {
-        guard sid != parentId,
-              let pi = projectIndex(pid),
-              let si = projects[pi].sessions.firstIndex(where: { $0.id == sid }),
+        guard !parentId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        _ = setParentSession(projectId: pid, sessionId: sid, parentSessionId: parentId)
+    }
+
+    @discardableResult
+    func setParentSession(
+        projectId: String?,
+        sessionId: String,
+        parentSessionId: String?
+    ) -> ControlResponse {
+        let sid = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sid.isEmpty else {
+            return .failure("set-parent-session requires a session id", code: "bad-request")
+        }
+        let pi: Int
+        let si: Int
+        if let rawProjectId = projectId {
+            let normalizedProjectId = rawProjectId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedProjectId.isEmpty else {
+                return .failure("invalid project id", code: "bad-request")
+            }
+            guard let projectIdx = projectIndex(normalizedProjectId) else {
+                return .failure("unknown project: \(normalizedProjectId)", code: "unknown-project")
+            }
+            guard let sessionIdx = projects[projectIdx].sessions.firstIndex(where: { $0.id == sid }) else {
+                return .failure("no such session", code: "gone")
+            }
+            pi = projectIdx
+            si = sessionIdx
+        } else {
+            guard let loc = locateIndex(sid) else {
+                return .failure("no such session", code: "gone")
+            }
+            pi = loc.p
+            si = loc.s
+        }
+
+        let parentId = parentSessionId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if parentId.isEmpty {
+            ungroupSession(projectId: projects[pi].id, sessionId: sid)
+            return .success(sid, code: "reparented")
+        }
+
+        guard parentId != sid,
               let parentIndex = projects[pi].sessions.firstIndex(where: { $0.id == parentId }),
               projects[pi].sessions[parentIndex].parentSessionId == nil,
-              !projects[pi].sessions.contains(where: { $0.parentSessionId == sid }) else { return }
+              !projects[pi].sessions.contains(where: { $0.parentSessionId == sid }) else {
+            return .failure("invalid parent session", code: "bad-request")
+        }
         projects[pi].sessions[si].parentSessionId = parentId
         expandedParentSessionIds.insert(parentId)
         projects[pi].normalizeParentSessions()
         save()
+        return .success(sid, code: "reparented")
     }
 
     func markAllSessionsRead(inProjectId pid: String) {

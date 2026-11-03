@@ -24,6 +24,9 @@ struct ControlCommandRouter {
         var sendSessionPrompt: (ControlRequest) -> ControlResponse = { _ in
             .failure("send-session-prompt is not configured", code: "unavailable")
         }
+        var setParentSession: (ControlRequest) -> ControlResponse = { _ in
+            .failure("set-parent-session is not configured", code: "unavailable")
+        }
         var listHosts: () -> String = { "" }
         var setDefaultHost: (ControlRequest) -> ControlResponse = { _ in
             .failure("set-default-host is not configured", code: "unavailable")
@@ -75,6 +78,12 @@ struct ControlCommandRouter {
                 return .failure("close-session requires a session id", code: "bad-request")
             }
             return actions.closeSession(request)
+        case "set-parent-session":
+            guard let sessionId = request.sessionId, !sessionId.isEmpty,
+                  request.projectId.map({ !$0.isEmpty }) ?? true else {
+                return .failure("set-parent-session requires a session id", code: "bad-request")
+            }
+            return actions.setParentSession(request)
         case "rename-project":
             guard let name = request.name else {
                 return .failure("rename-project requires a name")
