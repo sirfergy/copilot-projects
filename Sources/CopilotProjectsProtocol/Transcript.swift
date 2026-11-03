@@ -241,6 +241,7 @@ public struct TranscriptTurn: Codable, Equatable, Sendable, Identifiable {
     /// `session.error` the agent did not recover from. Absent for successful,
     /// stopped, and in-progress turns, and from older trackers.
     public let error: TranscriptTurnError?
+    public let reasoningSteps: [String]?
 
     public init(
         id: String,
@@ -252,7 +253,8 @@ public struct TranscriptTurn: Codable, Equatable, Sendable, Identifiable {
         tools: [TranscriptTool],
         isAborted: Bool,
         images: [TranscriptImageRef]? = nil,
-        error: TranscriptTurnError? = nil
+        error: TranscriptTurnError? = nil,
+        reasoningSteps: [String]? = nil
     ) {
         self.id = id
         self.startedAt = startedAt
@@ -264,6 +266,65 @@ public struct TranscriptTurn: Codable, Equatable, Sendable, Identifiable {
         self.isAborted = isAborted
         self.images = images
         self.error = error
+        self.reasoningSteps = reasoningSteps
+    }
+
+    public var nonEmptyReasoningSteps: [String] {
+        (reasoningSteps ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    public static func extractReasoningHeading(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let firstLine = trimmed
+                  .components(separatedBy: .newlines)
+                  .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+                  .first(where: { !$0.isEmpty }) else {
+            return nil
+        }
+
+        let rawCandidate: String
+        if firstLine.hasPrefix("**"),
+           let closingRange = firstLine.dropFirst(2).range(of: "**") {
+            rawCandidate = String(firstLine.dropFirst(2)[..<closingRange.lowerBound])
+        } else {
+            var slice = Substring(firstLine)
+            while let first = slice.first,
+                  first.isWhitespace || "#*_->".contains(first) {
+                slice.removeFirst()
+            }
+            while let last = slice.last,
+                  last.isWhitespace || "*_".contains(last) {
+                slice.removeLast()
+            }
+            rawCandidate = String(slice)
+        }
+
+        let collapsed = rawCandidate
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        guard !collapsed.isEmpty else {
+            return nil
+        }
+        if collapsed.count > 80 {
+            return String(collapsed.prefix(80)) + "…"
+        }
+        return collapsed
+    }
+
+    public var latestReasoningHeading: String? {
+        nonEmptyReasoningSteps.last.flatMap(Self.extractReasoningHeading(from:))
+    }
+
+    public var reasoningSummaryLabel: String {
+        let steps = nonEmptyReasoningSteps
+        let base = steps.count > 1 ? "Thinking (\(steps.count) steps)" : "Thinking"
+        if let heading = latestReasoningHeading, !heading.isEmpty {
+            return "\(base) · \(heading)"
+        }
+        return base
     }
     /// Assistant messages and inline images interleaved in chronological
     /// order. Images with a known `displayedAt` precede any assistant message

@@ -10472,6 +10472,135 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(reencoded.images?.first?.contentVersionText, "18000000000000000001")
     }
 
+    func testTranscriptTurnExtractReasoningHeadingParsesAndTruncates() {
+        XCTAssertEqual(
+            TranscriptTurn.extractReasoningHeading(
+                from: "\n  **Analyzing Copilot Project Opportunities**\n\nLook at files."
+            ),
+            "Analyzing Copilot Project Opportunities"
+        )
+        XCTAssertEqual(
+            TranscriptTurn.extractReasoningHeading(from: "###   Checking   test   cases  \nMore text"),
+            "Checking test cases"
+        )
+        XCTAssertEqual(
+            TranscriptTurn.extractReasoningHeading(from: "- _Inspecting edge cases_\nDetails"),
+            "Inspecting edge cases"
+        )
+        XCTAssertNil(TranscriptTurn.extractReasoningHeading(from: "   \n  \n "))
+        XCTAssertNil(TranscriptTurn.extractReasoningHeading(from: "***"))
+
+        let longLine = String(repeating: "a", count: 95)
+        let truncated = TranscriptTurn.extractReasoningHeading(from: longLine)
+        XCTAssertEqual(truncated, String(repeating: "a", count: 80) + "…")
+    }
+
+    func testTranscriptTurnReasoningSummaryLabelFormatsSingleAndMultipleSteps() {
+        let singleWithHeading = TranscriptTurn(
+            id: "t1",
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: nil,
+            kind: "foreground",
+            userContent: "hi",
+            assistantMessages: [],
+            tools: [],
+            isAborted: false,
+            reasoningSteps: ["**Planning Changes**\n\nStep 1 details"]
+        )
+        XCTAssertEqual(singleWithHeading.nonEmptyReasoningSteps, ["**Planning Changes**\n\nStep 1 details"])
+        XCTAssertEqual(singleWithHeading.latestReasoningHeading, "Planning Changes")
+        XCTAssertEqual(singleWithHeading.reasoningSummaryLabel, "Thinking · Planning Changes")
+
+        let multiSteps = TranscriptTurn(
+            id: "t2",
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: nil,
+            kind: "foreground",
+            userContent: "hi",
+            assistantMessages: [],
+            tools: [],
+            isAborted: false,
+            reasoningSteps: [
+                "**Step One**\n\nFirst thought",
+                "   ",
+                "**Step Two**\n\nSecond thought",
+            ]
+        )
+        XCTAssertEqual(multiSteps.nonEmptyReasoningSteps.count, 2)
+        XCTAssertEqual(multiSteps.latestReasoningHeading, "Step Two")
+        XCTAssertEqual(multiSteps.reasoningSummaryLabel, "Thinking (2 steps) · Step Two")
+
+        let noHeading = TranscriptTurn(
+            id: "t3",
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: nil,
+            kind: "foreground",
+            userContent: "hi",
+            assistantMessages: [],
+            tools: [],
+            isAborted: false,
+            reasoningSteps: ["***"]
+        )
+        XCTAssertNil(noHeading.latestReasoningHeading)
+        XCTAssertEqual(noHeading.reasoningSummaryLabel, "Thinking")
+    }
+
+    func testTranscriptTurnReasoningStepsCodableRoundTripAndLegacyDecode() throws {
+        let legacyJSON = Data("""
+        {"id":"t1","startedAt":"1970-01-01T00:01:40Z","endedAt":null,"kind":"foreground",\
+        "userContent":"hi","assistantMessages":[],"tools":[],"isAborted":false}
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decodedLegacy = try decoder.decode(TranscriptTurn.self, from: legacyJSON)
+        XCTAssertNil(decodedLegacy.reasoningSteps)
+        XCTAssertTrue(decodedLegacy.nonEmptyReasoningSteps.isEmpty)
+
+        let withReasoning = TranscriptTurn(
+            id: "t2",
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: Date(timeIntervalSince1970: 120),
+            kind: "foreground",
+            userContent: "hi",
+            assistantMessages: [],
+            tools: [],
+            isAborted: false,
+            reasoningSteps: ["**Checking Protocol**\n\nDetails", "**Updating View**\n\nMore"]
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encoded = try encoder.encode(withReasoning)
+        let roundTripped = try decoder.decode(TranscriptTurn.self, from: encoded)
+        XCTAssertEqual(
+            roundTripped.reasoningSteps,
+            ["**Checking Protocol**\n\nDetails", "**Updating View**\n\nMore"]
+        )
+    }
+
+    func testTranscriptImageAssociationPreservesReasoningSteps() {
+        let turn = TranscriptTurn(
+            id: "t1",
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: Date(timeIntervalSince1970: 200),
+            kind: "foreground",
+            userContent: "hi",
+            assistantMessages: [],
+            tools: [],
+            isAborted: false,
+            reasoningSteps: ["**Inspecting Image Association**\n\nPreserve reasoningSteps."]
+        )
+        let snapshot = makeSnapshot([turn])
+        let resultWithImage = TranscriptImageAssociation.attach(
+            images: [img(5, 42, at: 150)],
+            to: snapshot
+        )
+        XCTAssertEqual(
+            resultWithImage.turns.first?.reasoningSteps,
+            ["**Inspecting Image Association**\n\nPreserve reasoningSteps."]
+        )
+        XCTAssertEqual(resultWithImage.turns.first?.images?.map(\.imageId), [5])
+    }
+
     // MARK: - Remote Kitty APC capture (byte-level parser, bounded + fail-closed)
 
     @MainActor

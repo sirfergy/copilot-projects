@@ -90,7 +90,8 @@ enum TranscriptImageAssociation {
                 tools: turn.tools,
                 isAborted: turn.isAborted,
                 images: refs,
-                error: turn.error
+                error: turn.error,
+                reasoningSteps: turn.reasoningSteps
             )
             if entry.isDropped {
                 droppedTurns.append(rebuilt)

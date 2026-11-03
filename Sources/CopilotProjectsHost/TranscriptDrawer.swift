@@ -530,6 +530,14 @@ private struct TranscriptTurnCard: View {
                     )
             }
 
+            if !turn.nonEmptyReasoningSteps.isEmpty {
+                TranscriptReasoningView(
+                    steps: turn.nonEmptyReasoningSteps,
+                    summaryLabel: turn.reasoningSummaryLabel,
+                    latestHeading: turn.latestReasoningHeading
+                )
+            }
+
             ForEach(turn.timelineItems(includingBlankAssistantMessages: true)) { item in
                 switch item {
                 case .assistant(let message):
@@ -565,6 +573,73 @@ private struct TranscriptTurnCard: View {
         }
         .padding(.vertical, 12)
         .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func transcriptText(_ text: String) -> some View {
+        MarkdownText(text: text)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct TranscriptReasoningView: View {
+    let steps: [String]
+    let summaryLabel: String
+    let latestHeading: String?
+    @State private var isExpanded = false
+
+    private var titleLabel: String {
+        steps.count > 1 ? "Thinking (\(steps.count) steps)" : "Thinking"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                isExpanded.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Image(systemName: "brain")
+                        .font(.caption)
+                    Text(titleLabel)
+                        .font(.caption.weight(.medium))
+                        .layoutPriority(1)
+                    if let latestHeading, !latestHeading.isEmpty {
+                        Text("· \(latestHeading)")
+                            .font(.caption)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(StudioStyle.secondaryText)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(summaryLabel)
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            .accessibilityIdentifier("transcript-thinking-toggle")
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                        if index > 0 {
+                            Divider()
+                        }
+                        transcriptText(step)
+                            .font(.callout)
+                            .foregroundStyle(StudioStyle.secondaryText)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(StudioStyle.raised)
+                )
+            }
+        }
     }
 
     private func transcriptText(_ text: String) -> some View {

@@ -395,6 +395,7 @@ if (validSessionId && socketPath) {
     const transcriptEventIds = new Set();
     const queuedTranscriptEvents = [];
     let pendingTranscriptTurn = null;
+    let pendingReasoningSteps = [];
     let startingPrompt = null;
     let pullRequestKeys = [];
     const PULL_REQUEST_KEYS_POLICY_TOKEN = "policy:strict-v1";
@@ -489,6 +490,7 @@ if (validSessionId && socketPath) {
     const RESUME_TRANSCRIPT_TURN_PREFIX = "session-resume-";
     const MAX_TRANSCRIPT_TEXT = 50_000;
     const MAX_TRANSCRIPT_METADATA_TEXT = 512;
+    const MAX_TRANSCRIPT_REASONING_STEPS = 100;
     const MAX_TRANSCRIPT_ASSISTANT_MESSAGES = 250;
     const MAX_TRANSCRIPT_TOOLS = 400;
     const MAX_TRANSCRIPT_EVENT_IDS = 50_000;
@@ -3529,6 +3531,7 @@ if (validSessionId && socketPath) {
         if (!turn) return null;
         if (!turn.userContent
                 && turn.assistantMessages.length === 0
+                && !(turn.reasoningSteps?.length > 0)
                 && turn.tools.length === 0
                 && !turn.error) return null;
         const assistantMessages = turn.assistantMessages.slice();
@@ -3548,6 +3551,7 @@ if (validSessionId && socketPath) {
             assistantMessages,
             tools: turn.tools,
             isAborted: false,
+            ...(turn.reasoningSteps?.length > 0 ? { reasoningSteps: turn.reasoningSteps.slice() } : {}),
             ...(turn.error ? { error: turn.error } : {}),
         };
     }
@@ -3633,27 +3637,35 @@ if (validSessionId && socketPath) {
         }
 
         const encodedBytes = (value) => Buffer.byteLength(encodedTranscriptItem(value));
-        // Measures one turn: the shell it encodes to with both payload
+        // Measures one turn: the shell it encodes to with all payload
         // arrays empty, plus every member's own encoded size. A turn from a
         // restored snapshot whose payload is not an array is measured
         // verbatim inside the shell and simply has nothing to shed.
         const measure = (turn) => {
+            const reasoning = Array.isArray(turn.reasoningSteps)
+                ? turn.reasoningSteps
+                : null;
             const messages = Array.isArray(turn.assistantMessages)
                 ? turn.assistantMessages
                 : null;
             const tools = Array.isArray(turn.tools) ? turn.tools : null;
             const shell = { ...turn };
+            if (reasoning) shell.reasoningSteps = [];
             if (messages) shell.assistantMessages = [];
             if (tools) shell.tools = [];
+            const reasoningBytes = reasoning ? reasoning.map(encodedBytes) : [];
             const messageBytes = messages ? messages.map(encodedBytes) : [];
             const toolBytes = tools ? tools.map(encodedBytes) : [];
             return {
                 turn,
+                reasoning,
                 messages,
                 tools,
+                reasoningBytes,
                 messageBytes,
                 toolBytes,
                 bytes: Buffer.byteLength(JSON.stringify(shell))
+                    + sum(reasoningBytes) + separators(reasoningBytes.length)
                     + sum(messageBytes) + separators(messageBytes.length)
                     + sum(toolBytes) + separators(toolBytes.length),
             };
@@ -3684,6 +3696,7 @@ if (validSessionId && socketPath) {
             for (const entry of entries) {
                 if (!predicate(entry.turn)) continue;
                 for (const [sizes, items] of [
+                    [entry.reasoningBytes, entry.reasoning],
                     [entry.messageBytes, entry.messages],
                     [entry.toolBytes, entry.tools],
                 ]) {
@@ -3924,6 +3937,7 @@ if (validSessionId && socketPath) {
     // (a recurring prompt), or "automated" (assistant activity with no
     // preceding visible message).
     function startTranscriptTurn(event, kind) {
+        pendingReasoningSteps = [];
         pendingTranscriptTurn = {
             id: boundedMetadataText(event.id),
             startedAt: normalizedTimestamp(event.timestamp),
@@ -4084,6 +4098,27 @@ if (validSessionId && socketPath) {
         startTranscriptTurn(event, "automated");
     }
 
+    function appendTranscriptReasoningStep(event, value) {
+        if (typeof value !== "string" || value.trim().length === 0) return;
+        ensureSyntheticTranscriptTurn(event);
+        const text = boundedText(value.trim());
+        const id = boundedMetadataText(event.data?.messageId || event.id);
+        const existing = id.length > 0
+            ? pendingReasoningSteps.find((step) => step.id === id)
+            : undefined;
+        if (existing) {
+            existing.text = text;
+        } else {
+            if (pendingReasoningSteps.length >= MAX_TRANSCRIPT_REASONING_STEPS) {
+                pendingReasoningSteps.shift();
+            }
+            pendingReasoningSteps.push({ id, text });
+        }
+        pendingTranscriptTurn.reasoningSteps = pendingReasoningSteps.map(
+            (step) => step.text
+        );
+    }
+
     function appendTranscriptAssistantMessage(event, value) {
         if (typeof value !== "string" || value.trim().length === 0) return;
         ensureSyntheticTranscriptTurn(event);
@@ -4107,6 +4142,7 @@ if (validSessionId && socketPath) {
 
     function resetPendingTranscriptTurn() {
         pendingTranscriptTurn = null;
+        pendingReasoningSteps = [];
         synthesizedTaskCompletionContent = null;
     }
 
@@ -4122,6 +4158,7 @@ if (validSessionId && socketPath) {
         turn.endedAt = end;
         if (!turn.userContent
                 && turn.assistantMessages.length === 0
+                && !(turn.reasoningSteps?.length > 0)
                 && turn.tools.length === 0
                 && !turn.error) return;
         transcriptTurns.push(turn);
@@ -4311,6 +4348,7 @@ if (validSessionId && socketPath) {
         // never marked failed.
         const unanswered = pendingTranscriptTurn !== null
             && pendingTranscriptTurn.assistantMessages.length === 0
+            && !(pendingTranscriptTurn.reasoningSteps?.length > 0)
             && pendingTranscriptTurn.tools.length === 0;
         const inRequest = !transcriptPromptPhase
             && (liveTranscriptErrorScopes.get(event.id)
@@ -4405,6 +4443,12 @@ if (validSessionId && socketPath) {
             clearRecoveredTranscriptError();
             break;
         case "assistant.message":
+            if (typeof event.data.reasoningText === "string"
+                    && event.data.reasoningText.trim().length > 0) {
+                clearRecoveredTranscriptError();
+                appendTranscriptReasoningStep(event, event.data.reasoningText);
+                if (live) schedulePublishTranscript();
+            }
             if (event.data.content) {
                 const content = boundedText(event.data.content);
                 if (content.trim().length > 0) clearRecoveredTranscriptError();
