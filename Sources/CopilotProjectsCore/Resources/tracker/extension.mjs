@@ -4348,7 +4348,6 @@ if (validSessionId && socketPath) {
         // never marked failed.
         const unanswered = pendingTranscriptTurn !== null
             && pendingTranscriptTurn.assistantMessages.length === 0
-            && !(pendingTranscriptTurn.reasoningSteps?.length > 0)
             && pendingTranscriptTurn.tools.length === 0;
         const inRequest = !transcriptPromptPhase
             && (liveTranscriptErrorScopes.get(event.id)

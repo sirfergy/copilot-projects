@@ -10601,6 +10601,134 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(resultWithImage.turns.first?.images?.map(\.imageId), [5])
     }
 
+    func testCopilotExtensionReplayAttributesExecutionErrorToReasoningOnlyUnansweredTurn() throws {
+        try requireNodeForJavaScriptTests()
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/copilot-extension-reasoning-replay-\(UUID().uuidString)")
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let appSessionId = "12345678-1234-1234-1234-123456789abc"
+
+        let prelude = #"""
+        const fakeSession = {
+          sessionId: "11111111-1111-1111-1111-111111111111",
+          rpc: { schedule: { list: async () => ({entries:[]}) } },
+          on() {},
+          async getEvents() {
+            return [
+              {
+                id: "u1",
+                type: "user.message",
+                timestamp: "2026-07-12T03:00:00.000Z",
+                data: { content: "run build" }
+              },
+              {
+                id: "ts1",
+                type: "assistant.turn_start",
+                timestamp: "2026-07-12T03:00:01.000Z",
+                data: {}
+              },
+              {
+                id: "am1",
+                type: "assistant.message",
+                timestamp: "2026-07-12T03:00:02.000Z",
+                data: {
+                  messageId: "m1",
+                  content: "",
+                  reasoningText: "**Checking Build Setup**\n\nInspecting build scripts."
+                }
+              },
+              {
+                id: "te1",
+                type: "assistant.turn_end",
+                timestamp: "2026-07-12T03:00:03.000Z",
+                data: {}
+              },
+              {
+                id: "err1",
+                type: "session.error",
+                timestamp: "2026-07-12T03:00:04.000Z",
+                data: {
+                  errorType: "execution",
+                  message: "Execution failed before producing an answer"
+                }
+              },
+              {
+                id: "idle1",
+                type: "session.idle",
+                timestamp: "2026-07-12T03:00:05.000Z",
+                data: { aborted: false }
+              }
+            ];
+          }
+        };
+        const joinSession = async () => fakeSession;
+        """#
+        let extensionScript = CopilotExtension.script.replacingOccurrences(
+            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            with: prelude
+        )
+        let epilogue = #"""
+
+        const sealed = JSON.parse(readFileSync(
+          `${process.env.COPILOT_PROJECTS_ROOT}/sessions/`
+            + `${process.env.COPILOT_PROJECTS_SESSION}.transcript.json`,
+          "utf8"
+        ));
+        console.log(JSON.stringify({
+          turns: sealed.turns
+        }));
+        process.exit(0);
+        """#
+        let scriptURL = root.appendingPathComponent("reasoning-replay.mjs")
+        try (extensionScript + epilogue).write(
+            to: scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", scriptURL.path]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "HOME": root.path,
+            "COPILOT_PROJECTS_SESSION": appSessionId,
+            "COPILOT_PROJECTS_SOCKET": root.appendingPathComponent("app.sock").path,
+            "COPILOT_PROJECTS_ROOT": root.path,
+        ]) { _, new in new }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: errorOutput, encoding: .utf8) ?? "node harness failed"
+        )
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: output) as? [String: Any]
+        )
+        let turns = try XCTUnwrap(payload["turns"] as? [[String: Any]])
+        XCTAssertEqual(turns.count, 1)
+        XCTAssertEqual(turns[0]["id"] as? String, "u1")
+        XCTAssertEqual(
+            turns[0]["reasoningSteps"] as? [String],
+            ["**Checking Build Setup**\n\nInspecting build scripts."]
+        )
+        let turnError = try XCTUnwrap(turns[0]["error"] as? [String: Any])
+        XCTAssertEqual(turnError["errorType"] as? String, "execution")
+        XCTAssertEqual(
+            turnError["message"] as? String,
+            "Execution failed before producing an answer"
+        )
+    }
+
     // MARK: - Remote Kitty APC capture (byte-level parser, bounded + fail-closed)
 
     @MainActor
