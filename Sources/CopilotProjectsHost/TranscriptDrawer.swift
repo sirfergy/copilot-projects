@@ -91,6 +91,79 @@ struct TranscriptOverlay: View {
     }
 }
 
+private struct TranscriptUsageButton: View {
+    let workflow: RemoteSessionWorkflow
+    let receipts: [RemoteOperationReceipt]
+    let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
+    @State private var showsPopover = false
+    @State private var workflowState = SessionWorkflowState()
+
+    var body: some View {
+        let hasBudgetRequest = workflow.budgetRequest != nil
+        let summary = TranscriptDrawer.usageSummary(for: workflow)
+        let accessibilityText = TranscriptDrawer.usageAccessibilityLabel(for: workflow)
+        Button {
+            showsPopover.toggle()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: hasBudgetRequest ? "exclamationmark.circle" : "gauge.with.dots.needle.50percent")
+                    .foregroundStyle(hasBudgetRequest ? Color.orange : StudioStyle.secondaryText)
+                    .fixedSize()
+                Text(summary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundStyle(hasBudgetRequest ? Color.primary : StudioStyle.secondaryText)
+            }
+            .font(.caption.weight(hasBudgetRequest ? .semibold : .medium))
+            .monospacedDigit()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(StudioStyle.raised)
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .fill(hasBudgetRequest ? Color.orange.opacity(0.16) : Color.clear)
+                    )
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(
+                        hasBudgetRequest ? Color.orange.opacity(0.65) : Color.primary.opacity(0.14),
+                        lineWidth: hasBudgetRequest ? 1 : 0.5
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .help(accessibilityText)
+        .accessibilityLabel(accessibilityText)
+        .accessibilityIdentifier("session-usage-button")
+        .onChange(of: workflow.budgetRequest?.requestId) { _, _ in
+            workflowState.resetBudgetAnswer()
+        }
+        .onChange(of: receipts) { _, values in
+            workflowState.reconcile(receipts: values)
+        }
+        .background(
+            Color.clear.popover(isPresented: $showsPopover, arrowEdge: .bottom) {
+                ScrollView {
+                    SessionWorkflowContentView(
+                        workflow: workflow,
+                        canWrite: true,
+                        receipts: receipts,
+                        state: $workflowState,
+                        onAction: onAction
+                    )
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(width: 380)
+                .frame(maxHeight: 440)
+            }
+        )
+    }
+}
+
 private struct ImageAssociatedTranscriptDrawer: View {
     @ObservedObject var capture: RemoteKittyImageCapture
     let snapshot: TranscriptSnapshot?
@@ -153,6 +226,38 @@ struct TranscriptDrawer: View {
 
     static func usesFullTerminalArea(storedValue: Bool?) -> Bool {
         storedValue ?? false
+    }
+
+    static func usageSummary(for workflow: RemoteSessionWorkflow, now: Date = Date()) -> String {
+        if workflow.budgetRequest != nil {
+            return "Budget decision needed"
+        }
+        var parts: [String] = []
+        if let credits = workflow.totalAiCredits, credits.isFinite, credits >= 0 {
+            parts.append("\(credits.formatted(.number.precision(.fractionLength(0...3)))) AI credits")
+        }
+        if !workflow.agents.isEmpty {
+            parts.append("\(workflow.agents.count) active \(workflow.agents.count == 1 ? "agent" : "agents")")
+        }
+        if !workflow.schedules.isEmpty {
+            parts.append("\(workflow.schedules.count) \(workflow.schedules.count == 1 ? "schedule" : "schedules")")
+        }
+        if !workflow.isFresh(at: now) {
+            parts.append("Stale")
+        } else if workflow.error != nil, parts.isEmpty {
+            parts.append("Error")
+        }
+        return parts.isEmpty ? "Usage" : parts.joined(separator: " · ")
+    }
+
+    static func usageAccessibilityLabel(for workflow: RemoteSessionWorkflow, now: Date = Date()) -> String {
+        let summary = usageSummary(for: workflow, now: now)
+        if let request = workflow.budgetRequest {
+            return "Budget decision needed: \(request.usedAiCredits.formatted()) of \(request.maxAiCredits.formatted()) AI credits. Usage and background work"
+        }
+        return summary == "Usage"
+            ? "Usage and background work"
+            : "Usage and background work: \(summary)"
     }
 
     private var displayedTurns: [TranscriptTurn] {
@@ -227,17 +332,30 @@ struct TranscriptDrawer: View {
     }
 
     var body: some View {
+        let currentWorkflow = workflowProvider?() ?? workflow
+        let currentOperation = operationProvider?() ?? operation
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Label("Session details", systemImage: "text.bubble")
                     .font(.headline)
-                Spacer()
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                if let currentWorkflow {
+                    TranscriptUsageButton(
+                        workflow: currentWorkflow,
+                        receipts: currentOperation.receipts ?? [],
+                        onAction: onAction
+                    )
+                    .id(currentOperation.conversationEpoch)
+                }
+                Spacer(minLength: 4)
                 Button {
                     isFullWidth.toggle()
                 } label: {
                     Image(systemName: isFullWidth ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                 }
                 .buttonStyle(.borderless)
+                .fixedSize()
                 .help(isFullWidth ? "Restore side drawer" : "Expand to full terminal area")
                 .accessibilityLabel(isFullWidth ? "Restore side drawer" : "Expand to full terminal area")
                 .accessibilityIdentifier("toggle-transcript-full-width")
@@ -245,6 +363,7 @@ struct TranscriptDrawer: View {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.borderless)
+                .fixedSize()
                 .help("Hide session details")
                 .accessibilityLabel("Hide session details")
                 .accessibilityIdentifier("hide-session-details")
@@ -253,15 +372,6 @@ struct TranscriptDrawer: View {
             .frame(height: 44)
 
             Divider()
-            if let workflow {
-                SessionWorkflowView(
-                    workflow: workflow, canWrite: true,
-                    receipts: operation.receipts ?? [], onAction: onAction
-                )
-                    .id(operation.conversationEpoch)
-                    .padding(12)
-                Divider()
-            }
 
             ScrollViewReader { proxy in
                 ScrollView {

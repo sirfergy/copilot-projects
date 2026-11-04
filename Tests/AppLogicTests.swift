@@ -15831,6 +15831,283 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(composer.canSend(workflow: workflow, operation: operation, now: now))
         XCTAssertTrue(makeView().isDeliveryModeDisabled)
     }
+
+    func testTranscriptDrawerUsageSummaryAndAccessibilityLabel() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let fresh = Int64(now.timeIntervalSince1970 * 1_000)
+        let stale = fresh - 60_000
+        let credits = Double(12.5).formatted(.number.precision(.fractionLength(0...3)))
+
+        let plural = RemoteSessionWorkflow(
+            observedAtMilliseconds: stale, capabilities: [], sendReady: true, totalAiCredits: 12.5,
+            agents: [RemoteWorkflowAgent(id: "a1", name: "One"), RemoteWorkflowAgent(id: "a2", name: "Two")],
+            schedules: ["s1", "s2"]
+        )
+        XCTAssertEqual(
+            TranscriptDrawer.usageSummary(for: plural, now: now),
+            "\(credits) AI credits · 2 active agents · 2 schedules · Stale"
+        )
+        XCTAssertEqual(
+            TranscriptDrawer.usageAccessibilityLabel(for: plural, now: now),
+            "Usage and background work: \(credits) AI credits · 2 active agents · 2 schedules · Stale"
+        )
+
+        let fallback = RemoteSessionWorkflow(
+            observedAtMilliseconds: fresh, capabilities: [], sendReady: true, totalAiCredits: -1
+        )
+        XCTAssertEqual(TranscriptDrawer.usageSummary(for: fallback, now: now), "Usage")
+        XCTAssertEqual(TranscriptDrawer.usageAccessibilityLabel(for: fallback, now: now), "Usage and background work")
+
+        let budget = RemoteSessionWorkflow(
+            observedAtMilliseconds: stale, capabilities: [], sendReady: true, totalAiCredits: 32.5,
+            budgetRequest: RemoteBudgetRequest(requestId: "req-1", maxAiCredits: 30, usedAiCredits: 32.5)
+        )
+        XCTAssertEqual(TranscriptDrawer.usageSummary(for: budget, now: now), "Budget decision needed")
+        XCTAssertEqual(
+            TranscriptDrawer.usageAccessibilityLabel(for: budget, now: now),
+            "Budget decision needed: \(Double(32.5).formatted()) of \(Double(30).formatted()) AI credits. Usage and background work"
+        )
+    }
+
+    @MainActor
+    private func findEditableTextFields(in root: NSView) -> [NSTextField] {
+        var result: [NSTextField] = []
+        if let textField = root as? NSTextField, textField.isEditable {
+            result.append(textField)
+        }
+        for subview in root.subviews {
+            result.append(contentsOf: findEditableTextFields(in: subview))
+        }
+        return result
+    }
+
+    @MainActor
+    private func sendClick(in window: NSWindow, point: NSPoint) throws {
+        let timestamp = ProcessInfo.processInfo.systemUptime
+        for (type, delta): (NSEvent.EventType, TimeInterval) in [(.leftMouseDown, 0), (.leftMouseUp, 0.01)] {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(
+                with: type,
+                location: point,
+                modifierFlags: [],
+                timestamp: timestamp + delta,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 1,
+                pressure: type == .leftMouseDown ? 1 : 0
+            ))
+            window.sendEvent(event)
+        }
+    }
+
+    @MainActor
+    private func toggleUsagePopover(_ window: NSWindow, host: NSView) throws {
+        let local = NSPoint(x: 185, y: host.isFlipped ? 22 : host.bounds.height - 22)
+        try sendClick(in: window, point: host.convert(local, to: nil))
+        for _ in 0..<8 {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+            host.layoutSubtreeIfNeeded()
+        }
+    }
+
+    @MainActor
+    func testTranscriptDrawerUsagePopoverSurvivesRefreshAndBudgetTransition() throws {
+        _ = NSApplication.shared
+        var activeWorkflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+            capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+            sendReady: true,
+            totalAiCredits: 12.5,
+            limitsKnown: true,
+            maxAiCredits: 40,
+            agents: [RemoteWorkflowAgent(id: "a1", name: "Reviewer")],
+            schedules: ["every 10m"]
+        )
+        let operation = AgentOperationProjection(conversationEpoch: "epoch-1", support: .receipts, receipts: [])
+        func makeDrawer() -> TranscriptDrawer {
+            TranscriptDrawer(
+                turns: [], imageCapture: nil, workflow: activeWorkflow, operation: operation,
+                workflowProvider: { activeWorkflow }, operationProvider: { operation },
+                promptComposer: nil, onClose: {},
+                onAction: { _ in RemoteWorkflowActionResult(state: .applied) },
+                onPreview: { _ in }
+            )
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: -4000, y: -4000, width: 420, height: 480),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: makeDrawer())
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer { window.close() }
+        for _ in 0..<6 {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+            host.layoutSubtreeIfNeeded()
+        }
+        XCTAssertTrue(findEditableTextFields(in: host).isEmpty)
+
+        try toggleUsagePopover(window, host: host)
+        let popover = try XCTUnwrap(window.childWindows?.first)
+        let content = try XCTUnwrap(popover.contentView)
+        let limitField = try XCTUnwrap(findEditableTextFields(in: content).first)
+        XCTAssertEqual(limitField.placeholderString, "Soft limit (minimum 30)")
+        limitField.stringValue = "55"
+        NotificationCenter.default.post(name: NSControl.textDidChangeNotification, object: limitField)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        // Live workflow refresh keeps popover open and retains typed limit.
+        activeWorkflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+            capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+            sendReady: true, totalAiCredits: 15.0, limitsKnown: true, maxAiCredits: 40
+        )
+        host.rootView = makeDrawer()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        XCTAssertTrue(window.childWindows?.contains(popover) == true)
+        XCTAssertEqual(try XCTUnwrap(findEditableTextFields(in: content).first).stringValue, "55")
+
+        // Budget-pending state switches to Additional AI credits, survives refresh, and resets when requestId changes while closed.
+        activeWorkflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+            capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+            sendReady: true, totalAiCredits: 32.5, limitsKnown: true, maxAiCredits: 30,
+            budgetRequest: RemoteBudgetRequest(requestId: "req-1", maxAiCredits: 30, usedAiCredits: 32.5)
+        )
+        host.rootView = makeDrawer()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        let additionalField = try XCTUnwrap(findEditableTextFields(in: content).first)
+        XCTAssertEqual(additionalField.placeholderString, "Additional AI credits")
+        additionalField.stringValue = "15"
+        NotificationCenter.default.post(name: NSControl.textDidChangeNotification, object: additionalField)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        try toggleUsagePopover(window, host: host)
+        XCTAssertTrue(window.childWindows?.isEmpty ?? true)
+        activeWorkflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+            capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+            sendReady: true, totalAiCredits: 32.5, limitsKnown: true, maxAiCredits: 30,
+            budgetRequest: RemoteBudgetRequest(requestId: "req-2", maxAiCredits: 30, usedAiCredits: 32.5)
+        )
+        host.rootView = makeDrawer()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        try toggleUsagePopover(window, host: host)
+        let reopenedContent = try XCTUnwrap(window.childWindows?.first?.contentView)
+        XCTAssertEqual(try XCTUnwrap(findEditableTextFields(in: reopenedContent).first).stringValue, "")
+    }
+
+    @MainActor
+    func testTranscriptDrawerUsagePopoverReconcilesReceiptsAndEpochWhileClosed() throws {
+        _ = NSApplication.shared
+        var recordedActions: [RemoteSessionAction] = []
+        var nextResult = RemoteWorkflowActionResult(state: .indeterminate, operationId: "op-budget-stop")
+        var activeOperation = AgentOperationProjection(conversationEpoch: "epoch-1", support: .receipts, receipts: [])
+        func budgetWorkflow() -> RemoteSessionWorkflow {
+            RemoteSessionWorkflow(
+                observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+                capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+                sendReady: true, totalAiCredits: 32.5, limitsKnown: true, maxAiCredits: 30,
+                budgetRequest: RemoteBudgetRequest(requestId: "req-budget-1", maxAiCredits: 30, usedAiCredits: 32.5)
+            )
+        }
+        func makeDrawer() -> TranscriptDrawer {
+            let wf = budgetWorkflow()
+            return TranscriptDrawer(
+                turns: [], imageCapture: nil, workflow: wf, operation: activeOperation,
+                workflowProvider: { wf }, operationProvider: { activeOperation },
+                promptComposer: nil, onClose: {},
+                onAction: { action in
+                    recordedActions.append(action)
+                    return nextResult
+                },
+                onPreview: { _ in }
+            )
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: -4000, y: -4000, width: 420, height: 480),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: makeDrawer())
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer { window.close() }
+        for _ in 0..<6 {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+            host.layoutSubtreeIfNeeded()
+        }
+
+        func clickStopInOpenPopover() throws {
+            let popWin = try XCTUnwrap(window.childWindows?.first)
+            let popContent = try XCTUnwrap(popWin.contentView)
+            let field = try XCTUnwrap(findEditableTextFields(in: popContent).first)
+            let stopPoint = NSPoint(
+                x: popContent.bounds.maxX - 36,
+                y: field.convert(field.bounds, to: nil).midY
+            )
+            try sendClick(in: popWin, point: stopPoint)
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        }
+
+        try toggleUsagePopover(window, host: host)
+        try clickStopInOpenPopover()
+        XCTAssertEqual(recordedActions, [RemoteSessionAction(kind: .answerBudget, requestId: "req-budget-1")])
+
+        // Close and reopen while op-budget-stop is uncertain; Stop stays disabled.
+        try toggleUsagePopover(window, host: host)
+        XCTAssertTrue(window.childWindows?.isEmpty ?? true)
+        try toggleUsagePopover(window, host: host)
+        try clickStopInOpenPopover()
+        XCTAssertEqual(recordedActions.count, 1)
+
+        // Close popover, deliver receipt while closed, reopen, and verify Stop is re-enabled.
+        try toggleUsagePopover(window, host: host)
+        XCTAssertTrue(window.childWindows?.isEmpty ?? true)
+        activeOperation = AgentOperationProjection(
+            conversationEpoch: "epoch-1",
+            support: .receipts,
+            receipts: [
+                RemoteOperationReceipt(
+                    operationId: "op-budget-stop",
+                    conversationEpoch: "epoch-1",
+                    kind: RemoteSessionActionKind.answerBudget.rawValue,
+                    state: .applied,
+                    updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000)
+                ),
+            ]
+        )
+        nextResult = RemoteWorkflowActionResult(state: .applied)
+        host.rootView = makeDrawer()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        try toggleUsagePopover(window, host: host)
+        try clickStopInOpenPopover()
+        XCTAssertEqual(recordedActions.count, 2)
+
+        // Leave draft text and an uncertain action in epoch-1, then advance to epoch-2 and verify both reset.
+        let epoch1Content = try XCTUnwrap(window.childWindows?.first?.contentView)
+        let epoch1Field = try XCTUnwrap(findEditableTextFields(in: epoch1Content).first)
+        epoch1Field.stringValue = "25"
+        NotificationCenter.default.post(name: NSControl.textDidChangeNotification, object: epoch1Field)
+        nextResult = RemoteWorkflowActionResult(state: .indeterminate, operationId: "op-epoch-1-stale")
+        try clickStopInOpenPopover()
+        XCTAssertEqual(recordedActions.count, 3)
+
+        activeOperation = AgentOperationProjection(conversationEpoch: "epoch-2", support: .receipts, receipts: [])
+        nextResult = RemoteWorkflowActionResult(state: .applied)
+        host.rootView = makeDrawer()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        try toggleUsagePopover(window, host: host)
+        let epoch2Content = try XCTUnwrap(window.childWindows?.first?.contentView)
+        XCTAssertEqual(try XCTUnwrap(findEditableTextFields(in: epoch2Content).first).stringValue, "")
+        try clickStopInOpenPopover()
+        XCTAssertEqual(recordedActions.count, 4)
+    }
 }
 
 // MARK: - Remote Kitty test helpers
