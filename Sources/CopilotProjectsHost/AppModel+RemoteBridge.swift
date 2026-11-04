@@ -1643,19 +1643,17 @@ extension AppModel {
                     : "The answer could not be sent."
             )
         }
-        guard let operation, let epoch else {
-            return RemoteWorkflowActionResult(state: .applied)
-        }
         for _ in 0..<40 {
             do { try await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(500))) }
             catch { break }
             guard let fresh = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
                   !fresh.reportsTerminalDisconnect,
-                  fresh.conversationEpoch == epoch else { break }
-            if let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
-                $0.operationId == operation.operationId
-                    && $0.kind == CLISDKOperationKind.answerUserInput.rawValue
-            }), receipt.state.isTerminal {
+                  epoch == nil || fresh.conversationEpoch == epoch else { break }
+            if let operation,
+               let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
+                   $0.operationId == operation.operationId
+                       && $0.kind == CLISDKOperationKind.answerUserInput.rawValue
+               }), receipt.state.isTerminal {
                 return RemoteWorkflowActionResult(
                     state: receipt.state,
                     message: receipt.state == .applied ? nil : receipt.state == .rejected
@@ -1668,14 +1666,14 @@ extension AppModel {
                !tracked.contains(where: { $0.requestId == answer.requestId }) {
                 return RemoteWorkflowActionResult(
                     state: .applied,
-                    operationId: operation.operationId
+                    operationId: operation?.operationId
                 )
             }
         }
         return RemoteWorkflowActionResult(
             state: .indeterminate,
             message: "Couldn't confirm the outcome. Inspect the terminal before trying again.",
-            operationId: operation.operationId
+            operationId: operation?.operationId
         )
     }
 
@@ -1707,19 +1705,17 @@ extension AppModel {
         if isSynthetic {
             return RemoteWorkflowActionResult(state: .applied)
         }
-        guard let operation, let epoch else {
-            return RemoteWorkflowActionResult(state: .applied)
-        }
         for _ in 0..<40 {
             do { try await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(500))) }
             catch { break }
             guard let fresh = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
                   !fresh.reportsTerminalDisconnect,
-                  fresh.conversationEpoch == epoch else { break }
-            if let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
-                $0.operationId == operation.operationId
-                    && $0.kind == CLISDKOperationKind.answerElicitation.rawValue
-            }), receipt.state.isTerminal {
+                  epoch == nil || fresh.conversationEpoch == epoch else { break }
+            if let operation,
+               let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
+                   $0.operationId == operation.operationId
+                       && $0.kind == CLISDKOperationKind.answerElicitation.rawValue
+               }), receipt.state.isTerminal {
                 return RemoteWorkflowActionResult(
                     state: receipt.state,
                     message: receipt.state == .applied ? nil : receipt.state == .rejected
@@ -1732,14 +1728,14 @@ extension AppModel {
                !tracked.contains(where: { $0.requestId == answer.requestId }) {
                 return RemoteWorkflowActionResult(
                     state: .applied,
-                    operationId: operation.operationId
+                    operationId: operation?.operationId
                 )
             }
         }
         return RemoteWorkflowActionResult(
             state: .indeterminate,
             message: "Couldn't confirm the outcome. Inspect the terminal before trying again.",
-            operationId: operation.operationId
+            operationId: operation?.operationId
         )
     }
 

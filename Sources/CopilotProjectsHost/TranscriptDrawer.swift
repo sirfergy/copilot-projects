@@ -179,7 +179,8 @@ struct TranscriptDrawer: View {
         for index in turn.assistantMessages.indices.reversed() {
             let text = turn.assistantMessages[index].content
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let count = remaining[text], count > 0 else { continue }
+            if text.isEmpty { continue }
+            guard let count = remaining[text], count > 0 else { break }
             remaining[text] = count - 1
             hidden.insert(index)
         }
@@ -1211,11 +1212,14 @@ struct DesktopElicitationForm: Equatable {
         if let itemType = items["type"] {
             guard case .string("string") = itemType else { return nil }
         }
-        if let alternatives = arrayEntries(items["anyOf"]) ?? arrayEntries(items["oneOf"]) {
+        if let alternatives = arrayEntries(items["oneOf"]) ?? arrayEntries(items["anyOf"]),
+           (items["oneOf"] == nil) != (items["anyOf"] == nil) {
             guard items["enum"] == nil else { return nil }
             return labeledChoices(alternatives)
         }
-        if case let .array(values)? = items["enum"] {
+        if case let .array(values)? = items["enum"],
+           items["oneOf"] == nil,
+           items["anyOf"] == nil {
             return bareChoices(values)
         }
         return nil
@@ -1227,7 +1231,7 @@ struct DesktopElicitationForm: Equatable {
         var seen = Set<String>()
         for entry in entries {
             guard case let .object(option) = entry,
-                  option.keys.allSatisfy({ $0 == "const" || $0 == "title" }),
+                  option.keys.allSatisfy({ $0 == "const" || $0 == "title" || $0 == "description" }),
                   case let .string(value)? = option["const"],
                   seen.insert(value).inserted else { return nil }
             let title: String
@@ -1752,9 +1756,12 @@ private struct DesktopElicitationCard: View {
                 Button("Decline") { submit(.decline) }
                     .buttonStyle(.bordered)
                     .disabled(isDisabled)
-                Spacer()
                 Button("Focus terminal", action: onFocusTerminal)
                     .buttonStyle(.bordered)
+                Spacer()
+                Button("Done") { submit(.accept) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isDisabled)
             }
         }
     }
