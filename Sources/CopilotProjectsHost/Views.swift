@@ -195,6 +195,8 @@ private struct WorkspaceHeading: View {
                     controller: transcript,
                     isOpen: model.isTranscriptDrawerOpen(sessionId: sessionId),
                     hasWorkflow: model.sessionWorkflow(sessionId: sessionId) != nil,
+                    hasPendingQuestions: !model.sessionPendingUserInputs(sessionId: sessionId).isEmpty
+                        || !model.sessionPendingElicitations(sessionId: sessionId).isEmpty,
                     onOpen: { model.openTranscriptDrawer(sessionId: sessionId) }
                 )
                 .id(sessionId)
@@ -1008,6 +1010,8 @@ struct DetailView: View {
                     onClose: { model.closeTranscriptDrawer(sessionId: sessionId) },
                     workflow: model.sessionWorkflow(sessionId: sessionId),
                     operation: operation,
+                    pendingUserInputs: model.sessionPendingUserInputs(sessionId: sessionId),
+                    pendingElicitations: model.sessionPendingElicitations(sessionId: sessionId),
                     workflowProvider: { model.sessionWorkflow(sessionId: sessionId) },
                     operationProvider: { model.sessionOperationProjection(sessionId: sessionId) },
                     promptComposer: composer,
@@ -1019,6 +1023,12 @@ struct DetailView: View {
                                 ? (composer.attachedEpoch ?? operation.conversationEpoch)
                                 : operation.conversationEpoch
                         )
+                    },
+                    onAnswerUserInput: { answer in
+                        await model.performLocalUserInputAnswer(sessionId: sessionId, answer: answer)
+                    },
+                    onAnswerElicitation: { answer in
+                        await model.performLocalElicitationAnswer(sessionId: sessionId, answer: answer)
                     },
                     onPreview: onPreview
                 )

@@ -14547,6 +14547,427 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(model.isParentSessionExpanded("parent-1"))
         XCTAssertNil(model.project("p1")?.sessions.first(where: { $0.id == child2Id.uuidString })?.parentSessionId)
     }
+
+    // MARK: - Desktop transcript interactive pending questions
+
+    func testTranscriptDrawerTurnsWithoutQuestionEchoesSuppressesLatestTurnEchoesAndPreservesReasoningSteps() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let earlierTurn = TranscriptTurn(
+            id: "turn-1",
+            startedAt: now,
+            endedAt: now.addingTimeInterval(5),
+            kind: "user",
+            userContent: "First turn",
+            assistantMessages: [
+                TranscriptAssistantMessage(
+                    id: "m-early",
+                    timestamp: now.addingTimeInterval(2),
+                    content: "Deploy to production?"
+                ),
+            ],
+            tools: [],
+            isAborted: false,
+            reasoningSteps: ["Step 1"]
+        )
+        let latestTurn = TranscriptTurn(
+            id: "turn-2",
+            startedAt: now.addingTimeInterval(10),
+            endedAt: nil,
+            kind: "user",
+            userContent: "Second turn",
+            assistantMessages: [
+                TranscriptAssistantMessage(
+                    id: "m-keep-earlier-duplicate",
+                    timestamp: now.addingTimeInterval(11),
+                    content: "Deploy to production?"
+                ),
+                TranscriptAssistantMessage(
+                    id: "m-keep-intro",
+                    timestamp: now.addingTimeInterval(12),
+                    content: "Checking deployment config."
+                ),
+                TranscriptAssistantMessage(
+                    id: "m-hide-ask-user",
+                    timestamp: now.addingTimeInterval(13),
+                    content: "  Deploy to production?\n"
+                ),
+                TranscriptAssistantMessage(
+                    id: "m-hide-elicitation",
+                    timestamp: now.addingTimeInterval(14),
+                    content: "Select target environment"
+                ),
+            ],
+            tools: [TranscriptTool(id: "t-1", name: "ask_user", title: "ask_user", success: nil)],
+            isAborted: false,
+            reasoningSteps: ["**Evaluating options**\nConsidering prod vs staging."]
+        )
+
+        let pendingUserInputs = [
+            RemoteUserInputRequest(
+                requestId: "req-1",
+                question: "Deploy to production?",
+                choices: ["Yes", "No"],
+                allowFreeform: true,
+                requestedAt: now.addingTimeInterval(13)
+            ),
+        ]
+        let pendingElicitations = [
+            RemoteElicitationRequest(
+                requestId: "elicit-1",
+                message: "Select target environment",
+                mode: "form",
+                schema: nil,
+                elicitationSource: nil,
+                requestedAt: now.addingTimeInterval(14)
+            ),
+        ]
+
+        let filtered = TranscriptDrawer.turnsWithoutQuestionEchoes(
+            [earlierTurn, latestTurn],
+            pendingUserInputs: pendingUserInputs,
+            pendingElicitations: pendingElicitations
+        )
+
+        XCTAssertEqual(filtered.count, 2)
+        // Earlier turn is untouched even when it has matching text.
+        XCTAssertEqual(filtered[0], earlierTurn)
+        // Latest turn hides only one trailing copy per pending question and preserves earlier messages + reasoningSteps.
+        XCTAssertEqual(
+            filtered[1].assistantMessages.map(\.id),
+            ["m-keep-earlier-duplicate", "m-keep-intro"]
+        )
+        XCTAssertEqual(
+            filtered[1].reasoningSteps,
+            ["**Evaluating options**\nConsidering prod vs staging."]
+        )
+        XCTAssertEqual(filtered[1].tools, latestTurn.tools)
+    }
+
+    func testDesktopElicitationFormParsesOrderedFieldsSeedsDefaultsAndValidatesAgainstHostSchema() throws {
+        let schema: RemoteJSONValue = .object([
+            "type": .string("object"),
+            "required": .array([
+                .string("environment"),
+                .string("strategy"),
+                .string("confirm"),
+                .string("retries"),
+                .string("note"),
+                .string("regions"),
+            ]),
+            DesktopElicitationForm.propertyOrderKey: .array([
+                .string("strategy"),
+                .string("environment"),
+                .string("confirm"),
+                .string("retries"),
+                .string("ratio"),
+                .string("note"),
+                .string("regions"),
+            ]),
+            "properties": .object([
+                "environment": .object([
+                    "type": .string("string"),
+                    "title": .string("Environment"),
+                    "enum": .array([.string("staging"), .string("prod")]),
+                    "default": .string("prod"),
+                ]),
+                "strategy": .object([
+                    "type": .string("string"),
+                    "title": .string("Strategy"),
+                    "oneOf": .array([
+                        .object(["const": .string("canary"), "title": .string("Canary rollout")]),
+                        .object(["const": .string("full"), "title": .string("Full rollout")]),
+                    ]),
+                ]),
+                "confirm": .object([
+                    "type": .string("boolean"),
+                    "title": .string("Confirm"),
+                    "default": .bool(true),
+                ]),
+                "retries": .object([
+                    "type": .string("integer"),
+                    "title": .string("Retries"),
+                    "default": .number(3),
+                ]),
+                "ratio": .object([
+                    "type": .string("number"),
+                    "title": .string("Ratio"),
+                ]),
+                "note": .object([
+                    "type": .string("string"),
+                    "title": .string("Note"),
+                    "minLength": .number(2),
+                    "maxLength": .number(20),
+                    "default": .string("ship it"),
+                ]),
+                "regions": .object([
+                    "type": .string("array"),
+                    "title": .string("Regions"),
+                    "minItems": .number(1),
+                    "maxItems": .number(2),
+                    "items": .object([
+                        "type": .string("string"),
+                        "oneOf": .array([
+                            .object(["const": .string("us-east"), "title": .string("US East")]),
+                            .object(["const": .string("eu-west"), "title": .string("EU West")]),
+                            .object(["const": .string("ap-south"), "title": .string("AP South")]),
+                        ]),
+                    ]),
+                ]),
+            ]),
+        ])
+
+        let form = try XCTUnwrap(
+            DesktopElicitationForm.parse(schema, allowFreeformChoices: true)
+        )
+        XCTAssertEqual(
+            form.fields.map(\.key),
+            ["strategy", "environment", "confirm", "retries", "ratio", "note", "regions"]
+        )
+
+        let initial = form.initialState()
+        XCTAssertEqual(initial.values["strategy"], .string("canary"))
+        XCTAssertEqual(initial.values["environment"], .string("prod"))
+        XCTAssertEqual(initial.values["confirm"], .bool(true))
+        XCTAssertEqual(initial.values["retries"], .number(3))
+        XCTAssertNil(initial.values["ratio"])
+        XCTAssertEqual(initial.values["note"], .string("ship it"))
+        XCTAssertEqual(initial.values["regions"], .array([]))
+
+        // Invalid while required `regions` has 0 items (< minItems 1).
+        XCTAssertNil(form.validatedContent(values: initial.values, touched: []))
+
+        var values = initial.values
+        var touched: Set<String> = ["regions", "ratio"]
+        let regionsField = try XCTUnwrap(form.fields.first { $0.key == "regions" })
+        guard case let .stringMultiSelect(regionChoices, _, maxItems) = regionsField.kind else {
+            return XCTFail("Expected stringMultiSelect for regions")
+        }
+        let firstToggle = try XCTUnwrap(
+            DesktopElicitationField.toggledSelection(
+                "eu-west",
+                in: [],
+                choices: regionChoices,
+                maxItems: maxItems
+            )
+        )
+        let secondToggle = try XCTUnwrap(
+            DesktopElicitationField.toggledSelection(
+                "us-east",
+                in: firstToggle,
+                choices: regionChoices,
+                maxItems: maxItems
+            )
+        )
+        // Stored in schema choice order and capped at maxItems = 2.
+        XCTAssertEqual(secondToggle, ["us-east", "eu-west"])
+        XCTAssertNil(
+            DesktopElicitationField.toggledSelection(
+                "ap-south",
+                in: secondToggle,
+                choices: regionChoices,
+                maxItems: maxItems
+            )
+        )
+        values["regions"] = .array(secondToggle.map(RemoteJSONValue.string))
+        values["ratio"] = DesktopElicitationNumberText.value(for: "0.75")
+
+        let payload = try XCTUnwrap(
+            form.validatedContent(values: values, touched: touched)
+        )
+        XCTAssertTrue(AppModel.isValidElicitationContent(payload))
+        XCTAssertTrue(
+            AppModel.elicitationContent(
+                payload,
+                satisfies: schema,
+                allowFreeformStringChoices: true
+            )
+        )
+
+        // Freeform custom choice on `strategy` when allowFreeformChoices is true.
+        var customFields: Set<String> = []
+        DesktopElicitationChoiceSelection.other.apply(
+            fieldKey: "strategy",
+            choices: form.fields[0].singleChoiceOptions,
+            allowsFreeform: true,
+            values: &values,
+            customChoiceFields: &customFields
+        )
+        touched.insert("strategy")
+        // Blank custom choice is rejected until text is entered.
+        XCTAssertNil(
+            form.validatedContent(
+                values: values,
+                touched: touched,
+                customChoiceFields: customFields
+            )
+        )
+        values["strategy"] = .string("blue-green")
+        let customPayload = try XCTUnwrap(
+            form.validatedContent(
+                values: values,
+                touched: touched,
+                customChoiceFields: customFields
+            )
+        )
+        XCTAssertTrue(
+            AppModel.elicitationContent(
+                customPayload,
+                satisfies: schema,
+                allowFreeformStringChoices: true
+            )
+        )
+        XCTAssertFalse(
+            AppModel.elicitationContent(
+                customPayload,
+                satisfies: schema,
+                allowFreeformStringChoices: false
+            )
+        )
+    }
+
+    @MainActor
+    func testPerformLocalUserInputAndElicitationAnswersWriteHandoffAndResolveWhenQuestionClearsOrReceiptArrives() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(id: "session-local-q", title: "target", cwd: "/tmp")
+        let project = Project(name: "target", cwd: "/tmp", sessions: [session])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+        let snapshotURL = directory.appendingPathComponent("\(session.id).agent-activity.json")
+        let userInputResponseURL = directory.appendingPathComponent("\(session.id).user-input-response.json")
+        let elicitationResponseURL = directory.appendingPathComponent("\(session.id).elicitation-response.json")
+        let markerURL = directory.appendingPathComponent("\(session.id).copilot-session")
+        try Data("copilot-session".utf8).write(to: markerURL)
+
+        let schema: RemoteJSONValue = .object([
+            "type": .string("object"),
+            "required": .array([.string("choice")]),
+            "properties": .object([
+                "choice": .object([
+                    "type": .string("string"),
+                    "enum": .array([.string("alpha"), .string("beta")]),
+                ]),
+            ]),
+        ])
+
+        func writeSnapshot(
+            userInputs: [TrackedUserInput]?,
+            elicitations: [TrackedElicitation]?,
+            receipts: [TrackedOperationReceipt]? = nil
+        ) throws {
+            let nowString = ISO8601DateFormatter().string(from: Date())
+            let snapshot = AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: nowString,
+                foregroundTurnActive: false,
+                scheduledTurnActive: false,
+                activeSubagents: [],
+                schedules: [],
+                idleGeneration: 0,
+                lastIdleAborted: false,
+                lastIdleTurnKind: nil,
+                error: nil,
+                trackedUserInputs: userInputs,
+                trackedElicitations: elicitations,
+                copilotSessionId: "copilot-session",
+                conversationEpoch: "epoch-local-1",
+                operationReceiptVersion: 1,
+                operationReceipts: receipts
+            )
+            try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
+        }
+
+        let initialUserInput = TrackedUserInput(
+            requestId: "req-u1",
+            question: "Proceed?",
+            choices: ["Yes", "No"],
+            allowFreeform: true,
+            requestedAt: ISO8601DateFormatter().string(from: Date()),
+            agentId: nil
+        )
+        let initialElicitation = TrackedElicitation(
+            requestId: "req-e1",
+            message: "Pick option",
+            mode: "form",
+            url: nil,
+            schema: schema,
+            elicitationSource: nil,
+            requestedAt: ISO8601DateFormatter().string(from: Date()),
+            agentId: nil
+        )
+        try writeSnapshot(userInputs: [initialUserInput], elicitations: [initialElicitation])
+
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: directory,
+            resumeMarkerDirectory: directory
+        )
+        model.refreshAgentActivitySnapshots()
+        XCTAssertEqual(model.sessionPendingUserInputs(sessionId: session.id).map(\.requestId), ["req-u1"])
+        XCTAssertEqual(model.sessionPendingElicitations(sessionId: session.id).map(\.requestId), ["req-e1"])
+
+        // 1. User input answer writes user-input-response.json and resolves to .applied once the question clears.
+        Task {
+            try? await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(120)))
+            if let data = try? Data(contentsOf: userInputResponseURL),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                XCTAssertEqual(obj["requestId"] as? String, "req-u1")
+                XCTAssertEqual(obj["answer"] as? String, "Yes")
+                try? FileManager.default.removeItem(at: userInputResponseURL)
+                try? writeSnapshot(userInputs: [], elicitations: [initialElicitation])
+            }
+        }
+        let userInputResult = await model.performLocalUserInputAnswer(
+            sessionId: session.id,
+            answer: RemoteUserInputAnswer(requestId: "req-u1", answer: "Yes", wasFreeform: false)
+        )
+        XCTAssertEqual(userInputResult.state, .applied)
+
+        // 2. Elicitation answer writes elicitation-response.json and resolves to .applied via terminal receipt.
+        Task {
+            try? await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(120)))
+            if let data = try? Data(contentsOf: elicitationResponseURL),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let opId = obj["operationId"] as? String {
+                XCTAssertEqual(obj["requestId"] as? String, "req-e1")
+                XCTAssertEqual(obj["action"] as? String, "accept")
+                try? FileManager.default.removeItem(at: elicitationResponseURL)
+                try? writeSnapshot(
+                    userInputs: [],
+                    elicitations: [initialElicitation],
+                    receipts: [
+                        TrackedOperationReceipt(
+                            operationId: opId,
+                            conversationEpoch: "epoch-local-1",
+                            kind: CLISDKOperationKind.answerElicitation.rawValue,
+                            state: .applied,
+                            updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+                            errorCode: nil,
+                            payloadFingerprint: nil
+                        ),
+                    ]
+                )
+            }
+        }
+        let elicitationResult = await model.performLocalElicitationAnswer(
+            sessionId: session.id,
+            answer: RemoteElicitationAnswer(
+                requestId: "req-e1",
+                action: .accept,
+                content: ["choice": .string("alpha")]
+            )
+        )
+        XCTAssertEqual(elicitationResult.state, .applied)
+    }
 }
 
 // MARK: - Remote Kitty test helpers
