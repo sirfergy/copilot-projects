@@ -15029,6 +15029,13 @@ final class AppLogicTests: XCTestCase {
             ]),
             .failure(.duplicateLabel("ship it"))
         )
+        XCTAssertEqual(
+            QuickReplyConfiguration.validateList([
+                QuickReplyItem(label: "Σ", prompt: "First"),
+                QuickReplyItem(label: "ς", prompt: "Second"),
+            ]),
+            .failure(.duplicateLabel("ς"))
+        )
 
         let twelveItems = (1...12).map {
             QuickReplyItem(label: "Item \($0)", prompt: "Prompt \($0)")

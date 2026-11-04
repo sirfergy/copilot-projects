@@ -339,7 +339,7 @@ struct QuickReplyItem: Codable, Equatable, Identifiable, Sendable {
     let label: String
     let prompt: String
 
-    var id: String { label.lowercased() }
+    var id: String { label.folding(options: .caseInsensitive, locale: nil) }
 
     enum CodingKeys: String, CodingKey {
         case label
@@ -435,8 +435,7 @@ enum QuickReplyConfiguration: Equatable, Sendable {
             case .failure(let error):
                 return .failure(error)
             case .success(let validItem):
-                let key = validItem.label.lowercased()
-                guard seenLabels.insert(key).inserted else {
+                guard seenLabels.insert(validItem.id).inserted else {
                     return .failure(.duplicateLabel(validItem.label))
                 }
                 normalized.append(validItem)
