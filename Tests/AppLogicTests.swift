@@ -9689,6 +9689,32 @@ final class AppLogicTests: XCTestCase {
             ) as? NSNumber,
             1
         )
+
+        let header500 = Array(repeating: "h", count: 500).joined(separator: " | ")
+        let delim500 = Array(repeating: "---", count: 500).joined(separator: " | ")
+        let row500 = Array(repeating: "v", count: 500).joined(separator: " | ")
+        let table500 = "\(header500)\n\(delim500)\n\(row500)"
+        let threePipeTables = "\(table500)\n\n\(table500)\n\n<details open>\n<summary>Third</summary>\n\n\(table500)\n</details>"
+        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(threePipeTables))
+        let pipeTablesHost = NSHostingView(
+            rootView: MarkdownText(text: threePipeTables)
+                .frame(width: 380, alignment: .leading)
+        )
+        pipeTablesHost.frame = NSRect(x: 0, y: 0, width: 380, height: 1_200)
+        pipeTablesHost.layoutSubtreeIfNeeded()
+        XCTAssertEqual(findTextViews(in: pipeTablesHost).filter { $0.headerDividerY() != nil }.count, 2)
+
+        let fiveDeepOpen = (1...5).map { "<details open>\n<summary>L\($0)</summary>" }.joined(separator: "\n")
+            + "\nInner **five**\n"
+            + Array(repeating: "</details>", count: 5).joined(separator: "\n")
+        let fiveDeepHost = NSHostingView(
+            rootView: MarkdownText(text: fiveDeepOpen)
+                .frame(width: 380, alignment: .leading)
+        )
+        fiveDeepHost.frame = NSRect(x: 0, y: 0, width: 380, height: 600)
+        fiveDeepHost.layoutSubtreeIfNeeded()
+        let fifthLevelView = try XCTUnwrap(findTextViews(in: fiveDeepHost).first { $0.attributedText.string.contains("L5\nInner **five**") })
+        XCTAssertNil(fifthLevelView.headerDividerY())
     }
 
     // MARK: - Remote web terminal image rendering

@@ -35,6 +35,7 @@ public struct MarkdownTable: Equatable, Sendable {
     public let header: [String]
     public let alignments: [MarkdownColumnAlignment]
     public let rows: [[String]]
+    fileprivate var pipeCount = 0
 
     public init(
         header: [String],
@@ -44,6 +45,11 @@ public struct MarkdownTable: Equatable, Sendable {
         self.header = header
         self.alignments = alignments
         self.rows = rows
+        self.pipeCount = (rows.count + 2) * max(header.count - 1, 0)
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.header == rhs.header && lhs.alignments == rhs.alignments && lhs.rows == rhs.rows
     }
 }
 
@@ -262,24 +268,30 @@ public enum MarkdownParser {
     )
 
     fileprivate struct RenderBudget: Equatable, Sendable {
+        var pipesRemaining = MarkdownParser.maximumRenderedPipes
         var inlineMarkersRemaining = MarkdownParser.maximumInlineMarkers
         var tableCellsRemaining = MarkdownParser.maximumDocumentTableCells
         var segmentsRemaining = MarkdownParser.maximumRenderedSegments
 
         mutating func consumeInline(_ text: String) -> Bool {
             let markers = MarkdownParser.inlineMarkerCount(in: text)
+            let pipes = MarkdownParser.pipeCount(in: text)
             guard markers <= MarkdownParser.maximumBlockInlineMarkers,
-                  markers <= inlineMarkersRemaining else {
+                  markers <= inlineMarkersRemaining,
+                  pipes <= MarkdownParser.maximumBlockPipes,
+                  pipes <= pipesRemaining else {
                 return false
             }
             inlineMarkersRemaining -= markers
+            pipesRemaining -= pipes
             return true
         }
 
         mutating func consumeTable(_ table: MarkdownTable) -> Bool {
             guard let cells = MarkdownParser.estimatedTableVisualCells(table),
                   cells <= MarkdownParser.maximumRenderedTableCells,
-                  cells <= tableCellsRemaining else {
+                  cells <= tableCellsRemaining,
+                  table.pipeCount <= pipesRemaining else {
                 return false
             }
             let markers = ([table.header] + table.rows).reduce(0) { total, row in
@@ -290,6 +302,7 @@ public enum MarkdownParser {
                 return false
             }
             tableCellsRemaining -= cells
+            pipesRemaining -= table.pipeCount
             inlineMarkersRemaining -= markers
             return true
         }
@@ -343,22 +356,6 @@ public enum MarkdownParser {
 
     public static func isWithinRenderingLimits(_ text: String) -> Bool {
         guard isWithinDocumentLimits(text) else { return false }
-        let normalized = normalizeLineEndings(text)
-        var pipes = 0
-        var linePipes = 0
-        var inlineMarkers = 0
-        for character in normalized {
-            if character == "\n" {
-                linePipes = 0
-            } else if character == "|" {
-                pipes += 1
-                linePipes += 1
-                if linePipes > maximumBlockPipes || pipes > maximumRenderedPipes { return false }
-            } else if isInlineMarker(character) {
-                inlineMarkers += 1
-                if inlineMarkers > maximumInlineMarkers { return false }
-            }
-        }
         var budget = RenderBudget()
         return isWithinBlockLimits(blocks(from: text), depth: 0, budget: &budget)
     }
@@ -642,14 +639,16 @@ public enum MarkdownParser {
                 let tableStart = index
                 let header = splitTableRow(trimmed)
                 var tableCells = header.count
+                var tablePipes = pipeCount(in: trimmed) + pipeCount(in: lines[index + 1])
                 index += 2
                 var rows: [[String]] = []
                 var withinCellCap = tableCells <= maximumRenderedTableCells
                 while index < lines.count {
                     let rowLine = lines[index].trimmingCharacters(in: .whitespaces)
+                    let rowPipes = pipeCount(in: rowLine)
                     guard !rowLine.isEmpty,
                           rowContainsUnescapedPipe(rowLine),
-                          pipeCount(in: rowLine) <= maximumBlockPipes else {
+                          rowPipes <= maximumBlockPipes else {
                         break
                     }
                     if !rowLine.hasPrefix("|") {
@@ -662,6 +661,7 @@ public enum MarkdownParser {
                     if withinCellCap {
                         let row = Array(splitTableRow(rowLine).prefix(header.count))
                         tableCells += row.count
+                        tablePipes += rowPipes
                         if tableCells <= maximumRenderedTableCells {
                             rows.append(row)
                         } else {
@@ -672,11 +672,9 @@ public enum MarkdownParser {
                     index += 1
                 }
                 if withinCellCap {
-                    blocks.append(.table(MarkdownTable(
-                        header: header,
-                        alignments: alignments,
-                        rows: rows
-                    )))
+                    var table = MarkdownTable(header: header, alignments: alignments, rows: rows)
+                    table.pipeCount = tablePipes
+                    blocks.append(.table(table))
                 } else {
                     blocks.append(.plainText(lines[tableStart..<index].joined(separator: "\n")))
                 }
@@ -1101,18 +1099,24 @@ public struct MarkdownText: View, Equatable {
                 }
             case let .details(details):
                 flushProse()
+                guard nestingDepth + 1 <= MarkdownParser.maximumDetailsNestingDepth else {
+                    appendSegment(.plain(plainBlockText(.details(details))))
+                    break
+                }
                 let summaryText = details.summary.isEmpty ? "Details" : details.summary
                 let parseSummaryInline = budget.consumeInline(summaryText)
                 budget.segmentsRemaining = max(0, budget.segmentsRemaining - 1)
                 let childBudget = budget
-                if nestingDepth + 1 <= MarkdownParser.maximumDetailsNestingDepth,
-                   !details.body.isEmpty,
-                   MarkdownParser.isWithinDocumentLimits(details.body) {
-                    _ = Self.segments(
-                        from: MarkdownParser.blocks(from: details.body),
-                        nestingDepth: nestingDepth + 1,
-                        budget: &budget
-                    )
+                if !details.body.isEmpty {
+                    if MarkdownParser.isWithinDocumentLimits(details.body) {
+                        _ = Self.segments(
+                            from: MarkdownParser.blocks(from: details.body),
+                            nestingDepth: nestingDepth + 1,
+                            budget: &budget
+                        )
+                    } else {
+                        budget.segmentsRemaining = max(0, budget.segmentsRemaining - 1)
+                    }
                 }
                 result.append(
                     .details(details, parseSummaryInline: parseSummaryInline, budget: childBudget)
@@ -1255,19 +1259,11 @@ private struct MarkdownDetailsView: View {
             .accessibilityHint(isExpanded ? "Double-tap to collapse" : "Double-tap to expand")
 
             if isExpanded, !details.body.isEmpty {
-                Group {
-                    if nestingDepth <= MarkdownParser.maximumDetailsNestingDepth {
-                        MarkdownText(
-                            text: details.body,
-                            nestingDepth: nestingDepth,
-                            budget: budget
-                        )
-                    } else {
-                        SelectableMarkdownText(wraps: true, segment: .plain(details.body))
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
+                MarkdownText(
+                    text: details.body,
+                    nestingDepth: nestingDepth,
+                    budget: budget
+                )
                 .padding(.leading, 10).padding(.vertical, 2)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .overlay(alignment: .leading) {
