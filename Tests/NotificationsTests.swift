@@ -1182,6 +1182,78 @@ final class NotificationsTests: XCTestCase {
         XCTAssertEqual(erred?.complete, false)
     }
 
+    func testPaginatesOlderReviewRequestEventsAndPendingReviewers() async {
+        URLProtocol.registerClass(GraphQLStub.self)
+        defer { URLProtocol.unregisterClass(GraphQLStub.self); GraphQLStub.respond = { _, _ in (500, "") } }
+        let fetcher = NotificationDetailsFetcher(graphQL: GitHubGraphQL(endpoint: GraphQLStub.endpoint))
+        let threads = [
+            thread("1", "review_requested", number: 1),
+            thread("2", "review_requested", number: 2),
+            thread("3", "review_requested", number: 3),
+        ]
+        let team = #"{"requestedReviewer":{"__typename":"Team","slug":"reviewers","organization":{"login":"octo"}}}"#
+        let owners = #"{"requestedReviewer":{"__typename":"Team","slug":"owners","organization":{"login":"octo"}}}"#
+        let direct = #"{"requestedReviewer":{"__typename":"User","login":"OctoCat"}}"#
+        let other = #"{"requestedReviewer":{"__typename":"User","login":"hubot"}}"#
+        let batchResponse = """
+        {"data":{"viewer":{"login":"octocat"},
+          "t0":{"issueOrPullRequest":{"state":"OPEN",
+            "timelineItems":{"pageInfo":{"hasPreviousPage":true,"startCursor":"hist-1"},"nodes":[\(team)]},
+            "pending":{"pageInfo":{"hasNextPage":true,"endCursor":"pend-1"},"nodes":[\(team)]}}},
+          "t1":{"issueOrPullRequest":{"state":"OPEN",
+            "timelineItems":{"pageInfo":{"hasPreviousPage":true,"startCursor":"hist-direct"},"nodes":[\(team)]},
+            "pending":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[\(direct)]}}},
+          "t2":{"issueOrPullRequest":{"state":"OPEN",
+            "timelineItems":{"pageInfo":{"hasPreviousPage":true,"startCursor":"hist-broken"},"nodes":[\(team)]},
+            "pending":{"pageInfo":{"hasNextPage":true,"endCursor":"pend-broken"},"nodes":[\(team)]}}}}}
+        """
+        GraphQLStub.respond = { _, body in
+            let query = body["query"] as? String ?? ""
+            let variables = body["variables"] as? [String: Any] ?? [:]
+            if query.contains("fragment Engaged") { return (200, batchResponse) }
+            if query.contains("before: $cursor") {
+                switch variables["cursor"] as? String {
+                case "hist-1":
+                    return (200, #"{"data":{"repository":{"pullRequest":{"timelineItems":{"pageInfo":{"hasPreviousPage":true,"startCursor":"hist-2"},"nodes":[\#(team)]}}}}}"#)
+                case "hist-2":
+                    return (200, #"{"data":{"repository":{"pullRequest":{"timelineItems":{"pageInfo":{"hasPreviousPage":false,"startCursor":"hist-0"},"nodes":[\#(owners)]}}}}}"#)
+                case "hist-direct":
+                    return (200, #"{"data":{"repository":{"pullRequest":{"timelineItems":{"pageInfo":{"hasPreviousPage":false,"startCursor":"hist-0"},"nodes":[\#(direct)]}}}}}"#)
+                default:
+                    return (500, "")
+                }
+            }
+            if query.contains("after: $cursor") {
+                switch variables["cursor"] as? String {
+                case "pend-1":
+                    return (200, #"{"data":{"repository":{"pullRequest":{"pending":{"pageInfo":{"hasNextPage":true,"endCursor":"pend-2"},"nodes":[\#(team)]}}}}}"#)
+                case "pend-2":
+                    return (200, #"{"data":{"repository":{"pullRequest":{"pending":{"pageInfo":{"hasNextPage":false,"endCursor":"pend-3"},"nodes":[\#(other)]}}}}}"#)
+                default:
+                    return (500, "")
+                }
+            }
+            return (500, "")
+        }
+        let result = await fetcher.details(for: threads, account: GitHubAccount(login: "octocat", token: "token"))
+        let d1 = result.details[threads[0].key]
+        XCTAssertEqual(d1?.requestHistoryComplete, true)
+        XCTAssertEqual(d1?.viewerRequested, false)
+        XCTAssertEqual(d1?.requestedTeams, ["octo/reviewers", "octo/owners"], "newest team request stays first after prepending older pages")
+        XCTAssertEqual(NotificationItem.lane(for: .reviewRequested, detail: d1), .teamReviewRequested)
+        XCTAssertEqual(d1?.pendingReviewers, ["octo/reviewers", "hubot"])
+
+        let d2 = result.details[threads[1].key]
+        XCTAssertEqual(d2?.requestHistoryComplete, true)
+        XCTAssertEqual(d2?.viewerRequested, true, "direct review request on an older page keeps the PR in To you")
+        XCTAssertEqual(NotificationItem.lane(for: .reviewRequested, detail: d2), .reviewRequested)
+
+        let d3 = result.details[threads[2].key]
+        XCTAssertEqual(d3?.requestHistoryComplete, false, "a failed older page leaves history incomplete")
+        XCTAssertNil(d3?.pendingReviewers, "a failed pending page leaves pending reviewers unknown")
+        XCTAssertTrue(result.erred.contains(threads[2].key))
+    }
+
     /// Details GitHub would answer, changeable between refreshes.
     final class DetailBox: @unchecked Sendable {
         private let lock = NSLock()
@@ -1429,6 +1501,9 @@ final class NotificationsTests: XCTestCase {
         XCTAssertNil(try pending(user, more: true), "more than were read")
         XCTAssertNil(try pending(#"{"requestedReviewer":{"__typename":"EnterpriseTeam"}}"#), "a team it can't name may be yours")
         XCTAssertNil(try pending(#"{"requestedReviewer":null}"#))
+        XCTAssertNil(try NotificationDetailsFetcher.pendingReviewers(
+            JSONDecoder().decode(NotificationDetailsFetcher.PendingRequests.self, from: Data(#"{"pageInfo":{"hasNextPage":false},"nodes":null}"#.utf8))
+        ))
         XCTAssertNil(NotificationDetailsFetcher.pendingReviewers(nil))
     }
 

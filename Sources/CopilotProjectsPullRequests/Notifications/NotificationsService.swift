@@ -299,7 +299,7 @@ struct NotificationDetailsFetcher: Sendable {
       ... on PullRequest {
         state isDraft headRefName createdAt body lastEditedAt author { login }
         timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 100) {
-          pageInfo { hasPreviousPage }
+          pageInfo { hasPreviousPage startCursor }
           nodes { ... on ReviewRequestedEvent { requestedReviewer {
             __typename ... on User { login } ... on Team { slug organization { login } }
           } } }
@@ -316,7 +316,7 @@ struct NotificationDetailsFetcher: Sendable {
           }
         }
         pending: reviewRequests(first: 100) {
-          pageInfo { hasNextPage }
+          pageInfo { hasNextPage endCursor }
           nodes { requestedReviewer {
             __typename ... on User { login } ... on Team { slug organization { login } }
           } }
@@ -349,9 +349,9 @@ struct NotificationDetailsFetcher: Sendable {
     }
     struct Event: Decodable { let requestedReviewer: Reviewer? }
     struct Timeline: Decodable {
-        struct PageInfo: Decodable { let hasPreviousPage: Bool? }
-        let pageInfo: PageInfo?
-        let nodes: [Event?]?
+        struct PageInfo: Decodable { let hasPreviousPage: Bool?; var startCursor: String? = nil }
+        var pageInfo: PageInfo?
+        var nodes: [Event?]?
     }
     struct PageInfo: Decodable { let hasPreviousPage: Bool? }
     /// Something that asked for the user, or that they did.
@@ -393,16 +393,16 @@ struct NotificationDetailsFetcher: Sendable {
     }
     /// The review requests still open; GitHub drops one once it's reviewed or withdrawn.
     struct PendingRequests: Decodable {
-        struct PageInfo: Decodable { let hasNextPage: Bool? }
-        let pageInfo: PageInfo?
-        let nodes: [Event?]?
+        struct PageInfo: Decodable { let hasNextPage: Bool?; var endCursor: String? = nil }
+        var pageInfo: PageInfo?
+        var nodes: [Event?]?
     }
     struct Subject: Decodable {
         let state: String?
         let isDraft: Bool?
         let headRefName: String?
         let stateReason: String?
-        let timelineItems: Timeline?
+        var timelineItems: Timeline?
         var createdAt: Date? = nil
         var body: String? = nil
         var lastEditedAt: Date? = nil
@@ -415,7 +415,7 @@ struct NotificationDetailsFetcher: Sendable {
     /// Each alias: a repository holding the subject, or the viewer.
     struct Node: Decodable {
         let login: String?
-        let issueOrPullRequest: Subject?
+        var issueOrPullRequest: Subject?
     }
     /// A batch's answer, and which of its subjects (by index) GitHub reported
     /// an error inside; nil when an error can't be placed, so any may be.
@@ -493,7 +493,7 @@ struct NotificationDetailsFetcher: Sendable {
         do {
             // Partial answers are kept: a subject GitHub won't show settles without detail.
             let response = try await graphQL.run(text, variables: variables, token: account.token, as: [String: Node?].self)
-            guard let nodes = response.data else { return nil }
+            guard var nodes = response.data else { return nil }
             var erred: Set<Int>? = []
             for error in response.errors ?? [] {
                 if case .field(let alias)? = error.path?.first, alias.hasPrefix("t"), let index = Int(alias.dropFirst()) {
@@ -502,6 +502,14 @@ struct NotificationDetailsFetcher: Sendable {
                     erred = nil
                 }
             }
+            for (index, thread) in batch.enumerated() where erred?.contains(index) == false && thread.reason == .reviewRequested {
+                guard let subject = nodes["t\(index)"]??.issueOrPullRequest else { continue }
+                let (completed, pageErred) = await completeReviewRequests(subject, thread: thread, token: account.token)
+                var node = nodes["t\(index)"] ?? nil
+                node?.issueOrPullRequest = completed
+                nodes["t\(index)"] = node
+                if pageErred { erred?.insert(index) }
+            }
             return (nodes, erred)
         } catch {
             NSLog("copilot-notifications: subject details failed for \(account.login): \(error)")
@@ -509,14 +517,109 @@ struct NotificationDetailsFetcher: Sendable {
         }
     }
 
+    /// Reads any older `ReviewRequestedEvent` pages and remaining pending
+    /// `reviewRequests` pages so large CODEOWNERS fanouts (>100 requests) don't
+    /// leave team review requests misclassified under To you or un-withdrawn.
+    private func completeReviewRequests(
+        _ subject: Subject, thread: NotificationThread, token: String
+    ) async -> (Subject, Bool) {
+        let parts = thread.repository.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let number = thread.number else { return (subject, false) }
+        var subject = subject
+        var erred = false
+        if subject.timelineItems?.pageInfo?.hasPreviousPage == true {
+            let query = """
+            query($owner: String!, $name: String!, $number: Int!, $cursor: String!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 100, before: $cursor) {
+                    pageInfo { hasPreviousPage startCursor }
+                    nodes { ... on ReviewRequestedEvent { requestedReviewer {
+                      __typename ... on User { login } ... on Team { slug organization { login } }
+                    } } }
+                  }
+                }
+              }
+            }
+            """
+            struct Payload: Decodable {
+                struct Repository: Decodable {
+                    struct PullRequest: Decodable { let timelineItems: Timeline? }
+                    let pullRequest: PullRequest?
+                }
+                let repository: Repository?
+            }
+            var seen: Set<String> = []
+            for _ in 0..<10 where subject.timelineItems?.pageInfo?.hasPreviousPage == true {
+                guard let existing = subject.timelineItems?.nodes,
+                      let cursor = subject.timelineItems?.pageInfo?.startCursor, !cursor.isEmpty,
+                      seen.insert(cursor).inserted,
+                      let response = try? await graphQL.run(
+                          query, variables: ["owner": parts[0], "name": parts[1], "number": number, "cursor": cursor],
+                          token: token, as: Payload.self
+                      ),
+                      response.errors?.isEmpty != false,
+                      let page = response.data?.repository?.pullRequest?.timelineItems,
+                      let pageNodes = page.nodes else {
+                    erred = true
+                    break
+                }
+                subject.timelineItems?.nodes = pageNodes + existing
+                subject.timelineItems?.pageInfo = page.pageInfo
+            }
+        }
+        if subject.pending?.pageInfo?.hasNextPage == true {
+            let query = """
+            query($owner: String!, $name: String!, $number: Int!, $cursor: String!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  pending: reviewRequests(first: 100, after: $cursor) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { requestedReviewer {
+                      __typename ... on User { login } ... on Team { slug organization { login } }
+                    } }
+                  }
+                }
+              }
+            }
+            """
+            struct Payload: Decodable {
+                struct Repository: Decodable {
+                    struct PullRequest: Decodable { let pending: PendingRequests? }
+                    let pullRequest: PullRequest?
+                }
+                let repository: Repository?
+            }
+            var seen: Set<String> = []
+            for _ in 0..<10 where subject.pending?.pageInfo?.hasNextPage == true {
+                guard let existing = subject.pending?.nodes,
+                      let cursor = subject.pending?.pageInfo?.endCursor, !cursor.isEmpty,
+                      seen.insert(cursor).inserted,
+                      let response = try? await graphQL.run(
+                          query, variables: ["owner": parts[0], "name": parts[1], "number": number, "cursor": cursor],
+                          token: token, as: Payload.self
+                      ),
+                      response.errors?.isEmpty != false,
+                      let page = response.data?.repository?.pullRequest?.pending,
+                      let pageNodes = page.nodes else {
+                    erred = true
+                    break
+                }
+                subject.pending?.nodes = existing + pageNodes
+                subject.pending?.pageInfo = page.pageInfo
+            }
+        }
+        return (subject, erred)
+    }
+
     /// Every pending review request, as lowercased logins and `org/slug` teams;
     /// nil unless the whole list was read and every reviewer named. Bots can't
     /// be the user or a team of theirs, so they don't count; anything else that
     /// can't be named (an enterprise team, say) might be theirs.
     static func pendingReviewers(_ pending: PendingRequests?) -> Set<String>? {
-        guard let pending, pending.pageInfo?.hasNextPage == false else { return nil }
+        guard let pending, pending.pageInfo?.hasNextPage == false, let nodes = pending.nodes else { return nil }
         var names: Set<String> = []
-        for node in pending.nodes ?? [] {
+        for node in nodes {
             guard let reviewer = node?.requestedReviewer else { return nil }
             switch reviewer.__typename {
             case "User":
