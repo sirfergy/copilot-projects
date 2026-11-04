@@ -738,7 +738,7 @@ struct TranscriptPromptComposerView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(!canSend)
-                        .background(Color.accentColor.opacity(canSend ? 1 : 0.5))
+                        .background(Color.blue.opacity(canSend ? 1 : 0.5))
                         .help(composer.mode.title)
                         .accessibilityLabel(composer.mode.sendAccessibilityLabel)
                         .accessibilityIdentifier("desktop-send-prompt")
@@ -762,7 +762,7 @@ struct TranscriptPromptComposerView: View {
                         .buttonStyle(.plain)
                         .menuIndicator(.hidden)
                         .disabled(modeDisabled)
-                        .background(Color.accentColor.opacity(modeDisabled ? 0.5 : 1))
+                        .background(Color.blue.opacity(modeDisabled ? 0.5 : 1))
                         .help("Message delivery mode: \(composer.mode.title)")
                         .accessibilityLabel("Message delivery mode")
                         .accessibilityValue(composer.mode.title)
