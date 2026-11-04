@@ -15811,16 +15811,29 @@ final class AppLogicTests: XCTestCase {
         @MainActor
         func segmentColors() throws -> (main: RGB, chevron: RGB, chrome: RGB) {
             host.layoutSubtreeIfNeeded()
-            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            let width = Int(host.bounds.width)
+            let height = Int(host.bounds.height)
+            let bitmap = try XCTUnwrap(NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: width,
+                pixelsHigh: height,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            ))
+            bitmap.size = host.bounds.size
             host.cacheDisplay(in: host.bounds, to: bitmap)
-            let scaleX = CGFloat(bitmap.pixelsWide) / host.bounds.width
-            let scaleY = CGFloat(bitmap.pixelsHigh) / host.bounds.height
-            let mainX = Int((host.bounds.maxX - 12 - 24 - 45) * scaleX)
-            let chevX = Int((host.bounds.maxX - 12 - 4) * scaleX)
-            let btnY = bitmap.pixelsHigh - Int(24 * scaleY)
+            let mainX = width - 12 - 24 - 20
+            let chevX = width - 12 - 12
+            // Sample 3pt below the top edge of the 24pt button (above the centered text and chevron glyphs).
+            let btnY = height - 33
             let mainNS = try XCTUnwrap(bitmap.colorAt(x: mainX, y: btnY)?.usingColorSpace(.sRGB))
             let chevNS = try XCTUnwrap(bitmap.colorAt(x: chevX, y: btnY)?.usingColorSpace(.sRGB))
-            let chromeNS = try XCTUnwrap(bitmap.colorAt(x: Int(12 * scaleX), y: Int(60 * scaleY))?.usingColorSpace(.sRGB))
+            let chromeNS = try XCTUnwrap(bitmap.colorAt(x: 12, y: 60)?.usingColorSpace(.sRGB))
             return (
                 RGB(r: mainNS.redComponent, g: mainNS.greenComponent, b: mainNS.blueComponent),
                 RGB(r: chevNS.redComponent, g: chevNS.greenComponent, b: chevNS.blueComponent),
