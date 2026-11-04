@@ -51,6 +51,7 @@ struct LunaSessionRanker: SessionRanking, SessionHistorySearching {
     var historyTimeout: TimeInterval = 60
     /// How long a stopped run gets to exit before it and its subprocesses are killed.
     var terminationGrace: TimeInterval = 2
+    var sleep: @Sendable (TimeInterval) async -> Void = LunaProcess.defaultSleep
 
     func rank(query: String, entries: [SessionFinderEntry]) async throws -> [LunaMatch] {
         guard let executable = copilotExecutable() else { throw LunaSearchError.copilotUnavailable }
@@ -124,7 +125,8 @@ struct LunaSessionRanker: SessionRanking, SessionHistorySearching {
             environment: Self.childEnvironment(from: environment, copilotHome: home.path),
             directory: home,
             timeout: timeout,
-            terminationGrace: terminationGrace
+            terminationGrace: terminationGrace,
+            sleep: sleep
         )
         guard result.status == 0 else { throw Self.failure(from: result) }
         return Self.assistantReply(fromJSONL: result.output) ?? result.output
@@ -326,13 +328,18 @@ enum LunaProcess {
         let errorOutput: String
     }
 
+    static let defaultSleep: @Sendable (TimeInterval) async -> Void = {
+        try? await Task.sleep(nanoseconds: UInt64(max($0, 0) * 1_000_000_000))
+    }
+
     static func run(
         executable: String,
         arguments: [String],
         environment: [String: String],
         directory: URL,
         timeout: TimeInterval,
-        terminationGrace: TimeInterval = 2
+        terminationGrace: TimeInterval = 2,
+        sleep: @escaping @Sendable (TimeInterval) async -> Void = defaultSleep
     ) async throws -> Result {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -361,7 +368,7 @@ enum LunaProcess {
         run.recordLaunch()
 
         let watchdog = Task.detached {
-            try? await Task.sleep(nanoseconds: UInt64(max(timeout, 0) * 1_000_000_000))
+            await sleep(timeout)
             guard !Task.isCancelled else { return }
             run.terminate(timedOut: true)
         }

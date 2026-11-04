@@ -497,6 +497,27 @@ final class SessionFinderTests: XCTestCase {
             .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
     }
 
+    private func waitForRecordedPIDs(
+        at url: URL,
+        count: Int,
+        copilotExited: Bool = false,
+        timeout: TimeInterval = 5
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let pids = try? recordedPIDs(at: url),
+               pids.count >= count,
+               !copilotExited || ({
+                   let pgid = getpgid(pids[0])
+                   return pgid > 0 && kill(pgid, 0) != 0
+               }()) {
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Timed out waiting for subprocess readiness (count: \(count), copilotExited: \(copilotExited))")
+    }
+
     private func assertProcessesExit(_ pids: [pid_t], timeout: TimeInterval = 3) async throws {
         let identities = pids.compactMap(LunaProcess.ProcessIdentity.init)
         defer { identities.forEach { $0.signal(SIGKILL) } }
@@ -525,15 +546,19 @@ final class SessionFinderTests: XCTestCase {
         /bin/sleep 30 >/dev/null 2>&1 &
         echo $! >> '\(pidsFile.path)'
         if [ -x /usr/bin/perl ]; then
-          /usr/bin/perl -e 'setpgrp(0, 0); exec "/bin/sleep", "30"' &
-          echo $! >> '\(pidsFile.path)'
+          /usr/bin/perl -e 'setpgrp(0, 0); open my $f, ">>", $ARGV[0] or die; syswrite($f, "$$\\n"); close $f; exec "/bin/sleep", "30"' '\(pidsFile.path)' &
         fi
         /bin/sleep 30
         """)
         defer { try? FileManager.default.removeItem(at: root) }
         let runs = root.appendingPathComponent("runs").path
-        stubborn.timeout = 0.3
+        stubborn.timeout = 4
         stubborn.terminationGrace = 0.3
+        stubborn.sleep = { [weak self] timeout in
+            try? await self?.waitForRecordedPIDs(
+                at: pidsFile, count: expectedChildrenPerRun, timeout: timeout
+            )
+        }
         let started = Date()
         do {
             _ = try await stubborn.rank(query: "anything", entries: [entry("A")])
@@ -549,8 +574,9 @@ final class SessionFinderTests: XCTestCase {
 
         try Data().write(to: pidsFile)
         stubborn.timeout = 30
+        stubborn.sleep = LunaProcess.defaultSleep
         let task = Task { try await stubborn.rank(query: "anything", entries: [entry("A")]) }
-        try await Task.sleep(nanoseconds: 300_000_000)
+        try await waitForRecordedPIDs(at: pidsFile, count: expectedChildrenPerRun)
         let cancelled = Date()
         task.cancel()
         do {
@@ -579,8 +605,13 @@ final class SessionFinderTests: XCTestCase {
         """)
         defer { try? FileManager.default.removeItem(at: root) }
         let runs = root.appendingPathComponent("runs").path
-        leaky.timeout = 0.3
+        leaky.timeout = 4
         leaky.terminationGrace = 0.3
+        leaky.sleep = { [weak self] timeout in
+            try? await self?.waitForRecordedPIDs(
+                at: pidsFile, count: 1, copilotExited: true, timeout: timeout
+            )
+        }
         let started = Date()
         do {
             _ = try await leaky.rank(query: "anything", entries: [entry("A")])
@@ -596,8 +627,9 @@ final class SessionFinderTests: XCTestCase {
 
         try Data().write(to: pidsFile)
         leaky.timeout = 30
+        leaky.sleep = LunaProcess.defaultSleep
         let task = Task { try await leaky.rank(query: "anything", entries: [entry("A")]) }
-        try await Task.sleep(nanoseconds: 300_000_000)
+        try await waitForRecordedPIDs(at: pidsFile, count: 1, copilotExited: true)
         let cancelled = Date()
         task.cancel()
         do {
@@ -1446,7 +1478,7 @@ final class SessionFinderModelTests: XCTestCase {
 
         // Once Luna finishes, deep search starts with active + already-displayed resumable IDs excluded,
         // while keeping unlisted indexed sessions eligible so deep SQL search can match their middle turns.
-        try await waitUntil { finder.deepSearch == .searching }
+        try await waitUntil { finder.deepSearch == .searching && !historySearcher.calls.isEmpty }
         XCTAssertEqual(finder.luna, .finished([LunaMatch(sessionId: "beta", reason: "fast pass match")]))
         XCTAssertEqual(finder.rows.map(\.id), ["beta"])
         XCTAssertEqual(finder.highlightedId, "beta")
