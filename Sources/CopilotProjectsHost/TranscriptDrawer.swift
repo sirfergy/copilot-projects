@@ -504,6 +504,19 @@ enum QuickReplyConfiguration: Equatable, Sendable {
     }
 }
 
+extension RemotePromptMode {
+    var sendButtonTitle: String {
+        switch self {
+        case .immediate: "Steer"
+        case .enqueue: "Queue"
+        }
+    }
+
+    var sendAccessibilityLabel: String {
+        "\(sendButtonTitle) (\(title))"
+    }
+}
+
 struct TranscriptPromptComposerView: View {
     static let showQuickReplyChipsKey = "showQuickReplyChips"
     static let quickReplyListKey = QuickReplyConfiguration.storageKey
@@ -518,6 +531,10 @@ struct TranscriptPromptComposerView: View {
     @AppStorage(Self.showQuickReplyChipsKey) private var showQuickReplyChips = true
     @AppStorage(Self.quickReplyListKey) private var quickReplyListJSON: String?
     @FocusState private var promptFocused: Bool
+
+    var isDeliveryModeDisabled: Bool {
+        composer.isSending || composer.pendingOperationId != nil
+    }
 
     private var liveWorkflow: RemoteSessionWorkflow? {
         workflowProvider?() ?? workflow
@@ -673,16 +690,6 @@ struct TranscriptPromptComposerView: View {
                 }
 
                 HStack(spacing: 8) {
-                    Picker("Delivery", selection: $composer.mode) {
-                        ForEach(RemotePromptMode.allCases, id: \.self) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .disabled(composer.isSending || composer.pendingOperationId != nil)
-                    .accessibilityLabel("Message delivery mode")
-
                     Spacer(minLength: 0)
 
                     Button(action: chooseFiles) {
@@ -708,20 +715,61 @@ struct TranscriptPromptComposerView: View {
                     .accessibilityIdentifier("desktop-paste-screenshot")
                 }
 
+                let canSend = composer.canSend(workflow: currentWorkflow, operation: currentOperation, now: now)
+                let modeDisabled = isDeliveryModeDisabled
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("Message Copilot", text: $composer.prompt, axis: .vertical)
                         .lineLimit(1...5)
                         .textFieldStyle(.roundedBorder)
                         .focused($promptFocused)
-                        .disabled(composer.isSending || composer.pendingOperationId != nil)
+                        .disabled(modeDisabled)
                         .accessibilityLabel("Message Copilot")
                         .accessibilityIdentifier("desktop-prompt-field")
                         .onSubmit(submitPrompt)
 
-                    Button("Send", action: submitPrompt)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!composer.canSend(workflow: currentWorkflow, operation: currentOperation, now: now))
+                    HStack(spacing: 1) {
+                        Button(action: submitPrompt) {
+                            Text(composer.mode.sendButtonTitle)
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 10)
+                                .frame(height: 24)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canSend)
+                        .background(Color.accentColor.opacity(canSend ? 1 : 0.5))
+                        .help(composer.mode.title)
+                        .accessibilityLabel(composer.mode.sendAccessibilityLabel)
                         .accessibilityIdentifier("desktop-send-prompt")
+
+                        Menu {
+                            Picker("Message delivery mode", selection: $composer.mode) {
+                                ForEach(RemotePromptMode.allCases, id: \.self) { mode in
+                                    Text(mode.title).tag(mode)
+                                }
+                            }
+                            .pickerStyle(.inline)
+                            .labelsHidden()
+                        } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 24, height: 24)
+                                .contentShape(Rectangle())
+                        }
+                        .menuStyle(.button)
+                        .buttonStyle(.plain)
+                        .menuIndicator(.hidden)
+                        .disabled(modeDisabled)
+                        .background(Color.accentColor.opacity(modeDisabled ? 0.5 : 1))
+                        .help("Message delivery mode: \(composer.mode.title)")
+                        .accessibilityLabel("Message delivery mode")
+                        .accessibilityValue(composer.mode.title)
+                        .accessibilityIdentifier("desktop-send-mode")
+                    }
+                    .fixedSize()
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
             }
             .padding(12)

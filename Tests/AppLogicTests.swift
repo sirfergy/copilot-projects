@@ -15682,6 +15682,155 @@ final class AppLogicTests: XCTestCase {
             ).isEmpty
         )
     }
+
+    @MainActor
+    func testDesktopComposerSplitSendButtonModesDisabledStatesAndClicks() async throws {
+        _ = NSApplication.shared
+        let activationPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.prohibited)
+        defer { NSApp.setActivationPolicy(activationPolicy) }
+
+        let savedQuickReplies = UserDefaults.standard.object(forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
+        let savedQuickReplyList = UserDefaults.standard.object(forKey: TranscriptPromptComposerView.quickReplyListKey)
+        defer {
+            UserDefaults.standard.set(savedQuickReplies, forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
+            UserDefaults.standard.set(savedQuickReplyList, forKey: TranscriptPromptComposerView.quickReplyListKey)
+        }
+        UserDefaults.standard.set(true, forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
+        UserDefaults.standard.removeObject(forKey: TranscriptPromptComposerView.quickReplyListKey)
+
+        XCTAssertEqual(RemotePromptMode.immediate.sendButtonTitle, "Steer")
+        XCTAssertEqual(RemotePromptMode.enqueue.sendButtonTitle, "Queue")
+        XCTAssertEqual(RemotePromptMode.immediate.title, "Steer current task")
+        XCTAssertEqual(RemotePromptMode.enqueue.title, "Run after current task")
+        XCTAssertEqual(RemotePromptMode.immediate.sendAccessibilityLabel, "Steer (Steer current task)")
+        XCTAssertEqual(RemotePromptMode.enqueue.sendAccessibilityLabel, "Queue (Run after current task)")
+
+        let now = Date()
+        let workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+            capabilities: ["session-send"],
+            sendReady: true
+        )
+        let operation = AgentOperationProjection(conversationEpoch: "epoch-1", support: .receipts, receipts: [])
+        let composer = DesktopSessionPromptComposer(sessionId: UUID().uuidString)
+        XCTAssertEqual(composer.mode, .immediate)
+
+        var dispatched: [RemoteSessionAction] = []
+        let makeView = {
+            TranscriptPromptComposerView(
+                composer: composer,
+                workflow: workflow,
+                operation: operation,
+                workflowProvider: { workflow },
+                operationProvider: { operation },
+                onAction: { action in
+                    dispatched.append(action)
+                    return RemoteWorkflowActionResult(state: .applied)
+                },
+                onPreview: { _ in }
+            )
+        }
+
+        // Empty prompt: Send is disabled, but delivery mode menu remains enabled.
+        XCTAssertFalse(composer.canSend(workflow: workflow, operation: operation, now: now))
+        XCTAssertFalse(makeView().isDeliveryModeDisabled)
+
+        // Switching mode with a half-written draft only changes mode and must not send.
+        composer.prompt = "Half-written draft"
+        XCTAssertTrue(composer.canSend(workflow: workflow, operation: operation, now: now))
+        composer.mode = .enqueue
+        XCTAssertTrue(dispatched.isEmpty)
+        XCTAssertEqual(composer.prompt, "Half-written draft")
+
+        let window = NSWindow(
+            contentRect: NSRect(x: -20000, y: -20000, width: 420, height: 120),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        let host = NSHostingView(rootView: makeView().environment(\.controlActiveState, .key))
+        window.contentView = host
+        window.orderBack(nil)
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        host.layoutSubtreeIfNeeded()
+
+        func click(_ point: NSPoint) throws {
+            let ts = ProcessInfo.processInfo.systemUptime
+            for (type, delta): (NSEvent.EventType, TimeInterval) in [(.leftMouseDown, 0), (.leftMouseUp, 0.01)] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(
+                    with: type,
+                    location: point,
+                    modifierFlags: [],
+                    timestamp: ts + delta,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    eventNumber: 1,
+                    clickCount: 1,
+                    pressure: type == .leftMouseDown ? 1 : 0
+                ))
+                window.sendEvent(event)
+            }
+        }
+
+        let sendSegmentPoint = NSPoint(x: host.bounds.maxX - 12 - 24 - 20, y: 24)
+        try click(sendSegmentPoint)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(
+            dispatched,
+            [RemoteSessionAction(kind: .send, prompt: "Half-written draft", mode: .enqueue)]
+        )
+        XCTAssertEqual(composer.prompt, "")
+
+        // While prompt is empty, clicking the main Send segment does nothing.
+        try click(sendSegmentPoint)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(dispatched.count, 1)
+
+        // Quick-reply chip uses the currently selected composer.mode (.enqueue) when prompt is empty.
+        composer.mode = .enqueue
+        composer.prompt = ""
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        host.layoutSubtreeIfNeeded()
+        try click(NSPoint(x: 40, y: host.bounds.maxY - 24))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(
+            dispatched.last,
+            RemoteSessionAction(kind: .send, prompt: "Approve", mode: .enqueue)
+        )
+
+        // Switching back to .immediate and clicking main Send segment dispatches .immediate.
+        composer.mode = .immediate
+        composer.prompt = "Steer now"
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(30))
+        try click(sendSegmentPoint)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(
+            dispatched.last,
+            RemoteSessionAction(kind: .send, prompt: "Steer now", mode: .immediate)
+        )
+
+        // Indeterminate send sets pendingOperationId, disabling both Send and the delivery mode menu.
+        composer.prompt = "Hold until receipt"
+        await composer.send(
+            workflow: workflow,
+            operation: operation,
+            onAction: { _ in
+                RemoteWorkflowActionResult(state: .indeterminate, message: "Pending", operationId: "op-pending")
+            },
+            now: now
+        )
+        XCTAssertEqual(composer.pendingOperationId, "op-pending")
+        XCTAssertFalse(composer.canSend(workflow: workflow, operation: operation, now: now))
+        XCTAssertTrue(makeView().isDeliveryModeDisabled)
+    }
 }
 
 // MARK: - Remote Kitty test helpers
