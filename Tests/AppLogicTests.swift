@@ -8674,10 +8674,26 @@ final class AppLogicTests: XCTestCase {
         let delim900 = Array(repeating: "---", count: 900).joined(separator: " | ")
         let row900 = Array(repeating: "v", count: 900).joined(separator: " | ")
         let hugeTable = ([header900, delim900] + Array(repeating: row900, count: 9)).joined(separator: "\n")
+        let header400 = Array(repeating: "h", count: 400).joined(separator: " | ")
+        let delim400 = Array(repeating: "---", count: 400).joined(separator: " | ")
+        let row400 = Array(repeating: "v", count: 400).joined(separator: " | ")
+        let table8000 = ([header400, delim400] + Array(repeating: row400, count: 19)).joined(separator: "\n")
+        let markerHeader100 = Array(repeating: "h", count: 100).joined(separator: " | ")
+        let markerDelim100 = Array(repeating: "---", count: 100).joined(separator: " | ")
+        let markerRow100 = Array(repeating: "**x**", count: 100).joined(separator: " | ")
+        let markerTable1000 = ([markerHeader100, markerDelim100] + Array(repeating: markerRow100, count: 9)).joined(separator: "\n")
+        let eightMarkerTables = Array(repeating: markerTable1000, count: 8).joined(separator: "\n\n")
         let smallTable = "| K | V |\n| --- | --- |\n| a | b |"
         XCTAssertEqual(
-            MarkdownParser.blocks(from: "\(hugeTable)\n\n\(smallTable)").last,
+            MarkdownParser.blocks(from: "\(hugeTable)\n\n\(table8000)\n\n\(eightMarkerTables)\n\n\(smallTable)").last,
             .table(MarkdownTable(header: ["K", "V"], alignments: [.leading, .leading], rows: [["a", "b"]]))
+        )
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: "\(hugeTable)\n\n\(table8000)").map { block in
+                if case .plainText = block { return true }
+                return false
+            },
+            [true, true]
         )
     }
 
@@ -8813,6 +8829,9 @@ final class AppLogicTests: XCTestCase {
             + "Inner"
             + String(repeating: "\n</details>", count: 5)
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(fiveDeepDetails))
+        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
+            Array(repeating: "```\ncode\n```", count: 257).joined(separator: "\n")
+        ))
     }
 
     @MainActor
@@ -9534,11 +9553,20 @@ final class AppLogicTests: XCTestCase {
         let wideDelim50 = Array(repeating: "---", count: 50).joined(separator: " | ")
         let sparseRows25 = Array(repeating: "cell_a | cell_b", count: 25).joined(separator: "\n")
         let oversizedTable = "\(wideHeader50)\n\(wideDelim50)\n\(sparseRows25)"
+        let header900 = Array(repeating: "h", count: 900).joined(separator: " | ")
+        let delim900 = Array(repeating: "---", count: 900).joined(separator: " | ")
+        let row900 = (["**bold_900**"] + Array(repeating: "v", count: 899)).joined(separator: " | ")
+        let parserRejectedTable = ([header900, delim900] + Array(repeating: row900, count: 9)).joined(separator: "\n")
+        let eligibleSmallTable = "| Key | Val |\n| --- | ---: |\n| ok_key | 42 |"
         let oversizedInlinePara = Array(repeating: "**span** ", count: 600).joined()
         let mixedMarkdown = """
         # Mixed Report
 
         \(oversizedTable)
+
+        \(parserRejectedTable)
+
+        \(eligibleSmallTable)
 
         \(oversizedInlinePara)
 
@@ -9558,9 +9586,10 @@ final class AppLogicTests: XCTestCase {
         mixedHost.frame = NSRect(x: 0, y: 0, width: 380, height: 1_200)
         mixedHost.layoutSubtreeIfNeeded()
         XCTAssertFalse(MarkdownParser.inlineCache.contains("cell_a"))
+        XCTAssertFalse(MarkdownParser.inlineCache.contains(parserRejectedTable))
         XCTAssertFalse(MarkdownParser.inlineCache.contains(oversizedInlinePara))
         let mixedViews = findTextViews(in: mixedHost)
-        XCTAssertGreaterThanOrEqual(mixedViews.count, 4)
+        XCTAssertGreaterThanOrEqual(mixedViews.count, 5)
         let mixedHeadingView = try XCTUnwrap(mixedViews.first { $0.attributedText.string.contains("Mixed Report") })
         XCTAssertEqual(
             mixedHeadingView.attributedText.attribute(
@@ -9573,6 +9602,10 @@ final class AppLogicTests: XCTestCase {
         let mixedTableFallback = try XCTUnwrap(mixedViews.first { $0.attributedText.string.contains("cell_a\tcell_b") })
         XCTAssertNil(mixedTableFallback.headerDividerY())
         XCTAssertFalse(mixedTableFallback.attributedText.string.contains("cell_b\t"))
+        let parserRejectedView = try XCTUnwrap(mixedViews.first { $0.attributedText.string.contains("**bold_900**") })
+        XCTAssertNil(parserRejectedView.headerDividerY())
+        let smallTableView = try XCTUnwrap(mixedViews.first { $0.attributedText.string.contains("ok_key") })
+        XCTAssertNotNil(smallTableView.headerDividerY())
         let mixedTrailingView = try XCTUnwrap(mixedViews.first { $0.attributedText.string.contains("Trailing bold conclusion.") })
         let trailingBoldLoc = (mixedTrailingView.attributedText.string as NSString).range(of: "bold").location
         let trailingBoldFont = try XCTUnwrap(
@@ -9637,6 +9670,24 @@ final class AppLogicTests: XCTestCase {
         XCTAssertLessThanOrEqual(
             findTextViews(in: manyDetailsHost).count,
             262
+        )
+
+        let code255AndProse = ((1...255).map { "```\ncode_\($0)\n```" } + ["# Tail Heading", "Body **bold_tail**"]).joined(separator: "\n\n")
+        XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(code255AndProse))
+        let boundaryHost = NSHostingView(
+            rootView: MarkdownText(text: code255AndProse)
+                .frame(width: 380, alignment: .leading)
+        )
+        boundaryHost.frame = NSRect(x: 0, y: 0, width: 380, height: 4_000)
+        boundaryHost.layoutSubtreeIfNeeded()
+        let tailProseView = try XCTUnwrap(findTextViews(in: boundaryHost).last)
+        XCTAssertEqual(
+            tailProseView.attributedText.attribute(
+                MarkdownText.headingLevelAttribute,
+                at: 0,
+                effectiveRange: nil
+            ) as? NSNumber,
+            1
         )
     }
 

@@ -64,11 +64,20 @@ public struct MarkdownDetails: Equatable, Sendable {
 public enum MarkdownBlock: Equatable, Sendable {
     case heading(level: Int, text: String)
     case paragraph(String)
+    case plainText(String)
     case codeBlock(String)
     case quote(String)
     case list([MarkdownListItem])
     case table(MarkdownTable)
     case details(MarkdownDetails)
+
+    fileprivate var startsNewSegment: Bool {
+        switch self {
+        case .plainText, .codeBlock, .table, .details: true
+        case let .paragraph(text): MarkdownParser.isThematicBreak(text)
+        case .heading, .list, .quote: false
+        }
+    }
 }
 
 /// Bounded, thread-safe LRU cache keyed by raw Markdown text so repeated view
@@ -357,16 +366,24 @@ public enum MarkdownParser {
     private static func isWithinBlockLimits(
         _ blocks: [MarkdownBlock], depth: Int, budget: inout RenderBudget
     ) -> Bool {
+        var inProse = false
         for block in blocks {
+            if block.startsNewSegment || !inProse {
+                guard budget.segmentsRemaining > 0 else { return false }
+                budget.segmentsRemaining -= 1
+            }
+            inProse = !block.startsNewSegment
             switch block {
+            case let .paragraph(text) where isThematicBreak(text):
+                continue
             case let .heading(_, text), let .paragraph(text), let .quote(text):
                 guard budget.consumeInline(text) else { return false }
             case let .list(items):
                 for item in items {
                     guard budget.consumeInline(item.text) else { return false }
                 }
-            case .codeBlock:
-                continue
+            case .plainText, .codeBlock:
+                if case .plainText = block { return false }
             case let .table(table):
                 guard budget.consumeTable(table) else { return false }
             case let .details(details):
@@ -414,6 +431,7 @@ public enum MarkdownParser {
                 else { return false }
                 continue
             }
+            if case .plainText = block { return false }
             guard case let .table(table) = block else { continue }
             guard let tableCells = estimatedTableVisualCells(table),
                   tableCells <= maximumRenderedTableCells else {
@@ -458,7 +476,6 @@ public enum MarkdownParser {
         let normalized = normalizeLineEndings(text)
         let lines = normalized.components(separatedBy: "\n")
         var index = 0
-        var remainingTableCells = maximumRenderedPipes * 2
         var paragraph: [String] = []
 
         func flushParagraph() {
@@ -624,16 +641,10 @@ public enum MarkdownParser {
                 flushParagraph()
                 let tableStart = index
                 let header = splitTableRow(trimmed)
-                let previousTableCellBudget = remainingTableCells
-                remainingTableCells -= header.count
+                var tableCells = header.count
                 index += 2
                 var rows: [[String]] = []
-                var withinCellCap = remainingTableCells >= 0
-                defer {
-                    if !withinCellCap {
-                        remainingTableCells = previousTableCellBudget
-                    }
-                }
+                var withinCellCap = tableCells <= maximumRenderedTableCells
                 while index < lines.count {
                     let rowLine = lines[index].trimmingCharacters(in: .whitespaces)
                     guard !rowLine.isEmpty,
@@ -650,8 +661,8 @@ public enum MarkdownParser {
                     }
                     if withinCellCap {
                         let row = Array(splitTableRow(rowLine).prefix(header.count))
-                        remainingTableCells -= row.count
-                        if remainingTableCells >= 0 {
+                        tableCells += row.count
+                        if tableCells <= maximumRenderedTableCells {
                             rows.append(row)
                         } else {
                             withinCellCap = false
@@ -667,7 +678,7 @@ public enum MarkdownParser {
                         rows: rows
                     )))
                 } else {
-                    blocks.append(.paragraph(lines[tableStart..<index].joined(separator: "\n")))
+                    blocks.append(.plainText(lines[tableStart..<index].joined(separator: "\n")))
                 }
                 continue
             }
@@ -1009,7 +1020,7 @@ public struct MarkdownText: View, Equatable {
 
     private static func plainBlockText(_ block: MarkdownBlock) -> String {
         switch block {
-        case let .heading(_, text), let .paragraph(text), let .codeBlock(text), let .quote(text):
+        case let .heading(_, text), let .paragraph(text), let .plainText(text), let .codeBlock(text), let .quote(text):
             return text
         case let .list(items):
             return items.map { "\($0.marker) \($0.text)" }.joined(separator: "\n")
@@ -1040,18 +1051,13 @@ public struct MarkdownText: View, Equatable {
             currentProse = []
         }
 
+        let lastSegmentStartIndex = blocks.lastIndex(where: \.startsNewSegment) ?? -1
         for (index, block) in blocks.enumerated() {
-            let startsNewSegment: Bool = switch block {
-            case .codeBlock, .table, .details:
-                true
-            case let .paragraph(text):
-                MarkdownParser.isThematicBreak(text)
-            case .heading, .list, .quote:
-                false
-            }
             let remainingAfterProse = budget.segmentsRemaining - (currentProse.isEmpty ? 0 : 1)
-            if (startsNewSegment || currentProse.isEmpty),
-               remainingAfterProse <= 0 || (remainingAfterProse == 1 && index < blocks.count - 1) {
+            let needsMultipleSegments = index < blocks.count - 1
+                && (block.startsNewSegment || lastSegmentStartIndex > index)
+            if (block.startsNewSegment || currentProse.isEmpty),
+               remainingAfterProse <= 0 || (remainingAfterProse == 1 && needsMultipleSegments) {
                 flushProse()
                 let tail = blocks[index...].map(plainBlockText(_:)).joined(separator: "\n\n")
                 appendSegment(.plain(tail))
@@ -1071,6 +1077,9 @@ public struct MarkdownText: View, Equatable {
                         .paragraph(text, parseInline: budget.consumeInline(text))
                     )
                 }
+            case let .plainText(text):
+                flushProse()
+                appendSegment(.plain(text))
             case let .list(items):
                 let proseItems = items.map {
                     ProseListItem(item: $0, parseInline: budget.consumeInline($0.text))
