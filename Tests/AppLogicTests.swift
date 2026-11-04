@@ -15682,6 +15682,219 @@ final class AppLogicTests: XCTestCase {
             ).isEmpty
         )
     }
+
+    @MainActor
+    func testDesktopComposerSplitSendButtonModesDisabledStatesAndClicks() async throws {
+        _ = NSApplication.shared
+        let activationPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.prohibited)
+        defer { NSApp.setActivationPolicy(activationPolicy) }
+
+        let savedFullWidth = UserDefaults.standard.object(forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        let savedQuickReplies = UserDefaults.standard.object(forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
+        let savedQuickReplyList = UserDefaults.standard.object(forKey: TranscriptPromptComposerView.quickReplyListKey)
+        defer {
+            if let savedFullWidth {
+                UserDefaults.standard.set(savedFullWidth, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: TranscriptDrawer.fullWidthTranscriptKey)
+            }
+            if let savedQuickReplies {
+                UserDefaults.standard.set(savedQuickReplies, forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
+            }
+            if let savedQuickReplyList {
+                UserDefaults.standard.set(savedQuickReplyList, forKey: TranscriptPromptComposerView.quickReplyListKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: TranscriptPromptComposerView.quickReplyListKey)
+            }
+        }
+        UserDefaults.standard.set(true, forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
+        UserDefaults.standard.removeObject(forKey: TranscriptPromptComposerView.quickReplyListKey)
+
+        XCTAssertEqual(RemotePromptMode.immediate.sendButtonTitle, "Steer")
+        XCTAssertEqual(RemotePromptMode.enqueue.sendButtonTitle, "Queue")
+        XCTAssertEqual(RemotePromptMode.immediate.title, "Steer current task")
+        XCTAssertEqual(RemotePromptMode.enqueue.title, "Run after current task")
+        XCTAssertEqual(RemotePromptMode.immediate.sendAccessibilityLabel, "Steer (Steer current task)")
+        XCTAssertEqual(RemotePromptMode.enqueue.sendAccessibilityLabel, "Queue (Run after current task)")
+
+        let now = Date()
+        let workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+            capabilities: ["session-send"],
+            sendReady: true
+        )
+        let operation = AgentOperationProjection(conversationEpoch: "epoch-1", support: .receipts, receipts: [])
+        let composer = DesktopSessionPromptComposer(sessionId: UUID().uuidString)
+        XCTAssertEqual(composer.mode, .immediate)
+
+        var dispatched: [RemoteSessionAction] = []
+        let makeView = {
+            TranscriptPromptComposerView(
+                composer: composer,
+                workflow: workflow,
+                operation: operation,
+                workflowProvider: { workflow },
+                operationProvider: { operation },
+                onAction: { action in
+                    dispatched.append(action)
+                    return RemoteWorkflowActionResult(state: .applied)
+                },
+                onPreview: { _ in }
+            )
+        }
+
+        // Empty prompt: Send is disabled, but delivery mode menu remains enabled (preserving old picker behavior).
+        XCTAssertFalse(composer.canSend(workflow: workflow, operation: operation, now: now))
+        XCTAssertFalse(makeView().isDeliveryModeDisabled)
+
+        // Switching mode with a half-written draft only changes mode and must not send.
+        composer.prompt = "Half-written draft"
+        XCTAssertTrue(composer.canSend(workflow: workflow, operation: operation, now: now))
+        composer.mode = .enqueue
+        XCTAssertTrue(dispatched.isEmpty)
+        XCTAssertEqual(composer.prompt, "Half-written draft")
+
+        // Host the composer and verify clicking the main segment sends with the selected mode.
+        let window = NSWindow(
+            contentRect: NSRect(x: -20000, y: -20000, width: 420, height: 120),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.appearance = NSAppearance(named: .darkAqua)
+        let host = NSHostingView(
+            rootView: makeView()
+                .background(StudioStyle.chrome)
+                .environment(\.controlActiveState, .key)
+        )
+        window.contentView = host
+        window.orderBack(nil)
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        host.layoutSubtreeIfNeeded()
+
+        func click(_ point: NSPoint) throws {
+            let ts = ProcessInfo.processInfo.systemUptime
+            for (type, delta): (NSEvent.EventType, TimeInterval) in [(.leftMouseDown, 0), (.leftMouseUp, 0.01)] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(
+                    with: type,
+                    location: point,
+                    modifierFlags: [],
+                    timestamp: ts + delta,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    eventNumber: 1,
+                    clickCount: 1,
+                    pressure: type == .leftMouseDown ? 1 : 0
+                ))
+                window.sendEvent(event)
+            }
+        }
+
+        struct RGB {
+            let r: CGFloat
+            let g: CGFloat
+            let b: CGFloat
+
+            func distance(to other: RGB) -> CGFloat {
+                abs(r - other.r) + abs(g - other.g) + abs(b - other.b)
+            }
+        }
+
+        @MainActor
+        func segmentColors() throws -> (main: RGB, chevron: RGB, chrome: RGB) {
+            host.layoutSubtreeIfNeeded()
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let scaleX = CGFloat(bitmap.pixelsWide) / host.bounds.width
+            let scaleY = CGFloat(bitmap.pixelsHigh) / host.bounds.height
+            let mainX = Int((host.bounds.maxX - 12 - 24 - 45) * scaleX)
+            let chevX = Int((host.bounds.maxX - 12 - 4) * scaleX)
+            let btnY = bitmap.pixelsHigh - Int(24 * scaleY)
+            let mainNS = try XCTUnwrap(bitmap.colorAt(x: mainX, y: btnY)?.usingColorSpace(.sRGB))
+            let chevNS = try XCTUnwrap(bitmap.colorAt(x: chevX, y: btnY)?.usingColorSpace(.sRGB))
+            let chromeNS = try XCTUnwrap(bitmap.colorAt(x: Int(12 * scaleX), y: Int(60 * scaleY))?.usingColorSpace(.sRGB))
+            return (
+                RGB(r: mainNS.redComponent, g: mainNS.greenComponent, b: mainNS.blueComponent),
+                RGB(r: chevNS.redComponent, g: chevNS.greenComponent, b: chevNS.blueComponent),
+                RGB(r: chromeNS.redComponent, g: chromeNS.greenComponent, b: chromeNS.blueComponent)
+            )
+        }
+
+        // With non-empty draft, both segments render with matching prominent accent color distinct from chrome.
+        let readyColors = try segmentColors()
+        XCTAssertLessThan(readyColors.main.distance(to: readyColors.chevron), 0.05)
+        XCTAssertGreaterThan(readyColors.chevron.distance(to: readyColors.chrome), 0.25)
+
+        // The bottom row's main Send segment is at the bottom-right, left of the 24pt chevron segment.
+        let sendSegmentPoint = NSPoint(x: host.bounds.maxX - 12 - 24 - 20, y: 24)
+        try click(sendSegmentPoint)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(
+            dispatched,
+            [RemoteSessionAction(kind: .send, prompt: "Half-written draft", mode: .enqueue)]
+        )
+        XCTAssertEqual(composer.prompt, "")
+
+        // While prompt is empty, main Send segment is dimmed toward chrome while chevron menu segment stays active.
+        let emptyColors = try segmentColors()
+        XCTAssertGreaterThan(emptyColors.main.distance(to: emptyColors.chevron), 0.15)
+        XCTAssertLessThan(emptyColors.chevron.distance(to: readyColors.chevron), 0.05)
+        try click(sendSegmentPoint)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(dispatched.count, 1)
+
+        // Quick-reply chip uses the currently selected composer.mode (.enqueue) when prompt is empty.
+        composer.mode = .enqueue
+        composer.prompt = ""
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        host.layoutSubtreeIfNeeded()
+        let approveChipPoint = NSPoint(x: 40, y: host.bounds.maxY - 24)
+        try click(approveChipPoint)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(
+            dispatched.last,
+            RemoteSessionAction(kind: .send, prompt: "Approve", mode: .enqueue)
+        )
+
+        // Switching back to .immediate and clicking main Send segment dispatches .immediate.
+        composer.mode = .immediate
+        composer.prompt = "Steer now"
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(30))
+        try click(sendSegmentPoint)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(
+            dispatched.last,
+            RemoteSessionAction(kind: .send, prompt: "Steer now", mode: .immediate)
+        )
+
+        // Indeterminate send sets pendingOperationId, disabling both Send and the delivery mode menu.
+        composer.prompt = "Hold until receipt"
+        await composer.send(
+            workflow: workflow,
+            operation: operation,
+            onAction: { _ in
+                RemoteWorkflowActionResult(state: .indeterminate, message: "Pending", operationId: "op-pending")
+            },
+            now: now
+        )
+        XCTAssertEqual(composer.pendingOperationId, "op-pending")
+        XCTAssertFalse(composer.canSend(workflow: workflow, operation: operation, now: now))
+        XCTAssertTrue(makeView().isDeliveryModeDisabled)
+        try await Task.sleep(for: .milliseconds(30))
+        let pendingColors = try segmentColors()
+        XCTAssertLessThan(pendingColors.main.distance(to: pendingColors.chevron), 0.05)
+        XCTAssertGreaterThan(pendingColors.chevron.distance(to: readyColors.chevron), 0.15)
+    }
 }
 
 // MARK: - Remote Kitty test helpers
