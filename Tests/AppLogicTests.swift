@@ -14968,6 +14968,13 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertEqual(elicitationResult.state, .applied)
     }
+
+    func testTranscriptDrawerFullWidthPreferenceDefaultsAndPersistence() {
+        XCTAssertEqual(TranscriptDrawer.fullWidthTranscriptKey, "desktopFullWidthTranscript")
+        XCTAssertFalse(TranscriptDrawer.usesFullTerminalArea(storedValue: nil))
+        XCTAssertFalse(TranscriptDrawer.usesFullTerminalArea(storedValue: false))
+        XCTAssertTrue(TranscriptDrawer.usesFullTerminalArea(storedValue: true))
+    }
 }
 
 // MARK: - Remote Kitty test helpers

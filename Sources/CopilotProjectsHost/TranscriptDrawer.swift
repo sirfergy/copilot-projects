@@ -123,6 +123,8 @@ private struct ImageAssociatedTranscriptDrawer: View {
 }
 
 struct TranscriptDrawer: View {
+    static let fullWidthTranscriptKey = "desktopFullWidthTranscript"
+
     let turns: [TranscriptTurn]
     let imageCapture: RemoteKittyImageCapture?
     let workflow: RemoteSessionWorkflow?
@@ -137,7 +139,12 @@ struct TranscriptDrawer: View {
     var onAnswerUserInput: (@MainActor (RemoteUserInputAnswer) async -> RemoteWorkflowActionResult)? = nil
     var onAnswerElicitation: (@MainActor (RemoteElicitationAnswer) async -> RemoteWorkflowActionResult)? = nil
     let onPreview: (TranscriptImagePreviewItem) -> Void
+    @AppStorage(Self.fullWidthTranscriptKey) private var isFullWidth = Self.usesFullTerminalArea(storedValue: nil)
     @State private var isAtBottom = true
+
+    static func usesFullTerminalArea(storedValue: Bool?) -> Bool {
+        storedValue ?? false
+    }
 
     private var displayedTurns: [TranscriptTurn] {
         Self.turnsWithoutQuestionEchoes(
@@ -216,6 +223,15 @@ struct TranscriptDrawer: View {
                 Label("Session details", systemImage: "text.bubble")
                     .font(.headline)
                 Spacer()
+                Button {
+                    isFullWidth.toggle()
+                } label: {
+                    Image(systemName: isFullWidth ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                }
+                .buttonStyle(.borderless)
+                .help(isFullWidth ? "Restore side drawer" : "Expand to full terminal area")
+                .accessibilityLabel(isFullWidth ? "Restore side drawer" : "Expand to full terminal area")
+                .accessibilityIdentifier("toggle-transcript-full-width")
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                 }
@@ -303,13 +319,15 @@ struct TranscriptDrawer: View {
                 )
             }
         }
-        .frame(width: 420)
-        .frame(maxHeight: .infinity)
+        .frame(width: isFullWidth ? nil : 420)
+        .frame(maxWidth: isFullWidth ? .infinity : nil, maxHeight: .infinity)
         .background(StudioStyle.chrome)
         .overlay(alignment: .leading) {
-            Color(nsColor: .separatorColor).frame(width: 1).allowsHitTesting(false)
+            if !isFullWidth {
+                Color(nsColor: .separatorColor).frame(width: 1).allowsHitTesting(false)
+            }
         }
-        .shadow(color: .black.opacity(0.2), radius: 12, x: -4)
+        .shadow(color: .black.opacity(isFullWidth ? 0 : 0.2), radius: isFullWidth ? 0 : 12, x: isFullWidth ? 0 : -4)
     }
 }
 

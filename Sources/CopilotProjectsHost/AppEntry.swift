@@ -9,6 +9,7 @@ struct CopilotProjectsApp: App {
     @AppStorage(HostLifetimePolicy.settingKey) private var keepRunning = false
     @AppStorage(NotificationsAppLauncher.startsWithHostKey) private var startsNotifications = false
     @AppStorage(TranscriptPromptComposerView.showQuickReplyChipsKey) private var showQuickReplyChips = true
+    @AppStorage(TranscriptDrawer.fullWidthTranscriptKey) private var fullWidthTranscript = TranscriptDrawer.usesFullTerminalArea(storedValue: nil)
     @State private var showsProjects = true
 
     var body: some Scene {
@@ -21,6 +22,7 @@ struct CopilotProjectsApp: App {
             WorkspaceCommands(model: appDelegate.model, input: appDelegate.input,
                               keepRunning: $keepRunning, startsNotifications: $startsNotifications,
                               showQuickReplyChips: $showQuickReplyChips,
+                              fullWidthTranscript: $fullWidthTranscript,
                               showsProjects: $showsProjects)
         }
         MenuBarExtra("Copilot Projects", systemImage: "terminal", isInserted: $keepRunning) {
@@ -139,6 +141,7 @@ private struct WorkspaceCommands: Commands {
     @Binding var keepRunning: Bool
     @Binding var startsNotifications: Bool
     @Binding var showQuickReplyChips: Bool
+    @Binding var fullWidthTranscript: Bool
     @Binding var showsProjects: Bool
 
     var body: some Commands {
@@ -151,6 +154,7 @@ private struct WorkspaceCommands: Commands {
             Toggle("Keep Running When Window Closes", isOn: $keepRunning)
             Toggle("Start Notifications with Copilot Projects", isOn: $startsNotifications)
             Toggle("Show Quick-Reply Suggestions", isOn: $showQuickReplyChips)
+            Toggle("Full-Width Transcript View", isOn: $fullWidthTranscript)
             Divider()
             SSHHostsSettingsMenu(model: model, isSheetPresented: input.hasWorkspaceSheet)
             Button("Pull Request Review Prompt…") {
