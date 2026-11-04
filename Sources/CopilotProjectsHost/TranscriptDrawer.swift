@@ -30,6 +30,7 @@ struct TranscriptOverlay: View {
     let imageCapture: () -> RemoteKittyImageCapture?
     let isOpen: Bool
     let onClose: () -> Void
+    var onFullWidthChange: ((Bool) -> Void)? = nil
     let workflow: RemoteSessionWorkflow?
     let operation: AgentOperationProjection
     var pendingUserInputs: [RemoteUserInputRequest] = []
@@ -56,7 +57,9 @@ struct TranscriptOverlay: View {
                             workflowProvider: workflowProvider,
                             operationProvider: operationProvider,
                             promptComposer: promptComposer,
-                            onClose: onClose, onAction: onAction,
+                            onClose: onClose,
+                            onFullWidthChange: onFullWidthChange,
+                            onAction: onAction,
                             onAnswerUserInput: onAnswerUserInput,
                             onAnswerElicitation: onAnswerElicitation,
                             onPreview: onPreview
@@ -73,7 +76,9 @@ struct TranscriptOverlay: View {
                             workflowProvider: workflowProvider,
                             operationProvider: operationProvider,
                             promptComposer: promptComposer,
-                            onClose: onClose, onAction: onAction,
+                            onClose: onClose,
+                            onFullWidthChange: onFullWidthChange,
+                            onAction: onAction,
                             onAnswerUserInput: onAnswerUserInput,
                             onAnswerElicitation: onAnswerElicitation,
                             onPreview: onPreview
@@ -97,6 +102,7 @@ private struct ImageAssociatedTranscriptDrawer: View {
     let operationProvider: (() -> AgentOperationProjection)?
     let promptComposer: DesktopSessionPromptComposer?
     let onClose: () -> Void
+    let onFullWidthChange: ((Bool) -> Void)?
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
     let onAnswerUserInput: (@MainActor (RemoteUserInputAnswer) async -> RemoteWorkflowActionResult)?
     let onAnswerElicitation: (@MainActor (RemoteElicitationAnswer) async -> RemoteWorkflowActionResult)?
@@ -114,7 +120,9 @@ private struct ImageAssociatedTranscriptDrawer: View {
             workflowProvider: workflowProvider,
             operationProvider: operationProvider,
             promptComposer: promptComposer,
-            onClose: onClose, onAction: onAction,
+            onClose: onClose,
+            onFullWidthChange: onFullWidthChange,
+            onAction: onAction,
             onAnswerUserInput: onAnswerUserInput,
             onAnswerElicitation: onAnswerElicitation,
             onPreview: onPreview
@@ -135,6 +143,7 @@ struct TranscriptDrawer: View {
     let operationProvider: (() -> AgentOperationProjection)?
     let promptComposer: DesktopSessionPromptComposer?
     let onClose: () -> Void
+    var onFullWidthChange: ((Bool) -> Void)? = nil
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
     var onAnswerUserInput: (@MainActor (RemoteUserInputAnswer) async -> RemoteWorkflowActionResult)? = nil
     var onAnswerElicitation: (@MainActor (RemoteElicitationAnswer) async -> RemoteWorkflowActionResult)? = nil
@@ -287,10 +296,17 @@ struct TranscriptDrawer: View {
                 .onAppear {
                     isAtBottom = true
                     scrollToBottom(proxy)
+                    if isFullWidth {
+                        onFullWidthChange?(true)
+                    }
                 }
-                .task {
-                    isAtBottom = true
-                    scrollToBottom(proxy)
+                .onDisappear {
+                    if isFullWidth {
+                        onFullWidthChange?(false)
+                    }
+                }
+                .onChange(of: isFullWidth) { _, newValue in
+                    onFullWidthChange?(newValue)
                 }
                 .onChange(of: turns) { _, _ in
                     guard isAtBottom else { return }
@@ -1062,9 +1078,9 @@ struct DesktopElicitationField: Identifiable, Equatable {
     enum Kind: Equatable {
         case stringEnum([String])
         case stringOneOf([Choice])
-        case stringMultiSelect(choices: [Choice], minItems: Int?, maxItems: Int?)
+        case stringMultiSelect(choices: [Choice], maxItems: Int?)
         case bool
-        case number(isInteger: Bool)
+        case number
         case string(minLength: Int?, maxLength: Int?)
     }
 
@@ -1079,13 +1095,36 @@ struct DesktopElicitationField: Identifiable, Equatable {
     let kind: Kind
     let required: Bool
     let defaultValue: RemoteJSONValue?
+    let schema: RemoteJSONValue
 
     var id: String { key }
+
+    func accepts(
+        _ value: RemoteJSONValue,
+        allowFreeformChoice: Bool = false
+    ) -> Bool {
+        guard AppModel.isValidElicitationContent([key: value]),
+              AppModel.elicitationValue(
+                  value,
+                  satisfies: schema,
+                  allowFreeformStringChoice: allowFreeformChoice
+              ) else {
+            return false
+        }
+        if case .stringMultiSelect = kind, case let .array(items) = value {
+            var seen = Set<String>()
+            return items.allSatisfy {
+                if case let .string(string) = $0 { return seen.insert(string).inserted }
+                return false
+            }
+        }
+        return true
+    }
 
     func normalizedStringInput(_ text: String) -> RemoteJSONValue? {
         guard case .string = kind else { return nil }
         let value = RemoteJSONValue.string(text)
-        if !required, text.isEmpty, !kind.accepts(value) {
+        if !required, text.isEmpty, !accepts(value) {
             return nil
         }
         return value
@@ -1125,53 +1164,20 @@ struct DesktopElicitationField: Identifiable, Equatable {
             return nil
         }
     }
-}
 
-extension DesktopElicitationField.Kind {
-    func accepts(
-        _ value: RemoteJSONValue,
-        allowFreeformChoice: Bool = false
-    ) -> Bool {
-        switch self {
-        case .stringEnum(let options):
-            if case let .string(string) = value {
-                return options.contains(string)
-                    || (allowFreeformChoice && !string.isEmpty)
-            }
-            return false
-        case .stringOneOf(let choices):
-            if case let .string(string) = value {
-                return choices.contains { $0.value == string }
-                    || (allowFreeformChoice && !string.isEmpty)
-            }
-            return false
-        case .bool:
-            if case .bool = value { return true }
-            if allowFreeformChoice, case let .string(text) = value {
-                return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            }
-            return false
-        case .number(let isInteger):
-            guard case let .number(number) = value, number.isFinite else { return false }
-            return isInteger ? number == number.rounded() : true
-        case .string(let minLength, let maxLength):
-            guard case let .string(string) = value else { return false }
-            let length = string.unicodeScalars.count
-            if let minLength, length < minLength { return false }
-            if let maxLength, length > maxLength { return false }
-            return true
-        case .stringMultiSelect(let choices, let minItems, let maxItems):
-            guard case let .array(items) = value else { return false }
-            var seen = Set<String>()
-            for item in items {
-                guard case let .string(string) = item,
-                      choices.contains(where: { $0.value == string }),
-                      seen.insert(string).inserted else { return false }
-            }
-            if let minItems, items.count < minItems { return false }
-            if let maxItems, items.count > maxItems { return false }
-            return true
+    func toggledSelectionValue(_ value: String, in current: RemoteJSONValue?) -> RemoteJSONValue?? {
+        guard case let .stringMultiSelect(choices, maxItems) = kind,
+              let ordered = Self.toggledSelection(
+                  value,
+                  in: Self.selectedStrings(current),
+                  choices: choices,
+                  maxItems: maxItems
+              ) else { return nil }
+        let selection = RemoteJSONValue.array(ordered.map(RemoteJSONValue.string))
+        if ordered.isEmpty, !required, !accepts(selection) {
+            return .some(nil)
         }
+        return .some(selection)
     }
 }
 
@@ -1183,6 +1189,7 @@ struct DesktopElicitationForm: Equatable {
 
     let fields: [DesktopElicitationField]
     let allowsFreeformChoices: Bool
+    let schema: RemoteJSONValue
     private static let maxFields = 32
     private static let maxChoices = 50
     static let propertyOrderKey = "x-copilot-projects-property-order"
@@ -1191,7 +1198,7 @@ struct DesktopElicitationForm: Equatable {
         _ schema: RemoteJSONValue?,
         allowFreeformChoices: Bool = false
     ) -> DesktopElicitationForm? {
-        guard case let .object(root)? = schema else { return nil }
+        guard let schema, case let .object(root) = schema else { return nil }
         let supportedRootKeys: Set<String> = [
             "$schema", "type", "title", "description", "properties", "required",
             "additionalProperties", propertyOrderKey,
@@ -1216,7 +1223,8 @@ struct DesktopElicitationForm: Equatable {
 
         var fields: [DesktopElicitationField] = []
         for key in fieldOrder(root[propertyOrderKey], properties: properties) {
-            guard case let .object(prop) = properties[key] else { return nil }
+            guard let fieldSchema = properties[key],
+                  case let .object(prop) = fieldSchema else { return nil }
             guard let kind = fieldKind(prop) else { return nil }
             let title: String
             if case let .string(value)? = prop["title"] { title = value } else { title = key }
@@ -1233,7 +1241,8 @@ struct DesktopElicitationForm: Equatable {
                     description: description,
                     kind: kind,
                     required: required.contains(key),
-                    defaultValue: prop["default"]
+                    defaultValue: prop["default"],
+                    schema: fieldSchema
                 )
             )
         }
@@ -1241,7 +1250,8 @@ struct DesktopElicitationForm: Equatable {
         guard !fields.isEmpty else { return nil }
         return DesktopElicitationForm(
             fields: fields,
-            allowsFreeformChoices: allowFreeformChoices
+            allowsFreeformChoices: allowFreeformChoices,
+            schema: schema
         )
     }
 
@@ -1261,13 +1271,20 @@ struct DesktopElicitationForm: Equatable {
                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return nil
             }
-            guard field.kind.accepts(
+            guard field.accepts(
                 value,
                 allowFreeformChoice: allowsFreeformChoices
             ) else { return nil }
             if field.required || touched.contains(field.key) || field.defaultValue != nil {
                 payload[field.key] = value
             }
+        }
+        guard AppModel.isAcceptableElicitationContent(
+            payload,
+            satisfies: schema,
+            allowFreeformStringChoices: allowsFreeformChoices
+        ) else {
+            return nil
         }
         return payload
     }
@@ -1277,13 +1294,13 @@ struct DesktopElicitationForm: Equatable {
         var customChoiceFields: Set<String> = []
         for field in fields {
             if let defaultValue = field.defaultValue,
-               field.kind.accepts(
+               field.accepts(
                    defaultValue,
                    allowFreeformChoice: allowsFreeformChoices
                ) {
                 values[field.key] = defaultValue
                 if allowsFreeformChoices,
-                   !field.kind.accepts(defaultValue) {
+                   !field.accepts(defaultValue) {
                     customChoiceFields.insert(field.key)
                 }
             } else if field.required {
@@ -1336,21 +1353,25 @@ struct DesktopElicitationForm: Equatable {
         if prop["$ref"] != nil { return nil }
         if prop["anyOf"] != nil || prop["allOf"] != nil || prop["not"] != nil
             || prop["if"] != nil || prop["then"] != nil || prop["else"] != nil
-            || prop["const"] != nil || prop["format"] != nil || prop["pattern"] != nil
-            || prop["minimum"] != nil || prop["maximum"] != nil
+            || prop["const"] != nil || prop["pattern"] != nil
             || prop["exclusiveMinimum"] != nil || prop["exclusiveMaximum"] != nil
             || prop["multipleOf"] != nil {
             return nil
         }
         if case let .array(oneOf)? = prop["oneOf"] {
-            guard prop["enum"] == nil else { return nil }
-            guard prop["minLength"] == nil, prop["maxLength"] == nil else { return nil }
+            guard prop["enum"] == nil, prop["format"] == nil,
+                  prop["minimum"] == nil, prop["maximum"] == nil,
+                  prop["minItems"] == nil, prop["maxItems"] == nil, prop["items"] == nil,
+                  prop["minLength"] == nil, prop["maxLength"] == nil else { return nil }
             guard case .string("string")? = prop["type"] else { return nil }
             guard let choices = labeledChoices(oneOf) else { return nil }
             return .stringOneOf(choices)
         }
         if case let .array(values)? = prop["enum"] {
-            guard prop["minLength"] == nil, prop["maxLength"] == nil else { return nil }
+            guard prop["format"] == nil,
+                  prop["minimum"] == nil, prop["maximum"] == nil,
+                  prop["minItems"] == nil, prop["maxItems"] == nil, prop["items"] == nil,
+                  prop["minLength"] == nil, prop["maxLength"] == nil else { return nil }
             guard case .string("string")? = prop["type"] else { return nil }
             guard values.count <= maxChoices else { return nil }
             var choices: [String] = []
@@ -1362,22 +1383,54 @@ struct DesktopElicitationForm: Equatable {
             return choices.isEmpty ? nil : .stringEnum(choices)
         }
         guard case let .string(type)? = prop["type"] else { return nil }
-        if type != "string", prop["minLength"] != nil || prop["maxLength"] != nil {
+        if type != "string",
+           prop["minLength"] != nil || prop["maxLength"] != nil || prop["format"] != nil {
+            return nil
+        }
+        if type != "number" && type != "integer",
+           prop["minimum"] != nil || prop["maximum"] != nil {
+            return nil
+        }
+        if type != "array",
+           prop["minItems"] != nil || prop["maxItems"] != nil || prop["items"] != nil {
             return nil
         }
         switch type {
         case "boolean": return .bool
-        case "integer": return .number(isInteger: true)
-        case "number": return .number(isInteger: false)
+        case "integer", "number": return numberKind(prop)
         case "string": return stringKind(prop)
         case "array": return arrayKind(prop)
         default: return nil
         }
     }
 
+    private static func numberKind(
+        _ prop: [String: RemoteJSONValue]
+    ) -> DesktopElicitationField.Kind? {
+        let minimum: Double?
+        if let raw = prop["minimum"] {
+            guard case let .number(value) = raw, value.isFinite else { return nil }
+            minimum = value
+        } else {
+            minimum = nil
+        }
+        let maximum: Double?
+        if let raw = prop["maximum"] {
+            guard case let .number(value) = raw, value.isFinite else { return nil }
+            maximum = value
+        } else {
+            maximum = nil
+        }
+        if let minimum, let maximum, minimum > maximum { return nil }
+        return .number
+    }
+
     private static func stringKind(
         _ prop: [String: RemoteJSONValue]
     ) -> DesktopElicitationField.Kind? {
+        if let rawFormat = prop["format"] {
+            guard case .string = rawFormat else { return nil }
+        }
         let minLength: Int?
         if let raw = prop["minLength"] {
             guard let value = nonNegativeInt(raw) else { return nil }
@@ -1414,7 +1467,7 @@ struct DesktopElicitationForm: Equatable {
             maxItems = nil
         }
         if let minItems, let maxItems, minItems > maxItems { return nil }
-        return .stringMultiSelect(choices: choices, minItems: minItems, maxItems: maxItems)
+        return .stringMultiSelect(choices: choices, maxItems: maxItems)
     }
 
     private static func choiceSet(_ items: [String: RemoteJSONValue]) -> [DesktopElicitationField.Choice]? {
@@ -1563,8 +1616,10 @@ enum DesktopElicitationChoiceSelection: Hashable {
 }
 
 enum DesktopElicitationNumberText {
-    static func value(for text: String) -> RemoteJSONValue? {
-        if let number = parse(text) {
+    private static let posixLocale = Locale(identifier: "en_US_POSIX")
+
+    static func value(for text: String, locale: Locale = .current) -> RemoteJSONValue? {
+        if let number = parse(text, locale: locale) {
             return .number(number)
         }
         if text.isEmpty {
@@ -1573,42 +1628,60 @@ enum DesktopElicitationNumberText {
         return .string(text)
     }
 
-    static func text(for value: RemoteJSONValue?) -> String {
+    static func text(for value: RemoteJSONValue?, locale: Locale = .current) -> String {
         if case let .number(number)? = value, number.isFinite {
-            return format(number)
+            return format(number, locale: locale)
         }
         if case let .string(text)? = value { return text }
         return ""
     }
 
-    static func format(_ value: Double) -> String {
+    static func format(_ value: Double, locale: Locale = .current) -> String {
         if value == value.rounded(), abs(value) < 1e15 {
             return String(format: "%.0f", value)
         }
-        if let localized = makeFormatter().string(from: NSNumber(value: value)),
-           parse(localized) == value {
+        if let localized = makeFormatter(locale: locale).string(from: NSNumber(value: value)),
+           parse(localized, locale: locale) == value {
             return localized
         }
         return String(value)
     }
 
-    static func parse(_ text: String) -> Double? {
+    static func parse(_ text: String, locale: Locale = .current) -> Double? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        if let number = makeFormatter().number(from: trimmed) {
-            let value = number.doubleValue
-            if value.isFinite, numericText(trimmed, roundTripsTo: value) { return value }
+        if let value = parseFormattedNumber(trimmed, locale: locale),
+           numericText(trimmed, locale: locale, roundTripsTo: value) {
+            return value
         }
         if let value = Double(trimmed), value.isFinite,
-           numericText(trimmed, roundTripsTo: value) {
+           numericText(trimmed, locale: posixLocale, roundTripsTo: value) {
             return value
         }
         return nil
     }
 
-    private static func makeFormatter() -> NumberFormatter {
+    private static func parseFormattedNumber(_ text: String, locale: Locale) -> Double? {
+        let formatter = makeFormatter(locale: locale)
+        var object: AnyObject?
+        var range = NSRange(location: 0, length: (text as NSString).length)
+        do {
+            try formatter.getObjectValue(&object, for: text, range: &range)
+        } catch {
+            return nil
+        }
+        guard range.location == 0,
+              range.length == (text as NSString).length,
+              let number = object as? NSNumber else {
+            return nil
+        }
+        let value = number.doubleValue
+        return value.isFinite ? value : nil
+    }
+
+    private static func makeFormatter(locale: Locale) -> NumberFormatter {
         let formatter = NumberFormatter()
-        formatter.locale = .current
+        formatter.locale = locale
         formatter.numberStyle = .decimal
         formatter.usesGroupingSeparator = false
         formatter.maximumFractionDigits = 16
@@ -1616,18 +1689,38 @@ enum DesktopElicitationNumberText {
         return formatter
     }
 
-    private static func numericText(_ text: String, roundTripsTo value: Double) -> Bool {
-        guard let entered = decimalValue(text),
-              let canonical = decimalValue(String(value)) else {
-            return true
+    private static func numericText(
+        _ text: String,
+        locale: Locale,
+        roundTripsTo value: Double
+    ) -> Bool {
+        guard let entered = decimalValue(text, locale: locale),
+              let canonical = decimalValue(String(value), locale: posixLocale) else {
+            if makeFormatter(locale: locale).string(from: NSNumber(value: value)) == text {
+                return true
+            }
+            let normalized = text.replacingOccurrences(
+                of: locale.decimalSeparator ?? ".",
+                with: "."
+            )
+            guard let parsed = Double(normalized), parsed.isFinite else { return false }
+            return parsed == value
         }
         return NSDecimalNumber(decimal: entered)
             .compare(NSDecimalNumber(decimal: canonical)) == .orderedSame
     }
 
-    private static func decimalValue(_ text: String) -> Decimal? {
-        Decimal(string: text, locale: Locale.current)
-            ?? Decimal(string: text, locale: Locale(identifier: "en_US_POSIX"))
+    private static func decimalValue(_ text: String, locale: Locale) -> Decimal? {
+        let scanner = Scanner(string: text)
+        scanner.locale = locale
+        scanner.charactersToBeSkipped = nil
+        guard let decimal = scanner.scanDecimal(),
+              scanner.isAtEnd,
+              !decimal.isNaN,
+              NSDecimalNumber(decimal: decimal).doubleValue.isFinite else {
+            return nil
+        }
+        return decimal
     }
 }
 
@@ -1636,9 +1729,21 @@ struct DesktopTerminalDefaultBooleanElicitation: Equatable {
     let value: Bool
 
     static func parse(_ request: RemoteElicitationRequest) -> Self? {
-        guard request.requestId.hasPrefix("synthetic::durable-ask-user::"),
-              request.mode == "terminal-default",
-              case .object(let root)? = request.schema,
+        parse(
+            requestId: request.requestId,
+            mode: request.mode,
+            schema: request.schema
+        )
+    }
+
+    static func parse(
+        requestId: String,
+        mode: String?,
+        schema: RemoteJSONValue?
+    ) -> Self? {
+        guard requestId.hasPrefix("synthetic::durable-ask-user::"),
+              mode == "terminal-default",
+              case .object(let root)? = schema,
               Set(root.keys) == [
                 "properties", "x-copilot-projects-terminal-default",
               ],
@@ -1820,7 +1925,8 @@ private struct DesktopElicitationCard: View {
     @FocusState private var focusedCustomChoice: String?
 
     private var form: DesktopElicitationForm? {
-        guard !request.requestId.hasPrefix("synthetic::durable-ask-user::"),
+        guard !isURLMode,
+              !request.requestId.hasPrefix("synthetic::durable-ask-user::"),
               request.mode == nil || request.mode == "form" else {
             return nil
         }
@@ -2048,14 +2154,11 @@ private struct DesktopElicitationCard: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
-            case .stringMultiSelect(let choices, _, let maxItems):
+            case .stringMultiSelect(let choices, _):
                 ForEach(choices, id: \.value) { choice in
                     let selected = isChoiceSelected(field.key, choice.value)
                     Button {
-                        toggleChoice(
-                            field.key, choice.value,
-                            choices: choices, maxItems: maxItems
-                        )
+                        toggleChoice(field, choice.value)
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: selected ? "checkmark.square.fill" : "square")
@@ -2127,20 +2230,10 @@ private struct DesktopElicitationCard: View {
         selectedStrings(key).contains(value)
     }
 
-    private func toggleChoice(
-        _ key: String,
-        _ value: String,
-        choices: [DesktopElicitationField.Choice],
-        maxItems: Int?
-    ) {
-        guard let ordered = DesktopElicitationField.toggledSelection(
-            value,
-            in: selectedStrings(key),
-            choices: choices,
-            maxItems: maxItems
-        ) else { return }
-        values[key] = .array(ordered.map { .string($0) })
-        markTouched(key)
+    private func toggleChoice(_ field: DesktopElicitationField, _ value: String) {
+        guard let updated = field.toggledSelectionValue(value, in: values[field.key]) else { return }
+        values[field.key] = updated
+        markTouched(field.key)
     }
 
     private func freeformStringBinding(_ field: DesktopElicitationField) -> Binding<String> {

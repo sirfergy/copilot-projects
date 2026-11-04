@@ -1176,9 +1176,11 @@ extension AppModel {
         switch answer.action {
         case .accept:
             if let content = answer.content {
-                guard Self.isValidElicitationContent(content),
-                      let encoded = try? JSONEncoder().encode(content),
-                      encoded.count <= 32_768 else {
+                guard Self.isAcceptableElicitationContent(
+                    content,
+                    satisfies: nil,
+                    allowFreeformStringChoices: false
+                ) else {
                     return .invalid
                 }
             }
@@ -1199,14 +1201,11 @@ extension AppModel {
                     return answer.content == nil
                 }
                 guard let content = answer.content,
-                      Self.isValidElicitationContent(content),
-                      Self.elicitationContent(
+                      Self.isAcceptableElicitationContent(
                           content,
                           satisfies: request.schema,
                           allowFreeformStringChoices: request.elicitationSource == nil
-                      ),
-                      let encoded = try? JSONEncoder().encode(content),
-                      encoded.count <= 32_768 else {
+                      ) else {
                     return false
                 }
                 return true
@@ -1308,26 +1307,16 @@ extension AppModel {
         request: TrackedElicitation,
         answer: RemoteElicitationAnswer
     ) -> Bool? {
-        guard request.requestId.hasPrefix("synthetic::durable-ask-user::"),
-              request.mode == "terminal-default",
-              answer.action == .accept,
-              let content = answer.content,
-              content.count == 1,
-              case .object(let root)? = request.schema,
-              Set(root.keys) == [
-                "properties", "x-copilot-projects-terminal-default"
-              ],
-              root["x-copilot-projects-terminal-default"] == .bool(true),
-              case .object(let properties)? = root["properties"],
-              properties.count == 1,
-              let fieldName = properties.keys.first,
-              case .object(let field)? = properties[fieldName],
-              field["type"] == .string("boolean"),
-              case .bool(let defaultValue)? = field["default"],
-              case .bool(let selected)? = content[fieldName],
-              selected == defaultValue
-        else { return nil }
-        return selected
+        guard let terminalDefault = DesktopTerminalDefaultBooleanElicitation.parse(
+            requestId: request.requestId,
+            mode: request.mode,
+            schema: request.schema
+        ),
+        answer.action == .accept,
+        answer.content == [terminalDefault.key: .bool(terminalDefault.value)] else {
+            return nil
+        }
+        return terminalDefault.value
     }
 
     nonisolated static func durableBooleanPromptIsVisible(
@@ -1623,77 +1612,98 @@ extension AppModel {
 
     func performLocalUserInputAnswer(
         sessionId: String,
-        answer: RemoteUserInputAnswer
+        answer: RemoteUserInputAnswer,
+        maxAttempts: Int = 40,
+        pollInterval: Duration = .milliseconds(500)
     ) async -> RemoteWorkflowActionResult {
-        let adapter = CLIOperationAdapter(
-            activityDirectory: agentActivityDirectory,
-            resumeMarkerDirectory: resumeMarkerDirectory
-        )
-        let snapshot = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() })
-        let epoch = snapshot?.remoteOperationProjection().conversationEpoch
-        let operation = epoch.map {
-            CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: $0)
-        }
-        let outcome = answerUserInput(sessionId: sessionId, answer: answer, operation: operation)
-        guard outcome == .accepted else {
-            return RemoteWorkflowActionResult(
-                state: .rejected,
-                message: outcome == .conflict
-                    ? "Another answer is already in progress."
-                    : "The answer could not be sent."
-            )
-        }
-        for _ in 0..<40 {
-            do { try await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(500))) }
-            catch { break }
-            guard let fresh = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
-                  !fresh.reportsTerminalDisconnect,
-                  epoch == nil || fresh.conversationEpoch == epoch else { break }
-            if let operation,
-               let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
-                   $0.operationId == operation.operationId
-                       && $0.kind == CLISDKOperationKind.answerUserInput.rawValue
-               }), receipt.state.isTerminal {
-                return RemoteWorkflowActionResult(
-                    state: receipt.state,
-                    message: receipt.state == .applied ? nil : receipt.state == .rejected
-                        ? "Copilot did not apply this answer."
-                        : "Outcome unknown. Inspect the terminal before trying again.",
-                    operationId: operation.operationId
-                )
+        await performLocalQuestionAnswer(
+            sessionId: sessionId,
+            requestId: answer.requestId,
+            kind: .answerUserInput,
+            fingerprint: CLIOperationAdapter.payloadFingerprint(kind: .answerUserInput, payload: answer),
+            isSynthetic: false,
+            maxAttempts: maxAttempts,
+            pollInterval: pollInterval,
+            submit: { operation in
+                answerUserInput(sessionId: sessionId, answer: answer, operation: operation)
             }
-            if let tracked = fresh.trackedUserInputs,
-               !tracked.contains(where: { $0.requestId == answer.requestId }) {
-                return RemoteWorkflowActionResult(
-                    state: .applied,
-                    operationId: operation?.operationId
-                )
-            }
-        }
-        return RemoteWorkflowActionResult(
-            state: .indeterminate,
-            message: "Couldn't confirm the outcome. Inspect the terminal before trying again.",
-            operationId: operation?.operationId
         )
     }
 
     func performLocalElicitationAnswer(
         sessionId: String,
-        answer: RemoteElicitationAnswer
+        answer: RemoteElicitationAnswer,
+        maxAttempts: Int = 40,
+        pollInterval: Duration = .milliseconds(500)
     ) async -> RemoteWorkflowActionResult {
+        await performLocalQuestionAnswer(
+            sessionId: sessionId,
+            requestId: answer.requestId,
+            kind: .answerElicitation,
+            fingerprint: CLIOperationAdapter.payloadFingerprint(kind: .answerElicitation, payload: answer),
+            isSynthetic: answer.requestId.hasPrefix("synthetic::durable-ask-user::"),
+            maxAttempts: maxAttempts,
+            pollInterval: pollInterval,
+            submit: { operation in
+                answerElicitation(sessionId: sessionId, answer: answer, operation: operation)
+            }
+        )
+    }
+
+    private func performLocalQuestionAnswer(
+        sessionId: String,
+        requestId: String,
+        kind: CLISDKOperationKind,
+        fingerprint: String?,
+        isSynthetic: Bool,
+        maxAttempts: Int,
+        pollInterval: Duration,
+        submit: (CLIOperationRequest?) -> RemoteUserInputResult
+    ) async -> RemoteWorkflowActionResult {
+        if isSynthetic {
+            let outcome = submit(nil)
+            guard outcome == .accepted else {
+                return RemoteWorkflowActionResult(
+                    state: .rejected,
+                    message: outcome == .conflict
+                        ? "Another answer is already in progress."
+                        : "The answer could not be sent."
+                )
+            }
+            return RemoteWorkflowActionResult(state: .applied)
+        }
         let adapter = CLIOperationAdapter(
             activityDirectory: agentActivityDirectory,
             resumeMarkerDirectory: resumeMarkerDirectory
         )
-        let isSynthetic = answer.requestId.hasPrefix("synthetic::durable-ask-user::")
-        let snapshot = isSynthetic
-            ? nil
-            : adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() })
-        let epoch = snapshot?.remoteOperationProjection().conversationEpoch
-        let operation = epoch.map {
-            CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: $0)
+        guard let snapshot = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
+              let epoch = snapshot.remoteOperationProjection().conversationEpoch else {
+            return RemoteWorkflowActionResult(
+                state: .rejected,
+                message: "The answer could not be sent."
+            )
         }
-        let outcome = answerElicitation(sessionId: sessionId, answer: answer, operation: operation)
+        let operationKey = "\(sessionId):\(epoch):\(kind.rawValue):\(requestId)"
+        if let existing = localQuestionOperations[operationKey] {
+            let receipt = snapshot.remoteOperationProjection().receipts?.first(where: {
+                $0.operationId == existing.operation.operationId && $0.kind == kind.rawValue
+            })
+            if receipt?.state == .rejected {
+                localQuestionOperations.removeValue(forKey: operationKey)
+            } else if existing.fingerprint != fingerprint {
+                return RemoteWorkflowActionResult(
+                    state: .rejected,
+                    message: "Another answer is already in progress.",
+                    operationId: existing.operation.operationId
+                )
+            } else if let receipt, receipt.state.isTerminal {
+                return Self.questionReceiptResult(receipt.state, operationId: existing.operation.operationId)
+            } else {
+                return Self.questionReceiptResult(.indeterminate, operationId: existing.operation.operationId)
+            }
+        }
+        let operation = CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: epoch)
+        let outcome = submit(operation)
         guard outcome == .accepted else {
             return RemoteWorkflowActionResult(
                 state: .rejected,
@@ -1702,41 +1712,55 @@ extension AppModel {
                     : "The answer could not be sent."
             )
         }
-        if isSynthetic {
-            return RemoteWorkflowActionResult(state: .applied)
-        }
-        for _ in 0..<40 {
-            do { try await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(500))) }
+        localQuestionOperations[operationKey] = (operation, fingerprint)
+        for _ in 0..<maxAttempts {
+            do { try await ContinuousClock().sleep(until: .now.advanced(by: pollInterval)) }
             catch { break }
             guard let fresh = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
                   !fresh.reportsTerminalDisconnect,
-                  epoch == nil || fresh.conversationEpoch == epoch else { break }
-            if let operation,
-               let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
-                   $0.operationId == operation.operationId
-                       && $0.kind == CLISDKOperationKind.answerElicitation.rawValue
-               }), receipt.state.isTerminal {
-                return RemoteWorkflowActionResult(
-                    state: receipt.state,
-                    message: receipt.state == .applied ? nil : receipt.state == .rejected
-                        ? "Copilot did not apply this answer."
-                        : "Outcome unknown. Inspect the terminal before trying again.",
-                    operationId: operation.operationId
-                )
-            }
-            if let tracked = fresh.trackedElicitations,
-               !tracked.contains(where: { $0.requestId == answer.requestId }) {
-                return RemoteWorkflowActionResult(
-                    state: .applied,
-                    operationId: operation?.operationId
-                )
+                  fresh.conversationEpoch == epoch else { break }
+            if let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
+                $0.operationId == operation.operationId && $0.kind == kind.rawValue
+            }), receipt.state.isTerminal {
+                if receipt.state == .rejected,
+                   localQuestionOperations[operationKey]?.operation.operationId == operation.operationId {
+                    localQuestionOperations.removeValue(forKey: operationKey)
+                }
+                return Self.questionReceiptResult(receipt.state, operationId: operation.operationId)
             }
         }
-        return RemoteWorkflowActionResult(
-            state: .indeterminate,
-            message: "Couldn't confirm the outcome. Inspect the terminal before trying again.",
-            operationId: operation?.operationId
+        return Self.questionReceiptResult(.indeterminate, operationId: operation.operationId)
+    }
+
+    private nonisolated static func questionReceiptResult(
+        _ state: RemoteOperationState,
+        operationId: String?
+    ) -> RemoteWorkflowActionResult {
+        RemoteWorkflowActionResult(
+            state: state,
+            message: state == .applied ? nil : state == .rejected
+                ? "Copilot did not apply this answer."
+                : "Couldn't confirm the outcome. Inspect the terminal before trying again.",
+            operationId: operationId
         )
+    }
+
+    nonisolated static func isAcceptableElicitationContent(
+        _ content: [String: RemoteJSONValue],
+        satisfies schema: RemoteJSONValue?,
+        allowFreeformStringChoices: Bool
+    ) -> Bool {
+        guard isValidElicitationContent(content),
+              elicitationContent(
+                  content,
+                  satisfies: schema,
+                  allowFreeformStringChoices: allowFreeformStringChoices
+              ),
+              let encoded = try? JSONEncoder().encode(content),
+              encoded.count <= 32_768 else {
+            return false
+        }
+        return true
     }
 
     nonisolated static func isValidElicitationContent(_ content: [String: RemoteJSONValue]) -> Bool {
@@ -1782,7 +1806,7 @@ extension AppModel {
         return true
     }
 
-    private nonisolated static func elicitationValue(
+    nonisolated static func elicitationValue(
         _ value: RemoteJSONValue,
         satisfies schema: RemoteJSONValue,
         allowFreeformStringChoice: Bool = false
@@ -1847,10 +1871,11 @@ extension AppModel {
                !stringMatchesFormat(string, format: format) { return false }
             return true
         case "number":
-            guard case .number(let number) = value else { return false }
+            guard case .number(let number) = value, number.isFinite else { return false }
             return numberSatisfiesBounds(number, schema: schema)
         case "integer":
             guard case .number(let number) = value,
+                  number.isFinite,
                   number.rounded() == number else { return false }
             return numberSatisfiesBounds(number, schema: schema)
         case "boolean":
