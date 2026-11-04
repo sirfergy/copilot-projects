@@ -8631,6 +8631,54 @@ final class AppLogicTests: XCTestCase {
             MarkdownParser.blocks(from: "```inline triple backtick```"),
             [.paragraph("```inline triple backtick```")]
         )
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: "***bold***"),
+            [.paragraph("***bold***")]
+        )
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: "```\n---\n```"),
+            [.codeBlock("---")]
+        )
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: "- item\n---\nNext"),
+            [
+                .list([MarkdownListItem(marker: "\u{2022}", text: "item", depth: 0)]),
+                .paragraph("---"),
+                .paragraph("Next"),
+            ]
+        )
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: "Before\n***\n- item\n* * *\nAfter\n- - -"),
+            [
+                .paragraph("Before"),
+                .paragraph("***"),
+                .list([MarkdownListItem(marker: "\u{2022}", text: "item", depth: 0)]),
+                .paragraph("* * *"),
+                .paragraph("After"),
+                .paragraph("- - -"),
+            ]
+        )
+        XCTAssertFalse(MarkdownParser.isThematicBreak("__\n__"))
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: "- item\n  | A | B |\n  | --- | ---: |\n  | x | 1 |"),
+            [
+                .list([MarkdownListItem(marker: "\u{2022}", text: "item", depth: 0)]),
+                .table(MarkdownTable(
+                    header: ["A", "B"],
+                    alignments: [.leading, .trailing],
+                    rows: [["x", "1"]]
+                )),
+            ]
+        )
+        let header900 = Array(repeating: "h", count: 900).joined(separator: " | ")
+        let delim900 = Array(repeating: "---", count: 900).joined(separator: " | ")
+        let row900 = Array(repeating: "v", count: 900).joined(separator: " | ")
+        let hugeTable = ([header900, delim900] + Array(repeating: row900, count: 9)).joined(separator: "\n")
+        let smallTable = "| K | V |\n| --- | --- |\n| a | b |"
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: "\(hugeTable)\n\n\(smallTable)").last,
+            .table(MarkdownTable(header: ["K", "V"], alignments: [.leading, .leading], rows: [["a", "b"]]))
+        )
     }
 
     func testMarkdownParserParsesDetailsAndSummaryBlocks() {
@@ -8710,14 +8758,17 @@ final class AppLogicTests: XCTestCase {
 
     func testMarkdownRenderingLimitsPreventStructuralAmplification() {
         XCTAssertTrue(MarkdownParser.isWithinRenderingLimits("# Heading\n\nBody"))
-        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
-            Array(repeating: "- item", count: 501).joined(separator: "\n")
+        XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(
+            Array(repeating: "- item", count: 800).joined(separator: "\n")
         ))
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
-            Array(repeating: "- item", count: 501).joined(separator: "\r\n")
+            Array(repeating: "- item", count: 2_001).joined(separator: "\n")
         ))
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
-            Array(repeating: "- item", count: 501).joined(separator: "\r")
+            Array(repeating: "- item", count: 2_001).joined(separator: "\r\n")
+        ))
+        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
+            Array(repeating: "- item", count: 2_001).joined(separator: "\r")
         ))
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
             String(repeating: "|", count: 1_001)
@@ -8749,8 +8800,11 @@ final class AppLogicTests: XCTestCase {
             "\(wideHeader)\n\(wideDelimiter)\n\(sparseRows)"
         ))
         let wrappedTableUnit = "| A | B |\n| --- | --- |\n| \(String(repeating: "wrapped ", count: 250)) | y |"
-        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
+        XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(
             Array(repeating: wrappedTableUnit, count: 10).joined(separator: "\n\n")
+        ))
+        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
+            Array(repeating: wrappedTableUnit, count: 35).joined(separator: "\n\n")
         ))
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
             "<details>\n<summary>Huge table</summary>\n\n\(wideHeader)\n\(wideDelimiter)\n\(sparseRows)\n</details>"
@@ -9400,6 +9454,190 @@ final class AppLogicTests: XCTestCase {
         codeBlockView.selectAll(nil)
         codeBlockView.copy(nil)
         XCTAssertEqual(pasteboard.string(forType: .string), "let status = \"green\"")
+
+        // A multi-table report with 4 tables totaling >1,000 estimated visual cells (matching the
+        // 25 + 60 + 95 + 98 raw-cell / 1,205 visual-cell shape) renders every heading, divider,
+        // table, and fenced code block as formatted Markdown rather than raw text.
+        func makeSyntheticTable(rows: Int, cols: Int, lastCellLength: Int) -> String {
+            let header = "| " + (1...cols).map { "Col \($0)" }.joined(separator: " | ") + " |"
+            let delim = "| " + (["---"] + Array(repeating: "---:", count: cols - 1)).joined(separator: " | ") + " |"
+            let phrase = "batch pipeline sync ($14.2k), webhook worker ($8.5k), scheduled rollup ($4.1k), "
+            let body = (1...rows).map { r in
+                let prefix = (1..<cols).map { c in c == 1 ? "`service-\(r)`" : "**$\(r * 100).00**" }
+                let padCount = max(1, lastCellLength - 16)
+                let repeated = String(repeating: phrase, count: (padCount / phrase.count) + 2)
+                let tail = "`metric_\(r)` " + String(repeated.prefix(padCount))
+                return "| " + (prefix + [tail]).joined(separator: " | ") + " |"
+            }.joined(separator: "\n")
+            return "\(header)\n\(delim)\n\(body)"
+        }
+        let syntheticReport = """
+        Overview paragraph with **bold** summary and `inline_metric`.
+
+        ### 1. Summary Breakdown
+
+        \(makeSyntheticTable(rows: 4, cols: 5, lastCellLength: 60))
+
+        ---
+
+        ### 2. Team Rollup
+
+        \(makeSyntheticTable(rows: 11, cols: 5, lastCellLength: 280))
+
+        ---
+
+        ### 3. Detailed Breakdown
+
+        \(makeSyntheticTable(rows: 18, cols: 5, lastCellLength: 280))
+
+        ---
+
+        ### 4. Totals by Integration
+
+        | Integration (`cleaned_name`) | Full Total (`$200.0k`) | Direct (`$160.0k`) | Self (`$40.0k`) | Partners (`$180`) | Requests | Active Users |
+        | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+        \((1...13).map { "| `integration-service-\($0)` | **$\(80_000 / $0).00** | $\(70_000 / $0).00 | $\(10_000 / $0).00 | $0.00 | \(100_000 / $0) | \(15 - ($0 % 10)) |" }.joined(separator: "\n"))
+
+        ---
+
+        ### 5. Query Reference
+
+        ```kql
+        UsageEvents
+        | where Timestamp >= ago(30d)
+        | summarize Total = sum(Count) by Integration
+        ```
+        """
+        XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(syntheticReport))
+        let reportHost = NSHostingView(
+            rootView: MarkdownText(text: syntheticReport)
+                .frame(width: 380, alignment: .leading)
+        )
+        reportHost.frame = NSRect(x: 0, y: 0, width: 380, height: 2_400)
+        reportHost.layoutSubtreeIfNeeded()
+        let reportTextViews = findTextViews(in: reportHost)
+        let renderedTables = reportTextViews.filter { $0.headerDividerY() != nil }
+        XCTAssertEqual(renderedTables.count, 4, "All four tables in a multi-table report must render as formatted tables")
+        XCTAssertFalse(
+            reportTextViews.contains { $0.attributedText.string.contains("### 4. Totals by Integration") },
+            "Headings must be formatted rather than raw ### text"
+        )
+        XCTAssertFalse(
+            reportTextViews.contains { $0.attributedText.string == "---" },
+            "Standalone thematic breaks must render as dividers rather than literal --- paragraphs"
+        )
+
+        // An oversized block (e.g., a 50x26 table, a >2,000-marker paragraph, or a 5th table exceeding
+        // the document table budget) falls back only that block to plain text without flattening
+        // neighboring headings, bold prose, or earlier tables, and without polluting inlineCache.
+        let wideHeader50 = Array(repeating: "h", count: 50).joined(separator: " | ")
+        let wideDelim50 = Array(repeating: "---", count: 50).joined(separator: " | ")
+        let sparseRows25 = Array(repeating: "cell_a | cell_b", count: 25).joined(separator: "\n")
+        let oversizedTable = "\(wideHeader50)\n\(wideDelim50)\n\(sparseRows25)"
+        let oversizedInlinePara = Array(repeating: "**span** ", count: 600).joined()
+        let mixedMarkdown = """
+        # Mixed Report
+
+        \(oversizedTable)
+
+        \(oversizedInlinePara)
+
+        <details open>
+        <summary>\(Array(repeating: "*s* ", count: 1_001).joined())</summary>
+        Inner **formatted** detail.
+        </details>
+
+        Trailing **bold** conclusion.
+        """
+        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(mixedMarkdown))
+        MarkdownParser.clearCache()
+        let mixedHost = NSHostingView(
+            rootView: MarkdownText(text: mixedMarkdown)
+                .frame(width: 380, alignment: .leading)
+        )
+        mixedHost.frame = NSRect(x: 0, y: 0, width: 380, height: 1_200)
+        mixedHost.layoutSubtreeIfNeeded()
+        XCTAssertFalse(MarkdownParser.inlineCache.contains("cell_a"))
+        XCTAssertFalse(MarkdownParser.inlineCache.contains(oversizedInlinePara))
+        let mixedViews = findTextViews(in: mixedHost)
+        XCTAssertGreaterThanOrEqual(mixedViews.count, 4)
+        let mixedHeadingView = try XCTUnwrap(mixedViews.first { $0.attributedText.string.contains("Mixed Report") })
+        XCTAssertEqual(
+            mixedHeadingView.attributedText.attribute(
+                MarkdownText.headingLevelAttribute,
+                at: 0,
+                effectiveRange: nil
+            ) as? NSNumber,
+            1
+        )
+        let mixedTableFallback = try XCTUnwrap(mixedViews.first { $0.attributedText.string.contains("cell_a\tcell_b") })
+        XCTAssertNil(mixedTableFallback.headerDividerY())
+        XCTAssertFalse(mixedTableFallback.attributedText.string.contains("cell_b\t"))
+        let mixedTrailingView = try XCTUnwrap(mixedViews.first { $0.attributedText.string.contains("Trailing bold conclusion.") })
+        let trailingBoldLoc = (mixedTrailingView.attributedText.string as NSString).range(of: "bold").location
+        let trailingBoldFont = try XCTUnwrap(
+            mixedTrailingView.attributedText.attribute(.font, at: trailingBoldLoc, effectiveRange: nil) as? NSFont
+        )
+        XCTAssertTrue(trailingBoldFont.fontDescriptor.symbolicTraits.contains(.bold))
+
+        // Growing an earlier table crosses the document budget without crossing its per-table limit.
+        // Updating the same host must switch the unchanged trailing table to plain text and back.
+        let table960 = makeSyntheticTable(rows: 15, cols: 6, lastCellLength: 300)
+        let smallerFirstTable = makeSyntheticTable(rows: 1, cols: 6, lastCellLength: 300)
+        let withinBudgetMarkdown = (1...5).map {
+            "### Section \($0)\n\n\($0 == 1 ? smallerFirstTable : table960)"
+        }.joined(separator: "\n\n")
+        let fiveTablesMarkdown = (1...5).map { "### Section \($0)\n\n\(table960)" }.joined(separator: "\n\n")
+        let fiveTablesHost = NSHostingView(
+            rootView: MarkdownText(text: withinBudgetMarkdown)
+                .frame(width: 380, alignment: .leading)
+        )
+        fiveTablesHost.frame = NSRect(x: 0, y: 0, width: 380, height: 3_000)
+        fiveTablesHost.layoutSubtreeIfNeeded()
+        XCTAssertEqual(findTextViews(in: fiveTablesHost).filter { $0.headerDividerY() != nil }.count, 5)
+
+        fiveTablesHost.rootView = MarkdownText(text: fiveTablesMarkdown)
+            .frame(width: 380, alignment: .leading)
+        fiveTablesHost.layoutSubtreeIfNeeded()
+        let fiveTablesViews = findTextViews(in: fiveTablesHost)
+        XCTAssertEqual(fiveTablesViews.filter { $0.headerDividerY() != nil }.count, 4)
+
+        fiveTablesHost.rootView = MarkdownText(text: withinBudgetMarkdown)
+            .frame(width: 380, alignment: .leading)
+        fiveTablesHost.layoutSubtreeIfNeeded()
+        XCTAssertEqual(findTextViews(in: fiveTablesHost).filter { $0.headerDividerY() != nil }.count, 5)
+
+        let inlineBlocks5 = (1...5).map { idx -> String in
+            let p = "para_\(idx) " + Array(repeating: "**b** ", count: 450).joined()
+            return idx == 2 ? "<details open>\n<summary>Detail</summary>\n\n\(p)\n</details>" : p
+        }
+        let fifthInlineBlock = "para_5 " + Array(repeating: "**b** ", count: 450).joined()
+        MarkdownParser.clearCache()
+        let inlineBudgetHost = NSHostingView(
+            rootView: MarkdownText(text: inlineBlocks5.joined(separator: "\n\n"))
+                .frame(width: 380, alignment: .leading)
+        )
+        inlineBudgetHost.frame = NSRect(x: 0, y: 0, width: 380, height: 1_800)
+        inlineBudgetHost.layoutSubtreeIfNeeded()
+        XCTAssertFalse(MarkdownParser.inlineCache.contains(fifthInlineBlock))
+        let inlineBudgetViews = findTextViews(in: inlineBudgetHost)
+        XCTAssertTrue(inlineBudgetViews.contains { $0.attributedText.string.contains("para_4 b ") })
+        XCTAssertTrue(inlineBudgetViews.contains { $0.attributedText.string.contains("para_5 **b**") })
+
+        let codeBlocks60 = (1...60).map { "```\ncode_\($0)\n```" }.joined(separator: "\n")
+        let manyDetailsMarkdown = (1...6).map {
+            "<details open>\n<summary>Group \($0)</summary>\n\(codeBlocks60)\n</details>"
+        }.joined(separator: "\n")
+        let manyDetailsHost = NSHostingView(
+            rootView: MarkdownText(text: manyDetailsMarkdown)
+                .frame(width: 380, alignment: .leading)
+        )
+        manyDetailsHost.frame = NSRect(x: 0, y: 0, width: 380, height: 1_200)
+        manyDetailsHost.layoutSubtreeIfNeeded()
+        XCTAssertLessThanOrEqual(
+            findTextViews(in: manyDetailsHost).count,
+            262
+        )
     }
 
     // MARK: - Remote web terminal image rendering
