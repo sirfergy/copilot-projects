@@ -1847,6 +1847,8 @@ private struct DesktopElicitationCard: View {
                     .buttonStyle(.plain)
                     .disabled(isDisabled)
                     .opacity(isDisabled ? 0.5 : 1)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                    .accessibilityValue(selected ? "Selected" : "Not selected")
                     .accessibilityLabel(choice.title)
                 }
             }
