@@ -1555,15 +1555,17 @@ extension AppModel {
     }
 
     func sessionPendingUserInputs(sessionId: String) -> [RemoteUserInputRequest] {
-        guard let location = locateIndex(sessionId) else { return [] }
-        return projects[location.p].sessions[location.s].agentActivity?
-            .remoteUserInputRequests() ?? []
+        guard let location = locateIndex(sessionId),
+              let snapshot = projects[location.p].sessions[location.s].agentActivity,
+              !snapshot.reportsTerminalDisconnect else { return [] }
+        return snapshot.remoteUserInputRequests() ?? []
     }
 
     func sessionPendingElicitations(sessionId: String) -> [RemoteElicitationRequest] {
-        guard let location = locateIndex(sessionId) else { return [] }
-        return projects[location.p].sessions[location.s].agentActivity?
-            .remoteElicitationRequests() ?? []
+        guard let location = locateIndex(sessionId),
+              let snapshot = projects[location.p].sessions[location.s].agentActivity,
+              !snapshot.reportsTerminalDisconnect else { return [] }
+        return snapshot.remoteElicitationRequests() ?? []
     }
 
     func sessionOperationProjection(sessionId: String) -> AgentOperationProjection {
@@ -1648,6 +1650,7 @@ extension AppModel {
             do { try await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(500))) }
             catch { break }
             guard let fresh = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
+                  !fresh.reportsTerminalDisconnect,
                   fresh.conversationEpoch == epoch else { break }
             if let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
                 $0.operationId == operation.operationId
@@ -1661,7 +1664,8 @@ extension AppModel {
                     operationId: operation.operationId
                 )
             }
-            if !(fresh.trackedUserInputs ?? []).contains(where: { $0.requestId == answer.requestId }) {
+            if let tracked = fresh.trackedUserInputs,
+               !tracked.contains(where: { $0.requestId == answer.requestId }) {
                 return RemoteWorkflowActionResult(
                     state: .applied,
                     operationId: operation.operationId
@@ -1710,6 +1714,7 @@ extension AppModel {
             do { try await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(500))) }
             catch { break }
             guard let fresh = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
+                  !fresh.reportsTerminalDisconnect,
                   fresh.conversationEpoch == epoch else { break }
             if let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
                 $0.operationId == operation.operationId
@@ -1723,7 +1728,8 @@ extension AppModel {
                     operationId: operation.operationId
                 )
             }
-            if !(fresh.trackedElicitations ?? []).contains(where: { $0.requestId == answer.requestId }) {
+            if let tracked = fresh.trackedElicitations,
+               !tracked.contains(where: { $0.requestId == answer.requestId }) {
                 return RemoteWorkflowActionResult(
                     state: .applied,
                     operationId: operation.operationId

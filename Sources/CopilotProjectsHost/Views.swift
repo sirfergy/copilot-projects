@@ -1007,7 +1007,10 @@ struct DetailView: View {
                     controller: transcript,
                     imageCapture: { model.terminalView(for: sessionId)?.kittyImageCapture },
                     isOpen: model.isTranscriptDrawerOpen(sessionId: sessionId),
-                    onClose: { model.closeTranscriptDrawer(sessionId: sessionId) },
+                    onClose: {
+                        model.closeTranscriptDrawer(sessionId: sessionId)
+                        model.focusActiveTerminal()
+                    },
                     workflow: model.sessionWorkflow(sessionId: sessionId),
                     operation: operation,
                     pendingUserInputs: model.sessionPendingUserInputs(sessionId: sessionId),
