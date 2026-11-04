@@ -14975,6 +14975,242 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(TranscriptDrawer.usesFullTerminalArea(storedValue: false))
         XCTAssertTrue(TranscriptDrawer.usesFullTerminalArea(storedValue: true))
     }
+
+    func testQuickReplyConfigurationDefaultsValidationAndCorruptFallback() throws {
+        let suite = "quick-replies-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        XCTAssertEqual(TranscriptPromptComposerView.showQuickReplyChipsKey, "showQuickReplyChips")
+        XCTAssertEqual(TranscriptPromptComposerView.quickReplyListKey, "quickReplyList")
+
+        let initial = QuickReplyConfiguration.load(from: defaults)
+        XCTAssertFalse(initial.isCustomized)
+        XCTAssertEqual(initial.activeReplies.map(\.label), [
+            "Approve", "Post", "Merge when ready", "Request CCR",
+            "Max review", "Keep going", "No bloat?",
+        ])
+
+        // Trim and boundary validation (label 1-24, prompt 1-2000, max 12, case-insensitive unique labels).
+        XCTAssertEqual(
+            QuickReplyConfiguration.validateItem(label: "   ", prompt: "ok"),
+            .failure(.emptyLabel)
+        )
+        XCTAssertEqual(
+            QuickReplyConfiguration.validateItem(
+                label: String(repeating: "a", count: 25),
+                prompt: "ok"
+            ),
+            .failure(.labelTooLong(max: 24))
+        )
+        XCTAssertEqual(
+            QuickReplyConfiguration.validateItem(label: "ok", prompt: " \n\t "),
+            .failure(.emptyPrompt)
+        )
+        XCTAssertEqual(
+            QuickReplyConfiguration.validateItem(
+                label: "ok",
+                prompt: String(repeating: "p", count: 2_001)
+            ),
+            .failure(.promptTooLong(max: 2_000))
+        )
+
+        let maxLabel = String(repeating: "L", count: 24)
+        let maxPrompt = String(repeating: "P", count: 2_000)
+        XCTAssertEqual(
+            QuickReplyConfiguration.validateItem(label: "  \(maxLabel)  ", prompt: "  \(maxPrompt)\n"),
+            .success(QuickReplyItem(label: maxLabel, prompt: maxPrompt))
+        )
+
+        XCTAssertEqual(
+            QuickReplyConfiguration.validateList([
+                QuickReplyItem(label: "Ship It", prompt: "Ship it"),
+                QuickReplyItem(label: "  ship it ", prompt: "Another prompt"),
+            ]),
+            .failure(.duplicateLabel("ship it"))
+        )
+
+        let twelveItems = (1...12).map {
+            QuickReplyItem(label: "Item \($0)", prompt: "Prompt \($0)")
+        }
+        XCTAssertEqual(QuickReplyConfiguration.save(twelveItems, to: defaults), .success(twelveItems))
+        XCTAssertEqual(QuickReplyConfiguration.load(from: defaults), .custom(twelveItems))
+
+        let thirteenItems = (1...13).map {
+            QuickReplyItem(label: "Item \($0)", prompt: "Prompt \($0)")
+        }
+        XCTAssertEqual(
+            QuickReplyConfiguration.validateList(thirteenItems),
+            .failure(.tooManyReplies(max: 12))
+        )
+
+        // Empty custom list persists as [] and shows no chips.
+        XCTAssertEqual(QuickReplyConfiguration.save([], to: defaults), .success([]))
+        XCTAssertEqual(defaults.string(forKey: "quickReplyList"), "[]")
+        let emptyConfig = QuickReplyConfiguration.load(from: defaults)
+        XCTAssertTrue(emptyConfig.isCustomized)
+        XCTAssertTrue(emptyConfig.activeReplies.isEmpty)
+
+        // Reset removes the UserDefaults key rather than saving a copy of defaults.
+        QuickReplyConfiguration.reset(in: defaults)
+        XCTAssertNil(defaults.object(forKey: "quickReplyList"))
+        XCTAssertFalse(QuickReplyConfiguration.load(from: defaults).isCustomized)
+
+        // Corrupt or invalid stored JSON falls back to the non-customized state.
+        let invalidPayloads: [Any] = [
+            "not-json",
+            "{}",
+            "[{\"label\":\"only-label\"}]",
+            "[{\"label\":\"\",\"prompt\":\"hi\"}]",
+            "[{\"label\":\"A\",\"prompt\":\"1\"},{\"label\":\"a\",\"prompt\":\"2\"}]",
+            12345,
+        ]
+        for payload in invalidPayloads {
+            defaults.set(payload, forKey: "quickReplyList")
+            let loaded = QuickReplyConfiguration.load(from: defaults)
+            XCTAssertFalse(loaded.isCustomized)
+            XCTAssertEqual(loaded.activeReplies, QuickReplyConfiguration.defaultItems)
+        }
+    }
+
+    @MainActor
+    func testQuickRepliesSettingsModelAddEditDeleteReorderAndReset() throws {
+        let suite = "quick-replies-model-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let model = QuickRepliesSettingsModel(defaults: defaults)
+        XCTAssertFalse(model.isCustomized)
+        XCTAssertFalse(model.canResetToDefaults)
+        XCTAssertEqual(model.items, QuickReplyConfiguration.defaultItems)
+
+        // Duplicate label is rejected case-insensitively and cleared when draft edits.
+        model.draftLabel = "  approve "
+        model.draftPrompt = "Approve now"
+        XCTAssertFalse(model.commitDraft())
+        XCTAssertEqual(model.validationError, .duplicateLabel("approve"))
+        model.draftLabel = "LGTM"
+        XCTAssertNil(model.validationError)
+        XCTAssertTrue(model.commitDraft())
+        XCTAssertTrue(model.isCustomized)
+        XCTAssertEqual(model.items.last, QuickReplyItem(label: "LGTM", prompt: "Approve now"))
+
+        // Edit in place (including changing label casing of the same item) and reorder while editing.
+        model.beginEditing(at: 0)
+        XCTAssertEqual(model.editingIndex, 0)
+        model.moveDown(at: 0)
+        XCTAssertEqual(model.editingIndex, 1)
+        XCTAssertEqual(model.items[0].label, "Post")
+        XCTAssertEqual(model.items[1].label, "Approve")
+
+        model.draftLabel = "APPROVE"
+        model.draftPrompt = "Approve and merge"
+        XCTAssertTrue(model.commitDraft())
+        XCTAssertNil(model.editingIndex)
+        XCTAssertEqual(model.items[1], QuickReplyItem(label: "APPROVE", prompt: "Approve and merge"))
+
+        // Delete all items -> empty custom list.
+        while !model.items.isEmpty {
+            model.delete(at: 0)
+        }
+        XCTAssertTrue(model.isCustomized)
+        XCTAssertTrue(model.items.isEmpty)
+        XCTAssertEqual(QuickReplyConfiguration.load(from: defaults), .custom([]))
+
+        // Reset returns to non-customized state.
+        model.resetToDefaults()
+        XCTAssertFalse(model.isCustomized)
+        XCTAssertNil(defaults.object(forKey: "quickReplyList"))
+        XCTAssertEqual(model.items, QuickReplyConfiguration.defaultItems)
+    }
+
+    @MainActor
+    func testTranscriptPromptComposerQuickReplyVisibilityGates() throws {
+        let suite = "quick-replies-gates-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = RemoteAttachmentStore(sessionsDirectory: root)
+        let composer = DesktopSessionPromptComposer(sessionId: UUID().uuidString, attachmentStore: store)
+        let now = Date()
+        let readyWorkflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+            capabilities: ["session-send"],
+            sendReady: true
+        )
+        let readyOperation = AgentOperationProjection(
+            conversationEpoch: "epoch-1",
+            support: .receipts,
+            receipts: []
+        )
+
+        XCTAssertEqual(
+            TranscriptPromptComposerView.visibleQuickReplies(
+                showQuickReplyChips: true,
+                storedJSON: defaults.string(forKey: QuickReplyConfiguration.storageKey),
+                composer: composer,
+                workflow: readyWorkflow,
+                operation: readyOperation,
+                now: now
+            ),
+            QuickReplyConfiguration.defaultItems
+        )
+
+        let custom = [QuickReplyItem(label: "Fix CI", prompt: "Diagnose and fix the failing CI checks")]
+        QuickReplyConfiguration.save(custom, to: defaults)
+        XCTAssertEqual(
+            TranscriptPromptComposerView.visibleQuickReplies(
+                showQuickReplyChips: true,
+                storedJSON: defaults.string(forKey: QuickReplyConfiguration.storageKey),
+                composer: composer,
+                workflow: readyWorkflow,
+                operation: readyOperation,
+                now: now
+            ),
+            custom
+        )
+
+        // Opt-out toggle hides chips.
+        XCTAssertTrue(
+            TranscriptPromptComposerView.visibleQuickReplies(
+                showQuickReplyChips: false,
+                storedJSON: defaults.string(forKey: QuickReplyConfiguration.storageKey),
+                composer: composer,
+                workflow: readyWorkflow,
+                operation: readyOperation,
+                now: now
+            ).isEmpty
+        )
+
+        // Non-empty draft prompt hides chips.
+        composer.prompt = "Already typing"
+        XCTAssertTrue(
+            TranscriptPromptComposerView.visibleQuickReplies(
+                showQuickReplyChips: true,
+                storedJSON: defaults.string(forKey: QuickReplyConfiguration.storageKey),
+                composer: composer,
+                workflow: readyWorkflow,
+                operation: readyOperation,
+                now: now
+            ).isEmpty
+        )
+        composer.prompt = ""
+
+        // Empty custom list shows no chips.
+        QuickReplyConfiguration.save([], to: defaults)
+        XCTAssertTrue(
+            TranscriptPromptComposerView.visibleQuickReplies(
+                showQuickReplyChips: true,
+                storedJSON: defaults.string(forKey: QuickReplyConfiguration.storageKey),
+                composer: composer,
+                workflow: readyWorkflow,
+                operation: readyOperation,
+                now: now
+            ).isEmpty
+        )
+    }
 }
 
 // MARK: - Remote Kitty test helpers

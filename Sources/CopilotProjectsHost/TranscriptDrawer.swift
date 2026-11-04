@@ -331,8 +331,167 @@ struct TranscriptDrawer: View {
     }
 }
 
+struct QuickReplyItem: Codable, Equatable, Identifiable, Sendable {
+    static let maxCount = 12
+    static let maxLabelLength = 24
+    static let maxPromptLength = 2_000
+
+    let label: String
+    let prompt: String
+
+    var id: String { label.lowercased() }
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case prompt
+    }
+}
+
+enum QuickReplyValidationError: Equatable, LocalizedError, Sendable {
+    case emptyLabel
+    case labelTooLong(max: Int)
+    case emptyPrompt
+    case promptTooLong(max: Int)
+    case duplicateLabel(String)
+    case tooManyReplies(max: Int)
+
+    var message: String {
+        switch self {
+        case .emptyLabel:
+            return "Label cannot be empty."
+        case .labelTooLong(let max):
+            return "Label must be \(max) characters or fewer."
+        case .emptyPrompt:
+            return "Prompt cannot be empty."
+        case .promptTooLong(let max):
+            return "Prompt must be \(max) characters or fewer."
+        case .duplicateLabel(let label):
+            return "A quick reply labeled “\(label)” already exists."
+        case .tooManyReplies(let max):
+            return "You can configure at most \(max) quick replies."
+        }
+    }
+
+    var errorDescription: String? { message }
+}
+
+enum QuickReplyConfiguration: Equatable, Sendable {
+    static let storageKey = "quickReplyList"
+
+    static let defaultItems: [QuickReplyItem] = [
+        QuickReplyItem(label: "Approve", prompt: "Approve"),
+        QuickReplyItem(label: "Post", prompt: "Post"),
+        QuickReplyItem(label: "Merge when ready", prompt: "Merge when ready"),
+        QuickReplyItem(label: "Request CCR", prompt: "Request CCR and when green mark ready"),
+        QuickReplyItem(label: "Max review", prompt: "Do a max review"),
+        QuickReplyItem(label: "Keep going", prompt: "Keep going!"),
+        QuickReplyItem(label: "No bloat?", prompt: "No bloat or over-engineering?"),
+    ]
+
+    case defaultReplies
+    case custom([QuickReplyItem])
+
+    var isCustomized: Bool {
+        if case .custom = self { return true }
+        return false
+    }
+
+    var activeReplies: [QuickReplyItem] {
+        switch self {
+        case .defaultReplies:
+            return Self.defaultItems
+        case .custom(let items):
+            return items
+        }
+    }
+
+    static func validateItem(label: String, prompt: String) -> Result<QuickReplyItem, QuickReplyValidationError> {
+        let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedLabel.isEmpty else {
+            return .failure(.emptyLabel)
+        }
+        guard trimmedLabel.count <= QuickReplyItem.maxLabelLength else {
+            return .failure(.labelTooLong(max: QuickReplyItem.maxLabelLength))
+        }
+        guard !trimmedPrompt.isEmpty else {
+            return .failure(.emptyPrompt)
+        }
+        guard trimmedPrompt.count <= QuickReplyItem.maxPromptLength else {
+            return .failure(.promptTooLong(max: QuickReplyItem.maxPromptLength))
+        }
+        return .success(QuickReplyItem(label: trimmedLabel, prompt: trimmedPrompt))
+    }
+
+    static func validateList(_ items: [QuickReplyItem]) -> Result<[QuickReplyItem], QuickReplyValidationError> {
+        guard items.count <= QuickReplyItem.maxCount else {
+            return .failure(.tooManyReplies(max: QuickReplyItem.maxCount))
+        }
+        var normalized: [QuickReplyItem] = []
+        normalized.reserveCapacity(items.count)
+        var seenLabels = Set<String>()
+        for item in items {
+            switch validateItem(label: item.label, prompt: item.prompt) {
+            case .failure(let error):
+                return .failure(error)
+            case .success(let validItem):
+                let key = validItem.label.lowercased()
+                guard seenLabels.insert(key).inserted else {
+                    return .failure(.duplicateLabel(validItem.label))
+                }
+                normalized.append(validItem)
+            }
+        }
+        return .success(normalized)
+    }
+
+    static func resolved(fromJSON jsonString: String?) -> QuickReplyConfiguration {
+        guard let jsonString,
+              let data = jsonString.data(using: .utf8),
+              let valid = decodeCustomList(from: data) else {
+            return .defaultReplies
+        }
+        return .custom(valid)
+    }
+
+    static func load(from defaults: UserDefaults = .standard) -> QuickReplyConfiguration {
+        resolved(fromJSON: defaults.string(forKey: storageKey))
+    }
+
+    @discardableResult
+    static func save(
+        _ items: [QuickReplyItem],
+        to defaults: UserDefaults = .standard
+    ) -> Result<[QuickReplyItem], QuickReplyValidationError> {
+        switch validateList(items) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let validated):
+            guard let data = try? JSONEncoder().encode(validated),
+                  let json = String(data: data, encoding: .utf8) else {
+                return .failure(.emptyLabel)
+            }
+            defaults.set(json, forKey: storageKey)
+            return .success(validated)
+        }
+    }
+
+    static func reset(in defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: storageKey)
+    }
+
+    private static func decodeCustomList(from data: Data) -> [QuickReplyItem]? {
+        guard let decoded = try? JSONDecoder().decode([QuickReplyItem].self, from: data),
+              case .success(let valid) = validateList(decoded) else {
+            return nil
+        }
+        return valid
+    }
+}
+
 struct TranscriptPromptComposerView: View {
     static let showQuickReplyChipsKey = "showQuickReplyChips"
+    static let quickReplyListKey = QuickReplyConfiguration.storageKey
 
     @ObservedObject var composer: DesktopSessionPromptComposer
     let workflow: RemoteSessionWorkflow?
@@ -342,17 +501,8 @@ struct TranscriptPromptComposerView: View {
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
     let onPreview: (TranscriptImagePreviewItem) -> Void
     @AppStorage(Self.showQuickReplyChipsKey) private var showQuickReplyChips = true
+    @AppStorage(Self.quickReplyListKey) private var quickReplyListJSON: String?
     @FocusState private var promptFocused: Bool
-
-    private static let quickReplies: [(label: String, prompt: String)] = [
-        ("Approve", "Approve"),
-        ("Post", "Post"),
-        ("Merge when ready", "Merge when ready"),
-        ("Request CCR", "Request CCR and when green mark ready"),
-        ("Max review", "Do a max review"),
-        ("Keep going", "Keep going!"),
-        ("No bloat?", "No bloat or over-engineering?"),
-    ]
 
     private var liveWorkflow: RemoteSessionWorkflow? {
         workflowProvider?() ?? workflow
@@ -362,7 +512,10 @@ struct TranscriptPromptComposerView: View {
         operationProvider?() ?? operation
     }
 
-    private func canSendQuickReply(
+    @MainActor
+    static func canShowQuickReplies(
+        showQuickReplyChips: Bool,
+        composer: DesktopSessionPromptComposer,
         workflow: RemoteSessionWorkflow?,
         operation: AgentOperationProjection,
         now: Date
@@ -382,6 +535,41 @@ struct TranscriptPromptComposerView: View {
             return false
         }
         return true
+    }
+
+    @MainActor
+    static func visibleQuickReplies(
+        showQuickReplyChips: Bool,
+        storedJSON: String?,
+        composer: DesktopSessionPromptComposer,
+        workflow: RemoteSessionWorkflow?,
+        operation: AgentOperationProjection,
+        now: Date = Date()
+    ) -> [QuickReplyItem] {
+        guard canShowQuickReplies(
+            showQuickReplyChips: showQuickReplyChips,
+            composer: composer,
+            workflow: workflow,
+            operation: operation,
+            now: now
+        ) else {
+            return []
+        }
+        return QuickReplyConfiguration.resolved(fromJSON: storedJSON).activeReplies
+    }
+
+    private func canSendQuickReply(
+        workflow: RemoteSessionWorkflow?,
+        operation: AgentOperationProjection,
+        now: Date
+    ) -> Bool {
+        Self.canShowQuickReplies(
+            showQuickReplyChips: showQuickReplyChips,
+            composer: composer,
+            workflow: workflow,
+            operation: operation,
+            now: now
+        )
     }
 
     private func blockedMessage(now: Date) -> String? {
@@ -440,10 +628,18 @@ struct TranscriptPromptComposerView: View {
                     }
                 }
 
-                if canSendQuickReply(workflow: currentWorkflow, operation: currentOperation, now: now) {
+                let replies = Self.visibleQuickReplies(
+                    showQuickReplyChips: showQuickReplyChips,
+                    storedJSON: quickReplyListJSON,
+                    composer: composer,
+                    workflow: currentWorkflow,
+                    operation: currentOperation,
+                    now: now
+                )
+                if !replies.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 6) {
-                            ForEach(Self.quickReplies, id: \.label) { item in
+                            ForEach(replies) { item in
                                 Button(item.label) {
                                     guard canSendQuickReply(
                                         workflow: liveWorkflow,

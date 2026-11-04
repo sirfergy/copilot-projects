@@ -11,17 +11,27 @@ struct CopilotProjectsApp: App {
     @AppStorage(TranscriptPromptComposerView.showQuickReplyChipsKey) private var showQuickReplyChips = true
     @AppStorage(TranscriptDrawer.fullWidthTranscriptKey) private var fullWidthTranscript = TranscriptDrawer.usesFullTerminalArea(storedValue: nil)
     @State private var showsProjects = true
+    @State private var showsQuickRepliesSettings = false
 
     var body: some Scene {
         Window("Copilot Projects", id: "main") {
             MainWindowContent(appDelegate: appDelegate, showsProjects: $showsProjects)
                 .frame(minWidth: 820, minHeight: 520)
+                .sheet(isPresented: $showsQuickRepliesSettings) {
+                    QuickRepliesSettingsView {
+                        showsQuickRepliesSettings = false
+                    }
+                }
+                .onDisappear {
+                    showsQuickRepliesSettings = false
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
             WorkspaceCommands(model: appDelegate.model, input: appDelegate.input,
                               keepRunning: $keepRunning, startsNotifications: $startsNotifications,
                               showQuickReplyChips: $showQuickReplyChips,
+                              showsQuickRepliesSettings: $showsQuickRepliesSettings,
                               fullWidthTranscript: $fullWidthTranscript,
                               showsProjects: $showsProjects)
         }
@@ -141,38 +151,50 @@ private struct WorkspaceCommands: Commands {
     @Binding var keepRunning: Bool
     @Binding var startsNotifications: Bool
     @Binding var showQuickReplyChips: Bool
+    @Binding var showsQuickRepliesSettings: Bool
     @Binding var fullWidthTranscript: Bool
     @Binding var showsProjects: Bool
+
+    private var hasSheet: Bool {
+        input.hasWorkspaceSheet || showsQuickRepliesSettings
+    }
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Project…") { model.addProjectInteractive() }
                 .keyboardShortcut("n", modifiers: .command)
-                .disabled(input.hasWorkspaceSheet)
+                .disabled(hasSheet)
         }
         CommandGroup(after: .appSettings) {
             Toggle("Keep Running When Window Closes", isOn: $keepRunning)
             Toggle("Start Notifications with Copilot Projects", isOn: $startsNotifications)
             Toggle("Show Quick-Reply Suggestions", isOn: $showQuickReplyChips)
+            Button("Customize Quick Replies…") {
+                guard !hasSheet, NSApp.modalWindow == nil else { return }
+                openWindow(id: "main")
+                model.setNumberHint(.none)
+                showsQuickRepliesSettings = true
+            }
+            .disabled(hasSheet)
             Toggle("Full-Width Transcript View", isOn: $fullWidthTranscript)
             Divider()
-            SSHHostsSettingsMenu(model: model, isSheetPresented: input.hasWorkspaceSheet)
+            SSHHostsSettingsMenu(model: model, isSheetPresented: hasSheet)
             Button("Pull Request Review Prompt…") {
                 model.configurePullRequestReviewPromptInteractive()
             }
-            .disabled(input.hasWorkspaceSheet)
+            .disabled(hasSheet)
         }
         CommandGroup(after: .help) {
             Button("What's New") {
                 openWindow(id: "main")
                 input.presentReleaseNotes()
             }
-            .disabled(input.hasWorkspaceSheet)
+            .disabled(hasSheet)
         }
         CommandGroup(before: .sidebar) {
             Toggle("Show Projects", isOn: $showsProjects)
                 .keyboardShortcut("0", modifiers: .command)
-                .disabled(input.hasWorkspaceSheet)
+                .disabled(hasSheet)
         }
         CommandGroup(before: .windowList) {
             OpenPullRequestsButton()
@@ -203,7 +225,7 @@ private struct WorkspaceCommands: Commands {
                 Button("Previous Session") { model.selectAdjacentSession(-1) }
                     .keyboardShortcut("[", modifiers: [.command, .shift])
             }
-            .disabled(input.hasWorkspaceSheet)
+            .disabled(hasSheet)
         }
     }
 }
@@ -321,7 +343,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let drawerEditing = self.model.globalSelectedSessionId.map {
                     self.model.isTranscriptDrawerOpen(sessionId: $0)
                 } == true && (NSApp.keyWindow?.firstResponder is NSTextView)
-                if !self.input.hasWorkspaceSheet && !drawerEditing {
+                let attachedSheet = NSApp.windows.contains {
+                    $0.attachedSheet != nil || $0.sheetParent != nil
+                }
+                if !self.input.hasWorkspaceSheet && !attachedSheet && !drawerEditing {
                     self.model.focusActiveTerminal()
                 }
             }
