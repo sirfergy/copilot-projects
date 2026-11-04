@@ -79,6 +79,7 @@ final class AppModel: ObservableObject {
 
     var controllers: [String: TerminalController] = [:]
     var sessionPromptComposers: [String: DesktopSessionPromptComposer] = [:]
+    var localQuestionOperations: [String: (operation: CLIOperationRequest, fingerprint: String?)] = [:]
     private var selectedTranscriptController: TranscriptController?
     private let stateRepository: StateRepository
     /// User settings this model reads. Tests inject a suite so a saved review
@@ -1207,12 +1208,44 @@ final class AppModel: ObservableObject {
         transcriptOpenSessions.contains(sessionId)
     }
 
+    var isFullWidthTranscriptEnabled: Bool {
+        TranscriptDrawer.usesFullTerminalArea(
+            storedValue: defaults.object(forKey: TranscriptDrawer.fullWidthTranscriptKey) as? Bool
+        )
+    }
+
+    func hasTranscriptDrawerContent(sessionId: String) -> Bool {
+        (selectedTranscriptController?.sessionId == sessionId && selectedTranscriptController?.snapshot != nil)
+            || sessionWorkflow(sessionId: sessionId) != nil
+            || !sessionPendingUserInputs(sessionId: sessionId).isEmpty
+            || !sessionPendingElicitations(sessionId: sessionId).isEmpty
+    }
+
+    func isActiveTerminalCoveredByTranscriptDrawer(isFullWidth: Bool? = nil) -> Bool {
+        guard let sessionId = globalSelectedSessionId,
+              isTranscriptDrawerOpen(sessionId: sessionId),
+              hasTranscriptDrawerContent(sessionId: sessionId) else {
+            return false
+        }
+        return isFullWidth ?? isFullWidthTranscriptEnabled
+    }
+
+    func relinquishActiveTerminalFocusIfCovered(isFullWidth: Bool? = nil) {
+        guard isActiveTerminalCoveredByTranscriptDrawer(isFullWidth: isFullWidth),
+              let window = activeController?.terminalView.window ?? NSApp.keyWindow,
+              window.firstResponder is ProjectsTerminalView else {
+            return
+        }
+        window.makeFirstResponder(nil)
+    }
+
     func closeTranscriptDrawer(sessionId: String) {
         transcriptOpenSessions.remove(sessionId)
     }
 
     func openTranscriptDrawer(sessionId: String) {
         transcriptOpenSessions.insert(sessionId)
+        relinquishActiveTerminalFocusIfCovered()
     }
 
     /// Message + button title shown by the container when nothing is selected.
@@ -1912,6 +1945,7 @@ final class AppModel: ObservableObject {
         }
         controllers[sid] = nil
         sessionPromptComposers.removeValue(forKey: sid)?.clearAttachments(force: true)
+        localQuestionOperations = localQuestionOperations.filter { !$0.key.hasPrefix("\(sid):") }
         if selectedTranscriptController?.sessionId == sid {
             selectedTranscriptController = nil
         }
@@ -3776,6 +3810,10 @@ final class AppModel: ObservableObject {
     /// Make the visible session's terminal the first responder on activation or
     /// an explicit focus request. Hidden/unattached targets are focused on reveal.
     func focusActiveTerminal() {
+        guard !isActiveTerminalCoveredByTranscriptDrawer() else {
+            relinquishActiveTerminalFocusIfCovered()
+            return
+        }
         guard let view = activeController?.terminalView, !view.isHidden,
               let window = view.window, window.firstResponder !== view else { return }
         window.makeFirstResponder(view)

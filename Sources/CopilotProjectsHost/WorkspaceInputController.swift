@@ -255,14 +255,22 @@ final class WorkspaceInputController: ObservableObject {
             }
         }
         clearNumberHint()
-        if let controller = model.activeController,
-           controller.terminalView.sendRestoredModifiedReturnIfNeeded(
-               for: event,
-               restoredAgentLive: controller.reattachedToExistingShell
-                   && model.liveAgentSessions.contains(controller.sessionId),
-               copilotFooterVisible: controller.showsCopilotFooter
-           ) {
-            return nil
+        if let controller = model.activeController {
+            if model.isActiveTerminalCoveredByTranscriptDrawer() {
+                if event.window?.firstResponder is ProjectsTerminalView {
+                    event.window?.makeFirstResponder(nil)
+                    return nil
+                }
+                return event
+            }
+            if controller.terminalView.sendRestoredModifiedReturnIfNeeded(
+                for: event,
+                restoredAgentLive: controller.reattachedToExistingShell
+                    && model.liveAgentSessions.contains(controller.sessionId),
+                copilotFooterVisible: controller.showsCopilotFooter
+            ) {
+                return nil
+            }
         }
         return event
     }

@@ -995,7 +995,8 @@ struct DetailView: View {
             TerminalsContainer(
                 model: model,
                 activeSessionId: model.globalSelectedSessionId,
-                hostedIds: model.hostedTerminals.map(\.id)
+                hostedIds: model.hostedTerminals.map(\.id),
+                allowsTerminalFocus: !model.isActiveTerminalCoveredByTranscriptDrawer()
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -1010,6 +1011,13 @@ struct DetailView: View {
                     onClose: {
                         model.closeTranscriptDrawer(sessionId: sessionId)
                         model.focusActiveTerminal()
+                    },
+                    onFullWidthChange: { isFullWidth in
+                        if isFullWidth {
+                            model.relinquishActiveTerminalFocusIfCovered(isFullWidth: true)
+                        } else if !(NSApp.keyWindow?.firstResponder is NSTextView) {
+                            model.focusActiveTerminal()
+                        }
                     },
                     workflow: model.sessionWorkflow(sessionId: sessionId),
                     operation: operation,

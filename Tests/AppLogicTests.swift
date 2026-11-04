@@ -14686,11 +14686,15 @@ final class AppLogicTests: XCTestCase {
                 "retries": .object([
                     "type": .string("integer"),
                     "title": .string("Retries"),
+                    "minimum": .number(1),
+                    "maximum": .number(5),
                     "default": .number(3),
                 ]),
                 "ratio": .object([
                     "type": .string("number"),
                     "title": .string("Ratio"),
+                    "minimum": .number(0),
+                    "maximum": .number(1),
                 ]),
                 "note": .object([
                     "type": .string("string"),
@@ -14739,7 +14743,7 @@ final class AppLogicTests: XCTestCase {
         var values = initial.values
         var touched: Set<String> = ["regions", "ratio"]
         let regionsField = try XCTUnwrap(form.fields.first { $0.key == "regions" })
-        guard case let .stringMultiSelect(regionChoices, _, maxItems) = regionsField.kind else {
+        guard case let .stringMultiSelect(regionChoices, maxItems) = regionsField.kind else {
             return XCTFail("Expected stringMultiSelect for regions")
         }
         let firstToggle = try XCTUnwrap(
@@ -14769,7 +14773,34 @@ final class AppLogicTests: XCTestCase {
             )
         )
         values["regions"] = .array(secondToggle.map(RemoteJSONValue.string))
-        values["ratio"] = DesktopElicitationNumberText.value(for: "0.75")
+        values["ratio"] = DesktopElicitationNumberText.value(
+            for: "0,75",
+            locale: Locale(identifier: "de_DE")
+        )
+        XCTAssertEqual(values["ratio"], .number(0.75))
+        XCTAssertEqual(
+            DesktopElicitationNumberText.parse("۳", locale: Locale(identifier: "fa_IR")),
+            3
+        )
+        XCTAssertEqual(DesktopElicitationNumberText.parse("1e200"), 1e200)
+        XCTAssertEqual(DesktopElicitationNumberText.parse("1e-200"), 1e-200)
+        XCTAssertNil(DesktopElicitationNumberText.parse("12junk"))
+        XCTAssertEqual(DesktopElicitationNumberText.value(for: "12junk"), .string("12junk"))
+
+        // Out-of-bounds number values are rejected by both DesktopElicitationForm and AppModel.elicitationContent.
+        var outOfBounds = values
+        outOfBounds["retries"] = .number(0)
+        XCTAssertNil(form.validatedContent(values: outOfBounds, touched: touched))
+        XCTAssertFalse(
+            AppModel.elicitationContent(
+                outOfBounds,
+                satisfies: schema,
+                allowFreeformStringChoices: true
+            )
+        )
+        outOfBounds["retries"] = .number(3)
+        outOfBounds["ratio"] = .number(1.5)
+        XCTAssertNil(form.validatedContent(values: outOfBounds, touched: touched))
 
         let payload = try XCTUnwrap(
             form.validatedContent(values: values, touched: touched)
@@ -14780,6 +14811,77 @@ final class AppLogicTests: XCTestCase {
                 payload,
                 satisfies: schema,
                 allowFreeformStringChoices: true
+            )
+        )
+
+        // Payloads exceeding the host's 32,768-byte encoded JSON cap are rejected by the form validator.
+        let unconstrainedSchema: RemoteJSONValue = .object([
+            "type": .string("object"),
+            "required": .array([.string("body")]),
+            "properties": .object([
+                "body": .object(["type": .string("string")]),
+                "email": .object(["type": .string("string"), "format": .string("email")]),
+            ]),
+        ])
+        let unconstrainedForm = try XCTUnwrap(DesktopElicitationForm.parse(unconstrainedSchema))
+        XCTAssertNil(
+            unconstrainedForm.validatedContent(
+                values: ["body": .string("ok"), "email": .string("not-an-email")],
+                touched: ["body", "email"]
+            )
+        )
+        XCTAssertNotNil(
+            unconstrainedForm.validatedContent(
+                values: ["body": .string("ok"), "email": .string("dev@example.com")],
+                touched: ["body", "email"]
+            )
+        )
+        let oversizedValues: [String: RemoteJSONValue] = [
+            "body": .string(String(repeating: "x", count: 33_000)),
+        ]
+        XCTAssertNil(
+            unconstrainedForm.validatedContent(values: oversizedValues, touched: ["body"])
+        )
+
+        // Optional multi-select with minItems: 1 clears back to nil when its last option is deselected,
+        // while a required multi-select with minItems: 1 retains .array([]) and fails validation.
+        let clearedRequired = try XCTUnwrap(
+            regionsField.toggledSelectionValue("eu-west", in: .array([.string("eu-west")]))
+        )
+        XCTAssertEqual(clearedRequired, .array([]))
+        var requiredClearedValues = values
+        requiredClearedValues["regions"] = clearedRequired
+        XCTAssertNil(form.validatedContent(values: requiredClearedValues, touched: touched))
+
+        let optionalMultiSchema: RemoteJSONValue = .object([
+            "type": .string("object"),
+            "properties": .object([
+                "tags": .object([
+                    "type": .string("array"),
+                    "minItems": .number(1),
+                    "items": .object([
+                        "type": .string("string"),
+                        "enum": .array([.string("a"), .string("b")]),
+                    ]),
+                ]),
+            ]),
+        ])
+        let optionalMultiForm = try XCTUnwrap(DesktopElicitationForm.parse(optionalMultiSchema))
+        let tagsField = try XCTUnwrap(optionalMultiForm.fields.first)
+        var optionalValues: [String: RemoteJSONValue] = [:]
+        optionalValues["tags"] = try XCTUnwrap(tagsField.toggledSelectionValue("a", in: optionalValues["tags"]))
+        XCTAssertEqual(optionalValues["tags"], .array([.string("a")]))
+        optionalValues["tags"] = try XCTUnwrap(tagsField.toggledSelectionValue("a", in: optionalValues["tags"]))
+        XCTAssertNil(optionalValues["tags"])
+        let clearedOptionalPayload = try XCTUnwrap(
+            optionalMultiForm.validatedContent(values: optionalValues, touched: ["tags"])
+        )
+        XCTAssertTrue(clearedOptionalPayload.isEmpty)
+        XCTAssertTrue(
+            AppModel.elicitationContent(
+                clearedOptionalPayload,
+                satisfies: optionalMultiSchema,
+                allowFreeformStringChoices: false
             )
         )
 
@@ -14862,6 +14964,7 @@ final class AppLogicTests: XCTestCase {
         func writeSnapshot(
             userInputs: [TrackedUserInput]?,
             elicitations: [TrackedElicitation]?,
+            epoch: String? = "epoch-local-1",
             receipts: [TrackedOperationReceipt]? = nil
         ) throws {
             let nowString = ISO8601DateFormatter().string(from: Date())
@@ -14879,8 +14982,8 @@ final class AppLogicTests: XCTestCase {
                 trackedUserInputs: userInputs,
                 trackedElicitations: elicitations,
                 copilotSessionId: "copilot-session",
-                conversationEpoch: "epoch-local-1",
-                operationReceiptVersion: 1,
+                conversationEpoch: epoch,
+                operationReceiptVersion: epoch == nil ? nil : 1,
                 operationReceipts: receipts
             )
             try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
@@ -14904,49 +15007,198 @@ final class AppLogicTests: XCTestCase {
             requestedAt: ISO8601DateFormatter().string(from: Date()),
             agentId: nil
         )
-        try writeSnapshot(userInputs: [initialUserInput], elicitations: [initialElicitation])
-
         let model = AppModel(
             stateRepository: repository,
             agentActivityDirectory: directory,
             resumeMarkerDirectory: directory
         )
+
+        // 0. Receiptless snapshot (epoch == nil) is rejected without writing a handoff file.
+        try writeSnapshot(userInputs: [initialUserInput], elicitations: [initialElicitation], epoch: nil)
+        let receiptlessUserInput = await model.performLocalUserInputAnswer(
+            sessionId: session.id,
+            answer: RemoteUserInputAnswer(requestId: "req-u1", answer: "Yes", wasFreeform: false),
+            maxAttempts: 1,
+            pollInterval: .milliseconds(5)
+        )
+        XCTAssertEqual(receiptlessUserInput.state, .rejected)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: userInputResponseURL.path))
+
+        try writeSnapshot(userInputs: [initialUserInput], elicitations: [initialElicitation])
         model.refreshAgentActivitySnapshots()
         XCTAssertEqual(model.sessionPendingUserInputs(sessionId: session.id).map(\.requestId), ["req-u1"])
         XCTAssertEqual(model.sessionPendingElicitations(sessionId: session.id).map(\.requestId), ["req-e1"])
 
-        // 1. User input answer writes user-input-response.json and resolves to .applied once the question clears.
+        // 1. User input answer writes user-input-response.json and resolves to .applied via terminal receipt.
         Task {
-            try? await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(120)))
+            try? await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(25)))
             if let data = try? Data(contentsOf: userInputResponseURL),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let opId = obj["operationId"] as? String {
                 XCTAssertEqual(obj["requestId"] as? String, "req-u1")
                 XCTAssertEqual(obj["answer"] as? String, "Yes")
                 try? FileManager.default.removeItem(at: userInputResponseURL)
-                try? writeSnapshot(userInputs: [], elicitations: [initialElicitation])
-            }
-        }
-        let userInputResult = await model.performLocalUserInputAnswer(
-            sessionId: session.id,
-            answer: RemoteUserInputAnswer(requestId: "req-u1", answer: "Yes", wasFreeform: false)
-        )
-        XCTAssertEqual(userInputResult.state, .applied)
-
-        // 2. Elicitation answer writes elicitation-response.json and resolves to .applied via terminal receipt.
-        Task {
-            try? await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(120)))
-            if let data = try? Data(contentsOf: elicitationResponseURL),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let opId = obj["operationId"] as? String {
-                XCTAssertEqual(obj["requestId"] as? String, "req-e1")
-                XCTAssertEqual(obj["action"] as? String, "accept")
-                try? FileManager.default.removeItem(at: elicitationResponseURL)
                 try? writeSnapshot(
                     userInputs: [],
                     elicitations: [initialElicitation],
                     receipts: [
                         TrackedOperationReceipt(
                             operationId: opId,
+                            conversationEpoch: "epoch-local-1",
+                            kind: CLISDKOperationKind.answerUserInput.rawValue,
+                            state: .applied,
+                            updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+                            errorCode: nil,
+                            payloadFingerprint: nil
+                        ),
+                    ]
+                )
+            }
+        }
+        let appliedUserInput = await model.performLocalUserInputAnswer(
+            sessionId: session.id,
+            answer: RemoteUserInputAnswer(requestId: "req-u1", answer: "Yes", wasFreeform: false),
+            maxAttempts: 10,
+            pollInterval: .milliseconds(15)
+        )
+        XCTAssertEqual(appliedUserInput.state, .applied)
+
+        // 2. Question disappearance followed by a .rejected receipt must NOT report .applied.
+        let secondUserInput = TrackedUserInput(
+            requestId: "req-u2",
+            question: "Deploy?",
+            choices: ["Yes", "No"],
+            allowFreeform: true,
+            requestedAt: ISO8601DateFormatter().string(from: Date()),
+            agentId: nil
+        )
+        try writeSnapshot(userInputs: [secondUserInput], elicitations: [initialElicitation])
+        Task {
+            try? await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(25)))
+            if let data = try? Data(contentsOf: userInputResponseURL),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let opId = obj["operationId"] as? String {
+                try? FileManager.default.removeItem(at: userInputResponseURL)
+                // First publish a snapshot where the question disappeared without a receipt yet.
+                try? writeSnapshot(userInputs: [], elicitations: [initialElicitation], receipts: [])
+                try? await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(30)))
+                // Then publish the losing operation's terminal .rejected receipt.
+                try? writeSnapshot(
+                    userInputs: [],
+                    elicitations: [initialElicitation],
+                    receipts: [
+                        TrackedOperationReceipt(
+                            operationId: opId,
+                            conversationEpoch: "epoch-local-1",
+                            kind: CLISDKOperationKind.answerUserInput.rawValue,
+                            state: .rejected,
+                            updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+                            errorCode: "not-pending",
+                            payloadFingerprint: nil
+                        ),
+                    ]
+                )
+            }
+        }
+        let rejectedResult = await model.performLocalUserInputAnswer(
+            sessionId: session.id,
+            answer: RemoteUserInputAnswer(requestId: "req-u2", answer: "Yes", wasFreeform: false),
+            maxAttempts: 10,
+            pollInterval: .milliseconds(15)
+        )
+        XCTAssertEqual(rejectedResult.state, .rejected)
+        XCTAssertEqual(rejectedResult.message, "Copilot did not apply this answer.")
+
+        // 3. Conflict: when another handoff file is already on disk, returns .rejected with conflict message.
+        try writeSnapshot(userInputs: [secondUserInput], elicitations: [initialElicitation])
+        try Data(#"{"operationId":"other-op","conversationEpoch":"epoch-local-1","kind":"answer-user-input"}"#.utf8)
+            .write(to: userInputResponseURL)
+        let conflictResult = await model.performLocalUserInputAnswer(
+            sessionId: session.id,
+            answer: RemoteUserInputAnswer(requestId: "req-u2", answer: "Yes", wasFreeform: false),
+            maxAttempts: 2,
+            pollInterval: .milliseconds(10)
+        )
+        XCTAssertEqual(conflictResult.state, .rejected)
+        XCTAssertEqual(conflictResult.message, "Another answer is already in progress.")
+        try? FileManager.default.removeItem(at: userInputResponseURL)
+
+        // 4. Timeout (.indeterminate) + reopen idempotency: retains operationId across retry and reconciles delayed receipt.
+        let timeoutResult = await model.performLocalElicitationAnswer(
+            sessionId: session.id,
+            answer: RemoteElicitationAnswer(
+                requestId: "req-e1",
+                action: .accept,
+                content: ["choice": .string("alpha")]
+            ),
+            maxAttempts: 2,
+            pollInterval: .milliseconds(10)
+        )
+        XCTAssertEqual(timeoutResult.state, .indeterminate)
+        let firstOpId = try XCTUnwrap(timeoutResult.operationId)
+        try? FileManager.default.removeItem(at: elicitationResponseURL)
+
+        // Retrying a different answer while the original operation is unconfirmed is rejected as a conflict.
+        let retryMismatched = await model.performLocalElicitationAnswer(
+            sessionId: session.id,
+            answer: RemoteElicitationAnswer(
+                requestId: "req-e1",
+                action: .accept,
+                content: ["choice": .string("beta")]
+            ),
+            maxAttempts: 2,
+            pollInterval: .milliseconds(10)
+        )
+        XCTAssertEqual(retryMismatched.state, .rejected)
+        XCTAssertEqual(retryMismatched.message, "Another answer is already in progress.")
+        XCTAssertEqual(retryMismatched.operationId, firstOpId)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: elicitationResponseURL.path))
+
+        // Retrying the identical answer while still unconfirmed returns .indeterminate with the same operationId.
+        let retryStillUnconfirmed = await model.performLocalElicitationAnswer(
+            sessionId: session.id,
+            answer: RemoteElicitationAnswer(
+                requestId: "req-e1",
+                action: .accept,
+                content: ["choice": .string("alpha")]
+            ),
+            maxAttempts: 2,
+            pollInterval: .milliseconds(10)
+        )
+        XCTAssertEqual(retryStillUnconfirmed.state, .indeterminate)
+        XCTAssertEqual(retryStillUnconfirmed.operationId, firstOpId)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: elicitationResponseURL.path))
+
+        // Once a delayed .rejected receipt arrives, retrying with a different answer clears the cached operation,
+        // writes a new handoff with a fresh operationId, and resolves when its receipt arrives.
+        try writeSnapshot(
+            userInputs: [],
+            elicitations: [initialElicitation],
+            receipts: [
+                TrackedOperationReceipt(
+                    operationId: firstOpId,
+                    conversationEpoch: "epoch-local-1",
+                    kind: CLISDKOperationKind.answerElicitation.rawValue,
+                    state: .rejected,
+                    updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+                    errorCode: "invalid",
+                    payloadFingerprint: nil
+                ),
+            ]
+        )
+        Task {
+            try? await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(25)))
+            if let data = try? Data(contentsOf: elicitationResponseURL),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let retryOpId = obj["operationId"] as? String {
+                XCTAssertNotEqual(retryOpId, firstOpId)
+                try? FileManager.default.removeItem(at: elicitationResponseURL)
+                try? writeSnapshot(
+                    userInputs: [],
+                    elicitations: [],
+                    receipts: [
+                        TrackedOperationReceipt(
+                            operationId: retryOpId,
                             conversationEpoch: "epoch-local-1",
                             kind: CLISDKOperationKind.answerElicitation.rawValue,
                             state: .applied,
@@ -14958,15 +15210,227 @@ final class AppLogicTests: XCTestCase {
                 )
             }
         }
-        let elicitationResult = await model.performLocalElicitationAnswer(
+        let retriedAfterRejection = await model.performLocalElicitationAnswer(
             sessionId: session.id,
             answer: RemoteElicitationAnswer(
                 requestId: "req-e1",
                 action: .accept,
-                content: ["choice": .string("alpha")]
+                content: ["choice": .string("beta")]
+            ),
+            maxAttempts: 10,
+            pollInterval: .milliseconds(15)
+        )
+        XCTAssertEqual(retriedAfterRejection.state, .applied)
+        XCTAssertNotEqual(retriedAfterRejection.operationId, firstOpId)
+    }
+
+    @MainActor
+    func testTranscriptDrawerOpensAtBottomWithLongTranscriptAndFullWidthIsolatesTerminalFocus() async throws {
+        _ = NSApplication.shared
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let turns: [TranscriptTurn] = (1...40).map { (index: Int) -> TranscriptTurn in
+            let start = now.addingTimeInterval(Double(index * 10))
+            let msgTime = now.addingTimeInterval(Double(index * 10 + 3))
+            let end = now.addingTimeInterval(Double(index * 10 + 5))
+            return TranscriptTurn(
+                id: "turn-\(index)",
+                startedAt: start,
+                endedAt: end,
+                kind: "user",
+                userContent: "User prompt \(index)\nLine 2 of prompt \(index)",
+                assistantMessages: [
+                    TranscriptAssistantMessage(
+                        id: "msg-\(index)",
+                        timestamp: msgTime,
+                        content: "Assistant response \(index)\nDetailed explanation line 2\nLine 3"
+                    ),
+                ],
+                tools: [],
+                isAborted: false
+            )
+        }
+
+        let suiteName = "AppLogicTests.fullWidthFocus.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        var fullWidthCallbackValues: [Bool] = []
+        let drawer = TranscriptDrawer(
+            turns: turns,
+            imageCapture: nil,
+            workflow: nil,
+            operation: .unavailable,
+            workflowProvider: nil,
+            operationProvider: nil,
+            promptComposer: nil,
+            onClose: {},
+            onFullWidthChange: { fullWidthCallbackValues.append($0) },
+            onAction: { _ in RemoteWorkflowActionResult(state: .rejected) },
+            onPreview: { _ in }
+        )
+        .defaultAppStorage(defaults)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 500),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let host = NSHostingView(rootView: drawer)
+        host.frame = NSRect(x: 0, y: 0, width: 420, height: 500)
+        window.contentView = host
+        defer {
+            window.makeFirstResponder(nil)
+            window.contentView = nil
+        }
+
+        for _ in 0..<8 {
+            host.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        func findScrollView(in view: NSView) -> NSScrollView? {
+            if let scroll = view as? NSScrollView,
+               let doc = scroll.documentView,
+               doc.bounds.height > scroll.contentView.bounds.height + 100 {
+                return scroll
+            }
+            return view.subviews.lazy.compactMap(findScrollView(in:)).first
+        }
+
+        let scrollView = try XCTUnwrap(findScrollView(in: host))
+        let docView = try XCTUnwrap(scrollView.documentView)
+        let docHeight = docView.bounds.height
+        let visibleRect = scrollView.contentView.documentVisibleRect
+        XCTAssertGreaterThan(docHeight, 1_500)
+        if docView.isFlipped {
+            XCTAssertGreaterThanOrEqual(visibleRect.maxY, docHeight - 60)
+        } else {
+            XCTAssertLessThanOrEqual(visibleRect.minY, 60)
+        }
+
+        defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        try await Task.sleep(for: .milliseconds(30))
+        host.layoutSubtreeIfNeeded()
+        defaults.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        try await Task.sleep(for: .milliseconds(30))
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(fullWidthCallbackValues, [true, false])
+
+        // Verify terminal focus isolation when full-width transcript drawer covers the terminal.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = Session(id: "s-focus", title: "focus", cwd: root.path)
+        let project = Project(name: "P", cwd: root.path, sessions: [session], selectedSessionId: session.id)
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { true },
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+            defaults: defaults
+        )
+        defer { model.detachAllClients() }
+        let controller = try XCTUnwrap(model.controller(for: session.id))
+        let terminal = controller.terminalView
+        let container = TerminalsContainerView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        window.contentView = container
+        container.sync(
+            order: [session.id],
+            active: session.id,
+            allowsTerminalFocus: true,
+            emptyHint: ("", ""),
+            onNew: {},
+            provider: { model.terminalView(for: $0) }
+        )
+        XCTAssertTrue(window.firstResponder === terminal)
+
+        // Without drawer content, an open flag does not treat the terminal as covered.
+        defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        model.openTranscriptDrawer(sessionId: session.id)
+        XCTAssertFalse(model.isActiveTerminalCoveredByTranscriptDrawer())
+        XCTAssertTrue(window.firstResponder === terminal)
+
+        // Once the session has drawer content (e.g. a pending question), full-width mode covers the terminal and relinquishes focus.
+        model.projects[0].sessions[0].agentActivity = AgentActivitySnapshot(
+            schemaVersion: 1,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            foregroundTurnActive: false,
+            scheduledTurnActive: false,
+            activeSubagents: [],
+            schedules: [],
+            idleGeneration: 0,
+            lastIdleAborted: false,
+            lastIdleTurnKind: nil,
+            error: nil,
+            trackedUserInputs: [
+                TrackedUserInput(
+                    requestId: "req-focus",
+                    question: "Continue?",
+                    choices: ["Yes", "No"],
+                    allowFreeform: false,
+                    requestedAt: ISO8601DateFormatter().string(from: Date()),
+                    agentId: nil
+                ),
+            ]
+        )
+        model.openTranscriptDrawer(sessionId: session.id)
+        XCTAssertTrue(model.isActiveTerminalCoveredByTranscriptDrawer())
+        XCTAssertFalse(window.firstResponder === terminal)
+
+        model.focusActiveTerminal()
+        XCTAssertFalse(window.firstResponder === terminal)
+
+        container.sync(
+            order: [session.id],
+            active: session.id,
+            allowsTerminalFocus: !model.isActiveTerminalCoveredByTranscriptDrawer(),
+            emptyHint: ("", ""),
+            onNew: {},
+            provider: { model.terminalView(for: $0) }
+        )
+        XCTAssertFalse(window.firstResponder === terminal)
+
+        // Even if terminal somehow regains firstResponder, WorkspaceInputController swallows keyDown.
+        XCTAssertTrue(window.makeFirstResponder(terminal))
+        let input = WorkspaceInputController(model: model)
+        let keyEvent = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: "a",
+                charactersIgnoringModifiers: "a",
+                isARepeat: false,
+                keyCode: 0
             )
         )
-        XCTAssertEqual(elicitationResult.state, .applied)
+        XCTAssertNil(input.handleKeyDown(keyEvent))
+        XCTAssertFalse(window.firstResponder === terminal)
+
+        // Clearing the last drawer content while open restores terminal focus on sync.
+        model.projects[0].sessions[0].agentActivity = nil
+        XCTAssertFalse(model.isActiveTerminalCoveredByTranscriptDrawer())
+        container.sync(
+            order: [session.id],
+            active: session.id,
+            allowsTerminalFocus: !model.isActiveTerminalCoveredByTranscriptDrawer(),
+            emptyHint: ("", ""),
+            onNew: {},
+            provider: { model.terminalView(for: $0) }
+        )
+        XCTAssertTrue(window.firstResponder === terminal)
+
+        // Closing the drawer also keeps terminal focus capability.
+        model.closeTranscriptDrawer(sessionId: session.id)
+        XCTAssertFalse(model.isActiveTerminalCoveredByTranscriptDrawer())
+        model.focusActiveTerminal()
+        XCTAssertTrue(window.firstResponder === terminal)
     }
 
     func testTranscriptDrawerFullWidthPreferenceDefaultsAndPersistence() {
