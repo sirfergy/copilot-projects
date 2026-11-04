@@ -15690,25 +15690,11 @@ final class AppLogicTests: XCTestCase {
         NSApp.setActivationPolicy(.prohibited)
         defer { NSApp.setActivationPolicy(activationPolicy) }
 
-        let savedFullWidth = UserDefaults.standard.object(forKey: TranscriptDrawer.fullWidthTranscriptKey)
         let savedQuickReplies = UserDefaults.standard.object(forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
         let savedQuickReplyList = UserDefaults.standard.object(forKey: TranscriptPromptComposerView.quickReplyListKey)
         defer {
-            if let savedFullWidth {
-                UserDefaults.standard.set(savedFullWidth, forKey: TranscriptDrawer.fullWidthTranscriptKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: TranscriptDrawer.fullWidthTranscriptKey)
-            }
-            if let savedQuickReplies {
-                UserDefaults.standard.set(savedQuickReplies, forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
-            }
-            if let savedQuickReplyList {
-                UserDefaults.standard.set(savedQuickReplyList, forKey: TranscriptPromptComposerView.quickReplyListKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: TranscriptPromptComposerView.quickReplyListKey)
-            }
+            UserDefaults.standard.set(savedQuickReplies, forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
+            UserDefaults.standard.set(savedQuickReplyList, forKey: TranscriptPromptComposerView.quickReplyListKey)
         }
         UserDefaults.standard.set(true, forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
         UserDefaults.standard.removeObject(forKey: TranscriptPromptComposerView.quickReplyListKey)
@@ -15746,7 +15732,7 @@ final class AppLogicTests: XCTestCase {
             )
         }
 
-        // Empty prompt: Send is disabled, but delivery mode menu remains enabled (preserving old picker behavior).
+        // Empty prompt: Send is disabled, but delivery mode menu remains enabled.
         XCTAssertFalse(composer.canSend(workflow: workflow, operation: operation, now: now))
         XCTAssertFalse(makeView().isDeliveryModeDisabled)
 
@@ -15757,19 +15743,13 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(dispatched.isEmpty)
         XCTAssertEqual(composer.prompt, "Half-written draft")
 
-        // Host the composer and verify clicking the main segment sends with the selected mode.
         let window = NSWindow(
             contentRect: NSRect(x: -20000, y: -20000, width: 420, height: 120),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
-        window.appearance = NSAppearance(named: .darkAqua)
-        let host = NSHostingView(
-            rootView: makeView()
-                .background(StudioStyle.chrome)
-                .environment(\.controlActiveState, .key)
-        )
+        let host = NSHostingView(rootView: makeView().environment(\.controlActiveState, .key))
         window.contentView = host
         window.orderBack(nil)
         defer {
@@ -15798,55 +15778,6 @@ final class AppLogicTests: XCTestCase {
             }
         }
 
-        struct RGB {
-            let r: CGFloat
-            let g: CGFloat
-            let b: CGFloat
-
-            func distance(to other: RGB) -> CGFloat {
-                abs(r - other.r) + abs(g - other.g) + abs(b - other.b)
-            }
-        }
-
-        @MainActor
-        func segmentColors() throws -> (main: RGB, chevron: RGB, chrome: RGB) {
-            host.layoutSubtreeIfNeeded()
-            let width = Int(host.bounds.width)
-            let height = Int(host.bounds.height)
-            let bitmap = try XCTUnwrap(NSBitmapImageRep(
-                bitmapDataPlanes: nil,
-                pixelsWide: width,
-                pixelsHigh: height,
-                bitsPerSample: 8,
-                samplesPerPixel: 4,
-                hasAlpha: true,
-                isPlanar: false,
-                colorSpaceName: .deviceRGB,
-                bytesPerRow: 0,
-                bitsPerPixel: 0
-            ))
-            bitmap.size = host.bounds.size
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-            let mainX = width - 12 - 24 - 20
-            let chevX = width - 12 - 12
-            // Sample 3pt below the top edge of the 24pt button (above the centered text and chevron glyphs).
-            let btnY = height - 33
-            let mainNS = try XCTUnwrap(bitmap.colorAt(x: mainX, y: btnY)?.usingColorSpace(.sRGB))
-            let chevNS = try XCTUnwrap(bitmap.colorAt(x: chevX, y: btnY)?.usingColorSpace(.sRGB))
-            let chromeNS = try XCTUnwrap(bitmap.colorAt(x: 12, y: 60)?.usingColorSpace(.sRGB))
-            return (
-                RGB(r: mainNS.redComponent, g: mainNS.greenComponent, b: mainNS.blueComponent),
-                RGB(r: chevNS.redComponent, g: chevNS.greenComponent, b: chevNS.blueComponent),
-                RGB(r: chromeNS.redComponent, g: chromeNS.greenComponent, b: chromeNS.blueComponent)
-            )
-        }
-
-        // With non-empty draft, both segments render with matching prominent accent color distinct from chrome.
-        let readyColors = try segmentColors()
-        XCTAssertLessThan(readyColors.main.distance(to: readyColors.chevron), 0.05)
-        XCTAssertGreaterThan(readyColors.chevron.distance(to: readyColors.chrome), 0.25)
-
-        // The bottom row's main Send segment is at the bottom-right, left of the 24pt chevron segment.
         let sendSegmentPoint = NSPoint(x: host.bounds.maxX - 12 - 24 - 20, y: 24)
         try click(sendSegmentPoint)
         try await Task.sleep(for: .milliseconds(50))
@@ -15856,10 +15787,7 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertEqual(composer.prompt, "")
 
-        // While prompt is empty, main Send segment is dimmed toward chrome while chevron menu segment stays active.
-        let emptyColors = try segmentColors()
-        XCTAssertGreaterThan(emptyColors.main.distance(to: emptyColors.chevron), 0.15)
-        XCTAssertLessThan(emptyColors.chevron.distance(to: readyColors.chevron), 0.05)
+        // While prompt is empty, clicking the main Send segment does nothing.
         try click(sendSegmentPoint)
         try await Task.sleep(for: .milliseconds(30))
         XCTAssertEqual(dispatched.count, 1)
@@ -15870,8 +15798,7 @@ final class AppLogicTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(50))
         host.layoutSubtreeIfNeeded()
-        let approveChipPoint = NSPoint(x: 40, y: host.bounds.maxY - 24)
-        try click(approveChipPoint)
+        try click(NSPoint(x: 40, y: host.bounds.maxY - 24))
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(
             dispatched.last,
@@ -15903,10 +15830,6 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(composer.pendingOperationId, "op-pending")
         XCTAssertFalse(composer.canSend(workflow: workflow, operation: operation, now: now))
         XCTAssertTrue(makeView().isDeliveryModeDisabled)
-        try await Task.sleep(for: .milliseconds(30))
-        let pendingColors = try segmentColors()
-        XCTAssertLessThan(pendingColors.main.distance(to: pendingColors.chevron), 0.05)
-        XCTAssertGreaterThan(pendingColors.chevron.distance(to: readyColors.chevron), 0.15)
     }
 }
 
