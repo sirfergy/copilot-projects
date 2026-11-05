@@ -20,7 +20,7 @@ actor TranscriptImageDecoder {
     func decode(_ data: Data, maximumDimension: Int) throws -> CGImage {
         try Task.checkCancellation()
         guard (1...Self.previewDimension).contains(maximumDimension),
-              RemoteKittyPNGValidation.isStructurallyValid(data),
+              TranscriptPromptAttachments.pixelSize(data) != nil,
               let source = CGImageSourceCreateWithData(data as CFData, [
                 kCGImageSourceShouldCache: false
               ] as CFDictionary),
@@ -41,6 +41,7 @@ private struct LoadedTranscriptImage {
     let identity: TranscriptImageIdentity
     let data: Data
     let image: CGImage
+    let size: CGSize
 
     func matches(_ identity: TranscriptImageIdentity, data: Data?) -> Bool {
         self.identity.sessionId == identity.sessionId
@@ -61,14 +62,17 @@ struct TranscriptImageView: View {
     @State private var loaded: LoadedTranscriptImage?
     @State private var failed: TranscriptImageIdentity?
 
-    private var readyImage: CGImage? {
+    private var activeLoaded: LoadedTranscriptImage? {
         guard let loaded, loaded.matches(identity, data: data) else { return nil }
-        return loaded.image
+        return loaded
     }
 
     var body: some View {
+        let readyImage = activeLoaded?.image
         Group {
-            if let data, let size = RemoteKittyPNGValidation.pixelSize(data) {
+            if let data,
+               failed != identity,
+               let size = activeLoaded?.size ?? TranscriptPromptAttachments.pixelSize(data) {
                 Button {
                     onPreview(TranscriptImagePreviewItem(id: identity, data: data))
                 } label: {
@@ -118,11 +122,19 @@ struct TranscriptImageView: View {
             if let loaded, loaded.matches(identity, data: data) { return }
             self.loaded = nil
             do {
+                guard let size = TranscriptPromptAttachments.pixelSize(data) else {
+                    throw TranscriptImageError.invalidImage
+                }
                 let image = try await TranscriptImageDecoder.shared.decode(
                     data, maximumDimension: TranscriptImageDecoder.thumbnailDimension
                 )
                 guard !Task.isCancelled else { return }
-                loaded = LoadedTranscriptImage(identity: identity, data: data, image: image)
+                loaded = LoadedTranscriptImage(
+                    identity: identity,
+                    data: data,
+                    image: image,
+                    size: size
+                )
             } catch is CancellationError {
                 return
             } catch {

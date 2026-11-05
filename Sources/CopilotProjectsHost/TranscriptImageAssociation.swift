@@ -1,15 +1,30 @@
 import Darwin
 import Foundation
+import ImageIO
 import CopilotProjectsCore
 import CopilotProjectsProtocol
 
 /// Prompt image attachments resolved directly from a Copilot session's
-/// `events.jsonl` `user.message` file attachments for the turns in a
+/// `events.jsonl` `user.message` attachments for the turns in a
 /// `TranscriptSnapshot`. Stateless: no cross-session or cross-turn cache.
 struct TranscriptPromptAttachments: Equatable, Sendable {
     private static let maxAttachmentsPerTurn = 8
     private static let maxBytesPerImage = 5 * 1_024 * 1_024
     private static let maxTotalBytes = 32 * 1_024 * 1_024
+    private static let maxEventLineBytes = 64 * 1_024 * 1_024
+    private static let decodePayloadsKey = CodingUserInfoKey(rawValue: "decodePayloads")!
+
+    struct Span: Hashable, Sendable {
+        let offset: Int
+        let length: Int
+    }
+
+    struct Ref: Equatable, Sendable {
+        let path: String?
+        let assetId: String?
+        let inline: Span?
+        let index: Int
+    }
 
     struct Item: Equatable, Identifiable, Sendable {
         let identity: TranscriptImageIdentity
@@ -24,7 +39,9 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
     var scannedEventsIdentity: String = ""
     var scannedEventsBytes: Int = 0
     var resolvedTurnIds: Set<String> = []
-    var pathsByTurnId: [String: [String]] = [:]
+    var refsByTurnId: [String: [Ref]] = [:]
+    var assetSpans: [String: Span] = [:]
+    var payloadBytesBySpan: [Span: Int] = [:]
     var itemsByTurnId: [String: [Item]] = [:]
     var watchedFiles: [String: String] = [:]
 
@@ -76,7 +93,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         if let prior,
            prior.orderedTurnIds == orderedTurnIds,
            wantedTurnIds.isSubset(of: prior.resolvedTurnIds),
-           Set(prior.itemsByTurnId.keys) == wantedTurnIds.intersection(prior.pathsByTurnId.keys),
+           Set(prior.itemsByTurnId.keys) == wantedTurnIds.intersection(prior.refsByTurnId.keys),
            !prior.hasWatchedFileChanges() {
             return prior
         }
@@ -107,7 +124,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
            prior.scannedEventsIdentity == eventsIdentity,
            eventsSize >= prior.scannedEventsBytes {
             result.resolvedTurnIds = prior.resolvedTurnIds.intersection(wantedTurnIds)
-            result.pathsByTurnId = prior.pathsByTurnId.filter { wantedTurnIds.contains($0.key) }
+            result.refsByTurnId = prior.refsByTurnId.filter { wantedTurnIds.contains($0.key) }
             startOffset = prior.scannedEventsBytes
         } else {
             startOffset = 0
@@ -119,36 +136,72 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         let typePrefix = Array("{\"type\":\"".utf8)
         let userPrefix = Array("{\"type\":\"user.message\"".utf8)
         let userNeedle = Array("\"user.message\"".utf8)
+        let assetPrefix = Array("{\"type\":\"session.binary_asset\"".utf8)
+        let assetNeedle = Array("\"session.binary_asset\"".utf8)
         let decoder = JSONDecoder()
-        func scanRange(_ lower: Int, _ upper: Int) -> Int {
+        func scanRange(_ lower: Int, _ upper: Int, assetsOnly: Set<String>? = nil) -> Int {
             guard lower < upper, fseeko(fp, off_t(lower), SEEK_SET) == 0 else { return lower }
             clearerr(fp)
             var cursor = lower
             while cursor < upper {
+                let lineStart = cursor
                 let n = getline(&linePtr, &lineCap, fp)
                 guard n > 0, let ptr = linePtr else { break }
+                defer {
+                    if lineCap > 256 * 1_024 {
+                        free(linePtr)
+                        linePtr = nil
+                        lineCap = 0
+                    }
+                }
                 let lineLen = min(n, upper - cursor)
                 guard lineLen > 0, ptr[lineLen - 1] == 0x0A else { break }
                 cursor += lineLen
-                guard lineLen >= 24 else { continue }
-                let isUser = memcmp(ptr, typePrefix, typePrefix.count) == 0
+                guard lineLen >= 24, lineLen <= Self.maxEventLineBytes else { continue }
+                let hasTypePrefix = memcmp(ptr, typePrefix, typePrefix.count) == 0
+                let isAsset = hasTypePrefix
+                    ? (lineLen >= assetPrefix.count && memcmp(ptr, assetPrefix, assetPrefix.count) == 0)
+                    : memmem(ptr, lineLen, assetNeedle, assetNeedle.count) != nil
+                let isUser = assetsOnly == nil && (hasTypePrefix
                     ? memcmp(ptr, userPrefix, userPrefix.count) == 0
-                    : memmem(ptr, lineLen, userNeedle, userNeedle.count) != nil
-                guard isUser else { continue }
-                let lineSlice = Data(bytesNoCopy: ptr, count: lineLen - 1, deallocator: .none)
-                if let event = try? decoder.decode(RawUserMessageEvent.self, from: lineSlice),
-                   event.type == "user.message",
-                   event.agentId == nil,
-                   let turnId = event.id,
-                   wantedTurnIds.contains(turnId),
-                   let data = event.data,
-                   data.source == nil || data.source?.hasPrefix("schedule-") == true {
+                    : memmem(ptr, lineLen, userNeedle, userNeedle.count) != nil)
+                guard isUser || isAsset else { continue }
+                autoreleasepool {
+                    let lineSlice = Data(bytesNoCopy: ptr, count: lineLen - 1, deallocator: .none)
+                    guard let event = try? decoder.decode(RawUserMessageEvent.self, from: lineSlice),
+                          let data = event.data else { return }
+                    let span = Span(offset: lineStart, length: lineLen - 1)
+                    if event.type == "session.binary_asset",
+                       let id = data.assetId,
+                       !id.isEmpty,
+                       data.hasData,
+                       assetsOnly?.contains(id) != false {
+                        result.assetSpans[id] = span
+                        return
+                    }
+                    guard assetsOnly == nil,
+                          event.type == "user.message",
+                          event.agentId == nil,
+                          let turnId = event.id,
+                          wantedTurnIds.contains(turnId),
+                          data.source == nil || data.source?.hasPrefix("schedule-") == true else { return }
                     result.resolvedTurnIds.insert(turnId)
-                    let paths = Array((data.attachments ?? []).filter(Self.isPNGFileAttachment).prefix(Self.maxAttachmentsPerTurn)).compactMap(\.path)
-                    result.pathsByTurnId[turnId] = paths.isEmpty ? nil : paths
+                    let refs = Array(
+                        (data.attachments ?? [])
+                            .enumerated()
+                            .compactMap { Self.attachmentRef(for: $1, span: span, index: $0) }
+                            .prefix(Self.maxAttachmentsPerTurn)
+                    )
+                    result.refsByTurnId[turnId] = refs.isEmpty ? nil : refs
                 }
+                if let assetsOnly, assetsOnly.isSubset(of: result.assetSpans.keys) { break }
             }
             return cursor
+        }
+        let sameEventsFile = startOffset > 0 && prior?.scannedEventsIdentity == eventsIdentity
+        if sameEventsFile, let prior {
+            result.assetSpans = prior.assetSpans
+            result.payloadBytesBySpan = prior.payloadBytesBySpan
         }
         let consumedEnd = scanRange(startOffset, eventsSize)
         if startOffset > 0,
@@ -156,38 +209,93 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
            !wantedTurnIds.subtracting(prior.orderedTurnIds).isSubset(of: result.resolvedTurnIds) {
             _ = scanRange(0, startOffset)
         }
-        if !wantedTurnIds.isSubset(of: result.resolvedTurnIds) {
+        let wantedAssets = Set(result.refsByTurnId.values.flatMap { $0.compactMap(\.assetId) })
+        let priorWanted = Set(prior?.refsByTurnId.values.flatMap { $0.compactMap(\.assetId) } ?? [])
+        let unsearched = wantedAssets.subtracting(result.assetSpans.keys).subtracting(priorWanted)
+        if startOffset > 0, !unsearched.isEmpty {
+            _ = scanRange(0, startOffset, assetsOnly: unsearched)
+        }
+        result.assetSpans = result.assetSpans.filter { wantedAssets.contains($0.key) }
+        if !wantedTurnIds.isSubset(of: result.resolvedTurnIds)
+            || consumedEnd < eventsSize
+            || !wantedAssets.isSubset(of: result.assetSpans.keys) {
             result.watchedFiles[eventsPath] = eventsToken
         }
         result.scannedEventsIdentity = eventsIdentity
         result.scannedEventsBytes = consumedEnd
 
+        let payloadDecoder = JSONDecoder()
+        payloadDecoder.userInfo[Self.decodePayloadsKey] = true
         var remainingBudget = Self.maxTotalBytes
         for turn in activeTurns.reversed() {
-            guard let paths = result.pathsByTurnId[turn.id],
+            guard let refs = result.refsByTurnId[turn.id],
                   result.itemsByTurnId[turn.id] == nil else { continue }
-            let currentTokens = paths.map(Self.fileStatToken(atPath:))
-            for (path, token) in zip(paths, currentTokens) {
-                result.watchedFiles[path] = token
+            var sourcesUnchanged = true
+            for ref in refs {
+                if let path = ref.path {
+                    let token = Self.fileStatToken(atPath: path)
+                    result.watchedFiles[path] = token
+                    if prior?.watchedFiles[path] != token { sourcesUnchanged = false }
+                }
+                if let id = ref.assetId,
+                   !sameEventsFile || prior?.assetSpans[id] != result.assetSpans[id] {
+                    sourcesUnchanged = false
+                }
+                if ref.inline != nil, !sameEventsFile {
+                    sourcesUnchanged = false
+                }
             }
-            if let priorItems = prior?.itemsByTurnId[turn.id],
-               prior?.pathsByTurnId[turn.id] == paths,
-               priorItems.count == paths.count,
+            if sourcesUnchanged,
+               let priorItems = prior?.itemsByTurnId[turn.id],
+               prior?.refsByTurnId[turn.id] == refs,
+               priorItems.count == refs.count,
                priorItems.allSatisfy({ $0.data != nil }),
-               zip(paths, currentTokens).allSatisfy({ prior?.watchedFiles[$0.0] == $0.1 }),
                priorItems.reduce(0, { $0 + ($1.data?.count ?? 0) }) <= remainingBudget {
                 remainingBudget -= priorItems.reduce(0, { $0 + ($1.data?.count ?? 0) })
                 result.itemsByTurnId[turn.id] = priorItems
                 continue
             }
             var items: [Item] = []
-            for (index, path) in paths.enumerated() {
+            var inlineCache: (span: Span, attachments: [RawAttachment]?)?
+            for (index, ref) in refs.enumerated() {
                 let cap = min(Self.maxBytesPerImage, remainingBudget)
-                let loaded = Self.readValidatedPNG(
-                    atPath: path,
-                    maxModifiedAt: turn.startedAt,
-                    maxBytes: cap
-                )
+                let loaded: (data: Data, token: String)? = autoreleasepool {
+                    if let id = ref.assetId,
+                       let span = result.assetSpans[id],
+                       let asset = Self.readValidatedAsset(
+                           fd: eventsFD,
+                           span: span,
+                           id: id,
+                           turnId: turn.id,
+                           index: 0,
+                           inlineCache: &inlineCache,
+                           payloadBytesBySpan: &result.payloadBytesBySpan,
+                           decoder: payloadDecoder,
+                           maxBytes: cap
+                       ) {
+                        return asset
+                    }
+                    if let span = ref.inline,
+                       let inline = Self.readValidatedAsset(
+                           fd: eventsFD,
+                           span: span,
+                           id: nil,
+                           turnId: turn.id,
+                           index: ref.index,
+                           inlineCache: &inlineCache,
+                           payloadBytesBySpan: &result.payloadBytesBySpan,
+                           decoder: payloadDecoder,
+                           maxBytes: cap
+                       ) {
+                        return inline
+                    }
+                    guard let path = ref.path else { return nil }
+                    return Self.readValidatedImage(
+                        atPath: path,
+                        maxModifiedAt: turn.startedAt,
+                        maxBytes: cap
+                    )
+                }
                 if let data = loaded?.data {
                     remainingBudget -= data.count
                 }
@@ -207,15 +315,126 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         return result
     }
 
-    private static func isPNGFileAttachment(_ attachment: RawAttachment) -> Bool {
-        guard attachment.type == "file", !attachment.hasTaggedFilesEntry,
-              let rawPath = attachment.path, !rawPath.isEmpty else { return false }
-        return attachment.mimeType?.lowercased() == "image/png"
-            || URL(fileURLWithPath: rawPath).pathExtension.lowercased() == "png"
-            || attachment.displayName.map { URL(fileURLWithPath: $0).pathExtension.lowercased() == "png" } == true
+    static func pixelSize(_ data: Data) -> CGSize? {
+        guard let src = CGImageSourceCreateWithData(
+                  data as CFData,
+                  [kCGImageSourceShouldCache: false] as CFDictionary
+              ),
+              CGImageSourceGetCount(src) >= 1,
+              let type = CGImageSourceGetType(src) as String?,
+              type == "public.png" || (type == "public.jpeg" && Self.hasJPEGEndMarker(data)),
+              CGImageSourceGetStatus(src) == .statusComplete,
+              CGImageSourceGetStatusAtIndex(src, 0) == .statusComplete,
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int,
+              let height = props[kCGImagePropertyPixelHeight] as? Int,
+              (1...16_384).contains(width),
+              (1...16_384).contains(height),
+              width <= RemoteAttachmentContract.maxPixels / height
+        else { return nil }
+        let orientation = props[kCGImagePropertyOrientation] as? Int ?? 1
+        return (5...8).contains(orientation)
+            ? CGSize(width: height, height: width)
+            : CGSize(width: width, height: height)
     }
 
-    private static func readValidatedPNG(
+    private static func hasJPEGEndMarker(_ data: Data) -> Bool {
+        guard let end = data.lastIndex(where: { $0 != 0 }), end >= 1 else { return false }
+        return data[end - 1] == 0xFF && data[end] == 0xD9
+    }
+
+    private static func attachmentRef(
+        for attachment: RawAttachment,
+        span: Span,
+        index: Int
+    ) -> Ref? {
+        let assetId = (attachment.assetId?.isEmpty == false) ? attachment.assetId : nil
+        guard !attachment.hasTaggedFilesEntry,
+              attachment.type == "file"
+                  || attachment.type == "blob"
+                  || (attachment.type == nil && assetId != nil)
+        else { return nil }
+        let exts = [attachment.path, attachment.displayName].compactMap { raw -> String? in
+            guard let raw, !raw.isEmpty else { return nil }
+            let ext = URL(fileURLWithPath: raw).pathExtension.lowercased()
+            return ext.isEmpty ? nil : ext
+        }
+        let hasImageExt = exts.contains { $0 == "png" || $0 == "jpg" || $0 == "jpeg" }
+        if let mime = attachment.mimeType?.lowercased(), !mime.isEmpty {
+            guard mime == "image/png"
+                    || mime == "image/jpeg"
+                    || (attachment.type == "file" && hasImageExt)
+            else { return nil }
+        } else if !hasImageExt && !(exts.isEmpty && (attachment.type == "blob" || assetId != nil)) {
+            return nil
+        }
+        let inline = attachment.hasInlineData ? span : nil
+        let path = (attachment.type == "file" && attachment.path?.isEmpty == false)
+            ? attachment.path
+            : nil
+        guard path != nil || assetId != nil || inline != nil || attachment.type == "blob" else {
+            return nil
+        }
+        return Ref(path: path, assetId: assetId, inline: inline, index: index)
+    }
+
+    private static func readValidatedAsset(
+        fd: Int32,
+        span: Span,
+        id: String?,
+        turnId: String,
+        index: Int,
+        inlineCache: inout (span: Span, attachments: [RawAttachment]?)?,
+        payloadBytesBySpan: inout [Span: Int],
+        decoder: JSONDecoder,
+        maxBytes: Int
+    ) -> (data: Data, token: String)? {
+        let spanKey = id == nil ? Span(offset: span.offset, length: -1 - index) : span
+        guard maxBytes > 0, (payloadBytesBySpan[spanKey] ?? 0) <= maxBytes else { return nil }
+        func decodeLine() -> RawUserMessageEvent? {
+            var line = Data(count: span.length)
+            let readCount = line.withUnsafeMutableBytes {
+                pread(fd, $0.baseAddress, span.length, off_t(span.offset))
+            }
+            guard readCount == span.length else { return nil }
+            return try? decoder.decode(RawUserMessageEvent.self, from: line)
+        }
+        let base64: String?
+        if let id {
+            guard let ev = decodeLine(),
+                  let d = ev.data,
+                  ev.type == "session.binary_asset",
+                  d.assetId == id,
+                  d.type == nil || d.type == "image",
+                  ["image/png", "image/jpeg", nil].contains(d.mimeType?.lowercased())
+            else { return nil }
+            base64 = d.data
+        } else {
+            if inlineCache?.span != span {
+                guard let ev = decodeLine(),
+                      ev.type == "user.message",
+                      ev.id == turnId
+                else { return nil }
+                inlineCache = (span, ev.data?.attachments)
+            }
+            base64 = (inlineCache?.attachments?.indices.contains(index) == true)
+                ? inlineCache?.attachments?[index].data
+                : nil
+        }
+        guard let base64, !base64.isEmpty else { return nil }
+        let minDecodedBytes = max(1, (base64.utf8.count / 4) * 3 - 2)
+        payloadBytesBySpan[spanKey] = minDecodedBytes
+        guard base64.utf8.count <= ((maxBytes + 2) / 3) * 4,
+              let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters),
+              !data.isEmpty
+        else { return nil }
+        payloadBytesBySpan[spanKey] = data.count
+        guard data.count <= maxBytes, Self.pixelSize(data) != nil else { return nil }
+        let token = "\(id ?? "inline"):\(span.offset):\(span.length):\(index):\(Self.fnv1a64(data))"
+        return (data, token)
+    }
+
+    private static func readValidatedImage(
         atPath path: String,
         maxModifiedAt: Date,
         maxBytes: Int
@@ -234,7 +453,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         guard modifiedTime < maxModifiedAt.timeIntervalSince1970 + 0.001,
               let buffer = try? FileHandle(fileDescriptor: fd, closeOnDealloc: false).readToEnd(),
               buffer.count == Int(st.st_size),
-              RemoteKittyPNGValidation.isStructurallyValid(buffer) else { return nil }
+              Self.pixelSize(buffer) != nil else { return nil }
         let token = Self.statToken(st)
         guard Self.fileStatToken(atPath: path) == token else { return nil }
         return (buffer, token)
@@ -269,6 +488,27 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
     private struct RawEventData: Decodable {
         let source: String?
         let attachments: [RawAttachment]?
+        let assetId: String?
+        let type: String?
+        let mimeType: String?
+        let data: String?
+        let hasData: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case source, attachments, assetId, type, mimeType, data
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            source = try c.decodeIfPresent(String.self, forKey: .source)
+            attachments = try c.decodeIfPresent([RawAttachment].self, forKey: .attachments)
+            assetId = try c.decodeIfPresent(String.self, forKey: .assetId)
+            type = try c.decodeIfPresent(String.self, forKey: .type)
+            mimeType = try c.decodeIfPresent(String.self, forKey: .mimeType)
+            let decodePayloads = (decoder.userInfo[TranscriptPromptAttachments.decodePayloadsKey] as? Bool) == true
+            data = decodePayloads ? try c.decodeIfPresent(String.self, forKey: .data) : nil
+            hasData = c.contains(.data) && ((try? c.decodeNil(forKey: .data)) != true)
+        }
     }
 
     private struct RawAttachment: Decodable {
@@ -276,10 +516,13 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         let path: String?
         let displayName: String?
         let mimeType: String?
+        let assetId: String?
+        let data: String?
+        let hasInlineData: Bool
         let hasTaggedFilesEntry: Bool
 
         private enum CodingKeys: String, CodingKey {
-            case type, path, displayName, mimeType, taggedFilesEntry
+            case type, path, displayName, mimeType, assetId, data, taggedFilesEntry
         }
 
         init(from decoder: Decoder) throws {
@@ -288,6 +531,10 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
             path = try c.decodeIfPresent(String.self, forKey: .path)
             displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
             mimeType = try c.decodeIfPresent(String.self, forKey: .mimeType)
+            assetId = try c.decodeIfPresent(String.self, forKey: .assetId)
+            let decodePayloads = (decoder.userInfo[TranscriptPromptAttachments.decodePayloadsKey] as? Bool) == true
+            data = decodePayloads ? try c.decodeIfPresent(String.self, forKey: .data) : nil
+            hasInlineData = c.contains(.data) && ((try? c.decodeNil(forKey: .data)) != true)
             hasTaggedFilesEntry = c.contains(.taggedFilesEntry)
                 && ((try? c.decode(Bool.self, forKey: .taggedFilesEntry))
                     ?? ((try? c.decodeNil(forKey: .taggedFilesEntry)) != true))

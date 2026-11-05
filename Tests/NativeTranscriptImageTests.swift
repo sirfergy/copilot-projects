@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import ImageIO
 import SwiftUI
 import XCTest
 @testable import CopilotProjectsCore
@@ -67,13 +68,43 @@ final class NativeTranscriptImageTests: XCTestCase {
         XCTAssertLessThanOrEqual(preview.width, TranscriptImageDecoder.previewDimension)
         XCTAssertEqual(preview.width, preview.height * 2)
         XCTAssertGreaterThan(preview.width, thumbnail.width)
+
+        let jpeg = try Self.makeSolidJPEG(width: 1_200, height: 600, color: .systemBlue, orientation: 6)
+        XCTAssertNil(RemoteKittyPNGValidation.pixelSize(jpeg))
+        XCTAssertEqual(TranscriptPromptAttachments.pixelSize(jpeg), CGSize(width: 600, height: 1_200))
+        let jpegThumb = try await TranscriptImageDecoder.shared.decode(
+            jpeg, maximumDimension: TranscriptImageDecoder.thumbnailDimension
+        )
+        XCTAssertEqual(jpegThumb.width, 384)
+        XCTAssertEqual(jpegThumb.height, 768)
+
+        let wideJPEG = try Self.makeSolidJPEG(width: 6_000, height: 100, color: .systemGreen)
+        XCTAssertEqual(TranscriptPromptAttachments.pixelSize(wideJPEG), CGSize(width: 6_000, height: 100))
+        let paddedJPEG = wideJPEG + Data([0x00, 0x00])
+        XCTAssertEqual(TranscriptPromptAttachments.pixelSize(paddedJPEG), CGSize(width: 6_000, height: 100))
+        let widePNG = remoteKittyTestPNGBytes(width: 5_120, height: 64)
+        XCTAssertEqual(TranscriptPromptAttachments.pixelSize(widePNG), CGSize(width: 5_120, height: 64))
     }
 
-    func testInvalidImagesAndDecodeSizesFailExplicitly() async {
+    func testInvalidImagesAndDecodeSizesFailExplicitly() async throws {
         let valid = remoteKittyTestPNGBytes(width: 4, height: 2)
-        let oversized = remoteKittyTestPNGBytes(width: 4_097, height: 1)
-        XCTAssertNil(RemoteKittyPNGValidation.pixelSize(oversized))
-        for (data, maximum) in [(Data([0, 1, 2]), 768), (oversized, 768), (valid, 0), (valid, 2_049)] {
+        let oversizedKitty = remoteKittyTestPNGBytes(width: 4_097, height: 1)
+        let oversizedAttachment = remoteKittyTestPNGBytes(width: 16_385, height: 1)
+        let validJPEG = try Self.makeSolidJPEG(width: 16, height: 16, color: .systemRed)
+        let truncatedJPEG = validJPEG.dropLast(2)
+        let emptyJPEG = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        XCTAssertNil(RemoteKittyPNGValidation.pixelSize(oversizedKitty))
+        XCTAssertNil(TranscriptPromptAttachments.pixelSize(oversizedAttachment))
+        XCTAssertNil(TranscriptPromptAttachments.pixelSize(Data(truncatedJPEG)))
+        XCTAssertNil(TranscriptPromptAttachments.pixelSize(emptyJPEG))
+        for (data, maximum) in [
+            (Data([0, 1, 2]), 768),
+            (oversizedAttachment, 768),
+            (Data(truncatedJPEG), 768),
+            (emptyJPEG, 768),
+            (valid, 0),
+            (valid, 2_049),
+        ] {
             do {
                 _ = try await TranscriptImageDecoder.shared.decode(data, maximumDimension: maximum)
                 XCTFail("Invalid image or decode bound was accepted")
@@ -693,7 +724,13 @@ final class NativeTranscriptImageTests: XCTestCase {
         return rep.representation(using: .png, properties: [:])
     }
 
-    private static func makeSolidPNG(width: Int, height: Int, color: NSColor) throws -> Data {
+    private static func makeSolidPNG(
+        width: Int,
+        height: Int,
+        color: NSColor,
+        fileType: NSBitmapImageRep.FileType = .png,
+        properties: [NSBitmapImageRep.PropertyKey: Any] = [:]
+    ) throws -> Data {
         let rep = try XCTUnwrap(
             NSBitmapImageRep(
                 bitmapDataPlanes: nil,
@@ -713,6 +750,208 @@ final class NativeTranscriptImageTests: XCTestCase {
         color.setFill()
         NSBezierPath(rect: NSRect(x: 0, y: 0, width: width, height: height)).fill()
         NSGraphicsContext.restoreGraphicsState()
-        return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        return try XCTUnwrap(rep.representation(using: fileType, properties: properties))
+    }
+
+    private static func makeSolidJPEG(
+        width: Int,
+        height: Int,
+        color: NSColor,
+        orientation: Int? = nil
+    ) throws -> Data {
+        let base = try makeSolidPNG(width: width, height: height, color: color, fileType: .jpeg, properties: [.compressionFactor: 0.9])
+        guard let orientation, let rep = NSBitmapImageRep(data: base), let cgImage = rep.cgImage else { return base }
+        let out = NSMutableData()
+        let dest = try XCTUnwrap(CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil))
+        CGImageDestinationAddImage(dest, cgImage, [
+            kCGImageDestinationLossyCompressionQuality: 0.9,
+            kCGImagePropertyOrientation: orientation,
+        ] as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
+        return out as Data
+    }
+
+    func testPromptAttachmentsLoadsUploadedBlobsBinaryAssetsAndJPEGsWithBudgets() throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prompt-uploaded-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let copilotSessionId = UUID().uuidString.lowercased()
+        let sessionDir = tempRoot
+            .appendingPathComponent("session-state", isDirectory: true)
+            .appendingPathComponent(copilotSessionId, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+        let eventsURL = sessionDir.appendingPathComponent("events.jsonl", isDirectory: false)
+
+        let t1 = ISO8601DateFormatter().date(from: "2026-11-05T12:00:01Z")!
+        let t2 = ISO8601DateFormatter().date(from: "2026-11-05T12:05:00Z")!
+        let t3 = ISO8601DateFormatter().date(from: "2026-11-05T12:10:00Z")!
+
+        let pngBytes = remoteKittyTestPNGBytes(width: 180, height: 90)
+        let jpegBytes = try Self.makeSolidJPEG(width: 200, height: 100, color: .systemBlue)
+        let gifBytes = try Self.makeSolidPNG(width: 8, height: 8, color: .systemRed, fileType: .gif)
+        XCTAssertNil(TranscriptPromptAttachments.pixelSize(gifBytes))
+        let localJPEGURL = tempRoot.appendingPathComponent("photo.jpg", isDirectory: false)
+        try jpegBytes.write(to: localJPEGURL)
+        try FileManager.default.setAttributes([.modificationDate: t2], ofItemAtPath: localJPEGURL.path)
+        let deletedTempURL = tempRoot.appendingPathComponent("deleted-temp.png", isDirectory: false)
+        let largeMetadata = String(repeating: "A", count: 300_000)
+
+        let events = [
+            #"{"type":"session.binary_asset","id":"a-unreferenced","data":{"assetId":"sha256:unreferenced-tool-asset","type":"image","mimeType":"image/png","data":"\#(pngBytes.base64EncodedString())"}}"#,
+            #"{"type":"session.binary_asset","id":"a-1","data":{"assetId":"sha256:asset-jpeg","type":"image","mimeType":"image/jpeg","byteLength":\#(jpegBytes.count),"data":"\#(jpegBytes.base64EncodedString())"}}"#,
+            #"{"type":"session.binary_asset","id":"a-2","data":{"metadata":{"assetId":"sha256:wrong","imageEditSource":{"data":"\#(largeMetadata)"}},"assetId":"sha256:asset-png","type":"image","mimeType":"image/png","byteLength":\#(pngBytes.count),"data":"\#(pngBytes.base64EncodedString())"}}"#,
+            #"{"type":"session.binary_asset","id":"a-corrupt","data":{"assetId":"sha256:corrupt","type":"image","mimeType":"image/jpeg","data":"\#(Data([0xFF, 0xD8, 0x00, 0xFF, 0xD9]).base64EncodedString())"}}"#,
+            #"{"type":"user.message","id":"turn-1","timestamp":"2026-11-05T12:00:01Z","data":{"content":"Uploaded assets","attachments":[{"type":"blob","assetId":"sha256:asset-jpeg","displayName":"Screenshot.jpg","mimeType":"image/jpeg","byteLength":\#(jpegBytes.count)},{"assetId":"sha256:asset-png","mimeType":"image/png"},{"type":"blob","displayName":"notes.md","mimeType":"text/markdown","data":"aGVsbG8="}]}}"#,
+            #"{"type":"user.message","id":"turn-2","timestamp":"2026-11-05T12:05:00Z","data":{"content":"Inline blobs and JPEG file","attachments":[{"type":"blob","displayName":"inline.jpg","mimeType":"image/jpeg","data":"\#(jpegBytes.base64EncodedString())"},{"type":"blob","displayName":"inline.png","mimeType":"image/png","data":"\#(pngBytes.base64EncodedString())"},{"type":"file","path":"\#(localJPEGURL.path)","displayName":"photo.jpg"},{"type":"file","path":"\#(localJPEGURL.path)","assetId":"sha256:asset-png","displayName":"overwritten.png","mimeType":"image/png"},{"type":"file","path":"\#(deletedTempURL.path)","assetId":"sha256:asset-png","displayName":"deleted-temp.png","mimeType":"image/png"}]}}"#,
+            #"{"type":"user.message","id":"turn-3","timestamp":"2026-11-05T12:10:00Z","data":{"content":"Unavailable uploads","attachments":[{"type":"blob","assetId":"sha256:late-asset","displayName":"late.png","mimeType":"image/png"},{"type":"blob","assetId":"sha256:corrupt","displayName":"corrupt.jpg","mimeType":"image/jpeg"},{"type":"blob","displayName":"bad-inline.png","mimeType":"image/png","data":"\#(gifBytes.base64EncodedString())"},{"type":"blob","displayName":"omitted.png","mimeType":"image/png","omittedReason":"too_large"},{"type":"blob","displayName":"anim.gif","mimeType":"image/gif","data":"\#(gifBytes.base64EncodedString())"}]}}"#,
+        ].joined(separator: "\n") + "\n"
+        try events.write(to: eventsURL, atomically: true, encoding: .utf8)
+
+        let snapshot = TranscriptSnapshot(
+            schemaVersion: 4,
+            updatedAt: t3.addingTimeInterval(5),
+            copilotSessionId: copilotSessionId,
+            turns: [
+                TranscriptTurn(id: "turn-1", startedAt: t1, endedAt: t1.addingTimeInterval(2), kind: "foreground", userContent: "Uploaded assets", assistantMessages: [], tools: [], isAborted: false),
+                TranscriptTurn(id: "turn-2", startedAt: t2, endedAt: t2.addingTimeInterval(2), kind: "foreground", userContent: "Inline blobs and JPEG file", assistantMessages: [], tools: [], isAborted: false),
+                TranscriptTurn(id: "turn-3", startedAt: t3, endedAt: t3.addingTimeInterval(2), kind: "foreground", userContent: "Unavailable uploads", assistantMessages: [], tools: [], isAborted: false),
+            ]
+        )
+
+        let appSessionId = "desktop-upload-session"
+        let loaded = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: snapshot,
+            copilotHome: tempRoot.path
+        )
+        XCTAssertNil(loaded.assetSpans["sha256:unreferenced-tool-asset"])
+        XCTAssertEqual(Set(loaded.assetSpans.keys), ["sha256:asset-jpeg", "sha256:asset-png", "sha256:corrupt"])
+
+        let turn1 = loaded.items(forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: copilotSessionId)
+        XCTAssertEqual(turn1.map(\.data), [jpegBytes, pngBytes])
+        XCTAssertNotEqual(turn1[0].identity, turn1[1].identity)
+
+        let turn2 = loaded.items(forTurnId: "turn-2", sessionId: appSessionId, copilotSessionId: copilotSessionId)
+        XCTAssertEqual(turn2.map(\.data), [jpegBytes, pngBytes, jpegBytes, pngBytes, pngBytes])
+
+        let turn3 = loaded.items(forTurnId: "turn-3", sessionId: appSessionId, copilotSessionId: copilotSessionId)
+        XCTAssertEqual(turn3.count, 4)
+        XCTAssertTrue(turn3.allSatisfy { $0.data == nil && ($0.identity.version & (1 << 63)) == 0 })
+
+        // Appending the missing `session.binary_asset` later flips `hasWatchedFileChanges()` and resolves only that attachment.
+        let handle = try FileHandle(forWritingTo: eventsURL)
+        try handle.seekToEnd()
+        let appendedAsset = #"{"type":"session.binary_asset","id":"a-late","data":{"assetId":"sha256:late-asset","type":"image","mimeType":"image/png","data":"\#(pngBytes.base64EncodedString())"}}"# + "\n"
+        try handle.write(contentsOf: Data(appendedAsset.utf8))
+        try handle.close()
+        XCTAssertTrue(loaded.hasWatchedFileChanges())
+
+        let reloaded = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: snapshot,
+            previous: loaded,
+            copilotHome: tempRoot.path
+        )
+        let reloadedTurn3 = reloaded.items(forTurnId: "turn-3", sessionId: appSessionId, copilotSessionId: copilotSessionId)
+        XCTAssertEqual(reloadedTurn3.map(\.data), [pngBytes, nil, nil, nil])
+        XCTAssertNotEqual(reloadedTurn3[0].identity.version & (1 << 63), 0)
+        XCTAssertFalse(reloaded.hasWatchedFileChanges())
+
+        // Appending a new turn that references an earlier unreferenced asset resolves it from `0..<startOffset`, and missing/invalid assets fall back to inline data or a validated local file path.
+        let handle2 = try FileHandle(forWritingTo: eventsURL)
+        try handle2.seekToEnd()
+        let appendedTurn4 = #"{"type":"user.message","id":"turn-4","timestamp":"2026-11-05T12:12:00Z","data":{"content":"Historical asset","attachments":[{"type":"blob","assetId":"sha256:unreferenced-tool-asset","mimeType":"image/png"},{"type":"blob","assetId":"sha256:corrupt","mimeType":"image/png","data":"\#(pngBytes.base64EncodedString())"},{"type":"file","assetId":"sha256:missing-asset","path":"\#(localJPEGURL.path)","displayName":"photo.jpg"}]}}"# + "\n"
+        try handle2.write(contentsOf: Data(appendedTurn4.utf8))
+        try handle2.close()
+        let snapshotWithTurn4 = TranscriptSnapshot(
+            schemaVersion: 4,
+            updatedAt: t3.addingTimeInterval(120),
+            copilotSessionId: copilotSessionId,
+            turns: snapshot.turns + [
+                TranscriptTurn(id: "turn-4", startedAt: t3.addingTimeInterval(120), endedAt: t3.addingTimeInterval(122), kind: "foreground", userContent: "Historical asset", assistantMessages: [], tools: [], isAborted: false),
+            ]
+        )
+        let withTurn4 = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: snapshotWithTurn4,
+            previous: reloaded,
+            copilotHome: tempRoot.path
+        )
+        XCTAssertEqual(withTurn4.items(forTurnId: "turn-4", sessionId: appSessionId, copilotSessionId: copilotSessionId).map(\.data), [pngBytes, pngBytes, jpegBytes])
+        XCTAssertEqual(withTurn4.items(forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: copilotSessionId), turn1)
+
+        func makePaddedPNG(targetBytes: Int, seed: UInt8) -> Data {
+            var out = Data(pngBytes.dropLast(12))
+            let pad = max(4, targetBytes - pngBytes.count - 12)
+            var len = UInt32(pad).bigEndian
+            out.append(Data(bytes: &len, count: 4))
+            out.append(contentsOf: "tEXt".utf8)
+            out.append(contentsOf: "k\0".utf8)
+            out.append(Data(repeating: seed, count: pad - 2))
+            out.append(Data(repeating: 0, count: 4))
+            out.append(pngBytes.suffix(12))
+            return out
+        }
+
+        // Oversized (> 5 MiB) inline blob and binary_asset entries with structurally valid PNG bytes are rejected and surface as `data == nil` placeholders.
+        let oversizedValidPNG = makePaddedPNG(targetBytes: 5 * 1_024 * 1_024 + 64, seed: 0x41)
+        XCTAssertGreaterThan(oversizedValidPNG.count, 5 * 1_024 * 1_024)
+        XCTAssertEqual(TranscriptPromptAttachments.pixelSize(oversizedValidPNG), CGSize(width: 180, height: 90))
+        let oversizedBase64 = oversizedValidPNG.base64EncodedString()
+        let budgetEvents = [
+            #"{"type":"session.binary_asset","id":"a-big","data":{"data":"\#(oversizedBase64)","type":"image","mimeType":"image/png","assetId":"sha256:oversized-asset"}}"#,
+            #"{"type":"user.message","id":"turn-1","timestamp":"2026-11-05T12:00:01Z","data":{"content":"Oversized","attachments":[{"type":"blob","assetId":"sha256:oversized-asset","mimeType":"image/png"},{"type":"blob","mimeType":"image/png","data":"\#(oversizedBase64)"}]}}"#,
+        ].joined(separator: "\n") + "\n"
+        try budgetEvents.write(to: eventsURL, atomically: true, encoding: .utf8)
+        let afterOversized = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: snapshot,
+            previous: reloaded,
+            copilotHome: tempRoot.path
+        )
+        let oversizedItems = afterOversized.items(forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: copilotSessionId)
+        XCTAssertEqual(oversizedItems.map(\.data), [nil, nil])
+
+        // Aggregate 32 MiB total budget: newest turns keep their image data while older turns exceeding 32 MiB become placeholders.
+        let fourMiB1 = makePaddedPNG(targetBytes: 4_500_000, seed: 0x41)
+        let fourMiB2 = makePaddedPNG(targetBytes: 4_500_000, seed: 0x42)
+        let exactFiveMiB = makePaddedPNG(targetBytes: 5 * 1_024 * 1_024, seed: 0x43)
+        XCTAssertEqual(exactFiveMiB.count, 5 * 1_024 * 1_024)
+        let turn1Attachments = ((0..<3).map { _ in #"{"type":"blob","assetId":"sha256:four-1","mimeType":"image/png"}"# } + [#"{"type":"blob","assetId":"sha256:exact-5m","mimeType":"image/png"}"#]).joined(separator: ",")
+        let turn2Attachments = (0..<4).map { _ in #"{"type":"blob","mimeType":"image/png","data":"\#(fourMiB2.base64EncodedString())"}"# }.joined(separator: ",")
+        let totalBudgetEvents = [
+            #"{"type":"session.binary_asset","id":"a-4m","data":{"assetId":"sha256:four-1","type":"image","mimeType":"image/png","data":"\#(fourMiB1.base64EncodedString())"}}"#,
+            #"{"type":"session.binary_asset","id":"a-5m","data":{"assetId":"sha256:exact-5m","type":"image","mimeType":"image/png","data":"\#(exactFiveMiB.base64EncodedString())"}}"#,
+            #"{"type":"user.message","id":"turn-1","timestamp":"2026-11-05T12:00:01Z","data":{"content":"Older 18MB","attachments":[\#(turn1Attachments)]}}"#,
+            #"{"type":"user.message","id":"turn-2","timestamp":"2026-11-05T12:05:00Z","data":{"content":"Newer 18MB","attachments":[\#(turn2Attachments)]}}"#,
+        ].joined(separator: "\n") + "\n"
+        try totalBudgetEvents.write(to: eventsURL, atomically: true, encoding: .utf8)
+        let afterTotalBudget = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: snapshot,
+            previous: afterOversized,
+            copilotHome: tempRoot.path
+        )
+        let newerItems = afterTotalBudget.items(forTurnId: "turn-2", sessionId: appSessionId, copilotSessionId: copilotSessionId)
+        let olderItems = afterTotalBudget.items(forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: copilotSessionId)
+        XCTAssertEqual(newerItems.compactMap(\.data).count, 4)
+        XCTAssertEqual(olderItems.count, 4)
+        XCTAssertEqual(olderItems.compactMap(\.data).count, 3)
+        XCTAssertNil(olderItems[3].data)
+
+        // When a newer turn references the exact-5-MiB asset that was previously rejected for insufficient aggregate budget, it loads cleanly.
+        let handle3 = try FileHandle(forWritingTo: eventsURL)
+        try handle3.seekToEnd()
+        try handle3.write(contentsOf: Data((#"{"type":"user.message","id":"turn-4","timestamp":"2026-11-05T12:12:00Z","data":{"content":"Reuse exact 5MB","attachments":[{"type":"blob","assetId":"sha256:exact-5m","mimeType":"image/png"}]}}"# + "\n").utf8))
+        try handle3.close()
+        let afterExact5MReuse = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: snapshotWithTurn4,
+            previous: afterTotalBudget,
+            copilotHome: tempRoot.path
+        )
+        XCTAssertEqual(afterExact5MReuse.items(forTurnId: "turn-4", sessionId: appSessionId, copilotSessionId: copilotSessionId).map(\.data), [exactFiveMiB])
     }
 }
