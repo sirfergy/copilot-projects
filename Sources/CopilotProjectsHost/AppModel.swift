@@ -94,7 +94,8 @@ final class AppModel: ObservableObject {
     private let stateRepository: StateRepository
     /// User settings this model reads. Tests inject a suite so a saved review
     /// prompt cannot leak into another test through `UserDefaults.standard`.
-    private let defaults: UserDefaults
+    let defaults: UserDefaults
+    var cachedQuickRepliesDigest: (raw: String?, digest: String?)?
     /// The durable Kitty-image disk store every session's terminal is wired
     /// to. Defaults to the real process-wide singleton; tests inject an
     /// isolated instance (a fresh temp-directory-backed store) so a test

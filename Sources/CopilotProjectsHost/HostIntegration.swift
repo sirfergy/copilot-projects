@@ -92,9 +92,35 @@ public protocol SessionHost: AnyObject, Sendable {
     var supportsPullRequests: Bool { get }
     func pullRequestsOverview(refresh: Bool) async -> RemotePullRequestsOverviewOutcome
     func performPullRequestSession(_ request: RemotePullRequestSessionRequest) async -> RemotePullRequestSessionOutcome
+    var supportsQuickReplies: Bool { get }
+    func quickReplies() -> RemoteQuickRepliesState?
+    func updateQuickReplies(_ request: RemoteQuickRepliesUpdateRequest) -> RemoteQuickRepliesUpdateOutcome
+    func updateQuickReplies(from data: Data) -> RemoteQuickRepliesUpdateOutcome
 }
 
 public extension SessionHost {
+    var supportsQuickReplies: Bool { false }
+
+    func quickReplies() -> RemoteQuickRepliesState? { nil }
+
+    func updateQuickReplies(_ request: RemoteQuickRepliesUpdateRequest) -> RemoteQuickRepliesUpdateOutcome {
+        .unsupported
+    }
+
+    func updateQuickReplies(from data: Data) -> RemoteQuickRepliesUpdateOutcome {
+        guard supportsQuickReplies else { return .unsupported }
+        guard data.count <= RemoteQuickRepliesContract.maximumPayloadBytes else {
+            return .payloadTooLarge
+        }
+        guard let request = try? JSONDecoder().decode(
+            RemoteQuickRepliesUpdateRequest.self,
+            from: data
+        ) else {
+            return .invalid("Invalid quick replies request.")
+        }
+        return updateQuickReplies(request)
+    }
+
     var supportsPullRequests: Bool { false }
 
     var supportsMarkUnread: Bool { false }

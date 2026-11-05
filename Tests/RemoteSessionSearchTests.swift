@@ -627,6 +627,10 @@ final class RemoteSessionSearchTests: XCTestCase {
         let host: any SessionHost = MinimalSessionHost()
         XCTAssertFalse(host.supportsMarkUnread)
         host.markUnread(sessionId: "s")
+        XCTAssertFalse(host.supportsQuickReplies)
+        XCTAssertNil(host.quickReplies())
+        XCTAssertEqual(host.updateQuickReplies(.init(items: nil)), .unsupported)
+        XCTAssertEqual(host.updateQuickReplies(from: Data("{}".utf8)), .unsupported)
     }
 
     func testOlderHostsAnswerCursorRequestsWithTheirUsualTranscript() async throws {

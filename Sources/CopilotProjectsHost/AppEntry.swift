@@ -18,7 +18,7 @@ struct CopilotProjectsApp: App {
             MainWindowContent(appDelegate: appDelegate, showsProjects: $showsProjects)
                 .frame(minWidth: 820, minHeight: 520)
                 .sheet(isPresented: $showsQuickRepliesSettings) {
-                    QuickRepliesSettingsView {
+                    QuickRepliesSettingsView(defaults: appDelegate.model.defaults) {
                         showsQuickRepliesSettings = false
                     }
                 }

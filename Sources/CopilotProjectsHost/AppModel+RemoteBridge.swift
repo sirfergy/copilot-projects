@@ -812,8 +812,97 @@ extension AppModel {
             protocolInfo: .current.supportingReplaySafeControl(epoch: remoteControlDeliveryEpoch),
             availableHosts: hosts.count > 1 ? hosts : nil,
             hostHealth: resolvedHostHealth.isEmpty ? nil : resolvedHostHealth,
-            recentlyClosedSessions: closedItems.isEmpty ? nil : closedItems
+            recentlyClosedSessions: closedItems.isEmpty ? nil : closedItems,
+            quickRepliesDigest: remoteQuickRepliesDigest()
         )
+    }
+
+    func remoteQuickRepliesDigest() -> String? {
+        let raw = defaults.object(forKey: QuickReplyConfiguration.storageKey) as? String
+        if let cached = cachedQuickRepliesDigest {
+            switch (cached.raw, raw) {
+            case (nil, nil):
+                return cached.digest
+            case let (cachedRaw?, currentRaw?) where cachedRaw.utf8.elementsEqual(currentRaw.utf8):
+                return cached.digest
+            default:
+                break
+            }
+        }
+        let digest = QuickReplyConfiguration.resolved(fromJSON: raw).digest
+        cachedQuickRepliesDigest = (raw, digest)
+        return digest
+    }
+
+    func remoteQuickRepliesState() -> RemoteQuickRepliesState? {
+        guard !isTerminating, !didFailToLoadWorkspaceState, stateLoadFailure == nil else {
+            return nil
+        }
+        return RemoteQuickRepliesState(
+            configuration: QuickReplyConfiguration.load(from: defaults)
+        )
+    }
+
+    func updateRemoteQuickReplies(
+        from data: Data
+    ) -> RemoteQuickRepliesUpdateOutcome {
+        guard !isTerminating else {
+            return .unavailable("Copilot Projects is closing.")
+        }
+        guard !didFailToLoadWorkspaceState, stateLoadFailure == nil else {
+            return .unavailable("The workspace could not be loaded.")
+        }
+        guard data.count <= RemoteQuickRepliesContract.maximumPayloadBytes else {
+            return .payloadTooLarge
+        }
+        guard let request = try? JSONDecoder().decode(
+            RemoteQuickRepliesUpdateRequest.self,
+            from: data
+        ) else {
+            return .invalid("Invalid quick replies request.")
+        }
+        return updateRemoteQuickReplies(request)
+    }
+
+    func updateRemoteQuickReplies(
+        _ request: RemoteQuickRepliesUpdateRequest
+    ) -> RemoteQuickRepliesUpdateOutcome {
+        guard !isTerminating else {
+            return .unavailable("Copilot Projects is closing.")
+        }
+        guard !didFailToLoadWorkspaceState, stateLoadFailure == nil else {
+            return .unavailable("The workspace could not be loaded.")
+        }
+        if request.onlyIfUnset == true, request.items == nil {
+            return .invalid("Migration requires a custom quick-reply list.")
+        }
+        if let items = request.items {
+            switch QuickReplyConfiguration.validateList(items) {
+            case .failure(let error):
+                return .invalid(error.message)
+            case .success(let validated):
+                if request.onlyIfUnset == true {
+                    let existing = QuickReplyConfiguration.load(from: defaults)
+                    if existing.isCustomized {
+                        return .updated(RemoteQuickRepliesState(configuration: existing))
+                    }
+                }
+                guard case .success(let saved) = QuickReplyConfiguration.save(
+                    validated,
+                    to: defaults
+                ) else {
+                    return .unavailable("Could not save quick replies.")
+                }
+                cachedQuickRepliesDigest = nil
+                objectWillChange.send()
+                return .updated(RemoteQuickRepliesState(items: saved))
+            }
+        } else {
+            QuickReplyConfiguration.reset(in: defaults)
+            cachedQuickRepliesDigest = nil
+            objectWillChange.send()
+            return .updated(RemoteQuickRepliesState(configuration: .defaultReplies))
+        }
     }
 
     func remoteScreen(

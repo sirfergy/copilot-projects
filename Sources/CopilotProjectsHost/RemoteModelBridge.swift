@@ -282,6 +282,22 @@ final class RemoteModelBridge: SessionHost {
         return await model.performPullRequestSession(request)
     }
 
+    var supportsQuickReplies: Bool { model != nil }
+
+    func quickReplies() -> RemoteQuickRepliesState? {
+        model?.remoteQuickRepliesState()
+    }
+
+    func updateQuickReplies(_ request: RemoteQuickRepliesUpdateRequest) -> RemoteQuickRepliesUpdateOutcome {
+        guard let model else { return .unavailable("Copilot Projects is closing.") }
+        return model.updateRemoteQuickReplies(request)
+    }
+
+    func updateQuickReplies(from data: Data) -> RemoteQuickRepliesUpdateOutcome {
+        guard let model else { return .unavailable("Copilot Projects is closing.") }
+        return model.updateRemoteQuickReplies(from: data)
+    }
+
     var sessionSearchCapabilities: [String] {
         model?.remoteSessionSearch.capabilities ?? [
             RemoteSessionSearchContract.capability,

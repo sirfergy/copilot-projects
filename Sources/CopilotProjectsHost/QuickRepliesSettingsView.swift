@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CopilotProjectsProtocol
 
 @MainActor
 final class QuickRepliesSettingsModel: ObservableObject {
@@ -23,12 +24,52 @@ final class QuickRepliesSettingsModel: ObservableObject {
     @Published private(set) var validationError: QuickReplyValidationError?
 
     private let defaults: UserDefaults
+    private var defaultsObserver: NSObjectProtocol?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let configuration = QuickReplyConfiguration.load(from: defaults)
         self.items = configuration.activeReplies
         self.isCustomized = configuration.isCustomized
+        self.defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: defaults,
+            queue: nil
+        ) { [weak self] _ in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    self?.reloadFromDefaults()
+                }
+            } else {
+                Task { @MainActor [weak self] in
+                    self?.reloadFromDefaults()
+                }
+            }
+        }
+    }
+
+    deinit {
+        if let defaultsObserver {
+            NotificationCenter.default.removeObserver(defaultsObserver)
+        }
+    }
+
+    func reloadFromDefaults() {
+        let configuration = QuickReplyConfiguration.load(from: defaults)
+        let repliesMatch = items.elementsEqual(configuration.activeReplies) { current, stored in
+            current.label.utf8.elementsEqual(stored.label.utf8)
+                && current.prompt.utf8.elementsEqual(stored.prompt.utf8)
+        }
+        guard !repliesMatch || isCustomized != configuration.isCustomized else {
+            return
+        }
+        items = configuration.activeReplies
+        isCustomized = configuration.isCustomized
+        if editingIndex != nil {
+            cancelEditing()
+        } else {
+            validationError = nil
+        }
     }
 
     var trimmedDraftLabelCount: Int {
@@ -99,10 +140,10 @@ final class QuickRepliesSettingsModel: ObservableObject {
     }
 
     func resetToDefaults() {
-        QuickReplyConfiguration.reset(in: defaults)
         items = QuickReplyConfiguration.defaultItems
         isCustomized = false
         cancelEditing()
+        QuickReplyConfiguration.reset(in: defaults)
     }
 
     private func swapItems(at first: Int, and second: Int) {
@@ -117,17 +158,20 @@ final class QuickRepliesSettingsModel: ObservableObject {
     }
 
     private func persist(_ candidate: [QuickReplyItem], clearingDraft: Bool) -> Bool {
-        switch QuickReplyConfiguration.save(candidate, to: defaults) {
+        switch QuickReplyConfiguration.validateList(candidate) {
         case .failure(let error):
             validationError = error
             return false
-        case .success(let saved):
-            items = saved
+        case .success(let validated):
+            items = validated
             isCustomized = true
             if clearingDraft {
                 cancelEditing()
             } else {
                 validationError = nil
+            }
+            guard case .success = QuickReplyConfiguration.save(validated, to: defaults) else {
+                return false
             }
             return true
         }
@@ -135,9 +179,17 @@ final class QuickRepliesSettingsModel: ObservableObject {
 }
 
 struct QuickRepliesSettingsView: View {
-    @StateObject private var model = QuickRepliesSettingsModel()
+    @StateObject private var model: QuickRepliesSettingsModel
     let onDismiss: () -> Void
     @AppStorage(TranscriptPromptComposerView.showQuickReplyChipsKey) private var showQuickReplyChips = true
+
+    init(
+        defaults: UserDefaults = .standard,
+        onDismiss: @escaping () -> Void
+    ) {
+        _model = StateObject(wrappedValue: QuickRepliesSettingsModel(defaults: defaults))
+        self.onDismiss = onDismiss
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

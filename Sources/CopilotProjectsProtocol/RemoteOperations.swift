@@ -8,6 +8,7 @@ public struct RemoteProtocolInfo: Codable, Equatable, Sendable {
     public static let operationReceipts = "sdk-operation-receipts"
     public static let nativeWorkflows = "native-session-workflows"
     public static let configuredSessionCreation = "configured-session-creation"
+    public static let sharedQuickReplies = "shared-quick-replies"
     public static let current = RemoteProtocolInfo(
         revision: 1,
         capabilities: [
