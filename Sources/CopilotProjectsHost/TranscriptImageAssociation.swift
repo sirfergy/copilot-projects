@@ -209,12 +209,10 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
             for (index, ref) in refs.enumerated() {
                 let cap = min(Self.maxBytesPerImage, remainingBudget)
                 let loaded: (data: Data, token: String)? = autoreleasepool {
-                    if let id = ref.assetId, let span = result.assetSpans[id] {
-                        return Self.readValidatedAsset(fd: eventsFD, span: span, id: id, turnId: turn.id, index: 0, inlineCache: &inlineCache, decoder: payloadDecoder, maxBytes: cap)
-                    }
-                    if let span = ref.inline {
-                        return Self.readValidatedAsset(fd: eventsFD, span: span, id: nil, turnId: turn.id, index: ref.index, inlineCache: &inlineCache, decoder: payloadDecoder, maxBytes: cap)
-                    }
+                    if let id = ref.assetId, let span = result.assetSpans[id],
+                       let asset = Self.readValidatedAsset(fd: eventsFD, span: span, id: id, turnId: turn.id, index: 0, inlineCache: &inlineCache, decoder: payloadDecoder, maxBytes: cap) { return asset }
+                    if let span = ref.inline,
+                       let inline = Self.readValidatedAsset(fd: eventsFD, span: span, id: nil, turnId: turn.id, index: ref.index, inlineCache: &inlineCache, decoder: payloadDecoder, maxBytes: cap) { return inline }
                     guard let path = ref.path else { return nil }
                     return Self.readValidatedImage(atPath: path, maxModifiedAt: turn.startedAt, maxBytes: cap)
                 }
@@ -233,7 +231,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
     static func pixelSize(_ data: Data) -> CGSize? {
         guard let src = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               CGImageSourceGetCount(src) >= 1, let type = CGImageSourceGetType(src) as String?,
-              (type == "public.png" && CGImageSourceGetCount(src) == 1)
+              type == "public.png"
                   || (type == "public.jpeg" && data.lastIndex(where: { $0 != 0 }).map({ $0 >= 1 && data[$0 - 1] == 0xFF && data[$0] == 0xD9 }) == true),
               CGImageSourceGetStatus(src) == .statusComplete, CGImageSourceGetStatusAtIndex(src, 0) == .statusComplete,
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
@@ -251,8 +249,8 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         if let mime = attachment.mimeType?.lowercased(), !mime.isEmpty {
             guard mime == "image/png" || mime == "image/jpeg" || (attachment.type == "file" && hasImageExt) else { return nil }
         } else if !hasImageExt && !(exts.isEmpty && (attachment.type == "blob" || assetId != nil)) { return nil }
-        let inline = (assetId == nil && attachment.hasInlineData) ? span : nil
-        let path = (assetId == nil && inline == nil && attachment.type == "file" && attachment.path?.isEmpty == false) ? attachment.path : nil
+        let inline = attachment.hasInlineData ? span : nil
+        let path = (attachment.type == "file" && attachment.path?.isEmpty == false) ? attachment.path : nil
         guard path != nil || assetId != nil || inline != nil || attachment.type == "blob" else { return nil }
         return Ref(path: path, assetId: assetId, inline: inline, index: index)
     }

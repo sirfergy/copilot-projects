@@ -859,10 +859,10 @@ final class NativeTranscriptImageTests: XCTestCase {
         XCTAssertNotEqual(reloadedTurn3[0].identity.version & (1 << 63), 0)
         XCTAssertFalse(reloaded.hasWatchedFileChanges())
 
-        // Appending a new turn that references an earlier unreferenced asset resolves it from `0..<startOffset`.
+        // Appending a new turn that references an earlier unreferenced asset resolves it from `0..<startOffset`, and missing/invalid assets fall back to inline data or a validated local file path.
         let handle2 = try FileHandle(forWritingTo: eventsURL)
         try handle2.seekToEnd()
-        let appendedTurn4 = #"{"type":"user.message","id":"turn-4","timestamp":"2026-11-05T12:12:00Z","data":{"content":"Historical asset","attachments":[{"type":"blob","assetId":"sha256:unreferenced-tool-asset","mimeType":"image/png"}]}}"# + "\n"
+        let appendedTurn4 = #"{"type":"user.message","id":"turn-4","timestamp":"2026-11-05T12:12:00Z","data":{"content":"Historical asset","attachments":[{"type":"blob","assetId":"sha256:unreferenced-tool-asset","mimeType":"image/png"},{"type":"blob","assetId":"sha256:corrupt","mimeType":"image/png","data":"\#(pngBytes.base64EncodedString())"},{"type":"file","assetId":"sha256:missing-asset","path":"\#(localJPEGURL.path)","displayName":"photo.jpg"}]}}"# + "\n"
         try handle2.write(contentsOf: Data(appendedTurn4.utf8))
         try handle2.close()
         let snapshotWithTurn4 = TranscriptSnapshot(
@@ -879,7 +879,7 @@ final class NativeTranscriptImageTests: XCTestCase {
             previous: reloaded,
             copilotHome: tempRoot.path
         )
-        XCTAssertEqual(withTurn4.items(forTurnId: "turn-4", sessionId: appSessionId, copilotSessionId: copilotSessionId).map(\.data), [pngBytes])
+        XCTAssertEqual(withTurn4.items(forTurnId: "turn-4", sessionId: appSessionId, copilotSessionId: copilotSessionId).map(\.data), [pngBytes, pngBytes, jpegBytes])
         XCTAssertEqual(withTurn4.items(forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: copilotSessionId), turn1)
 
         func makePaddedPNG(targetBytes: Int, seed: UInt8) -> Data {
