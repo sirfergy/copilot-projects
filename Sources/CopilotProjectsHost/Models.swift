@@ -551,6 +551,25 @@ extension Project {
         }
     }
 
+    /// Whether `sessionId` can be grouped under `parentId`: `parentId` is a
+    /// different top-level session in this project, not already `sessionId`'s
+    /// effective parent, and `sessionId` has no children of its own.
+    func canGroupSession(
+        _ sessionId: String,
+        underParent parentId: String,
+        effectiveParents: [String: String]? = nil
+    ) -> Bool {
+        guard sessionId != parentId,
+              sessions.contains(where: { $0.id == sessionId }),
+              sessions.contains(where: { $0.id == parentId }) else {
+            return false
+        }
+        let resolvedParents = effectiveParents ?? effectiveParentSessionIdsBySessionId()
+        return resolvedParents[parentId] == nil
+            && resolvedParents[sessionId] != parentId
+            && !resolvedParents.values.contains(sessionId)
+    }
+
     /// Whether a child session should auto-peek while its parent is collapsed.
     func shouldAutoPeekChild(_ child: Session) -> Bool {
         child.id == selectedSessionId || child.displayStatus == .waiting
