@@ -8695,6 +8695,15 @@ final class AppLogicTests: XCTestCase {
             },
             [true, true]
         )
+        let escapedPipeRow = "| " + String(repeating: #"\|"#, count: 1_001) + " | z |"
+        let oversizedRowTable = "| A | B |\n| --- | --- |\n| r1 | 1 |\n\(escapedPipeRow)\n| r3 | 3 |"
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: "\(oversizedRowTable)\n\n\(smallTable)"),
+            [
+                .plainText(oversizedRowTable),
+                .table(MarkdownTable(header: ["K", "V"], alignments: [.leading, .leading], rows: [["a", "b"]])),
+            ]
+        )
     }
 
     func testMarkdownParserParsesDetailsAndSummaryBlocks() {
@@ -9669,7 +9678,29 @@ final class AppLogicTests: XCTestCase {
         manyDetailsHost.layoutSubtreeIfNeeded()
         XCTAssertLessThanOrEqual(
             findTextViews(in: manyDetailsHost).count,
-            262
+            256
+        )
+
+        let code254DetailsAndTail = ((1...254).map { "```\ncode_\($0)\n```" }
+            + ["<details open>\n<summary>D</summary>\nInner detail\n</details>", "# Outer tail"])
+            .joined(separator: "\n\n")
+        let detailsTailHost = NSHostingView(
+            rootView: MarkdownText(text: code254DetailsAndTail)
+                .frame(width: 380, alignment: .leading)
+        )
+        detailsTailHost.frame = NSRect(x: 0, y: 0, width: 380, height: 4_000)
+        detailsTailHost.layoutSubtreeIfNeeded()
+        let detailsTailViews = findTextViews(in: detailsTailHost)
+        XCTAssertEqual(detailsTailViews.count, 256)
+        XCTAssertTrue(detailsTailViews.contains { $0.attributedText.string == "D\nInner detail" })
+        let outerTailView = try XCTUnwrap(detailsTailViews.last)
+        XCTAssertEqual(
+            outerTailView.attributedText.attribute(
+                MarkdownText.headingLevelAttribute,
+                at: 0,
+                effectiveRange: nil
+            ) as? NSNumber,
+            1
         )
 
         let code255AndProse = ((1...255).map { "```\ncode_\($0)\n```" } + ["# Tail Heading", "Body **bold_tail**"]).joined(separator: "\n\n")

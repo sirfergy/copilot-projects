@@ -386,7 +386,6 @@ public enum MarkdownParser {
             case let .details(details):
                 guard depth + 1 <= maximumDetailsNestingDepth,
                       budget.consumeInline(details.summary.isEmpty ? "Details" : details.summary),
-                      isWithinDocumentLimits(details.body),
                       isWithinBlockLimits(
                           self.blocks(from: details.body),
                           depth: depth + 1,
@@ -645,10 +644,8 @@ public enum MarkdownParser {
                 var withinCellCap = tableCells <= maximumRenderedTableCells
                 while index < lines.count {
                     let rowLine = lines[index].trimmingCharacters(in: .whitespaces)
-                    let rowPipes = pipeCount(in: rowLine)
                     guard !rowLine.isEmpty,
-                          rowContainsUnescapedPipe(rowLine),
-                          rowPipes <= maximumBlockPipes else {
+                          rowContainsUnescapedPipe(rowLine) else {
                         break
                     }
                     if !rowLine.hasPrefix("|") {
@@ -659,10 +656,13 @@ public enum MarkdownParser {
                         }
                     }
                     if withinCellCap {
-                        let row = Array(splitTableRow(rowLine).prefix(header.count))
+                        let rowPipes = pipeCount(in: rowLine)
+                        let row = rowPipes <= maximumBlockPipes
+                            ? Array(splitTableRow(rowLine).prefix(header.count))
+                            : []
                         tableCells += row.count
                         tablePipes += rowPipes
-                        if tableCells <= maximumRenderedTableCells {
+                        if rowPipes <= maximumBlockPipes, tableCells <= maximumRenderedTableCells {
                             rows.append(row)
                         } else {
                             withinCellCap = false
@@ -1099,25 +1099,25 @@ public struct MarkdownText: View, Equatable {
                 }
             case let .details(details):
                 flushProse()
-                guard nestingDepth + 1 <= MarkdownParser.maximumDetailsNestingDepth else {
+                let outerReserve = index < blocks.count - 1 ? 1 : 0
+                let minSegments = 1 + (details.body.isEmpty ? 0 : 1) + outerReserve
+                guard nestingDepth + 1 <= MarkdownParser.maximumDetailsNestingDepth,
+                      budget.segmentsRemaining >= minSegments else {
                     appendSegment(.plain(plainBlockText(.details(details))))
                     break
                 }
                 let summaryText = details.summary.isEmpty ? "Details" : details.summary
                 let parseSummaryInline = budget.consumeInline(summaryText)
-                budget.segmentsRemaining = max(0, budget.segmentsRemaining - 1)
+                budget.segmentsRemaining -= 1 + outerReserve
                 let childBudget = budget
                 if !details.body.isEmpty {
-                    if MarkdownParser.isWithinDocumentLimits(details.body) {
-                        _ = Self.segments(
-                            from: MarkdownParser.blocks(from: details.body),
-                            nestingDepth: nestingDepth + 1,
-                            budget: &budget
-                        )
-                    } else {
-                        budget.segmentsRemaining = max(0, budget.segmentsRemaining - 1)
-                    }
+                    _ = Self.segments(
+                        from: MarkdownParser.blocks(from: details.body),
+                        nestingDepth: nestingDepth + 1,
+                        budget: &budget
+                    )
                 }
+                budget.segmentsRemaining += outerReserve
                 result.append(
                     .details(details, parseSummaryInline: parseSummaryInline, budget: childBudget)
                 )
