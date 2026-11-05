@@ -64,23 +64,14 @@ final class QuickRepliesSettingsModel: ObservableObject {
 
     @discardableResult
     func commitDraft() -> Bool {
+        let item = QuickReplyItem(label: draftLabel, prompt: draftPrompt)
         if let index = editingIndex {
-            return update(at: index, label: draftLabel, prompt: draftPrompt)
+            guard items.indices.contains(index) else { return false }
+            var candidate = items
+            candidate[index] = item
+            return persist(candidate, clearingDraft: true)
         }
-        return add(label: draftLabel, prompt: draftPrompt)
-    }
-
-    @discardableResult
-    func add(label: String, prompt: String) -> Bool {
-        persist(items + [QuickReplyItem(label: label, prompt: prompt)], clearingDraft: true)
-    }
-
-    @discardableResult
-    func update(at index: Int, label: String, prompt: String) -> Bool {
-        guard items.indices.contains(index) else { return false }
-        var candidate = items
-        candidate[index] = QuickReplyItem(label: label, prompt: prompt)
-        return persist(candidate, clearingDraft: true)
+        return persist(items + [item], clearingDraft: true)
     }
 
     func delete(at index: Int) {
@@ -144,17 +135,9 @@ final class QuickRepliesSettingsModel: ObservableObject {
 }
 
 struct QuickRepliesSettingsView: View {
-    @StateObject private var model: QuickRepliesSettingsModel
+    @StateObject private var model = QuickRepliesSettingsModel()
     let onDismiss: () -> Void
     @AppStorage(TranscriptPromptComposerView.showQuickReplyChipsKey) private var showQuickReplyChips = true
-
-    init(
-        defaults: UserDefaults = .standard,
-        onDismiss: @escaping () -> Void
-    ) {
-        _model = StateObject(wrappedValue: QuickRepliesSettingsModel(defaults: defaults))
-        self.onDismiss = onDismiss
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

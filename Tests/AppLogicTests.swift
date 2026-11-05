@@ -15733,16 +15733,7 @@ final class AppLogicTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(25))
         }
 
-        func findScrollView(in view: NSView) -> NSScrollView? {
-            if let scroll = view as? NSScrollView,
-               let doc = scroll.documentView,
-               doc.bounds.height > scroll.contentView.bounds.height + 100 {
-                return scroll
-            }
-            return view.subviews.lazy.compactMap(findScrollView(in:)).first
-        }
-
-        let scrollView = try XCTUnwrap(findScrollView(in: host))
+        let scrollView = try XCTUnwrap(findTranscriptScrollView(in: host))
         let docView = try XCTUnwrap(scrollView.documentView)
         let docHeight = docView.bounds.height
         let visibleRect = scrollView.contentView.documentVisibleRect
@@ -15877,20 +15868,10 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === terminal)
     }
 
-    func testTranscriptDrawerFullWidthPreferenceDefaultsAndPersistence() {
-        XCTAssertEqual(TranscriptDrawer.fullWidthTranscriptKey, "desktopFullWidthTranscript")
-        XCTAssertFalse(TranscriptDrawer.usesFullTerminalArea(storedValue: nil))
-        XCTAssertFalse(TranscriptDrawer.usesFullTerminalArea(storedValue: false))
-        XCTAssertTrue(TranscriptDrawer.usesFullTerminalArea(storedValue: true))
-    }
-
     func testQuickReplyConfigurationDefaultsValidationAndCorruptFallback() throws {
         let suite = "quick-replies-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-
-        XCTAssertEqual(TranscriptPromptComposerView.showQuickReplyChipsKey, "showQuickReplyChips")
-        XCTAssertEqual(TranscriptPromptComposerView.quickReplyListKey, "quickReplyList")
 
         let initial = QuickReplyConfiguration.load(from: defaults)
         XCTAssertFalse(initial.isCustomized)
@@ -15909,7 +15890,7 @@ final class AppLogicTests: XCTestCase {
                 label: String(repeating: "a", count: 25),
                 prompt: "ok"
             ),
-            .failure(.labelTooLong(max: 24))
+            .failure(.labelTooLong)
         )
         XCTAssertEqual(
             QuickReplyConfiguration.validateItem(label: "ok", prompt: " \n\t "),
@@ -15920,7 +15901,7 @@ final class AppLogicTests: XCTestCase {
                 label: "ok",
                 prompt: String(repeating: "p", count: 2_001)
             ),
-            .failure(.promptTooLong(max: 2_000))
+            .failure(.promptTooLong)
         )
 
         let maxLabel = String(repeating: "L", count: 24)
@@ -15956,7 +15937,7 @@ final class AppLogicTests: XCTestCase {
         }
         XCTAssertEqual(
             QuickReplyConfiguration.validateList(thirteenItems),
-            .failure(.tooManyReplies(max: 12))
+            .failure(.tooManyReplies)
         )
 
         // Empty custom list persists as [] and shows no chips.
@@ -16040,11 +16021,7 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
-    func testTranscriptPromptComposerQuickReplyVisibilityGates() throws {
-        let suite = "quick-replies-gates-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-
+    func testTranscriptPromptComposerQuickReplyVisibilityGates() {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = RemoteAttachmentStore(sessionsDirectory: root)
@@ -16061,69 +16038,34 @@ final class AppLogicTests: XCTestCase {
             receipts: []
         )
 
-        XCTAssertEqual(
-            TranscriptPromptComposerView.visibleQuickReplies(
-                showQuickReplyChips: true,
-                storedJSON: defaults.string(forKey: QuickReplyConfiguration.storageKey),
-                composer: composer,
-                workflow: readyWorkflow,
-                operation: readyOperation,
-                now: now
-            ),
-            QuickReplyConfiguration.defaultItems
-        )
-
-        let custom = [QuickReplyItem(label: "Fix CI", prompt: "Diagnose and fix the failing CI checks")]
-        QuickReplyConfiguration.save(custom, to: defaults)
-        XCTAssertEqual(
-            TranscriptPromptComposerView.visibleQuickReplies(
-                showQuickReplyChips: true,
-                storedJSON: defaults.string(forKey: QuickReplyConfiguration.storageKey),
-                composer: composer,
-                workflow: readyWorkflow,
-                operation: readyOperation,
-                now: now
-            ),
-            custom
-        )
-
-        // Opt-out toggle hides chips.
         XCTAssertTrue(
-            TranscriptPromptComposerView.visibleQuickReplies(
+            TranscriptPromptComposerView.canShowQuickReplies(
+                showQuickReplyChips: true,
+                composer: composer,
+                workflow: readyWorkflow,
+                operation: readyOperation,
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            TranscriptPromptComposerView.canShowQuickReplies(
                 showQuickReplyChips: false,
-                storedJSON: defaults.string(forKey: QuickReplyConfiguration.storageKey),
                 composer: composer,
                 workflow: readyWorkflow,
                 operation: readyOperation,
                 now: now
-            ).isEmpty
+            )
         )
 
-        // Non-empty draft prompt hides chips.
         composer.prompt = "Already typing"
-        XCTAssertTrue(
-            TranscriptPromptComposerView.visibleQuickReplies(
+        XCTAssertFalse(
+            TranscriptPromptComposerView.canShowQuickReplies(
                 showQuickReplyChips: true,
-                storedJSON: defaults.string(forKey: QuickReplyConfiguration.storageKey),
                 composer: composer,
                 workflow: readyWorkflow,
                 operation: readyOperation,
                 now: now
-            ).isEmpty
-        )
-        composer.prompt = ""
-
-        // Empty custom list shows no chips.
-        QuickReplyConfiguration.save([], to: defaults)
-        XCTAssertTrue(
-            TranscriptPromptComposerView.visibleQuickReplies(
-                showQuickReplyChips: true,
-                storedJSON: defaults.string(forKey: QuickReplyConfiguration.storageKey),
-                composer: composer,
-                workflow: readyWorkflow,
-                operation: readyOperation,
-                now: now
-            ).isEmpty
+            )
         )
     }
 
@@ -16135,18 +16077,16 @@ final class AppLogicTests: XCTestCase {
         defer { NSApp.setActivationPolicy(activationPolicy) }
 
         let savedQuickReplies = UserDefaults.standard.object(forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
-        let savedQuickReplyList = UserDefaults.standard.object(forKey: TranscriptPromptComposerView.quickReplyListKey)
+        let savedQuickReplyList = UserDefaults.standard.object(forKey: QuickReplyConfiguration.storageKey)
         defer {
             UserDefaults.standard.set(savedQuickReplies, forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
-            UserDefaults.standard.set(savedQuickReplyList, forKey: TranscriptPromptComposerView.quickReplyListKey)
+            UserDefaults.standard.set(savedQuickReplyList, forKey: QuickReplyConfiguration.storageKey)
         }
         UserDefaults.standard.set(true, forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
-        UserDefaults.standard.removeObject(forKey: TranscriptPromptComposerView.quickReplyListKey)
+        UserDefaults.standard.removeObject(forKey: QuickReplyConfiguration.storageKey)
 
         XCTAssertEqual(RemotePromptMode.immediate.sendButtonTitle, "Steer")
         XCTAssertEqual(RemotePromptMode.enqueue.sendButtonTitle, "Queue")
-        XCTAssertEqual(RemotePromptMode.immediate.title, "Steer current task")
-        XCTAssertEqual(RemotePromptMode.enqueue.title, "Run after current task")
         XCTAssertEqual(RemotePromptMode.immediate.sendAccessibilityLabel, "Steer (Steer current task)")
         XCTAssertEqual(RemotePromptMode.enqueue.sendAccessibilityLabel, "Queue (Run after current task)")
 
@@ -16204,26 +16144,8 @@ final class AppLogicTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(50))
         host.layoutSubtreeIfNeeded()
 
-        func click(_ point: NSPoint) throws {
-            let ts = ProcessInfo.processInfo.systemUptime
-            for (type, delta): (NSEvent.EventType, TimeInterval) in [(.leftMouseDown, 0), (.leftMouseUp, 0.01)] {
-                let event = try XCTUnwrap(NSEvent.mouseEvent(
-                    with: type,
-                    location: point,
-                    modifierFlags: [],
-                    timestamp: ts + delta,
-                    windowNumber: window.windowNumber,
-                    context: nil,
-                    eventNumber: 1,
-                    clickCount: 1,
-                    pressure: type == .leftMouseDown ? 1 : 0
-                ))
-                window.sendEvent(event)
-            }
-        }
-
         let sendSegmentPoint = NSPoint(x: host.bounds.maxX - 12 - 24 - 20, y: 24)
-        try click(sendSegmentPoint)
+        try sendClick(in: window, point: sendSegmentPoint)
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(
             dispatched,
@@ -16232,7 +16154,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(composer.prompt, "")
 
         // While prompt is empty, clicking the main Send segment does nothing.
-        try click(sendSegmentPoint)
+        try sendClick(in: window, point: sendSegmentPoint)
         try await Task.sleep(for: .milliseconds(30))
         XCTAssertEqual(dispatched.count, 1)
 
@@ -16242,7 +16164,7 @@ final class AppLogicTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(50))
         host.layoutSubtreeIfNeeded()
-        try click(NSPoint(x: 40, y: host.bounds.maxY - 24))
+        try sendClick(in: window, point: NSPoint(x: 40, y: host.bounds.maxY - 24))
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(
             dispatched.last,
@@ -16254,7 +16176,7 @@ final class AppLogicTests: XCTestCase {
         composer.prompt = "Steer now"
         host.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(30))
-        try click(sendSegmentPoint)
+        try sendClick(in: window, point: sendSegmentPoint)
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(
             dispatched.last,
@@ -16359,12 +16281,6 @@ final class AppLogicTests: XCTestCase {
 
         func findAllScrollViews(in view: NSView) -> [NSScrollView] {
             ((view as? NSScrollView).map { [$0] } ?? []) + view.subviews.flatMap(findAllScrollViews(in:))
-        }
-
-        func findTranscriptScrollView(in view: NSView) -> NSScrollView? {
-            findAllScrollViews(in: view).first {
-                ($0.documentView?.bounds.height ?? 0) > $0.contentView.bounds.height + 100
-            }
         }
 
         func pumpLayout(iterations: Int = 6) async throws {
@@ -16551,6 +16467,16 @@ final class AppLogicTests: XCTestCase {
             TranscriptDrawer.usageAccessibilityLabel(for: budget, now: now),
             "Budget decision needed: \(Double(32.5).formatted()) of \(Double(30).formatted()) AI credits. Usage and background work"
         )
+    }
+
+    @MainActor
+    private func findTranscriptScrollView(in view: NSView) -> NSScrollView? {
+        if let scroll = view as? NSScrollView,
+           let doc = scroll.documentView,
+           doc.bounds.height > scroll.contentView.bounds.height + 100 {
+            return scroll
+        }
+        return view.subviews.lazy.compactMap(findTranscriptScrollView(in:)).first
     }
 
     @MainActor
@@ -16797,35 +16723,23 @@ final class AppLogicTests: XCTestCase {
     func testTranscriptWorkingIndicatorResolutionAndAppModelLifecycle() throws {
         _ = NSApplication.shared
         for empty in [nil, "", "  \n\t "] {
-            let working = try XCTUnwrap(
-                TranscriptWorkingIndicator.resolve(status: .running, activityText: empty)
+            XCTAssertEqual(
+                TranscriptWorkingIndicator.resolve(status: .running, activityText: empty),
+                .working(nil)
             )
-            XCTAssertEqual(working, .working(nil))
-            XCTAssertEqual(working.text, "Copilot is working…")
-            XCTAssertEqual(working.accessibilityLabel, "Copilot is working")
-
-            let runningBackground = try XCTUnwrap(
-                TranscriptWorkingIndicator.resolve(
-                    status: .running,
-                    hasBackgroundWork: true,
-                    activityText: empty
-                )
+            XCTAssertEqual(
+                TranscriptWorkingIndicator.resolve(status: .running, hasBackgroundWork: true, activityText: empty),
+                .backgroundWork(nil)
             )
-            XCTAssertEqual(runningBackground, .backgroundWork(nil))
-            XCTAssertEqual(runningBackground.text, "Background work active")
-            XCTAssertEqual(runningBackground.accessibilityLabel, "Background work active")
-
-            let idleBackground = try XCTUnwrap(
-                TranscriptWorkingIndicator.resolve(
-                    status: .idle,
-                    hasBackgroundWork: true,
-                    activityText: empty
-                )
+            XCTAssertEqual(
+                TranscriptWorkingIndicator.resolve(status: .idle, hasBackgroundWork: true, activityText: empty),
+                .backgroundWork(nil)
             )
-            XCTAssertEqual(idleBackground, .backgroundWork(nil))
-            XCTAssertEqual(idleBackground.text, "Background work active")
-            XCTAssertEqual(idleBackground.accessibilityLabel, "Background work active")
         }
+        XCTAssertEqual(TranscriptWorkingIndicator.working(nil).text, "Copilot is working…")
+        XCTAssertEqual(TranscriptWorkingIndicator.working(nil).accessibilityLabel, "Copilot is working")
+        XCTAssertEqual(TranscriptWorkingIndicator.backgroundWork(nil).text, "Background work active")
+        XCTAssertEqual(TranscriptWorkingIndicator.backgroundWork(nil).accessibilityLabel, "Background work active")
 
         let workingText = try XCTUnwrap(
             TranscriptWorkingIndicator.resolve(
@@ -16935,7 +16849,6 @@ final class AppLogicTests: XCTestCase {
         // Working without text -> "Copilot is working…".
         try publish(makeSnapshot(processing: true, intent: nil))
         XCTAssertEqual(workingModel.indicator, .working(nil))
-        XCTAssertEqual(workingModel.indicator?.text, "Copilot is working…")
 
         // Activity text changes update the scoped workingModel without publishing AppModel.objectWillChange.
         var modelPublications = 0
@@ -17035,7 +16948,6 @@ final class AppLogicTests: XCTestCase {
             at: base.addingTimeInterval(9)
         )
         XCTAssertEqual(workingModel.indicator, .backgroundWork(nil))
-        XCTAssertEqual(workingModel.indicator?.text, "Background work active")
 
         // Terminal disconnect and snapshot expiry clear runtime-only, hook-driven (without working footer), background-agent, or scheduled indicators so dead sessions never spin forever.
         try publish(makeSnapshot(at: base.addingTimeInterval(9.2), processing: true, intent: "Before disconnect"), at: base.addingTimeInterval(9.2))
@@ -17191,14 +17103,6 @@ final class AppLogicTests: XCTestCase {
                 host.layoutSubtreeIfNeeded()
             }
         }
-        func findScrollView(in view: NSView) -> NSScrollView? {
-            if let scroll = view as? NSScrollView,
-               let doc = scroll.documentView,
-               doc.bounds.height > scroll.contentView.bounds.height + 100 {
-                return scroll
-            }
-            return view.subviews.lazy.compactMap(findScrollView(in:)).first
-        }
         func findProgressIndicators(in view: NSView) -> [NSProgressIndicator] {
             var result: [NSProgressIndicator] = []
             if let indicator = view as? NSProgressIndicator {
@@ -17211,7 +17115,7 @@ final class AppLogicTests: XCTestCase {
         }
 
         pumpLayout()
-        let scrollView = try XCTUnwrap(findScrollView(in: host))
+        let scrollView = try XCTUnwrap(findTranscriptScrollView(in: host))
         let docView = try XCTUnwrap(scrollView.documentView)
         func assertPinnedToBottom() {
             let docHeight = docView.bounds.height

@@ -9,7 +9,7 @@ struct CopilotProjectsApp: App {
     @AppStorage(HostLifetimePolicy.settingKey) private var keepRunning = false
     @AppStorage(NotificationsAppLauncher.startsWithHostKey) private var startsNotifications = false
     @AppStorage(TranscriptPromptComposerView.showQuickReplyChipsKey) private var showQuickReplyChips = true
-    @AppStorage(TranscriptDrawer.fullWidthTranscriptKey) private var fullWidthTranscript = TranscriptDrawer.usesFullTerminalArea(storedValue: nil)
+    @AppStorage(TranscriptDrawer.fullWidthTranscriptKey) private var fullWidthTranscript = false
     @State private var showsProjects = true
     @State private var showsQuickRepliesSettings = false
 

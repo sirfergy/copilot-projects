@@ -1219,26 +1219,16 @@ final class AppModel: ObservableObject {
         transcriptOpenSessions.contains(sessionId)
     }
 
-    var isFullWidthTranscriptEnabled: Bool {
-        TranscriptDrawer.usesFullTerminalArea(
-            storedValue: defaults.object(forKey: TranscriptDrawer.fullWidthTranscriptKey) as? Bool
-        )
-    }
-
-    func hasTranscriptDrawerContent(sessionId: String) -> Bool {
-        (selectedTranscriptController?.sessionId == sessionId && selectedTranscriptController?.snapshot != nil)
-            || sessionWorkflow(sessionId: sessionId) != nil
-            || !sessionPendingUserInputs(sessionId: sessionId).isEmpty
-            || !sessionPendingElicitations(sessionId: sessionId).isEmpty
-    }
-
     func isActiveTerminalCoveredByTranscriptDrawer(isFullWidth: Bool? = nil) -> Bool {
         guard let sessionId = globalSelectedSessionId,
               isTranscriptDrawerOpen(sessionId: sessionId),
-              hasTranscriptDrawerContent(sessionId: sessionId) else {
+              (selectedTranscriptController?.sessionId == sessionId && selectedTranscriptController?.snapshot != nil)
+                  || sessionWorkflow(sessionId: sessionId) != nil
+                  || !sessionPendingUserInputs(sessionId: sessionId).isEmpty
+                  || !sessionPendingElicitations(sessionId: sessionId).isEmpty else {
             return false
         }
-        return isFullWidth ?? isFullWidthTranscriptEnabled
+        return isFullWidth ?? defaults.bool(forKey: TranscriptDrawer.fullWidthTranscriptKey)
     }
 
     func relinquishActiveTerminalFocusIfCovered(isFullWidth: Bool? = nil) {

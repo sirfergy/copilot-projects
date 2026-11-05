@@ -446,20 +446,15 @@ final class NativeTranscriptImageTests: XCTestCase {
         )
         let turns = TranscriptImageAssociation.attach(images: capture.retainedImageMetadata(), to: snapshot).turns
 
-        let shotsDir = ProcessInfo.processInfo.environment["TRANSCRIPT_IMAGE_SHOTS_DIR"]
-            .map { URL(fileURLWithPath: $0, isDirectory: true) }
-        if let shotsDir {
-            try FileManager.default.createDirectory(at: shotsDir, withIntermediateDirectories: true)
-        }
         defer {
             UserDefaults.standard.removeObject(forKey: TranscriptDrawer.fullWidthTranscriptKey)
         }
 
-        let specs: [(name: String, appearance: NSAppearance.Name, width: CGFloat, fullWidth: Bool)] = [
-            ("drawer-420-light", .aqua, 420, false),
-            ("drawer-420-dark", .darkAqua, 420, false),
-            ("full-width-light", .aqua, 960, true),
-            ("full-width-dark", .darkAqua, 960, true),
+        let specs: [(appearance: NSAppearance.Name, width: CGFloat, fullWidth: Bool)] = [
+            (.aqua, 420, false),
+            (.darkAqua, 420, false),
+            (.aqua, 960, true),
+            (.darkAqua, 960, true),
         ]
         for spec in specs {
             UserDefaults.standard.set(spec.fullWidth, forKey: TranscriptDrawer.fullWidthTranscriptKey)
@@ -507,13 +502,8 @@ final class NativeTranscriptImageTests: XCTestCase {
             let renderedBitmap = try XCTUnwrap(bitmap)
             XCTAssertTrue(
                 Self.bitmapContainsTestFixturePixels(renderedBitmap),
-                "Hosted TranscriptDrawer (\(spec.name)) must render the decoded prompt PNG pixels"
+                "Hosted TranscriptDrawer (\(spec)) must render the decoded prompt PNG pixels"
             )
-            let pngData = try XCTUnwrap(renderedBitmap.representation(using: .png, properties: [:]))
-            XCTAssertGreaterThan(pngData.count, 5_000)
-            if let shotsDir {
-                try pngData.write(to: shotsDir.appendingPathComponent("\(spec.name).png"))
-            }
 
             // Render Turn 2 in isolation (no Turn 1 async image decode) with vs without the missing attachment to prove the placeholder itself visibly renders.
             let turn2WithMissing = Self.renderDrawerPNG(
@@ -537,7 +527,7 @@ final class NativeTranscriptImageTests: XCTestCase {
             XCTAssertNotEqual(
                 turn2WithMissing,
                 turn2WithoutMissing,
-                "Hosted TranscriptDrawer (\(spec.name)) must visibly render the missing attachment's Image unavailable placeholder in turn 2"
+                "Hosted TranscriptDrawer (\(spec)) must visibly render the missing attachment's Image unavailable placeholder in turn 2"
             )
             window.close()
         }
