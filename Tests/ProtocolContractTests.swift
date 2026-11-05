@@ -840,8 +840,18 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertNil(unreachable.cpuUsagePercent)
         XCTAssertNil(unreachable.diskAvailableBytes)
 
+        let spikeCPU = HostHealthEvaluator.evaluate(
+            reachable: true, cpuUsagePercent: 99, memoryUsagePercent: 45, diskAvailableBytes: 80_000_000_000
+        )
+        XCTAssertEqual(spikeCPU.level, .warning)
+        XCTAssertEqual(spikeCPU.statusSummary, "High CPU (99%)")
+
         let criticalCPU = HostHealthEvaluator.evaluate(
-            reachable: true, cpuUsagePercent: 92, memoryUsagePercent: 45, diskAvailableBytes: 80_000_000_000
+            reachable: true,
+            cpuUsagePercent: 92,
+            sustainedCriticalCPU: true,
+            memoryUsagePercent: 45,
+            diskAvailableBytes: 80_000_000_000
         )
         XCTAssertEqual(criticalCPU.level, .critical)
         XCTAssertEqual(criticalCPU.statusSummary, "High CPU (92%)")
@@ -887,7 +897,9 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertEqual(warningLatency.statusSummary, "High latency (520 ms)")
 
         // Exact threshold boundaries
-        XCTAssertEqual(HostHealthEvaluator.evaluate(cpuUsagePercent: 90).level, .critical)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(cpuUsagePercent: 90).level, .warning)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(cpuUsagePercent: 90, sustainedCriticalCPU: true).level, .critical)
+        XCTAssertEqual(HostHealthEvaluator.evaluate(cpuUsagePercent: 89, sustainedCriticalCPU: true).level, .warning)
         XCTAssertEqual(HostHealthEvaluator.evaluate(cpuUsagePercent: 89).level, .warning)
         XCTAssertEqual(HostHealthEvaluator.evaluate(cpuUsagePercent: 75).level, .warning)
         XCTAssertEqual(HostHealthEvaluator.evaluate(cpuUsagePercent: 74).level, .healthy)
@@ -1180,6 +1192,152 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertEqual(model.remoteWorkspaceSnapshot().hostHealth, sampled)
         XCTAssertEqual(HostHealthPill.overallLevel(for: sampled), sampled.map(\.level).max())
         XCTAssertTrue(HostHealthPill.metricsDescription(for: sampled[1]).contains("40 ms"))
+
+        // Sustained CPU critical window (120s), independent per host, and reset on sub-threshold / missing / unreachable / stale samples
+        final class SustainedTestState: @unchecked Sendable {
+            private let lock = NSLock()
+            var now = ContinuousClock.now
+            var remoteReachable = true
+            var remoteCPU: Int? = 99
+            var remoteMemory: Int? = 40
+
+            func advance(_ duration: Duration) {
+                lock.lock()
+                defer { lock.unlock() }
+                now = now.advanced(by: duration)
+            }
+
+            func currentNow() -> ContinuousClock.Instant {
+                lock.lock()
+                defer { lock.unlock() }
+                return now
+            }
+
+            func makeRemote(for host: RemoteHostInfo) -> RemoteHostHealth {
+                lock.lock()
+                defer { lock.unlock() }
+                return HostHealthEvaluator.makeHealth(
+                    host: host,
+                    reachable: remoteReachable,
+                    cpuUsagePercent: remoteCPU,
+                    memoryUsagePercent: remoteMemory,
+                    diskAvailableBytes: 80_000_000_000,
+                    diskTotalBytes: 200_000_000_000,
+                    latencyMilliseconds: 20
+                )
+            }
+        }
+
+        let state = SustainedTestState()
+        let sustainedMonitor = HostHealthMonitor(now: { state.currentNow() }) { host in
+            state.makeRemote(for: host)
+        }
+        func sampleBoth(localCPU: Int?, localMemory: Int? = 40) async -> (local: RemoteHostHealth, remote: RemoteHostHealth) {
+            let localSample = HostHealthEvaluator.makeHealth(
+                host: .local,
+                reachable: true,
+                cpuUsagePercent: localCPU,
+                memoryUsagePercent: localMemory,
+                diskAvailableBytes: 80_000_000_000,
+                diskTotalBytes: 200_000_000_000
+            )
+            let pair = await sustainedMonitor.sampleAll(hosts: [.local, woodhaven], localHealth: localSample)
+            return (pair[0], pair[1])
+        }
+
+        // t = 0s: brief 99% CPU spike on both hosts reports Warning ("High CPU (99%)"), not Critical
+        let t0 = await sampleBoth(localCPU: 99)
+        XCTAssertEqual(t0.local.level, .warning)
+        XCTAssertEqual(t0.local.statusSummary, "High CPU (99%)")
+        XCTAssertEqual(t0.local.cpuUsagePercent, 99)
+        XCTAssertEqual(t0.remote.level, .warning)
+        XCTAssertEqual(t0.remote.statusSummary, "High CPU (99%)")
+        XCTAssertEqual(t0.remote.cpuUsagePercent, 99)
+
+        // t = 60s: local drops to 89% (resets local window) while woodhaven stays >= 90%
+        state.advance(.seconds(60))
+        state.remoteCPU = 94
+        let t60 = await sampleBoth(localCPU: 89)
+        XCTAssertEqual(t60.local.level, .warning)
+        XCTAssertEqual(t60.local.statusSummary, "High CPU (89%)")
+        XCTAssertEqual(t60.remote.level, .warning)
+        XCTAssertEqual(t60.remote.statusSummary, "High CPU (94%)")
+
+        // t = 90s: local spikes again to 95% (starts a fresh 120s window at t = 90s); woodhaven is at 90s (< 120s)
+        state.advance(.seconds(30))
+        state.remoteCPU = 92
+        let t90 = await sampleBoth(localCPU: 95)
+        XCTAssertEqual(t90.local.level, .warning)
+        XCTAssertEqual(t90.remote.level, .warning)
+
+        // t = 119s: woodhaven at 119s is still Warning
+        state.advance(.seconds(29))
+        let t119 = await sampleBoth(localCPU: 95)
+        XCTAssertEqual(t119.local.level, .warning)
+        XCTAssertEqual(t119.remote.level, .warning)
+
+        // t = 120s: woodhaven reaches 120s sustained and becomes Critical; local is only 30s into its new streak and stays Warning
+        state.advance(.seconds(1))
+        let t120 = await sampleBoth(localCPU: 95)
+        XCTAssertEqual(t120.remote.level, .critical)
+        XCTAssertEqual(t120.remote.statusSummary, "High CPU (92%)")
+        XCTAssertEqual(t120.local.level, .warning)
+        XCTAssertEqual(t120.local.statusSummary, "High CPU (95%)")
+
+        // Advance local to 120s sustained as well (t = 180s -> t = 210s) so both hosts are Critical before testing resets
+        state.advance(.seconds(60))
+        _ = await sampleBoth(localCPU: 95)
+        state.advance(.seconds(30))
+        let t210 = await sampleBoth(localCPU: 95)
+        XCTAssertEqual(t210.local.level, .critical)
+        XCTAssertEqual(t210.remote.level, .critical)
+
+        // Missing CPU sample (nil) on local and unreachable on woodhaven reset their Critical streaks within 10s (< 120s gap)
+        state.advance(.seconds(10))
+        state.remoteReachable = false
+        let t220 = await sampleBoth(localCPU: nil)
+        XCTAssertEqual(t220.local.level, .healthy)
+        XCTAssertEqual(t220.remote.level, .critical)
+        XCTAssertEqual(t220.remote.statusSummary, "Unreachable")
+
+        // High-CPU sample 10s later starts back at Warning on both hosts (proving explicit reset, not gap expiry), while critical memory stays immediate Critical
+        state.advance(.seconds(10))
+        state.remoteReachable = true
+        state.remoteCPU = 96
+        let t230 = await sampleBoth(localCPU: 95, localMemory: 92)
+        XCTAssertEqual(t230.remote.level, .warning)
+        XCTAssertEqual(t230.remote.statusSummary, "High CPU (96%)")
+        XCTAssertEqual(t230.local.level, .critical)
+        XCTAssertEqual(t230.local.statusSummary, "High memory (92%)")
+        let t230NormalMem = await sampleBoth(localCPU: 95, localMemory: 40)
+        XCTAssertEqual(t230NormalMem.local.level, .warning)
+        XCTAssertEqual(t230NormalMem.local.statusSummary, "High CPU (95%)")
+
+        // An unmonitored gap >= 120s (e.g. system sleep) between two high-CPU samples restarts the streak instead of firing Critical on the second sample
+        state.advance(.seconds(150))
+        let t380 = await sampleBoth(localCPU: 95)
+        XCTAssertEqual(t380.local.level, .warning)
+        XCTAssertEqual(t380.remote.level, .warning)
+
+        // Direct production probeRemoteSSHHost path applies sustained CPU tracking
+        let highCPUScript = scriptDir.appendingPathComponent("fake-ssh-high-cpu.sh")
+        try """
+        #!/bin/sh
+        printf 'READY\\n'; IFS= read -r _ || true; printf 'PONG\\n'
+        printf '/dev/sda1 209715200 104857600 83886080 55%% /\\nMEM 48\\nCPU 95\\n'
+        """.write(to: highCPUScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: highCPUScript.path)
+
+        let sshSustainedMonitor = HostHealthMonitor(now: { state.currentNow() })
+        let sshT0 = await sshSustainedMonitor.probeRemoteSSHHost(woodhavenHost, sshExecutablePath: highCPUScript.path, timeoutSeconds: 2.0)
+        XCTAssertEqual(sshT0.level, .warning)
+        XCTAssertEqual(sshT0.statusSummary, "High CPU (95%)")
+        state.advance(.seconds(60))
+        _ = await sshSustainedMonitor.probeRemoteSSHHost(woodhavenHost, sshExecutablePath: highCPUScript.path, timeoutSeconds: 2.0)
+        state.advance(.seconds(60))
+        let sshT120 = await sshSustainedMonitor.probeRemoteSSHHost(woodhavenHost, sshExecutablePath: highCPUScript.path, timeoutSeconds: 2.0)
+        XCTAssertEqual(sshT120.level, .critical)
+        XCTAssertEqual(sshT120.statusSummary, "High CPU (95%)")
     }
 
     @MainActor
