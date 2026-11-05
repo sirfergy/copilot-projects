@@ -90,7 +90,7 @@ struct TranscriptTurnCard: View {
             }
 
             if !turn.tools.isEmpty {
-                TranscriptTools(tools: turn.tools)
+                TranscriptTools(tools: turn.tools, isTurnInProgress: turn.endedAt == nil && !turn.isAborted)
             }
             if let error = turn.error {
                 TranscriptTurnFailure(error: error)
@@ -106,15 +106,15 @@ struct TranscriptTurnCard: View {
     }
 }
 
-private struct TranscriptReasoningView: View {
-    let steps: [String]
-    let summaryLabel: String
-    let latestHeading: String?
+private struct TranscriptDisclosureSection<Badge: View, Content: View>: View {
+    let icon: String
+    let title: String
+    let subtitle: String?
+    let accessibilityLabel: String
+    let accessibilityIdentifier: String
     @State private var isExpanded = false
-
-    private var titleLabel: String {
-        steps.count > 1 ? "Thinking (\(steps.count) steps)" : "Thinking"
-    }
+    @ViewBuilder let badge: () -> Badge
+    @ViewBuilder let content: () -> Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -125,45 +125,61 @@ private struct TranscriptReasoningView: View {
                     Image(systemName: "chevron.right")
                         .font(.caption2.weight(.semibold))
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                    Image(systemName: "brain")
+                    Image(systemName: icon)
                         .font(.caption)
-                    Text(titleLabel)
+                    Text(title)
                         .font(.caption.weight(.medium))
                         .layoutPriority(1)
-                    if let latestHeading, !latestHeading.isEmpty {
-                        Text("· \(latestHeading)")
+                    if let subtitle, !subtitle.isEmpty {
+                        Text("· \(subtitle)")
                             .font(.caption)
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
+                    badge()
                     Spacer(minLength: 0)
                 }
                 .foregroundStyle(StudioStyle.secondaryText)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(summaryLabel)
+            .accessibilityLabel(accessibilityLabel)
             .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
-            .accessibilityIdentifier("transcript-thinking-toggle")
+            .accessibilityIdentifier(accessibilityIdentifier)
 
             if isExpanded {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-                        if index > 0 {
-                            Divider()
-                        }
-                        MarkdownText(text: step)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .font(.callout)
-                            .foregroundStyle(StudioStyle.secondaryText)
-                    }
+                content()
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(StudioStyle.raised))
+            }
+        }
+    }
+}
+
+private struct TranscriptReasoningView: View {
+    let steps: [String]
+    let summaryLabel: String
+    let latestHeading: String?
+
+    var body: some View {
+        TranscriptDisclosureSection(
+            icon: "brain",
+            title: steps.count > 1 ? "Thinking (\(steps.count) steps)" : "Thinking",
+            subtitle: latestHeading,
+            accessibilityLabel: summaryLabel,
+            accessibilityIdentifier: "transcript-thinking-toggle"
+        ) {
+            EmptyView()
+        } content: {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                    if index > 0 { Divider() }
+                    MarkdownText(text: step)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .font(.callout)
+                        .foregroundStyle(StudioStyle.secondaryText)
                 }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(StudioStyle.raised)
-                )
             }
         }
     }
@@ -193,45 +209,93 @@ private struct TranscriptTurnFailure: View {
     }
 }
 
-private struct TranscriptTools: View {
+struct TranscriptTools: View {
+    private static let pathToolNames: Set<String> = ["view", "edit", "create"]
+
     let tools: [TranscriptTool]
-    @State private var expanded = false
+    var isTurnInProgress = true
+
+    static func previewText(for tools: [TranscriptTool]) -> String {
+        var counts: [String: Int] = [:]
+        var names: [String] = []
+        for tool in tools {
+            let name = tool.name.isEmpty ? "tool" : tool.name
+            if counts[name] == nil { names.append(name) }
+            counts[name, default: 0] += 1
+        }
+        return names.map { name in
+            let count = counts[name, default: 1]
+            return count > 1 ? "\(name) ×\(count)" : name
+        }.joined(separator: ", ")
+    }
+
+    static func summaryLabel(for tools: [TranscriptTool], isTurnInProgress: Bool = true) -> String {
+        var parts = ["Tools (\(tools.count) \(tools.count == 1 ? "tool" : "tools"))"]
+        let preview = previewText(for: tools)
+        if !preview.isEmpty { parts.append(preview) }
+        let failed = tools.filter { $0.success == false }.count
+        if failed > 0 { parts.append("\(failed) failed") }
+        if isTurnInProgress {
+            let running = tools.filter { $0.success == nil }.count
+            if running > 0 { parts.append("\(running) running") }
+        }
+        return parts.joined(separator: " · ")
+    }
 
     var body: some View {
-        DisclosureGroup(
-            "\(tools.count) tool\(tools.count == 1 ? "" : "s")",
-            isExpanded: $expanded
+        let failedCount = tools.filter { $0.success == false }.count
+        TranscriptDisclosureSection(
+            icon: "wrench.and.screwdriver",
+            title: "Tools",
+            subtitle: Self.previewText(for: tools),
+            accessibilityLabel: Self.summaryLabel(for: tools, isTurnInProgress: isTurnInProgress),
+            accessibilityIdentifier: "transcript-tools-toggle"
         ) {
+            if failedCount > 0 {
+                Text("· \(failedCount) failed")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.red)
+                    .layoutPriority(1)
+            }
+            if isTurnInProgress, tools.contains(where: { $0.success == nil }) {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityHidden(true)
+            }
+        } content: {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(tools) { tool in
+                    let status = status(for: tool)
                     HStack(spacing: 7) {
-                        Image(systemName: icon(for: tool))
-                            .foregroundStyle(color(for: tool))
+                        Image(systemName: status.icon)
+                            .foregroundStyle(status.color)
+                            .accessibilityLabel(status.label)
+                        if !tool.name.isEmpty, tool.title != tool.name {
+                            Text(tool.name)
+                                .fontWeight(.light)
+                                .foregroundStyle(StudioStyle.secondaryText.opacity(0.75))
+                                .lineLimit(1)
+                                .layoutPriority(1)
+                        }
                         Text(tool.title)
+                            .foregroundStyle(StudioStyle.secondaryText)
                             .lineLimit(1)
-                        Spacer()
+                            .truncationMode(Self.pathToolNames.contains(tool.name) ? .middle : .tail)
+                        Spacer(minLength: 0)
                     }
                     .font(.caption)
+                    .accessibilityElement(children: .combine)
                 }
             }
-            .padding(.top, 8)
-        }
-        .font(.callout)
-    }
-
-    private func icon(for tool: TranscriptTool) -> String {
-        switch tool.success {
-        case true: return "checkmark.circle.fill"
-        case false: return "xmark.circle.fill"
-        case nil: return "circle.dotted"
+            .textSelection(.enabled)
         }
     }
 
-    private func color(for tool: TranscriptTool) -> Color {
+    private func status(for tool: TranscriptTool) -> (icon: String, color: Color, label: String) {
         switch tool.success {
-        case true: return .green
-        case false: return .red
-        case nil: return .secondary
+        case true: ("checkmark.circle.fill", .green, "Succeeded")
+        case false: ("xmark.circle.fill", .red, "Failed")
+        case nil: ("circle.dotted", StudioStyle.secondaryText, isTurnInProgress ? "Running" : "Stopped")
         }
     }
 }

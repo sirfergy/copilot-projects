@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
     closeSync, constants as fsConstants, createReadStream,
@@ -4207,10 +4207,24 @@ if (validSessionId && socketPath) {
         return null;
     }
 
-    function toolTitle(data) {
-        return data.toolDescription?.name
-            || data.toolName
-            || "Tool";
+    const TOOL_TITLE_FIELDS = {
+        bash: "description", view: "path", edit: "path", create: "path",
+        grep: "pattern", glob: "pattern", task: "description",
+    };
+
+    function toolTitle(data, cwd = process.cwd()) {
+        const field = Object.hasOwn(TOOL_TITLE_FIELDS, data?.toolName)
+            ? TOOL_TITLE_FIELDS[data.toolName] : undefined;
+        const text = field && typeof data?.arguments?.[field] === "string"
+            ? data.arguments[field].trim() : "";
+        if (text.length > 0) {
+            if (field === "path" && isAbsolute(text)) {
+                const rel = relative(cwd, text);
+                if (rel !== ".." && !rel.startsWith("../") && !isAbsolute(rel)) return rel || ".";
+            }
+            return text;
+        }
+        return data?.toolDescription?.name || data?.toolName || "Tool";
     }
 
     function boundCompletedPermissionIds() {

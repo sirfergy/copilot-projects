@@ -10899,6 +10899,130 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(noHeading.reasoningSummaryLabel, "Thinking")
     }
 
+    @MainActor
+    func testTranscriptToolsPreviewSummaryAndDisclosureRendering() throws {
+        let tools = [
+            TranscriptTool(id: "t1", name: "bash", title: "Run targeted tests", success: true),
+            TranscriptTool(id: "t2", name: "bash", title: "Verify linter", success: false),
+            TranscriptTool(
+                id: "t3",
+                name: "view",
+                title: "Sources/CopilotProjectsPullRequests/Notifications/NotificationsApplication.swift",
+                success: true
+            ),
+            TranscriptTool(id: "t4", name: "grep", title: "TranscriptTools", success: nil),
+            TranscriptTool(id: "t5", name: "sql", title: "sql", success: true),
+        ]
+        XCTAssertEqual(TranscriptTools.previewText(for: tools), "bash ×2, view, grep, sql")
+        XCTAssertEqual(
+            TranscriptTools.summaryLabel(for: tools),
+            "Tools (5 tools) · bash ×2, view, grep, sql · 1 failed · 1 running"
+        )
+        XCTAssertEqual(
+            TranscriptTools.summaryLabel(for: tools, isTurnInProgress: false),
+            "Tools (5 tools) · bash ×2, view, grep, sql · 1 failed"
+        )
+        let single = [TranscriptTool(id: "s1", name: "view", title: "README.md", success: true)]
+        XCTAssertEqual(TranscriptTools.previewText(for: single), "view")
+        XCTAssertEqual(TranscriptTools.summaryLabel(for: single), "Tools (1 tool) · view")
+
+        let turn = TranscriptTurn(
+            id: "turn-tools",
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: nil,
+            kind: "foreground",
+            userContent: "Check tools",
+            assistantMessages: [],
+            tools: tools,
+            isAborted: false,
+            reasoningSteps: ["**Checking tools**\n\nInspecting layout."]
+        )
+        _ = NSApplication.shared
+        let window = NSWindow(
+            contentRect: NSRect(x: -18_000, y: -18_000, width: 420, height: 360),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(
+            rootView: TranscriptTurnCard(
+                turn: turn,
+                imageCapture: nil,
+                onPreview: { _ in }
+            )
+            .frame(width: 384)
+            .environment(\.controlActiveState, .key)
+        )
+        host.frame = NSRect(x: 0, y: 0, width: 420, height: 360)
+        window.contentView = host
+        window.orderBack(nil)
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+            window.close()
+        }
+
+        func pump() {
+            for _ in 0..<8 {
+                CFRunLoopRunInMode(.defaultMode, 0, false)
+                host.layoutSubtreeIfNeeded()
+            }
+        }
+        func findProgressIndicators(in view: NSView) -> [NSProgressIndicator] {
+            ((view as? NSProgressIndicator).map { [$0] } ?? [])
+                + view.subviews.flatMap(findProgressIndicators(in:))
+        }
+
+        pump()
+        let indicator = try XCTUnwrap(findProgressIndicators(in: host).first)
+        let collapsedHeight = host.fittingSize.height
+        let togglePointInWindow = indicator.convert(NSPoint(x: -40, y: indicator.bounds.midY), to: nil)
+        try sendClick(in: window, point: togglePointInWindow)
+        pump()
+        let expandedHeight = host.fittingSize.height
+        XCTAssertGreaterThan(expandedHeight, collapsedHeight + 80)
+
+        let togglePointAfterExpand = indicator.convert(NSPoint(x: -40, y: indicator.bounds.midY), to: nil)
+        try sendClick(in: window, point: togglePointAfterExpand)
+        pump()
+        XCTAssertEqual(host.fittingSize.height, collapsedHeight, accuracy: 1)
+
+        for inactiveTurn in [
+            TranscriptTurn(
+                id: "turn-ended",
+                startedAt: Date(timeIntervalSince1970: 100),
+                endedAt: Date(timeIntervalSince1970: 110),
+                kind: "foreground",
+                userContent: "Ended",
+                assistantMessages: [],
+                tools: tools,
+                isAborted: false
+            ),
+            TranscriptTurn(
+                id: "turn-aborted",
+                startedAt: Date(timeIntervalSince1970: 100),
+                endedAt: nil,
+                kind: "foreground",
+                userContent: "Aborted",
+                assistantMessages: [],
+                tools: tools,
+                isAborted: true
+            ),
+        ] {
+            let inactiveHost = NSHostingView(
+                rootView: TranscriptTurnCard(turn: inactiveTurn, imageCapture: nil, onPreview: { _ in })
+            )
+            inactiveHost.frame = NSRect(x: 0, y: 0, width: 420, height: 220)
+            window.contentView = inactiveHost
+            for _ in 0..<4 {
+                CFRunLoopRunInMode(.defaultMode, 0, false)
+                inactiveHost.layoutSubtreeIfNeeded()
+            }
+            XCTAssertTrue(findProgressIndicators(in: inactiveHost).isEmpty, inactiveTurn.id)
+        }
+    }
+
     func testTranscriptTurnReasoningStepsCodableRoundTripAndLegacyDecode() throws {
         let legacyJSON = Data("""
         {"id":"t1","startedAt":"1970-01-01T00:01:40Z","endedAt":null,"kind":"foreground",\
