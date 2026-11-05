@@ -16276,6 +16276,246 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(makeView().isDeliveryModeDisabled)
     }
 
+    @MainActor
+    func testDesktopComposerQuickReplyWrappingSharedAttachRowAndStableHeight() async throws {
+        _ = NSApplication.shared
+        let activationPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.prohibited)
+        defer { NSApp.setActivationPolicy(activationPolicy) }
+
+        let suite = "AppLogicTests.quickReplyWrap.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let turns: [TranscriptTurn] = (1...30).map { index in
+            let start = now.addingTimeInterval(Double(index * 10))
+            return TranscriptTurn(
+                id: "turn-\(index)",
+                startedAt: start,
+                endedAt: start.addingTimeInterval(5),
+                kind: "user",
+                userContent: "User prompt \(index)\nSecond line of prompt \(index)",
+                assistantMessages: [
+                    TranscriptAssistantMessage(
+                        id: "msg-\(index)",
+                        timestamp: start.addingTimeInterval(3),
+                        content: "Assistant reply \(index)\nDetailed explanation line 2\nLine 3"
+                    ),
+                ],
+                tools: [],
+                isAborted: false
+            )
+        }
+
+        func makeFreshWorkflow(sendReady: Bool = true) -> RemoteSessionWorkflow {
+            RemoteSessionWorkflow(
+                observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000) - 2_000,
+                capabilities: ["session-send"],
+                sendReady: sendReady
+            )
+        }
+        var isSendReady = true
+        var workflow = makeFreshWorkflow()
+        let operation = AgentOperationProjection(conversationEpoch: "epoch-wrap", support: .receipts, receipts: [])
+        let composer = DesktopSessionPromptComposer(sessionId: UUID().uuidString)
+        var dispatched: [RemoteSessionAction] = []
+
+        let window = NSWindow(
+            contentRect: NSRect(x: -18_000, y: -18_000, width: 420, height: 640),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(
+            rootView: TranscriptDrawer(
+                turns: turns,
+                imageCapture: nil,
+                workflow: workflow,
+                operation: operation,
+                workflowProvider: { workflow },
+                operationProvider: { operation },
+                promptComposer: composer,
+                onClose: {},
+                onAction: { action in
+                    dispatched.append(action)
+                    return RemoteWorkflowActionResult(state: .applied)
+                },
+                onPreview: { _ in }
+            )
+            .defaultAppStorage(defaults)
+            .environment(\.controlActiveState, .key)
+        )
+        host.sizingOptions = []
+        host.frame = NSRect(x: 0, y: 0, width: 420, height: 640)
+        window.contentView = host
+        window.orderBack(nil)
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+            window.close()
+        }
+
+        func findAllScrollViews(in view: NSView) -> [NSScrollView] {
+            ((view as? NSScrollView).map { [$0] } ?? []) + view.subviews.flatMap(findAllScrollViews(in:))
+        }
+
+        func findTranscriptScrollView(in view: NSView) -> NSScrollView? {
+            findAllScrollViews(in: view).first {
+                ($0.documentView?.bounds.height ?? 0) > $0.contentView.bounds.height + 100
+            }
+        }
+
+        func pumpLayout(iterations: Int = 6) async throws {
+            workflow = makeFreshWorkflow(sendReady: isSendReady)
+            composer.objectWillChange.send()
+            for _ in 0..<iterations {
+                host.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            host.layoutSubtreeIfNeeded()
+        }
+
+        func transcriptHeight(file: StaticString = #filePath, line: UInt = #line) throws -> CGFloat {
+            try XCTUnwrap(findTranscriptScrollView(in: host), file: file, line: line).frame.height
+        }
+
+        try await pumpLayout()
+
+        // 1. Default chips at 420pt: no horizontal chip ScrollView; composer height stays constant when typing
+        //    or when sendability changes, and hidden chips are not clickable.
+        XCTAssertEqual(findAllScrollViews(in: host).count, 1)
+        let defaultScrollHeight = try transcriptHeight()
+        let defaultRow3Y = CGFloat(12 + 24 + 8 + 10)
+        let defaultRow2Y = defaultRow3Y + 24
+
+        composer.prompt = "Drafting a follow-up"
+        try await pumpLayout()
+        XCTAssertEqual(try transcriptHeight(), defaultScrollHeight, accuracy: 1)
+        try sendClick(in: window, point: NSPoint(x: 210, y: defaultRow2Y))
+        try sendClick(in: window, point: NSPoint(x: 45, y: defaultRow3Y))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(dispatched.isEmpty)
+
+        composer.prompt = ""
+        isSendReady = false
+        try await pumpLayout()
+        XCTAssertEqual(try transcriptHeight(), defaultScrollHeight, accuracy: 1)
+        workflow = makeFreshWorkflow(sendReady: true)
+        try sendClick(in: window, point: NSPoint(x: 210, y: defaultRow2Y))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(dispatched.isEmpty)
+
+        isSendReady = true
+        try await pumpLayout()
+        XCTAssertEqual(try transcriptHeight(), defaultScrollHeight, accuracy: 1)
+
+        // 2. Wrapped row-2 ("Keep going") and row-3 ("No bloat?") chips dispatch; attach/paste column never hits a chip.
+        try sendClick(in: window, point: NSPoint(x: 210, y: defaultRow2Y))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(dispatched.map(\.prompt), ["Keep going!"])
+
+        try sendClick(in: window, point: NSPoint(x: 45, y: defaultRow3Y))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(dispatched.map(\.prompt), ["Keep going!", "No bloat or over-engineering?"])
+
+        try sendClick(in: window, point: NSPoint(x: 360, y: defaultRow2Y))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(dispatched.count, 2)
+
+        // 3. Wide Unicode 24-character chip clamps to the left column without overlapping the attach/paste column.
+        let wideUnicodeItems = [
+            QuickReplyItem(label: String(repeating: "🚀", count: QuickReplyItem.maxLabelLength), prompt: "Wide emoji"),
+            QuickReplyItem(label: "Follow-up", prompt: "Second chip"),
+        ]
+        XCTAssertEqual(QuickReplyConfiguration.save(wideUnicodeItems, to: defaults), .success(wideUnicodeItems))
+        try await pumpLayout()
+        try sendClick(in: window, point: NSPoint(x: 60, y: defaultRow2Y))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(dispatched.last?.prompt, "Wide emoji")
+        let countAfterWide = dispatched.count
+        try sendClick(in: window, point: NSPoint(x: 360, y: defaultRow2Y))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(dispatched.count, countAfterWide)
+
+        // 4. 12 × 24-character chips at 420pt cap at 116pt with vertical scrolling and stable height when hidden.
+        let twelveLongChips: [QuickReplyItem] = (1...12).map { idx in
+            let label = String(format: "Custom quick reply #%02d!!", idx)
+            XCTAssertEqual(label.count, QuickReplyItem.maxLabelLength)
+            return QuickReplyItem(label: label, prompt: "Prompt \(idx)")
+        }
+        XCTAssertEqual(QuickReplyConfiguration.save(twelveLongChips, to: defaults), .success(twelveLongChips))
+        try await pumpLayout()
+        let scrollWithTwelveLong = try XCTUnwrap(findTranscriptScrollView(in: host))
+        let twelveLongScrollHeight420 = scrollWithTwelveLong.frame.height
+        XCTAssertLessThan(twelveLongScrollHeight420, defaultScrollHeight - 30)
+        XCTAssertGreaterThan(twelveLongScrollHeight420, 400)
+        XCTAssertEqual(findAllScrollViews(in: host).count, 2)
+
+        let chipStripBottomY = CGFloat(12 + 24 + 8)
+        let chipOneY = chipStripBottomY + TranscriptPromptComposerView.maxQuickReplyStripHeight - 15
+        try sendClick(in: window, point: NSPoint(x: 60, y: chipOneY))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(dispatched.last?.prompt, "Prompt 1")
+
+        let chipScrollView = try XCTUnwrap(findAllScrollViews(in: host).first { $0 !== scrollWithTwelveLong })
+        let chipDocView = try XCTUnwrap(chipScrollView.documentView)
+        let chipBottomOrigin = chipDocView.isFlipped
+            ? NSPoint(x: 0, y: max(0, chipDocView.bounds.height - chipScrollView.contentView.bounds.height))
+            : .zero
+        chipScrollView.contentView.scroll(to: chipBottomOrigin)
+        chipScrollView.reflectScrolledClipView(chipScrollView.contentView)
+        try await pumpLayout(iterations: 4)
+
+        let chipTwelveY = chipStripBottomY + 10
+        try sendClick(in: window, point: NSPoint(x: 60, y: chipTwelveY))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(dispatched.last?.prompt, "Prompt 12")
+        let countAfterChipTwelve = dispatched.count
+        try sendClick(in: window, point: NSPoint(x: 360, y: chipTwelveY))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(dispatched.count, countAfterChipTwelve)
+
+        composer.prompt = "Typing with 12 chips configured"
+        try await pumpLayout()
+        XCTAssertEqual(try transcriptHeight(), twelveLongScrollHeight420, accuracy: 1)
+        try sendClick(in: window, point: NSPoint(x: 60, y: chipTwelveY))
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(dispatched.count, countAfterChipTwelve)
+        composer.prompt = ""
+        try await pumpLayout()
+
+        // 5. Turning chips off or saving an empty custom list collapses the row to just the 30pt attach/paste band.
+        defaults.set(false, forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
+        try await pumpLayout()
+        let noChipsRowScrollHeight = try transcriptHeight()
+        XCTAssertGreaterThan(noChipsRowScrollHeight, defaultScrollHeight + 30)
+        XCTAssertEqual(findAllScrollViews(in: host).count, 1)
+
+        defaults.set(true, forKey: TranscriptPromptComposerView.showQuickReplyChipsKey)
+        XCTAssertEqual(QuickReplyConfiguration.save([], to: defaults), .success([]))
+        try await pumpLayout()
+        XCTAssertEqual(try transcriptHeight(), noChipsRowScrollHeight, accuracy: 1)
+
+        XCTAssertEqual(QuickReplyConfiguration.save(twelveLongChips, to: defaults), .success(twelveLongChips))
+        try await pumpLayout()
+        XCTAssertEqual(try transcriptHeight(), twelveLongScrollHeight420, accuracy: 1)
+
+        // 6. Minimum-height drawer (436pt) keeps >200pt transcript; full-width (900pt) wraps 12 long chips without a chip ScrollView.
+        window.setContentSize(NSSize(width: 420, height: 436))
+        host.frame = NSRect(x: 0, y: 0, width: 420, height: 436)
+        try await pumpLayout()
+        XCTAssertGreaterThan(try transcriptHeight(), 200)
+
+        defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        window.setContentSize(NSSize(width: 900, height: 640))
+        host.frame = NSRect(x: 0, y: 0, width: 900, height: 640)
+        try await pumpLayout()
+        XCTAssertEqual(findAllScrollViews(in: host).count, 1)
+        XCTAssertGreaterThan(try transcriptHeight(), twelveLongScrollHeight420 + 30)
+    }
+
     func testTranscriptDrawerUsageSummaryAndAccessibilityLabel() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let fresh = Int64(now.timeIntervalSince1970 * 1_000)

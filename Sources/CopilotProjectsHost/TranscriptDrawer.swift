@@ -788,6 +788,8 @@ extension RemotePromptMode {
 struct TranscriptPromptComposerView: View {
     static let showQuickReplyChipsKey = "showQuickReplyChips"
     static let quickReplyListKey = QuickReplyConfiguration.storageKey
+    static let maxQuickReplyStripHeight: CGFloat = 116
+    static let quickReplyFirstRowHeight: CGFloat = 30
 
     @ObservedObject var composer: DesktopSessionPromptComposer
     let workflow: RemoteSessionWorkflow?
@@ -877,6 +879,31 @@ struct TranscriptPromptComposerView: View {
             ?? composer.attachmentsBlockedReason(workflow: liveWorkflow, operation: liveOperation, now: now)
     }
 
+    @ViewBuilder
+    private func quickReplyStrip(replies: [QuickReplyItem]) -> some View {
+        QuickReplyFlowLayout(
+            horizontalSpacing: 6,
+            verticalSpacing: 4,
+            firstRowAlignmentHeight: Self.quickReplyFirstRowHeight
+        ) {
+            ForEach(replies) { item in
+                Button(item.label) {
+                    guard canSendQuickReply(
+                        workflow: liveWorkflow,
+                        operation: liveOperation,
+                        now: Date()
+                    ) else { return }
+                    composer.prompt = item.prompt
+                    submitPrompt()
+                }
+                .lineLimit(1)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     var body: some View {
         TimelineView(.periodic(from: .now, by: 2)) { context in
             let currentWorkflow = liveWorkflow
@@ -928,59 +955,63 @@ struct TranscriptPromptComposerView: View {
                     }
                 }
 
-                let replies = Self.visibleQuickReplies(
+                let configuredReplies = showQuickReplyChips
+                    ? QuickReplyConfiguration.resolved(fromJSON: quickReplyListJSON).activeReplies
+                    : []
+                let chipsVisible = Self.canShowQuickReplies(
                     showQuickReplyChips: showQuickReplyChips,
-                    storedJSON: quickReplyListJSON,
                     composer: composer,
                     workflow: currentWorkflow,
                     operation: currentOperation,
                     now: now
                 )
-                if !replies.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            ForEach(replies) { item in
-                                Button(item.label) {
-                                    guard canSendQuickReply(
-                                        workflow: liveWorkflow,
-                                        operation: liveOperation,
-                                        now: Date()
-                                    ) else { return }
-                                    composer.prompt = item.prompt
-                                    submitPrompt()
+                HStack(alignment: .top, spacing: 8) {
+                    if !configuredReplies.isEmpty {
+                        QuickReplyStripCapLayout(maxHeight: Self.maxQuickReplyStripHeight) {
+                            ViewThatFits(in: .vertical) {
+                                quickReplyStrip(replies: configuredReplies)
+                                ScrollView(.vertical) {
+                                    quickReplyStrip(replies: configuredReplies)
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
+                                .scrollIndicators(.visible)
                             }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .opacity(chipsVisible ? 1 : 0)
+                        .disabled(!chipsVisible)
+                        .allowsHitTesting(chipsVisible)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("desktop-quick-reply-strip")
+                        .accessibilityHidden(!chipsVisible)
+                    } else {
+                        Spacer(minLength: 0)
                     }
-                    .accessibilityIdentifier("desktop-quick-reply-strip")
-                }
 
-                HStack(spacing: 8) {
-                    Spacer(minLength: 0)
+                    HStack(spacing: 8) {
+                        Button(action: chooseFiles) {
+                            Image(systemName: "paperclip")
+                                .frame(width: 24, height: 24)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(!composer.canAttach(workflow: currentWorkflow, operation: currentOperation, now: now))
+                        .help(composer.attachHelpText(workflow: currentWorkflow, operation: currentOperation, now: now))
+                        .accessibilityLabel("Attach files")
+                        .accessibilityIdentifier("desktop-attach-screenshot")
 
-                    Button(action: chooseFiles) {
-                        Image(systemName: "paperclip")
-                            .frame(width: 24, height: 24)
+                        Button(action: pasteScreenshots) {
+                            Image(systemName: "doc.on.clipboard")
+                                .frame(width: 24, height: 24)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(!composer.canAttach(workflow: currentWorkflow, operation: currentOperation, now: now))
+                        .help(composer.attachHelpText(workflow: currentWorkflow, operation: currentOperation, now: now))
+                        .accessibilityLabel("Paste attachment")
+                        .accessibilityIdentifier("desktop-paste-screenshot")
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(!composer.canAttach(workflow: currentWorkflow, operation: currentOperation, now: now))
-                    .help(composer.attachHelpText(workflow: currentWorkflow, operation: currentOperation, now: now))
-                    .accessibilityLabel("Attach files")
-                    .accessibilityIdentifier("desktop-attach-screenshot")
-
-                    Button(action: pasteScreenshots) {
-                        Image(systemName: "doc.on.clipboard")
-                            .frame(width: 24, height: 24)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(!composer.canAttach(workflow: currentWorkflow, operation: currentOperation, now: now))
-                    .help(composer.attachHelpText(workflow: currentWorkflow, operation: currentOperation, now: now))
-                    .accessibilityLabel("Paste attachment")
-                    .accessibilityIdentifier("desktop-paste-screenshot")
+                    .frame(height: Self.quickReplyFirstRowHeight)
+                    .fixedSize()
                 }
 
                 let canSend = composer.canSend(workflow: currentWorkflow, operation: currentOperation, now: now)
@@ -1104,6 +1135,123 @@ struct TranscriptPromptComposerView: View {
         let urls = panel.urls
         Task { @MainActor in
             await composer.attachFiles(urls, workflow: liveWorkflow, operation: liveOperation)
+        }
+    }
+}
+
+private struct QuickReplyStripCapLayout: Layout {
+    var maxHeight: CGFloat
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        guard let subview = subviews.first else { return .zero }
+        let size = subview.sizeThatFits(
+            ProposedViewSize(width: proposal.width, height: maxHeight)
+        )
+        return CGSize(width: size.width, height: min(size.height, maxHeight))
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        subviews.first?.place(
+            at: bounds.origin,
+            anchor: .topLeading,
+            proposal: ProposedViewSize(bounds.size)
+        )
+    }
+}
+
+private struct QuickReplyFlowLayout: Layout {
+    var horizontalSpacing: CGFloat = 6
+    var verticalSpacing: CGFloat = 4
+    var firstRowAlignmentHeight: CGFloat = 30
+
+    func makeCache(subviews: Subviews) -> CGFloat? { nil }
+
+    private func layout(
+        limitWidth: CGFloat,
+        subviews: Subviews
+    ) -> (size: CGSize, frames: [CGRect]) {
+        guard !subviews.isEmpty else { return (.zero, []) }
+        let clampedLimit = max(0, limitWidth)
+        var rows: [[(index: Int, size: CGSize)]] = [[]]
+        var rowWidth: CGFloat = 0
+
+        for (index, subview) in subviews.enumerated() {
+            let raw = subview.sizeThatFits(ProposedViewSize(width: clampedLimit, height: nil))
+            let size = CGSize(width: min(raw.width, clampedLimit), height: raw.height)
+            if !rows[rows.count - 1].isEmpty, rowWidth + horizontalSpacing + size.width > clampedLimit {
+                rows.append([(index, size)])
+                rowWidth = size.width
+            } else {
+                if !rows[rows.count - 1].isEmpty { rowWidth += horizontalSpacing }
+                rows[rows.count - 1].append((index, size))
+                rowWidth += size.width
+            }
+        }
+
+        var frames = Array(repeating: CGRect.zero, count: subviews.count)
+        var y: CGFloat = 0
+        var widestRow: CGFloat = 0
+
+        for (rowIndex, row) in rows.enumerated() {
+            let rowHeight = row.map(\.size.height).max() ?? 0
+            if rowIndex == 0 {
+                y = max(0, (firstRowAlignmentHeight - rowHeight) / 2)
+            }
+            var x: CGFloat = 0
+            for (itemIndex, item) in row.enumerated() {
+                if itemIndex > 0 { x += horizontalSpacing }
+                let chipY = y + (rowHeight - item.size.height) / 2
+                frames[item.index] = CGRect(x: x, y: chipY, width: item.size.width, height: item.size.height)
+                x += item.size.width
+            }
+            widestRow = max(widestRow, x)
+            y += rowHeight + (rowIndex < rows.count - 1 ? verticalSpacing : 0)
+        }
+
+        return (CGSize(width: widestRow, height: max(y, firstRowAlignmentHeight)), frames)
+    }
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout CGFloat?
+    ) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        if let width = proposal.width, width > 0, width.isFinite {
+            cache = width
+            return layout(limitWidth: width, subviews: subviews).size
+        }
+        let reference = layout(limitWidth: cache ?? .infinity, subviews: subviews).size
+        if proposal.width == nil { return reference }
+        let width = proposal.width == .infinity
+            ? layout(limitWidth: .infinity, subviews: subviews).size.width
+            : 0
+        return CGSize(width: width, height: reference.height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout CGFloat?
+    ) {
+        if bounds.width > 0, bounds.width.isFinite { cache = bounds.width }
+        let frames = layout(limitWidth: bounds.width, subviews: subviews).frames
+        for (index, frame) in frames.enumerated() {
+            subviews[index].place(
+                at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(frame.size)
+            )
         }
     }
 }
