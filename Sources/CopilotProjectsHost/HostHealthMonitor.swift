@@ -8,6 +8,9 @@ public enum HostHealthEvaluator {
     public static let latencyQuantizationMilliseconds: Int = 5
 
     public static let criticalCPUThreshold = 90
+    /// CPU must stay at or above `criticalCPUThreshold` for 2 minutes before becoming `.critical`;
+    /// sub-threshold, missing (`nil`), unreachable, or stale (`>= 120s` gap) samples reset the streak.
+    public static let criticalCPUSustainedDuration: Duration = .seconds(120)
     public static let warningCPUThreshold = 75
     public static let criticalMemoryThreshold = 90
     public static let warningMemoryThreshold = 80
@@ -33,6 +36,7 @@ public enum HostHealthEvaluator {
     public static func evaluate(
         reachable: Bool = true,
         cpuUsagePercent: Int? = nil,
+        sustainedCriticalCPU: Bool = false,
         memoryUsagePercent: Int? = nil,
         diskAvailableBytes: Int64? = nil,
         latencyMilliseconds: Int? = nil
@@ -47,7 +51,7 @@ public enum HostHealthEvaluator {
         let latency = latencyMilliseconds
 
         var criticalReasons: [String] = []
-        if let cpu, cpu >= criticalCPUThreshold {
+        if let cpu, cpu >= criticalCPUThreshold, sustainedCriticalCPU {
             criticalReasons.append("High CPU (\(cpu)%)")
         }
         if let memory, memory >= criticalMemoryThreshold {
@@ -84,6 +88,7 @@ public enum HostHealthEvaluator {
         host: RemoteHostInfo,
         reachable: Bool = true,
         cpuUsagePercent: Int? = nil,
+        sustainedCriticalCPU: Bool = false,
         memoryUsagePercent: Int? = nil,
         diskAvailableBytes: Int64? = nil,
         diskTotalBytes: Int64? = nil,
@@ -97,6 +102,7 @@ public enum HostHealthEvaluator {
         let evaluation = evaluate(
             reachable: reachable,
             cpuUsagePercent: clampedCPU,
+            sustainedCriticalCPU: sustainedCriticalCPU,
             memoryUsagePercent: clampedMemory,
             diskAvailableBytes: quantizedAvailable,
             latencyMilliseconds: quantizedLatency
@@ -142,20 +148,82 @@ public final class HostHealthMonitor: @unchecked Sendable {
     private var lastCPUPercent: Int?
     private var previousRemoteCPUTicks: [String: (active: UInt64, total: UInt64)] = [:]
     private var lastRemoteCPUPercent: [String: Int] = [:]
+    private var criticalCPUStreaks: [String: (since: ContinuousClock.Instant, lastSample: ContinuousClock.Instant)] = [:]
+    private let now: @Sendable () -> ContinuousClock.Instant
     private let remoteProbe: RemoteHostProbe?
 
-    public nonisolated init(remoteProbe: RemoteHostProbe? = nil) {
+    public nonisolated convenience init(remoteProbe: RemoteHostProbe? = nil) {
+        self.init(now: { ContinuousClock.now }, remoteProbe: remoteProbe)
+    }
+
+    public nonisolated init(
+        now: @escaping @Sendable () -> ContinuousClock.Instant,
+        remoteProbe: RemoteHostProbe? = nil
+    ) {
+        self.now = now
         self.remoteProbe = remoteProbe
+    }
+
+    private func recordSustainedCriticalCPU(
+        hostId: String,
+        reachable: Bool,
+        cpuUsagePercent: Int?
+    ) -> Bool {
+        let key = hostId.lowercased()
+        lock.lock()
+        defer { lock.unlock() }
+        guard reachable,
+              let cpu = HostHealthEvaluator.clampPercent(cpuUsagePercent),
+              cpu >= HostHealthEvaluator.criticalCPUThreshold else {
+            criticalCPUStreaks.removeValue(forKey: key)
+            return false
+        }
+        let sampleTime = now()
+        if let streak = criticalCPUStreaks[key],
+           streak.lastSample.duration(to: sampleTime) < HostHealthEvaluator.criticalCPUSustainedDuration {
+            criticalCPUStreaks[key] = (streak.since, sampleTime)
+            return streak.since.duration(to: sampleTime) >= HostHealthEvaluator.criticalCPUSustainedDuration
+        }
+        criticalCPUStreaks[key] = (sampleTime, sampleTime)
+        return false
+    }
+
+    private func evaluatingSustainedCPU(for sample: RemoteHostHealth) -> RemoteHostHealth {
+        let sustained = recordSustainedCriticalCPU(
+            hostId: sample.hostId,
+            reachable: sample.reachable,
+            cpuUsagePercent: sample.cpuUsagePercent
+        )
+        return HostHealthEvaluator.makeHealth(
+            host: RemoteHostInfo(
+                id: sample.hostId,
+                displayName: sample.displayName,
+                isLocal: sample.isLocal
+            ),
+            reachable: sample.reachable,
+            cpuUsagePercent: sample.cpuUsagePercent,
+            sustainedCriticalCPU: sustained,
+            memoryUsagePercent: sample.memoryUsagePercent,
+            diskAvailableBytes: sample.diskAvailableBytes,
+            diskTotalBytes: sample.diskTotalBytes,
+            latencyMilliseconds: sample.latencyMilliseconds
+        )
     }
 
     public func sampleLocalHost(host: RemoteHostInfo = .local) -> RemoteHostHealth {
         let cpu = sampleLocalCPUPercent()
         let memory = Self.sampleLocalMemoryPercent()
         let disk = Self.sampleLocalDiskBytes()
+        let sustained = recordSustainedCriticalCPU(
+            hostId: host.id,
+            reachable: true,
+            cpuUsagePercent: cpu
+        )
         return HostHealthEvaluator.makeHealth(
             host: host,
             reachable: true,
             cpuUsagePercent: cpu,
+            sustainedCriticalCPU: sustained,
             memoryUsagePercent: memory,
             diskAvailableBytes: disk.available,
             diskTotalBytes: disk.total,
@@ -173,7 +241,7 @@ public final class HostHealthMonitor: @unchecked Sendable {
         let localHost = targetHosts.first(where: \.isLocal) ?? .local
         let localHealth: RemoteHostHealth
         if let preSampledLocal {
-            localHealth = preSampledLocal
+            localHealth = evaluatingSustainedCPU(for: preSampledLocal)
         } else {
             localHealth = await Task.detached(priority: .utility) { [self] in
                 self.sampleLocalHost(host: localHost)
@@ -194,7 +262,7 @@ public final class HostHealthMonitor: @unchecked Sendable {
                 nextIndex += 1
                 group.addTask { [self] in
                     if let customProbe {
-                        return (index, await customProbe(host))
+                        return (index, self.evaluatingSustainedCPU(for: await customProbe(host)))
                     }
                     return (index, await self.probeRemoteSSHHost(host))
                 }
@@ -209,7 +277,7 @@ public final class HostHealthMonitor: @unchecked Sendable {
                     nextIndex += 1
                     group.addTask { [self] in
                         if let customProbe {
-                            return (index, await customProbe(host))
+                            return (index, self.evaluatingSustainedCPU(for: await customProbe(host)))
                         }
                         return (index, await self.probeRemoteSSHHost(host))
                     }
@@ -477,7 +545,7 @@ public final class HostHealthMonitor: @unchecked Sendable {
         sshExecutablePath: String = "/usr/bin/ssh",
         timeoutSeconds: TimeInterval = 5.0
     ) async -> RemoteHostHealth {
-        await Self.probeSSHHost(
+        let probed = await Self.probeSSHHost(
             host,
             sshExecutablePath: sshExecutablePath,
             timeoutSeconds: timeoutSeconds,
@@ -485,6 +553,7 @@ public final class HostHealthMonitor: @unchecked Sendable {
                 self?.resolveRemoteCPUPercent(hostId: host.id, parsed: parsed) ?? parsed.cpuUsagePercent
             }
         )
+        return evaluatingSustainedCPU(for: probed)
     }
 
     private final class ProbeProcessBox: @unchecked Sendable {
