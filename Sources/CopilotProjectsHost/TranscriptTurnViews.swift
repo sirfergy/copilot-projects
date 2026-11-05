@@ -90,7 +90,7 @@ struct TranscriptTurnCard: View {
             }
 
             if !turn.tools.isEmpty {
-                TranscriptTools(tools: turn.tools)
+                TranscriptTools(tools: turn.tools, isTurnInProgress: turn.endedAt == nil && !turn.isAborted)
             }
             if let error = turn.error {
                 TranscriptTurnFailure(error: error)
@@ -213,6 +213,7 @@ struct TranscriptTools: View {
     private static let pathToolNames: Set<String> = ["view", "edit", "create"]
 
     let tools: [TranscriptTool]
+    var isTurnInProgress = true
 
     static func previewText(for tools: [TranscriptTool]) -> String {
         var counts: [String: Int] = [:]
@@ -228,14 +229,16 @@ struct TranscriptTools: View {
         }.joined(separator: ", ")
     }
 
-    static func summaryLabel(for tools: [TranscriptTool]) -> String {
+    static func summaryLabel(for tools: [TranscriptTool], isTurnInProgress: Bool = true) -> String {
         var parts = ["Tools (\(tools.count) \(tools.count == 1 ? "tool" : "tools"))"]
         let preview = previewText(for: tools)
         if !preview.isEmpty { parts.append(preview) }
         let failed = tools.filter { $0.success == false }.count
         if failed > 0 { parts.append("\(failed) failed") }
-        let running = tools.filter { $0.success == nil }.count
-        if running > 0 { parts.append("\(running) running") }
+        if isTurnInProgress {
+            let running = tools.filter { $0.success == nil }.count
+            if running > 0 { parts.append("\(running) running") }
+        }
         return parts.joined(separator: " · ")
     }
 
@@ -245,7 +248,7 @@ struct TranscriptTools: View {
             icon: "wrench.and.screwdriver",
             title: "Tools",
             subtitle: Self.previewText(for: tools),
-            accessibilityLabel: Self.summaryLabel(for: tools),
+            accessibilityLabel: Self.summaryLabel(for: tools, isTurnInProgress: isTurnInProgress),
             accessibilityIdentifier: "transcript-tools-toggle"
         ) {
             if failedCount > 0 {
@@ -254,7 +257,7 @@ struct TranscriptTools: View {
                     .foregroundStyle(.red)
                     .layoutPriority(1)
             }
-            if tools.contains(where: { $0.success == nil }) {
+            if isTurnInProgress, tools.contains(where: { $0.success == nil }) {
                 ProgressView()
                     .controlSize(.small)
                     .accessibilityHidden(true)
@@ -292,7 +295,7 @@ struct TranscriptTools: View {
         switch tool.success {
         case true: ("checkmark.circle.fill", .green, "Succeeded")
         case false: ("xmark.circle.fill", .red, "Failed")
-        case nil: ("circle.dotted", StudioStyle.secondaryText, "Running")
+        case nil: ("circle.dotted", StudioStyle.secondaryText, isTurnInProgress ? "Running" : "Stopped")
         }
     }
 }
