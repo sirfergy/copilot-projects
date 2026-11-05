@@ -909,17 +909,12 @@ public struct MarkdownText: View, Equatable {
             makePlainAttributedText(text, styleContext: key.styleContext)
         case let .prose(parts):
             makeProseAttributedText(parts, styleContext: key.styleContext)
-        case .thematicBreak:
-            makePlainAttributedText("", styleContext: key.styleContext)
         case let .codeBlock(code):
             makeCodeBlockAttributedText(code, styleContext: key.styleContext)
         case let .table(table):
             makeTableAttributedText(table, styleContext: key.styleContext, layoutDirection: key.layoutDirection)
-        case let .details(details, _, _):
-            makePlainAttributedText(
-                [details.summary.isEmpty ? "Details" : details.summary, details.body].filter { !$0.isEmpty }.joined(separator: "\n"),
-                styleContext: key.styleContext
-            )
+        case .thematicBreak, .details:
+            NSAttributedString()
         }
     }
 
@@ -1076,7 +1071,7 @@ public struct MarkdownText: View, Equatable {
         case .thematicBreak:
             Divider()
                 .padding(.vertical, 2)
-        case .codeBlock:
+        case .codeBlock, .table:
             ScrollView(.horizontal, showsIndicators: false) {
                 SelectableMarkdownText(wraps: false, segment: segment)
                     .padding(10)
@@ -1087,25 +1082,9 @@ public struct MarkdownText: View, Equatable {
                 Self.containerBackgroundColor,
                 in: RoundedRectangle(cornerRadius: 8)
             )
-        case let .table(table):
-            tableView(table)
         case let .details(details, parseSummaryInline, budget):
             MarkdownDetailsView(details: details, parseSummaryInline: parseSummaryInline, nestingDepth: nestingDepth + 1, budget: budget)
         }
-    }
-
-    @ViewBuilder
-    private func tableView(_ table: MarkdownTable) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            SelectableMarkdownText(wraps: false, segment: .table(table))
-                .padding(10)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            Self.containerBackgroundColor,
-            in: RoundedRectangle(cornerRadius: 8)
-        )
     }
 
     private static let cellWidth: CGFloat = 280

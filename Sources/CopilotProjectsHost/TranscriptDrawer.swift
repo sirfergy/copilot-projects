@@ -299,12 +299,8 @@ struct TranscriptDrawer: View {
     var onAnswerUserInput: (@MainActor (RemoteUserInputAnswer) async -> RemoteWorkflowActionResult)? = nil
     var onAnswerElicitation: (@MainActor (RemoteElicitationAnswer) async -> RemoteWorkflowActionResult)? = nil
     let onPreview: (TranscriptImagePreviewItem) -> Void
-    @AppStorage(Self.fullWidthTranscriptKey) private var isFullWidth = Self.usesFullTerminalArea(storedValue: nil)
+    @AppStorage(Self.fullWidthTranscriptKey) private var isFullWidth = false
     @State private var isAtBottom = true
-
-    static func usesFullTerminalArea(storedValue: Bool?) -> Bool {
-        storedValue ?? false
-    }
 
     static func usageSummary(for workflow: RemoteSessionWorkflow, now: Date = Date()) -> String {
         if workflow.budgetRequest != nil {
@@ -624,39 +620,32 @@ struct QuickReplyItem: Codable, Equatable, Identifiable, Sendable {
     let prompt: String
 
     var id: String { label.folding(options: .caseInsensitive, locale: nil) }
-
-    enum CodingKeys: String, CodingKey {
-        case label
-        case prompt
-    }
 }
 
-enum QuickReplyValidationError: Equatable, LocalizedError, Sendable {
+enum QuickReplyValidationError: Error, Equatable, Sendable {
     case emptyLabel
-    case labelTooLong(max: Int)
+    case labelTooLong
     case emptyPrompt
-    case promptTooLong(max: Int)
+    case promptTooLong
     case duplicateLabel(String)
-    case tooManyReplies(max: Int)
+    case tooManyReplies
 
     var message: String {
         switch self {
         case .emptyLabel:
             return "Label cannot be empty."
-        case .labelTooLong(let max):
-            return "Label must be \(max) characters or fewer."
+        case .labelTooLong:
+            return "Label must be \(QuickReplyItem.maxLabelLength) characters or fewer."
         case .emptyPrompt:
             return "Prompt cannot be empty."
-        case .promptTooLong(let max):
-            return "Prompt must be \(max) characters or fewer."
+        case .promptTooLong:
+            return "Prompt must be \(QuickReplyItem.maxPromptLength) characters or fewer."
         case .duplicateLabel(let label):
             return "A quick reply labeled “\(label)” already exists."
-        case .tooManyReplies(let max):
-            return "You can configure at most \(max) quick replies."
+        case .tooManyReplies:
+            return "You can configure at most \(QuickReplyItem.maxCount) quick replies."
         }
     }
-
-    var errorDescription: String? { message }
 }
 
 enum QuickReplyConfiguration: Equatable, Sendable {
@@ -696,20 +685,20 @@ enum QuickReplyConfiguration: Equatable, Sendable {
             return .failure(.emptyLabel)
         }
         guard trimmedLabel.count <= QuickReplyItem.maxLabelLength else {
-            return .failure(.labelTooLong(max: QuickReplyItem.maxLabelLength))
+            return .failure(.labelTooLong)
         }
         guard !trimmedPrompt.isEmpty else {
             return .failure(.emptyPrompt)
         }
         guard trimmedPrompt.count <= QuickReplyItem.maxPromptLength else {
-            return .failure(.promptTooLong(max: QuickReplyItem.maxPromptLength))
+            return .failure(.promptTooLong)
         }
         return .success(QuickReplyItem(label: trimmedLabel, prompt: trimmedPrompt))
     }
 
     static func validateList(_ items: [QuickReplyItem]) -> Result<[QuickReplyItem], QuickReplyValidationError> {
         guard items.count <= QuickReplyItem.maxCount else {
-            return .failure(.tooManyReplies(max: QuickReplyItem.maxCount))
+            return .failure(.tooManyReplies)
         }
         var normalized: [QuickReplyItem] = []
         normalized.reserveCapacity(items.count)
@@ -729,22 +718,22 @@ enum QuickReplyConfiguration: Equatable, Sendable {
     }
 
     static func resolved(fromJSON jsonString: String?) -> QuickReplyConfiguration {
-        guard let jsonString,
-              let data = jsonString.data(using: .utf8),
-              let valid = decodeCustomList(from: data) else {
+        guard let data = jsonString?.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([QuickReplyItem].self, from: data),
+              case .success(let valid) = validateList(decoded) else {
             return .defaultReplies
         }
         return .custom(valid)
     }
 
-    static func load(from defaults: UserDefaults = .standard) -> QuickReplyConfiguration {
+    static func load(from defaults: UserDefaults) -> QuickReplyConfiguration {
         resolved(fromJSON: defaults.string(forKey: storageKey))
     }
 
     @discardableResult
     static func save(
         _ items: [QuickReplyItem],
-        to defaults: UserDefaults = .standard
+        to defaults: UserDefaults
     ) -> Result<[QuickReplyItem], QuickReplyValidationError> {
         switch validateList(items) {
         case .failure(let error):
@@ -759,16 +748,8 @@ enum QuickReplyConfiguration: Equatable, Sendable {
         }
     }
 
-    static func reset(in defaults: UserDefaults = .standard) {
+    static func reset(in defaults: UserDefaults) {
         defaults.removeObject(forKey: storageKey)
-    }
-
-    private static func decodeCustomList(from data: Data) -> [QuickReplyItem]? {
-        guard let decoded = try? JSONDecoder().decode([QuickReplyItem].self, from: data),
-              case .success(let valid) = validateList(decoded) else {
-            return nil
-        }
-        return valid
     }
 }
 
@@ -787,7 +768,6 @@ extension RemotePromptMode {
 
 struct TranscriptPromptComposerView: View {
     static let showQuickReplyChipsKey = "showQuickReplyChips"
-    static let quickReplyListKey = QuickReplyConfiguration.storageKey
     static let maxQuickReplyStripHeight: CGFloat = 116
     static let quickReplyFirstRowHeight: CGFloat = 30
 
@@ -799,7 +779,7 @@ struct TranscriptPromptComposerView: View {
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
     let onPreview: (TranscriptImagePreviewItem) -> Void
     @AppStorage(Self.showQuickReplyChipsKey) private var showQuickReplyChips = true
-    @AppStorage(Self.quickReplyListKey) private var quickReplyListJSON: String?
+    @AppStorage(QuickReplyConfiguration.storageKey) private var quickReplyListJSON: String?
     @FocusState private var promptFocused: Bool
 
     var isDeliveryModeDisabled: Bool {
@@ -839,41 +819,6 @@ struct TranscriptPromptComposerView: View {
         return true
     }
 
-    @MainActor
-    static func visibleQuickReplies(
-        showQuickReplyChips: Bool,
-        storedJSON: String?,
-        composer: DesktopSessionPromptComposer,
-        workflow: RemoteSessionWorkflow?,
-        operation: AgentOperationProjection,
-        now: Date = Date()
-    ) -> [QuickReplyItem] {
-        guard canShowQuickReplies(
-            showQuickReplyChips: showQuickReplyChips,
-            composer: composer,
-            workflow: workflow,
-            operation: operation,
-            now: now
-        ) else {
-            return []
-        }
-        return QuickReplyConfiguration.resolved(fromJSON: storedJSON).activeReplies
-    }
-
-    private func canSendQuickReply(
-        workflow: RemoteSessionWorkflow?,
-        operation: AgentOperationProjection,
-        now: Date
-    ) -> Bool {
-        Self.canShowQuickReplies(
-            showQuickReplyChips: showQuickReplyChips,
-            composer: composer,
-            workflow: workflow,
-            operation: operation,
-            now: now
-        )
-    }
-
     private func blockedMessage(now: Date) -> String? {
         composer.statusMessage
             ?? composer.attachmentsBlockedReason(workflow: liveWorkflow, operation: liveOperation, now: now)
@@ -881,14 +826,12 @@ struct TranscriptPromptComposerView: View {
 
     @ViewBuilder
     private func quickReplyStrip(replies: [QuickReplyItem]) -> some View {
-        QuickReplyFlowLayout(
-            horizontalSpacing: 6,
-            verticalSpacing: 4,
-            firstRowAlignmentHeight: Self.quickReplyFirstRowHeight
-        ) {
+        QuickReplyFlowLayout {
             ForEach(replies) { item in
                 Button(item.label) {
-                    guard canSendQuickReply(
+                    guard Self.canShowQuickReplies(
+                        showQuickReplyChips: showQuickReplyChips,
+                        composer: composer,
                         workflow: liveWorkflow,
                         operation: liveOperation,
                         now: Date()
@@ -967,7 +910,7 @@ struct TranscriptPromptComposerView: View {
                 )
                 HStack(alignment: .top, spacing: 8) {
                     if !configuredReplies.isEmpty {
-                        QuickReplyStripCapLayout(maxHeight: Self.maxQuickReplyStripHeight) {
+                        QuickReplyStripCapLayout {
                             ViewThatFits(in: .vertical) {
                                 quickReplyStrip(replies: configuredReplies)
                                 ScrollView(.vertical) {
@@ -1140,14 +1083,13 @@ struct TranscriptPromptComposerView: View {
 }
 
 private struct QuickReplyStripCapLayout: Layout {
-    var maxHeight: CGFloat
-
     func sizeThatFits(
         proposal: ProposedViewSize,
         subviews: Subviews,
         cache: inout ()
     ) -> CGSize {
         guard let subview = subviews.first else { return .zero }
+        let maxHeight = TranscriptPromptComposerView.maxQuickReplyStripHeight
         let size = subview.sizeThatFits(
             ProposedViewSize(width: proposal.width, height: maxHeight)
         )
@@ -1169,9 +1111,9 @@ private struct QuickReplyStripCapLayout: Layout {
 }
 
 private struct QuickReplyFlowLayout: Layout {
-    var horizontalSpacing: CGFloat = 6
-    var verticalSpacing: CGFloat = 4
-    var firstRowAlignmentHeight: CGFloat = 30
+    private static let horizontalSpacing: CGFloat = 6
+    private static let verticalSpacing: CGFloat = 4
+    private static let firstRowAlignmentHeight = TranscriptPromptComposerView.quickReplyFirstRowHeight
 
     func makeCache(subviews: Subviews) -> CGFloat? { nil }
 
@@ -1187,11 +1129,11 @@ private struct QuickReplyFlowLayout: Layout {
         for (index, subview) in subviews.enumerated() {
             let raw = subview.sizeThatFits(ProposedViewSize(width: clampedLimit, height: nil))
             let size = CGSize(width: min(raw.width, clampedLimit), height: raw.height)
-            if !rows[rows.count - 1].isEmpty, rowWidth + horizontalSpacing + size.width > clampedLimit {
+            if !rows[rows.count - 1].isEmpty, rowWidth + Self.horizontalSpacing + size.width > clampedLimit {
                 rows.append([(index, size)])
                 rowWidth = size.width
             } else {
-                if !rows[rows.count - 1].isEmpty { rowWidth += horizontalSpacing }
+                if !rows[rows.count - 1].isEmpty { rowWidth += Self.horizontalSpacing }
                 rows[rows.count - 1].append((index, size))
                 rowWidth += size.width
             }
@@ -1204,20 +1146,20 @@ private struct QuickReplyFlowLayout: Layout {
         for (rowIndex, row) in rows.enumerated() {
             let rowHeight = row.map(\.size.height).max() ?? 0
             if rowIndex == 0 {
-                y = max(0, (firstRowAlignmentHeight - rowHeight) / 2)
+                y = max(0, (Self.firstRowAlignmentHeight - rowHeight) / 2)
             }
             var x: CGFloat = 0
             for (itemIndex, item) in row.enumerated() {
-                if itemIndex > 0 { x += horizontalSpacing }
+                if itemIndex > 0 { x += Self.horizontalSpacing }
                 let chipY = y + (rowHeight - item.size.height) / 2
                 frames[item.index] = CGRect(x: x, y: chipY, width: item.size.width, height: item.size.height)
                 x += item.size.width
             }
             widestRow = max(widestRow, x)
-            y += rowHeight + (rowIndex < rows.count - 1 ? verticalSpacing : 0)
+            y += rowHeight + (rowIndex < rows.count - 1 ? Self.verticalSpacing : 0)
         }
 
-        return (CGSize(width: widestRow, height: max(y, firstRowAlignmentHeight)), frames)
+        return (CGSize(width: widestRow, height: max(y, Self.firstRowAlignmentHeight)), frames)
     }
 
     func sizeThatFits(
@@ -1457,7 +1399,8 @@ private struct TranscriptReasoningView: View {
                         if index > 0 {
                             Divider()
                         }
-                        transcriptText(step)
+                        MarkdownText(text: step)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .font(.callout)
                             .foregroundStyle(StudioStyle.secondaryText)
                     }
@@ -1470,11 +1413,6 @@ private struct TranscriptReasoningView: View {
                 )
             }
         }
-    }
-
-    private func transcriptText(_ text: String) -> some View {
-        MarkdownText(text: text)
-            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1951,8 +1889,8 @@ struct DesktopElicitationForm: Equatable {
         if let itemType = items["type"] {
             guard case .string("string") = itemType else { return nil }
         }
-        if let alternatives = arrayEntries(items["oneOf"]) ?? arrayEntries(items["anyOf"]),
-           (items["oneOf"] == nil) != (items["anyOf"] == nil) {
+        if (items["oneOf"] == nil) != (items["anyOf"] == nil),
+           case let .array(alternatives)? = items["oneOf"] ?? items["anyOf"] {
             guard items["enum"] == nil else { return nil }
             return labeledChoices(alternatives)
         }
@@ -1994,11 +1932,6 @@ struct DesktopElicitationForm: Equatable {
             choices.append(.init(value: value, title: value))
         }
         return choices.isEmpty ? nil : choices
-    }
-
-    private static func arrayEntries(_ value: RemoteJSONValue?) -> [RemoteJSONValue]? {
-        if case let .array(entries)? = value { return entries }
-        return nil
     }
 
     private static func nonNegativeInt(_ value: RemoteJSONValue) -> Int? {
@@ -2101,20 +2034,20 @@ enum DesktopElicitationNumberText {
         return .string(text)
     }
 
-    static func text(for value: RemoteJSONValue?, locale: Locale = .current) -> String {
+    static func text(for value: RemoteJSONValue?) -> String {
         if case let .number(number)? = value, number.isFinite {
-            return format(number, locale: locale)
+            return format(number)
         }
         if case let .string(text)? = value { return text }
         return ""
     }
 
-    static func format(_ value: Double, locale: Locale = .current) -> String {
+    private static func format(_ value: Double) -> String {
         if value == value.rounded(), abs(value) < 1e15 {
             return String(format: "%.0f", value)
         }
-        if let localized = makeFormatter(locale: locale).string(from: NSNumber(value: value)),
-           parse(localized, locale: locale) == value {
+        if let localized = makeFormatter(locale: .current).string(from: NSNumber(value: value)),
+           parse(localized, locale: .current) == value {
             return localized
         }
         return String(value)
@@ -2200,14 +2133,6 @@ enum DesktopElicitationNumberText {
 struct DesktopTerminalDefaultBooleanElicitation: Equatable {
     let key: String
     let value: Bool
-
-    static func parse(_ request: RemoteElicitationRequest) -> Self? {
-        parse(
-            requestId: request.requestId,
-            mode: request.mode,
-            schema: request.schema
-        )
-    }
 
     static func parse(
         requestId: String,
@@ -2410,7 +2335,11 @@ private struct DesktopElicitationCard: View {
     }
 
     private var terminalDefault: DesktopTerminalDefaultBooleanElicitation? {
-        DesktopTerminalDefaultBooleanElicitation.parse(request)
+        DesktopTerminalDefaultBooleanElicitation.parse(
+            requestId: request.requestId,
+            mode: request.mode,
+            schema: request.schema
+        )
     }
 
     private var isURLMode: Bool {
@@ -2454,7 +2383,14 @@ private struct DesktopElicitationCard: View {
                     Spacer()
                     Button("Send Answer") { submit(.accept) }
                         .buttonStyle(.borderedProminent)
-                        .disabled(isDisabled || !canSubmit(form))
+                        .disabled(
+                            isDisabled
+                                || form.validatedContent(
+                                    values: values,
+                                    touched: touched,
+                                    customChoiceFields: customChoiceFields
+                                ) == nil
+                        )
                 }
             } else {
                 Text("Answer this question in the Copilot terminal.")
@@ -2501,7 +2437,13 @@ private struct DesktopElicitationCard: View {
                     .buttonStyle(.bordered)
                 Spacer()
                 Button("Use default: \(terminalDefault.value ? "Yes" : "No")") {
-                    submitTerminalDefault(terminalDefault)
+                    sendAnswer(
+                        RemoteElicitationAnswer(
+                            requestId: request.requestId,
+                            action: .accept,
+                            content: [terminalDefault.key: .bool(terminalDefault.value)]
+                        )
+                    )
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(isDisabled)
@@ -2629,9 +2571,11 @@ private struct DesktopElicitationCard: View {
                 }
             case .stringMultiSelect(let choices, _):
                 ForEach(choices, id: \.value) { choice in
-                    let selected = isChoiceSelected(field.key, choice.value)
+                    let selected = DesktopElicitationField.selectedStrings(values[field.key]).contains(choice.value)
                     Button {
-                        toggleChoice(field, choice.value)
+                        guard let updated = field.toggledSelectionValue(choice.value, in: values[field.key]) else { return }
+                        values[field.key] = updated
+                        touched.insert(field.key)
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: selected ? "checkmark.square.fill" : "square")
@@ -2671,14 +2615,6 @@ private struct DesktopElicitationCard: View {
         customChoiceFields = initialState.customChoiceFields
     }
 
-    private func canSubmit(_ form: DesktopElicitationForm) -> Bool {
-        form.validatedContent(
-            values: values,
-            touched: touched,
-            customChoiceFields: customChoiceFields
-        ) != nil
-    }
-
     private func stringLengthRequirement(_ kind: DesktopElicitationField.Kind) -> String? {
         guard case let .string(minLength, maxLength) = kind else { return nil }
         switch (minLength, maxLength) {
@@ -2693,22 +2629,6 @@ private struct DesktopElicitationCard: View {
         }
     }
 
-    private func markTouched(_ key: String) { touched.insert(key) }
-
-    private func selectedStrings(_ key: String) -> [String] {
-        DesktopElicitationField.selectedStrings(values[key])
-    }
-
-    private func isChoiceSelected(_ key: String, _ value: String) -> Bool {
-        selectedStrings(key).contains(value)
-    }
-
-    private func toggleChoice(_ field: DesktopElicitationField, _ value: String) {
-        guard let updated = field.toggledSelectionValue(value, in: values[field.key]) else { return }
-        values[field.key] = updated
-        markTouched(field.key)
-    }
-
     private func freeformStringBinding(_ field: DesktopElicitationField) -> Binding<String> {
         Binding(
             get: {
@@ -2717,7 +2637,7 @@ private struct DesktopElicitationCard: View {
             },
             set: {
                 values[field.key] = field.normalizedStringInput($0)
-                markTouched(field.key)
+                touched.insert(field.key)
             }
         )
     }
@@ -2728,7 +2648,7 @@ private struct DesktopElicitationCard: View {
                 if case let .bool(value)? = values[key] { return value }
                 return false
             },
-            set: { values[key] = .bool($0); markTouched(key) }
+            set: { values[key] = .bool($0); touched.insert(key) }
         )
     }
 
@@ -2749,7 +2669,7 @@ private struct DesktopElicitationCard: View {
                 default:
                     values[key] = nil
                 }
-                markTouched(key)
+                touched.insert(key)
             }
         )
     }
@@ -2760,7 +2680,7 @@ private struct DesktopElicitationCard: View {
                 numberDrafts[key] ?? DesktopElicitationNumberText.text(for: values[key])
             },
             set: { text in
-                markTouched(key)
+                touched.insert(key)
                 numberDrafts[key] = text
                 values[key] = DesktopElicitationNumberText.value(for: text)
             }
@@ -2782,18 +2702,6 @@ private struct DesktopElicitationCard: View {
                 requestId: request.requestId,
                 action: action,
                 content: content
-            )
-        )
-    }
-
-    private func submitTerminalDefault(
-        _ terminalDefault: DesktopTerminalDefaultBooleanElicitation
-    ) {
-        sendAnswer(
-            RemoteElicitationAnswer(
-                requestId: request.requestId,
-                action: .accept,
-                content: [terminalDefault.key: .bool(terminalDefault.value)]
             )
         )
     }

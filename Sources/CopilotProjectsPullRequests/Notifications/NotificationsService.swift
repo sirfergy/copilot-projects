@@ -527,6 +527,10 @@ struct NotificationDetailsFetcher: Sendable {
         guard parts.count == 2, let number = thread.number else { return (subject, false) }
         var subject = subject
         var erred = false
+        struct Payload: Decodable {
+            struct Repository: Decodable { let pullRequest: Subject? }
+            let repository: Repository?
+        }
         if subject.timelineItems?.pageInfo?.hasPreviousPage == true {
             let query = """
             query($owner: String!, $name: String!, $number: Int!, $cursor: String!) {
@@ -542,13 +546,6 @@ struct NotificationDetailsFetcher: Sendable {
               }
             }
             """
-            struct Payload: Decodable {
-                struct Repository: Decodable {
-                    struct PullRequest: Decodable { let timelineItems: Timeline? }
-                    let pullRequest: PullRequest?
-                }
-                let repository: Repository?
-            }
             var seen: Set<String> = []
             for _ in 0..<10 where subject.timelineItems?.pageInfo?.hasPreviousPage == true {
                 guard let existing = subject.timelineItems?.nodes,
@@ -583,13 +580,6 @@ struct NotificationDetailsFetcher: Sendable {
               }
             }
             """
-            struct Payload: Decodable {
-                struct Repository: Decodable {
-                    struct PullRequest: Decodable { let pending: PendingRequests? }
-                    let pullRequest: PullRequest?
-                }
-                let repository: Repository?
-            }
             var seen: Set<String> = []
             for _ in 0..<10 where subject.pending?.pageInfo?.hasNextPage == true {
                 guard let existing = subject.pending?.nodes,
