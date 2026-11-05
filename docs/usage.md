@@ -535,6 +535,17 @@ existing `markRead` clears it. A marked session's snapshot carries `unread` and
 omits `mark-unread-v1`: a gateway advertises it only when it routes the
 `mark-unread` control to a host that declares it.
 
+#### Shared quick replies
+
+`SessionHost.quickReplies` and `SessionHost.updateQuickReplies` read and replace the
+Mac's stored quick-reply list (`UserDefaults` key `quickReplyList`), and
+`RemoteWorkspaceSnapshot.quickRepliesDigest` carries a 16-hex-character SHA-256
+prefix when a custom list is stored (`nil` when built-in defaults apply). Hosts
+report `supportsQuickReplies`, and other conformers default to unsupported.
+`RemoteProtocolInfo.current` omits `shared-quick-replies`: a gateway advertises it
+only when it serves `RemoteQuickRepliesContract.path` (`GET /quick-replies` and
+`POST /quick-replies`) for a host that declares it.
+
 ### Notification deep links
 
 External notifications can focus an existing project or session through the

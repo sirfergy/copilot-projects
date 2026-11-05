@@ -15892,6 +15892,13 @@ final class AppLogicTests: XCTestCase {
             ),
             .failure(.labelTooLong)
         )
+        let emojiLabel = String(repeating: "👨‍👩‍👧‍👦", count: 11)
+        XCTAssertEqual(emojiLabel.count, 11)
+        XCTAssertGreaterThan(emojiLabel.utf8.count, 256)
+        XCTAssertEqual(
+            QuickReplyConfiguration.validateItem(label: emojiLabel, prompt: "ok"),
+            .success(QuickReplyItem(label: emojiLabel, prompt: "ok"))
+        )
         XCTAssertEqual(
             QuickReplyConfiguration.validateItem(label: "ok", prompt: " \n\t "),
             .failure(.emptyPrompt)
@@ -15909,6 +15916,22 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(
             QuickReplyConfiguration.validateItem(label: "  \(maxLabel)  ", prompt: "  \(maxPrompt)\n"),
             .success(QuickReplyItem(label: maxLabel, prompt: maxPrompt))
+        )
+
+        // 8 KB (8,192 UTF-8 bytes) prompt limit, even when character count <= 2,000.
+        let exact8KBFlags = String(repeating: "🇺🇸", count: 1_024)
+        XCTAssertEqual(exact8KBFlags.count, 1_024)
+        XCTAssertEqual(exact8KBFlags.utf8.count, QuickReplyItem.maxPromptUTF8Bytes)
+        XCTAssertEqual(
+            QuickReplyConfiguration.validateItem(label: "Flags", prompt: exact8KBFlags),
+            .success(QuickReplyItem(label: "Flags", prompt: exact8KBFlags))
+        )
+        let over8KBFlags = exact8KBFlags + "🇺🇸"
+        XCTAssertEqual(over8KBFlags.count, 1_025)
+        XCTAssertGreaterThan(over8KBFlags.utf8.count, QuickReplyItem.maxPromptUTF8Bytes)
+        XCTAssertEqual(
+            QuickReplyConfiguration.validateItem(label: "Flags", prompt: over8KBFlags),
+            .failure(.promptTooLong)
         )
 
         XCTAssertEqual(
@@ -15959,6 +15982,7 @@ final class AppLogicTests: XCTestCase {
             "[{\"label\":\"only-label\"}]",
             "[{\"label\":\"\",\"prompt\":\"hi\"}]",
             "[{\"label\":\"A\",\"prompt\":\"1\"},{\"label\":\"a\",\"prompt\":\"2\"}]",
+            "[{\"label\":\"Flags\",\"prompt\":\"\(over8KBFlags)\"}]",
             12345,
         ]
         for payload in invalidPayloads {
@@ -15967,6 +15991,194 @@ final class AppLogicTests: XCTestCase {
             XCTAssertFalse(loaded.isCustomized)
             XCTAssertEqual(loaded.activeReplies, QuickReplyConfiguration.defaultItems)
         }
+    }
+
+    @MainActor
+    func testSharedQuickRepliesBridgeMigrationValidationAndLiveDesktopSync() throws {
+        let suite = "shared-quick-replies-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let project = Project(
+            id: "p1", name: "Main", cwd: root.path,
+            sessions: [Session(id: "s1", title: "Session", cwd: root.path)],
+            selectedSessionId: "s1"
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+        // 1. Desktop migration: an existing UserDefaults quickReplyList (seeded as raw legacy JSON,
+        //    including multi-scalar emoji labels) becomes the shared list on launch.
+        let familyEmojiLabel = String(repeating: "👨‍👩‍👧‍👦", count: 11)
+        let desktopExisting = [
+            QuickReplyItem(label: "Approve", prompt: "Approve PR"),
+            QuickReplyItem(label: familyEmojiLabel, prompt: "Merge when green"),
+        ]
+        defaults.set(
+            #"[{"label":"Approve","prompt":"Approve PR"},{"label":"\#(familyEmojiLabel)","prompt":"Merge when green"}]"#,
+            forKey: QuickReplyConfiguration.storageKey
+        )
+
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+            defaults: defaults
+        )
+        let bridge: any SessionHost = RemoteModelBridge(model: model)
+        XCTAssertTrue(bridge.supportsQuickReplies)
+        let expectedInitialState = RemoteQuickRepliesState(items: desktopExisting)
+        XCTAssertEqual(bridge.quickReplies(), expectedInitialState)
+        XCTAssertEqual(bridge.workspace()?.quickRepliesDigest, expectedInitialState.digest)
+
+        // Precomposed vs decomposed Unicode spelling changes invalidate the cached digest
+        // and reload Desktop settings with the new UTF-8 bytes.
+        let settingsBeforeUnicodeSwap = QuickRepliesSettingsModel(defaults: defaults)
+        let precomposed = [QuickReplyItem(label: "Café", prompt: "é")]
+        let decomposed = [QuickReplyItem(label: "Cafe\u{301}", prompt: "e\u{301}")]
+        XCTAssertEqual(QuickReplyConfiguration.save(precomposed, to: defaults), .success(precomposed))
+        settingsBeforeUnicodeSwap.beginEditing(at: 0)
+        let precomposedDigest = try XCTUnwrap(bridge.workspace()?.quickRepliesDigest)
+        XCTAssertEqual(
+            bridge.updateQuickReplies(RemoteQuickRepliesUpdateRequest(items: decomposed)),
+            .updated(RemoteQuickRepliesState(items: decomposed))
+        )
+        let decomposedDigest = try XCTUnwrap(bridge.workspace()?.quickRepliesDigest)
+        XCTAssertNotEqual(precomposedDigest, decomposedDigest)
+        XCTAssertEqual(decomposedDigest, bridge.quickReplies()?.digest)
+        XCTAssertNil(settingsBeforeUnicodeSwap.editingIndex)
+        XCTAssertTrue(
+            settingsBeforeUnicodeSwap.items[0].prompt.utf8.elementsEqual(decomposed[0].prompt.utf8)
+        )
+        let maxPrompt = String(repeating: "🇺🇸", count: 1_024)
+        let maxValidItems = (1...QuickReplyItem.maxCount).map {
+            QuickReplyItem(label: "Item \($0)", prompt: maxPrompt)
+        }
+        let maxValidData = try JSONEncoder().encode(
+            RemoteQuickRepliesUpdateRequest(items: maxValidItems)
+        )
+        XCTAssertEqual(
+            bridge.updateQuickReplies(from: maxValidData),
+            .updated(RemoteQuickRepliesState(items: maxValidItems))
+        )
+        XCTAssertEqual(QuickReplyConfiguration.save(desktopExisting, to: defaults), .success(desktopExisting))
+        _ = bridge.workspace()
+
+        // 2. Open Desktop settings model; verify one-time client migration (`onlyIfUnset: true`)
+        //    does NOT overwrite the existing host list.
+        let settingsModel = QuickRepliesSettingsModel(defaults: defaults)
+        XCTAssertTrue(settingsModel.isCustomized)
+        XCTAssertEqual(settingsModel.items, desktopExisting)
+        settingsModel.beginEditing(at: 0)
+        XCTAssertEqual(settingsModel.editingIndex, 0)
+
+        let clientMigrationItems = [QuickReplyItem(label: "Phone", prompt: "From phone")]
+        XCTAssertEqual(
+            bridge.updateQuickReplies(
+                RemoteQuickRepliesUpdateRequest(items: clientMigrationItems, onlyIfUnset: true)
+            ),
+            .updated(expectedInitialState)
+        )
+        XCTAssertEqual(settingsModel.items, desktopExisting)
+        XCTAssertEqual(settingsModel.editingIndex, 0)
+
+        // 3. Remote reset (`{"items":null}`) removes the stored list for all clients and updates Desktop settings live.
+        let resetData = Data(#"{"items":null}"#.utf8)
+        XCTAssertEqual(
+            bridge.updateQuickReplies(from: resetData),
+            .updated(RemoteQuickRepliesState(configuration: .defaultReplies))
+        )
+        XCTAssertNil(defaults.object(forKey: QuickReplyConfiguration.storageKey))
+        XCTAssertNil(bridge.workspace()?.quickRepliesDigest)
+        XCTAssertEqual(bridge.quickReplies(), RemoteQuickRepliesState(configuration: .defaultReplies))
+        XCTAssertFalse(settingsModel.isCustomized)
+        XCTAssertEqual(settingsModel.items, QuickReplyConfiguration.defaultItems)
+        XCTAssertNil(settingsModel.editingIndex)
+
+        // 4. Now that the host has no custom list, a client's one-time migration (`onlyIfUnset: true`)
+        //    stores its custom list and updates Desktop settings live.
+        let migratedData = try JSONEncoder().encode(
+            RemoteQuickRepliesUpdateRequest(
+                items: [QuickReplyItem(label: "  Phone  ", prompt: "  From phone\n")],
+                onlyIfUnset: true
+            )
+        )
+        let migratedExpected = RemoteQuickRepliesState(items: clientMigrationItems)
+        XCTAssertEqual(bridge.updateQuickReplies(from: migratedData), .updated(migratedExpected))
+        XCTAssertEqual(bridge.workspace()?.quickRepliesDigest, migratedExpected.digest)
+        XCTAssertTrue(settingsModel.isCustomized)
+        XCTAssertEqual(settingsModel.items, clientMigrationItems)
+
+        // 5. Regular remote write replaces the whole list (latest write wins), including empty custom list `[]`.
+        settingsModel.beginEditing(at: 0)
+        let emptyCustomState = RemoteQuickRepliesState(items: [])
+        XCTAssertEqual(
+            bridge.updateQuickReplies(RemoteQuickRepliesUpdateRequest(items: [])),
+            .updated(emptyCustomState)
+        )
+        XCTAssertEqual(bridge.workspace()?.quickRepliesDigest, emptyCustomState.digest)
+        XCTAssertNotNil(emptyCustomState.digest)
+        XCTAssertTrue(settingsModel.isCustomized)
+        XCTAssertTrue(settingsModel.items.isEmpty)
+        XCTAssertNil(settingsModel.editingIndex)
+
+        // 6. Size check before decoding and host validation rules reject invalid writes without mutating state.
+        let oversized = Data(repeating: UInt8(ascii: " "), count: RemoteQuickRepliesContract.maximumPayloadBytes + 1)
+        XCTAssertEqual(bridge.updateQuickReplies(from: oversized), .payloadTooLarge)
+        XCTAssertEqual(bridge.updateQuickReplies(from: Data("not-json".utf8)), .invalid("Invalid quick replies request."))
+        XCTAssertEqual(bridge.updateQuickReplies(from: Data("{}".utf8)), .invalid("Invalid quick replies request."))
+        XCTAssertEqual(
+            bridge.updateQuickReplies(RemoteQuickRepliesUpdateRequest(items: nil, onlyIfUnset: true)),
+            .invalid("Migration requires a custom quick-reply list.")
+        )
+        let over8KBPrompt = String(repeating: "🇺🇸", count: 1_025)
+        for invalidItems in [
+            [QuickReplyItem(label: " ", prompt: "ok")],
+            [QuickReplyItem(label: String(repeating: "a", count: 25), prompt: "ok")],
+            [QuickReplyItem(label: "ok", prompt: " ")],
+            [QuickReplyItem(label: "ok", prompt: String(repeating: "p", count: 2_001))],
+            [QuickReplyItem(label: "ok", prompt: over8KBPrompt)],
+            [QuickReplyItem(label: "Dup", prompt: "1"), QuickReplyItem(label: "dup", prompt: "2")],
+            (1...13).map { QuickReplyItem(label: "L\($0)", prompt: "P\($0)") },
+        ] {
+            guard case .invalid = bridge.updateQuickReplies(RemoteQuickRepliesUpdateRequest(items: invalidItems)) else {
+                return XCTFail("Expected invalid outcome for \(invalidItems.count) items")
+            }
+        }
+        XCTAssertEqual(bridge.quickReplies(), emptyCustomState)
+
+        // 7. Survives relaunch, and refuses reads/writes once the host is terminating.
+        let relaunched = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images-2")),
+            defaults: defaults
+        )
+        XCTAssertEqual(relaunched.remoteQuickRepliesState(), emptyCustomState)
+        relaunched.beginTermination()
+        let terminatingBridge = RemoteModelBridge(model: relaunched)
+        XCTAssertNil(terminatingBridge.quickReplies())
+        XCTAssertEqual(
+            terminatingBridge.updateQuickReplies(RemoteQuickRepliesUpdateRequest(items: desktopExisting)),
+            .unavailable("Copilot Projects is closing.")
+        )
+        XCTAssertEqual(
+            terminatingBridge.updateQuickReplies(
+                from: try JSONEncoder().encode(RemoteQuickRepliesUpdateRequest(items: desktopExisting))
+            ),
+            .unavailable("Copilot Projects is closing.")
+        )
+        XCTAssertEqual(terminatingBridge.updateQuickReplies(from: oversized), .payloadTooLarge)
+        XCTAssertEqual(QuickReplyConfiguration.load(from: defaults), .custom([]))
+        model.beginTermination()
     }
 
     @MainActor

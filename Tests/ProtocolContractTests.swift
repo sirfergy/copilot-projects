@@ -1658,4 +1658,124 @@ final class ProtocolContractTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(20))
         XCTAssertEqual(probe.closes, 1)
     }
+
+    // MARK: - Shared quick replies contract
+
+    func testSharedQuickRepliesCapabilityDigestAndWireContract() throws {
+        XCTAssertEqual(RemoteProtocolInfo.sharedQuickReplies, "shared-quick-replies")
+        XCTAssertEqual(RemoteQuickRepliesContract.capability, "shared-quick-replies")
+        XCTAssertEqual(RemoteQuickRepliesContract.path, "/quick-replies")
+        XCTAssertEqual(RemoteQuickRepliesContract.maximumPayloadBytes, 196_608)
+        // Only a gateway that serves `/quick-replies` advertises the capability.
+        XCTAssertFalse(RemoteProtocolInfo.current.supports(RemoteProtocolInfo.sharedQuickReplies))
+
+        // Default state has nil digest and omits quickRepliesDigest from workspace JSON.
+        let defaultState = RemoteQuickRepliesState(configuration: .defaultReplies)
+        XCTAssertNil(defaultState.items)
+        XCTAssertNil(defaultState.digest)
+        XCTAssertFalse(defaultState.isCustomized)
+        XCTAssertEqual(defaultState.configuration, .defaultReplies)
+        XCTAssertTrue(try jsonObject(defaultState).isEmpty)
+        XCTAssertEqual(
+            try JSONDecoder().decode(RemoteQuickRepliesState.self, from: JSONEncoder().encode(defaultState)),
+            defaultState
+        )
+
+        let uncustomizedWorkspace = RemoteWorkspaceSnapshot(projects: [], selectedProjectId: nil)
+        XCTAssertNil(uncustomizedWorkspace.quickRepliesDigest)
+        XCTAssertFalse(try jsonObject(uncustomizedWorkspace).keys.contains("quickRepliesDigest"))
+
+        // Empty custom list has a non-nil digest distinct from nil (.defaultReplies) and from non-empty lists.
+        let emptyCustom = RemoteQuickRepliesState(configuration: .custom([]))
+        XCTAssertEqual(emptyCustom.items, [])
+        XCTAssertTrue(emptyCustom.isCustomized)
+        let emptyDigest = try XCTUnwrap(emptyCustom.digest)
+        XCTAssertEqual(emptyDigest.count, 16)
+        XCTAssertEqual(
+            try JSONDecoder().decode(RemoteQuickRepliesState.self, from: JSONEncoder().encode(emptyCustom)),
+            emptyCustom
+        )
+
+        let customItems = [
+            QuickReplyItem(label: "Approve", prompt: "Approve"),
+            QuickReplyItem(label: "Ship", prompt: "Merge when CI is green"),
+        ]
+        let customState = RemoteQuickRepliesState(items: customItems)
+        let customDigest = try XCTUnwrap(customState.digest)
+        XCTAssertEqual(customDigest, QuickReplyConfiguration.digest(for: customItems))
+        XCTAssertNotEqual(customDigest, emptyDigest)
+        XCTAssertNotEqual(
+            customDigest,
+            QuickReplyConfiguration.digest(for: Array(customItems.reversed()))
+        )
+        XCTAssertNotEqual(
+            customDigest,
+            QuickReplyConfiguration.digest(for: [
+                QuickReplyItem(label: "approve", prompt: "Approve"),
+                customItems[1],
+            ])
+        )
+        XCTAssertNotEqual(
+            customDigest,
+            QuickReplyConfiguration.digest(for: [
+                QuickReplyItem(label: "Approve", prompt: "Approve!"),
+                customItems[1],
+            ])
+        )
+
+        // Workspace snapshot preserves quickRepliesDigest across keepingAvailableModels and withProtocolInfo.
+        let workspaceWithDigest = RemoteWorkspaceSnapshot(
+            projects: catalogWorkspace().projects,
+            selectedProjectId: "p1",
+            protocolInfo: .current,
+            quickRepliesDigest: customDigest,
+            servedAtMilliseconds: 123
+        )
+        XCTAssertEqual(workspaceWithDigest.keepingAvailableModels(for: "a").quickRepliesDigest, customDigest)
+        XCTAssertEqual(
+            workspaceWithDigest.withProtocolInfo(RemoteProtocolInfo(revision: 1, capabilities: [])).quickRepliesDigest,
+            customDigest
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                RemoteWorkspaceSnapshot.self,
+                from: JSONEncoder().encode(workspaceWithDigest)
+            ).quickRepliesDigest,
+            customDigest
+        )
+
+        // Update request wire shape (replace, migration onlyIfUnset, and reset).
+        let replaceReq = RemoteQuickRepliesUpdateRequest(items: customItems)
+        XCTAssertEqual(Set(try jsonObject(replaceReq).keys), ["items"])
+        XCTAssertEqual(
+            try JSONDecoder().decode(RemoteQuickRepliesUpdateRequest.self, from: JSONEncoder().encode(replaceReq)),
+            replaceReq
+        )
+
+        let migrateReq = RemoteQuickRepliesUpdateRequest(items: customItems, onlyIfUnset: true)
+        XCTAssertEqual(try jsonObject(migrateReq)["onlyIfUnset"] as? Bool, true)
+        XCTAssertEqual(
+            try JSONDecoder().decode(RemoteQuickRepliesUpdateRequest.self, from: JSONEncoder().encode(migrateReq)),
+            migrateReq
+        )
+
+        let resetReq = RemoteQuickRepliesUpdateRequest(items: nil)
+        XCTAssertEqual(
+            try JSONDecoder().decode(RemoteQuickRepliesUpdateRequest.self, from: JSONEncoder().encode(resetReq)),
+            resetReq
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(RemoteQuickRepliesUpdateRequest.self, from: Data(#"{"items":null}"#.utf8)),
+            resetReq
+        )
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(RemoteQuickRepliesUpdateRequest.self, from: Data("{}".utf8))
+        )
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                RemoteQuickRepliesUpdateRequest.self,
+                from: Data(#"{"quickReplies":[]}"#.utf8)
+            )
+        )
+    }
 }

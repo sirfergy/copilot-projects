@@ -48,6 +48,11 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
     /// Optional and omitted when empty so snapshots without closed sessions stay
     /// compact and backward-compatible.
     public var recentlyClosedSessions: [RemoteRecentlyClosedSession]?
+    /// Compact digest of the Mac host's stored custom quick-reply list, or `nil`
+    /// when no custom list is stored (built-in defaults apply) or on older hosts.
+    /// Clients compare this token across workspace updates and fetch
+    /// `RemoteQuickRepliesContract.path` only when it changes to a new non-nil value.
+    public var quickRepliesDigest: String?
     /// When the gateway served this snapshot, in Unix milliseconds on the Mac's
     /// clock: the same clock as each session's `workflow.observedAtMilliseconds`.
     /// Clients pass it with their own monotonic receipt time to
@@ -67,6 +72,7 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
         availableHosts: [RemoteHostInfo]? = nil,
         hostHealth: [RemoteHostHealth]? = nil,
         recentlyClosedSessions: [RemoteRecentlyClosedSession]? = nil,
+        quickRepliesDigest: String? = nil,
         servedAtMilliseconds: Int64? = nil
     ) {
         self.projects = projects
@@ -75,7 +81,21 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
         self.availableHosts = availableHosts
         self.hostHealth = hostHealth
         self.recentlyClosedSessions = recentlyClosedSessions
+        self.quickRepliesDigest = quickRepliesDigest
         self.servedAtMilliseconds = servedAtMilliseconds
+    }
+
+    public func withProtocolInfo(_ protocolInfo: RemoteProtocolInfo?) -> RemoteWorkspaceSnapshot {
+        RemoteWorkspaceSnapshot(
+            projects: projects,
+            selectedProjectId: selectedProjectId,
+            protocolInfo: protocolInfo,
+            availableHosts: availableHosts,
+            hostHealth: hostHealth,
+            recentlyClosedSessions: recentlyClosedSessions,
+            quickRepliesDigest: quickRepliesDigest,
+            servedAtMilliseconds: servedAtMilliseconds
+        )
     }
 }
 
