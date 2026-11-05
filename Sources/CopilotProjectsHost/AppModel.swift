@@ -2780,28 +2780,49 @@ final class AppModel: ObservableObject {
         let previousVisibleIds = projects[from.p]
             .sessionDisplayItems(expandedParentIds: expandedParentSessionIds)
             .map(\.id)
-        projects[from.p].normalizeParentSessions(removingParentId: sid)
-        var session = projects[from.p].sessions.remove(at: from.s)
-        session.parentSessionId = nil
-        expandedParentSessionIds.remove(sid)
-        // Keep the source project's selection sane (mirrors closeSession): fall back
-        // to the tab left of the one that moved, or clear if it's now empty.
-        if projects[from.p].selectedSessionId == sid {
-            if projects[from.p].sessions.isEmpty {
-                projects[from.p].selectedSessionId = nil
-            } else if let visibleIndex = previousVisibleIds.firstIndex(of: sid), visibleIndex > 0 {
-                projects[from.p].selectedSessionId = previousVisibleIds[visibleIndex - 1]
+        withCoalescedProjectPublications {
+            projects[from.p].normalizeParentSessions()
+            var session = projects[from.p].sessions.remove(at: from.s)
+            let children: [Session]
+            if session.parentSessionId == nil {
+                children = projects[from.p].sessions.filter { $0.parentSessionId == sid }
+                if !children.isEmpty {
+                    projects[from.p].sessions.removeAll { $0.parentSessionId == sid }
+                } else {
+                    expandedParentSessionIds.remove(sid)
+                }
             } else {
-                projects[from.p].selectedSessionId = projects[from.p]
-                    .sessionDisplayItems(expandedParentIds: expandedParentSessionIds)
-                    .first?.id
+                let previousParentId = session.parentSessionId
+                session.parentSessionId = nil
+                children = []
+                expandedParentSessionIds.remove(sid)
+                if let previousParentId,
+                   !projects[from.p].sessions.contains(where: { $0.parentSessionId == previousParentId }) {
+                    expandedParentSessionIds.remove(previousParentId)
+                }
             }
+            let movedIds = Set([sid] + children.map(\.id))
+            // Keep the source project's selection sane (mirrors closeSession): fall back
+            // to the tab left of the one that moved, or clear if it's now empty.
+            if let selectedId = projects[from.p].selectedSessionId, movedIds.contains(selectedId) {
+                if projects[from.p].sessions.isEmpty {
+                    projects[from.p].selectedSessionId = nil
+                } else if let visibleIndex = previousVisibleIds.firstIndex(of: selectedId),
+                          let previousId = previousVisibleIds[..<visibleIndex].last(where: { !movedIds.contains($0) }) {
+                    projects[from.p].selectedSessionId = previousId
+                } else {
+                    projects[from.p].selectedSessionId = projects[from.p]
+                        .sessionDisplayItems(expandedParentIds: expandedParentSessionIds)
+                        .first?.id
+                }
+            }
+            projects[tpi].sessions.append(session)
+            projects[tpi].sessions.append(contentsOf: children)
+            if selectInTarget || targetWasEmpty {
+                projects[tpi].selectedSessionId = session.id
+            }
+            clearManualMarkIfShown(replacing: previousGlobalSelection)
         }
-        projects[tpi].sessions.append(session)
-        if selectInTarget || targetWasEmpty {
-            projects[tpi].selectedSessionId = session.id
-        }
-        clearManualMarkIfShown(replacing: previousGlobalSelection)
         if globalSelectedSessionId != previousGlobalSelection {
             refreshSelectedTranscriptController()
         }
@@ -2825,7 +2846,12 @@ final class AppModel: ObservableObject {
               let si = projects[pi].sessions.firstIndex(where: { $0.id == sid }),
               projects[pi].sessions[si].parentSessionId != nil else { return }
         projects[pi].normalizeParentSessions()
+        let previousParentId = projects[pi].sessions[si].parentSessionId
         projects[pi].sessions[si].parentSessionId = nil
+        if let previousParentId,
+           !projects[pi].sessions.contains(where: { $0.parentSessionId == previousParentId }) {
+            expandedParentSessionIds.remove(previousParentId)
+        }
         save()
     }
 
@@ -2873,15 +2899,21 @@ final class AppModel: ObservableObject {
             return .success(sid, code: "reparented")
         }
 
+        projects[pi].normalizeParentSessions()
         guard parentId != sid,
               let parentIndex = projects[pi].sessions.firstIndex(where: { $0.id == parentId }),
               projects[pi].sessions[parentIndex].parentSessionId == nil,
               !projects[pi].sessions.contains(where: { $0.parentSessionId == sid }) else {
             return .failure("invalid parent session", code: "bad-request")
         }
+        let previousParentId = projects[pi].sessions[si].parentSessionId
         projects[pi].sessions[si].parentSessionId = parentId
         expandedParentSessionIds.insert(parentId)
-        projects[pi].normalizeParentSessions()
+        if let previousParentId,
+           previousParentId != parentId,
+           !projects[pi].sessions.contains(where: { $0.parentSessionId == previousParentId }) {
+            expandedParentSessionIds.remove(previousParentId)
+        }
         save()
         return .success(sid, code: "reparented")
     }

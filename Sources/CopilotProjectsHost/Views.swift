@@ -1107,7 +1107,7 @@ private struct SessionList: View {
     let showTabNumbers: Bool
     let expandedParentIds: Set<String>
     @State private var draggedSession: Session?
-    @State private var dropTargetId: String?     // a session id, or "" for end-of-list
+    @State private var dropTarget: SessionDropTarget?
 
     var body: some View {
         let displayItems = project.sessionDisplayItems(
@@ -1137,6 +1137,7 @@ private struct SessionList: View {
                             isChild: item.isChild,
                             childSummary: item.childSummary,
                             isExpanded: item.isExpanded,
+                            isDropTarget: dropTarget == .group(session.id),
                             onToggleExpand: item.childSummary != nil ? {
                                 model.toggleParentSessionExpanded(session.id)
                             } : nil,
@@ -1159,10 +1160,12 @@ private struct SessionList: View {
                                 Button("Ungroup from Parent") {
                                     model.ungroupSession(projectId: project.id, sessionId: session.id)
                                 }
-                                Divider()
-                            } else if item.childSummary == nil {
+                            }
+                            if item.childSummary == nil {
                                 let candidateParents = project.sessions.filter {
-                                    $0.id != session.id && $0.parentSessionId == nil
+                                    $0.id != session.id
+                                        && $0.parentSessionId == nil
+                                        && $0.id != item.effectiveParentSessionId
                                 }
                                 if !candidateParents.isEmpty {
                                     Menu("Group Under Parent") {
@@ -1176,6 +1179,8 @@ private struct SessionList: View {
                                             }
                                         }
                                     }
+                                }
+                                if item.isChild || !candidateParents.isEmpty {
                                     Divider()
                                 }
                             }
@@ -1207,26 +1212,26 @@ private struct SessionList: View {
                             }
                         }
                         .overlay(alignment: .top) {
-                            insertionBar.opacity(dropTargetId == session.id ? 1 : 0).offset(y: -3)
+                            insertionBar.opacity(dropTarget == .reorder(session.id) ? 1 : 0).offset(y: -3)
                         }
                         .onDrag {
                             draggedSession = session
-                            dropTargetId = nil
+                            dropTarget = nil
                             return NSItemProvider(object: session.id as NSString)
                         }
                         .onDrop(of: [.text], delegate: SessionDropDelegate(
                             targetId: session.id, dragged: $draggedSession,
-                            dropTargetId: $dropTargetId, model: model, project: project))
+                            dropTarget: $dropTarget, model: model, project: project))
                     }
                     Color.clear
                         .frame(height: 32)
                         .frame(maxWidth: .infinity)
                         .overlay(alignment: .top) {
-                            insertionBar.opacity(dropTargetId == "" ? 1 : 0)
+                            insertionBar.opacity(dropTarget == .reorder("") ? 1 : 0)
                         }
                         .onDrop(of: [.text], delegate: SessionDropDelegate(
                             targetId: "", dragged: $draggedSession,
-                            dropTargetId: $dropTargetId, model: model, project: project))
+                            dropTarget: $dropTarget, model: model, project: project))
                 }
                 .padding(10)
             }
@@ -1373,40 +1378,104 @@ private extension View {
     }
 }
 
-/// A session id inserts before that row; an empty target appends to the list.
-/// Top-level rows reorder among top-level rows; child rows reorder among siblings.
-private struct SessionDropDelegate: DropDelegate {
+/// Visual and semantic outcome for a drag over a row (or the end-of-list spacer)
+/// in `SessionList`: `.reorder` inserts before `targetId` (or appends when empty),
+/// and `.group` attaches the dragged session under `targetId`.
+enum SessionDropTarget: Equatable {
+    case reorder(String)
+    case group(String)
+
+    var targetId: String {
+        switch self {
+        case .reorder(let id), .group(let id):
+            return id
+        }
+    }
+}
+
+/// Near a row's top edge inserts before that row; the middle of a row groups under
+/// that session when `Project.canGroupSession` allows it and falls back to sibling
+/// reorder otherwise; an empty target appends to the list.
+struct SessionDropDelegate: DropDelegate {
+    static let reorderZoneHeight: CGFloat = 14
+
     let targetId: String
     @Binding var dragged: Session?
-    @Binding var dropTargetId: String?
+    @Binding var dropTarget: SessionDropTarget?
     let model: AppModel
     let project: Project
 
-    private var canDrop: Bool {
-        guard let dragged, dragged.id != targetId else { return false }
-        guard !targetId.isEmpty else { return true }
-        return project.effectiveParentSessionId(for: dragged.id)
-            == project.effectiveParentSessionId(for: targetId)
+    static func resolveTarget(
+        project: Project,
+        draggedId: String?,
+        targetId: String,
+        locationY: CGFloat
+    ) -> SessionDropTarget? {
+        guard let draggedId,
+              draggedId != targetId,
+              project.sessions.contains(where: { $0.id == draggedId }) else {
+            return nil
+        }
+        guard !targetId.isEmpty else { return .reorder("") }
+        guard project.sessions.contains(where: { $0.id == targetId }) else { return nil }
+        let effectiveParents = project.effectiveParentSessionIdsBySessionId()
+        let canReorder = effectiveParents[draggedId] == effectiveParents[targetId]
+        if locationY >= reorderZoneHeight,
+           project.canGroupSession(draggedId, underParent: targetId, effectiveParents: effectiveParents) {
+            return .group(targetId)
+        }
+        return canReorder ? .reorder(targetId) : nil
+    }
+
+    private func resolvedTarget(for info: DropInfo) -> SessionDropTarget? {
+        Self.resolveTarget(
+            project: project,
+            draggedId: dragged?.id,
+            targetId: targetId,
+            locationY: info.location.y
+        )
     }
 
     func dropEntered(info: DropInfo) {
-        dropTargetId = canDrop ? targetId : nil
+        dropTarget = resolvedTarget(for: info)
     }
     func dropExited(info: DropInfo) {
-        if dropTargetId == targetId { dropTargetId = nil }
+        if dropTarget?.targetId == targetId { dropTarget = nil }
     }
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: canDrop ? .move : .cancel)
+        let resolved = resolvedTarget(for: info)
+        dropTarget = resolved
+        return DropProposal(operation: resolved != nil ? .move : .cancel)
+    }
+    static func perform(
+        _ target: SessionDropTarget,
+        draggedId: String,
+        projectId: String,
+        model: AppModel
+    ) {
+        switch target {
+        case .reorder(let beforeId):
+            model.moveSession(
+                projectId: projectId,
+                draggedId: draggedId,
+                beforeId: beforeId.isEmpty ? nil : beforeId
+            )
+        case .group(let parentId):
+            model.groupSessionUnderParent(
+                projectId: projectId,
+                sessionId: draggedId,
+                parentSessionId: parentId
+            )
+        }
     }
     func performDrop(info: DropInfo) -> Bool {
-        let allowed = canDrop
-        if allowed, let dragged {
-            model.moveSession(projectId: project.id, draggedId: dragged.id,
-                              beforeId: targetId.isEmpty ? nil : targetId)
+        let resolved = resolvedTarget(for: info)
+        if let dragged, let resolved {
+            Self.perform(resolved, draggedId: dragged.id, projectId: project.id, model: model)
         }
         dragged = nil
-        dropTargetId = nil
-        return allowed
+        dropTarget = nil
+        return resolved != nil
     }
 }
 
@@ -1438,17 +1507,25 @@ private struct ProjectDropDelegate: DropDelegate {
 
 private struct SessionRowChromeModifier: ViewModifier {
     let isActive: Bool
+    var isDropTarget: Bool = false
     @State private var isHovering = false
 
     func body(content: Content) -> some View {
         content
             .background(
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(isActive ? StudioStyle.selection : isHovering ? StudioStyle.raised : .clear)
+                    .fill(
+                        isDropTarget
+                            ? Color.accentColor.opacity(0.15)
+                            : isActive ? StudioStyle.selection : isHovering ? StudioStyle.raised : .clear
+                    )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(isActive ? StudioStyle.selectionEdge : .clear, lineWidth: 1)
+                    .strokeBorder(
+                        isDropTarget ? Color.accentColor : isActive ? StudioStyle.selectionEdge : .clear,
+                        lineWidth: isDropTarget ? 2 : 1
+                    )
             )
             .contentShape(Rectangle())
             .onHover { isHovering = $0 }
@@ -1584,6 +1661,7 @@ struct SessionRow: View, Equatable {
     var isChild: Bool = false
     var childSummary: SessionChildSummary? = nil
     var isExpanded: Bool = false
+    var isDropTarget: Bool = false
     var onToggleExpand: (() -> Void)? = nil
     let onSelect: () -> Void
     let onClose: () -> Void
@@ -1596,6 +1674,7 @@ struct SessionRow: View, Equatable {
             && lhs.isChild == rhs.isChild
             && lhs.childSummary == rhs.childSummary
             && lhs.isExpanded == rhs.isExpanded
+            && lhs.isDropTarget == rhs.isDropTarget
             && lhs.session.id == rhs.session.id
             && lhs.session.title == rhs.session.title
             && lhs.session.hostId == rhs.session.hostId
@@ -1774,7 +1853,7 @@ struct SessionRow: View, Equatable {
             }
             .padding(.horizontal, 10)
             .frame(maxWidth: .infinity)
-            .modifier(SessionRowChromeModifier(isActive: isActive))
+            .modifier(SessionRowChromeModifier(isActive: isActive, isDropTarget: isDropTarget))
         }
         .accessibilityRepresentation {
             HStack {

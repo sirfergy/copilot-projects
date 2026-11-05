@@ -530,7 +530,9 @@ final class SessionWorkflowTests: XCTestCase {
             kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
         )
 
-        // Reparent child from parent1 to parent2 in-place.
+        // Reparent child from parent1 to parent2 in-place; parent1 loses its only child and is cleaned up.
+        model.toggleParentSessionExpanded(parent1.id)
+        XCTAssertTrue(model.isParentSessionExpanded(parent1.id))
         let reparented = model.setParentSession(
             projectId: project.id,
             sessionId: child.id,
@@ -541,6 +543,7 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertEqual(reparented.text, child.id)
         XCTAssertEqual(model.projects[0].sessions[2].parentSessionId, parent2.id)
         XCTAssertTrue(model.isParentSessionExpanded(parent2.id))
+        XCTAssertFalse(model.isParentSessionExpanded(parent1.id))
 
         // Reject self-parenting, nested parenting (under a child), and reparenting a parent that has children.
         XCTAssertEqual(
@@ -577,6 +580,8 @@ final class SessionWorkflowTests: XCTestCase {
         routedReq.parentSessionId = parent1.id
         XCTAssertEqual(model.handle(routedReq).code, "reparented")
         XCTAssertEqual(model.projects[0].sessions[2].parentSessionId, parent1.id)
+        XCTAssertTrue(model.isParentSessionExpanded(parent1.id))
+        XCTAssertFalse(model.isParentSessionExpanded(parent2.id))
 
         // Ungroup when parentSessionId is nil.
         let ungrouped = model.setParentSession(
@@ -587,6 +592,7 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertTrue(ungrouped.ok)
         XCTAssertEqual(ungrouped.code, "reparented")
         XCTAssertNil(model.projects[0].sessions[2].parentSessionId)
+        XCTAssertFalse(model.isParentSessionExpanded(parent1.id))
 
         // Verify CLI command wiring over a control socket.
         let socketPath = root.appendingPathComponent("control.sock").path

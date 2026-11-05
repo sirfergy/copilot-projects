@@ -14356,6 +14356,7 @@ final class AppLogicTests: XCTestCase {
             ledger: ledger,
             onLaunch: { _, _, _ in }
         )
+        defer { model.detachAllClients() }
 
         let child1Id = UUID()
         let child2Id = UUID()
@@ -14541,10 +14542,99 @@ final class AppLogicTests: XCTestCase {
             "parent-1"
         )
         XCTAssertEqual(model.project("p1")?.selectedSessionId, "parent-1")
+        XCTAssertTrue(model.isParentSessionExpanded("parent-1"))
 
-        // Closing parent-1 promotes its remaining child (child2) to top-level and clears expanded state.
+        // Moving the last remaining child (child2) to p2 clears parent-1's expanded state.
+        XCTAssertTrue(model.moveSession(toProjectId: "p2", draggedId: child2Id.uuidString))
+        XCTAssertFalse(model.isParentSessionExpanded("parent-1"))
+
+        // Move child1 and child2 back into p1 under parent-1 (child1 before child2) to test moving a parent with children.
+        XCTAssertTrue(model.moveSession(toProjectId: "p1", draggedId: child1Id.uuidString))
+        XCTAssertTrue(model.moveSession(toProjectId: "p1", draggedId: child2Id.uuidString))
+        XCTAssertEqual(
+            model.setParentSession(projectId: "p1", sessionId: child1Id.uuidString, parentSessionId: "parent-1").code,
+            "reparented"
+        )
+        XCTAssertEqual(
+            model.setParentSession(projectId: "p1", sessionId: child2Id.uuidString, parentSessionId: "parent-1").code,
+            "reparented"
+        )
+        let p1ChainIdx2 = try XCTUnwrap(model.projectIndex("p1"))
+        let c2ChainIdx2 = try XCTUnwrap(model.projects[p1ChainIdx2].sessions.firstIndex { $0.id == child2Id.uuidString })
+        model.projects[p1ChainIdx2].sessions[c2ChainIdx2].parentSessionId = child1Id.uuidString
+
+        let parentController = try XCTUnwrap(model.controller(for: "parent-1"))
+        let child1Controller = try XCTUnwrap(model.controller(for: child1Id.uuidString))
+        let child2Controller = try XCTUnwrap(model.controller(for: child2Id.uuidString))
+
+        // Select child2 in p1, then move parent-1 to p2: parent-1 and both children move in relative
+        // order, stay single-level children of parent-1, keep expanded state and live controllers,
+        // update p1/global/transcript selection to the remaining session (`top-2`), and select parent-1 in p2.
+        model.selectSession(projectId: "p1", sessionId: child2Id.uuidString)
+        XCTAssertEqual(model.globalSelectedSessionId, child2Id.uuidString)
+        XCTAssertEqual(model.activeTranscriptController?.sessionId, child2Id.uuidString)
+        XCTAssertTrue(model.moveSession(toProjectId: "p2", draggedId: "parent-1"))
+        XCTAssertEqual(model.project("p1")?.sessions.map(\.id), ["top-2", orphanChildId.uuidString])
+        XCTAssertEqual(model.project("p1")?.selectedSessionId, "top-2")
+        XCTAssertEqual(model.globalSelectedSessionId, "top-2")
+        XCTAssertEqual(model.activeTranscriptController?.sessionId, "top-2")
+        XCTAssertEqual(
+            model.project("p2")?.sessions.map(\.id),
+            ["parent-1", child1Id.uuidString, child2Id.uuidString]
+        )
+        XCTAssertEqual(
+            model.project("p2")?.sessions.map(\.parentSessionId),
+            [nil, "parent-1", "parent-1"]
+        )
+        XCTAssertEqual(model.project("p2")?.selectedSessionId, "parent-1")
+        XCTAssertTrue(model.isParentSessionExpanded("parent-1"))
+        XCTAssertTrue(model.controllers["parent-1"] === parentController)
+        XCTAssertTrue(model.controllers[child1Id.uuidString] === child1Controller)
+        XCTAssertTrue(model.controllers[child2Id.uuidString] === child2Controller)
+
+        // Collapse parent-1 and move it back to p1 via moveRemoteSession (`selectInTarget: false`):
+        // collapsed state is preserved, p2 becomes empty (`selectedSessionId == nil`), and p1 keeps `top-2` selected.
+        model.toggleParentSessionExpanded("parent-1")
+        XCTAssertFalse(model.isParentSessionExpanded("parent-1"))
+        XCTAssertEqual(model.moveRemoteSession(sessionId: "parent-1", toProjectId: "p1"), .moved)
+        XCTAssertFalse(model.isParentSessionExpanded("parent-1"))
+        XCTAssertTrue(try XCTUnwrap(model.project("p2")).sessions.isEmpty)
+        XCTAssertNil(model.project("p2")?.selectedSessionId)
+        XCTAssertEqual(model.project("p1")?.selectedSessionId, "top-2")
+        XCTAssertEqual(
+            model.project("p1")?.sessions.map(\.id),
+            ["top-2", orphanChildId.uuidString, "parent-1", child1Id.uuidString, child2Id.uuidString]
+        )
+        XCTAssertEqual(
+            model.project("p1")?.sessions.map(\.parentSessionId),
+            [nil, nil, nil, "parent-1", "parent-1"]
+        )
+
+        // When parent-1 is selected after `orphanChildId`, moving parent-1 to empty p2 selects the left
+        // visible neighbor (`orphanChildId`) in p1, selects parent-1 in p2, and persists across reload.
+        model.selectSession(projectId: "p1", sessionId: "parent-1")
+        XCTAssertEqual(model.moveRemoteSession(sessionId: "parent-1", toProjectId: "p2"), .moved)
+        XCTAssertEqual(model.project("p1")?.selectedSessionId, orphanChildId.uuidString)
+        XCTAssertEqual(model.globalSelectedSessionId, orphanChildId.uuidString)
+        XCTAssertEqual(model.activeTranscriptController?.sessionId, orphanChildId.uuidString)
+        XCTAssertEqual(model.project("p2")?.selectedSessionId, "parent-1")
+        if case .loaded(let reloadedAfterMove) = StateRepository(path: root.appendingPathComponent("state.json")).load() {
+            let reloadedP1 = try XCTUnwrap(reloadedAfterMove.projects.first { $0.id == "p1" })
+            let reloadedP2 = try XCTUnwrap(reloadedAfterMove.projects.first { $0.id == "p2" })
+            XCTAssertEqual(reloadedP1.sessions.map(\.id), ["top-2", orphanChildId.uuidString])
+            XCTAssertEqual(reloadedP2.sessions.map(\.id), ["parent-1", child1Id.uuidString, child2Id.uuidString])
+            XCTAssertEqual(reloadedP2.sessions.map(\.parentSessionId), [nil, "parent-1", "parent-1"])
+            XCTAssertEqual(reloadedP2.selectedSessionId, "parent-1")
+        } else {
+            XCTFail("expected persisted state to load after parent move")
+        }
+
+        // Move parent-1 back to p1 and close parent-1: promotes its children to top-level and clears expanded state.
+        model.toggleParentSessionExpanded("parent-1")
+        XCTAssertTrue(model.moveSession(toProjectId: "p1", draggedId: "parent-1"))
         model.closeSession(projectId: "p1", sessionId: "parent-1")
         XCTAssertFalse(model.isParentSessionExpanded("parent-1"))
+        XCTAssertNil(model.project("p1")?.sessions.first(where: { $0.id == child1Id.uuidString })?.parentSessionId)
         XCTAssertNil(model.project("p1")?.sessions.first(where: { $0.id == child2Id.uuidString })?.parentSessionId)
     }
 
