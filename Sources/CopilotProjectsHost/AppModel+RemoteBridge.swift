@@ -1563,6 +1563,91 @@ extension AppModel {
             .remoteOperationProjection() ?? .unavailable
     }
 
+    func sessionWorkingModel(sessionId: String) -> TranscriptWorkingModel {
+        if let existing = sessionWorkingModels[sessionId] {
+            return existing
+        }
+        let workingModel = TranscriptWorkingModel(
+            indicator: sessionWorkingIndicator(sessionId: sessionId)
+        )
+        if locateIndex(sessionId) != nil {
+            sessionWorkingModels[sessionId] = workingModel
+        }
+        return workingModel
+    }
+
+    func syncSessionWorkingModels(now: Date = Date()) {
+        workingModelsSyncNeeded = false
+        guard !sessionWorkingModels.isEmpty else { return }
+        for (sessionId, workingModel) in sessionWorkingModels {
+            workingModel.update(sessionWorkingIndicator(sessionId: sessionId, now: now))
+        }
+    }
+
+    func sessionWorkingIndicator(
+        sessionId: String,
+        now: Date = Date()
+    ) -> TranscriptWorkingIndicator? {
+        guard let location = locateIndex(sessionId) else { return nil }
+        let session = projects[location.p].sessions[location.s]
+        let snapshot = session.agentActivity
+        let latestSnapshot = snapshot ?? agentActivitySnapshotCache[session.id]?.snapshot
+        let owner = verifiedCopilotOwners[session.id]
+            ?? (snapshot == nil ? runtimeTrackedOwners[session.id] : nil)
+        let isOwnedSnapshot = snapshot?.copilotSessionId == nil
+            || snapshot?.copilotSessionId?.lowercased() == owner?.lowercased()
+        let disconnectTimestamp = latestSnapshot?.updatedAtMilliseconds
+        let isOwnedDisconnect = latestSnapshot?.schemaVersion == AgentActivitySnapshot.currentSchemaVersion
+            && disconnectTimestamp.map { $0 <= Int64(now.timeIntervalSince1970 * 1_000) } == true
+            && (latestSnapshot?.copilotSessionId == nil
+                || latestSnapshot?.copilotSessionId?.lowercased() == owner?.lowercased())
+            && latestSnapshot?.reportsTerminalDisconnect == true
+        let isSnapshotActive = isOwnedSnapshot
+            && snapshot?.isFresh(at: now) == true
+            && snapshot?.reportsTerminalDisconnect == false
+
+        let foreground = runtimeForegroundActivity(for: session, now: now, resolvedOwner: .some(owner))
+        let projected = projectedStatus(
+            for: session,
+            foreground: foreground,
+            now: now,
+            resolvedOwner: .some(owner)
+        )
+        guard projected != .waiting else { return nil }
+        let needsFooterEvidence = isOwnedDisconnect
+            || (session.statusIsRuntimeDerived
+                && (foreground == .unknown || !isSnapshotActive))
+        let isFooterWorking = needsFooterEvidence
+            && (remotePromptTarget?(session.id)?.activity
+                ?? controllers[session.id]?.agentActivity) == .working
+        let hasIndependentRunningOnDisconnect = isFooterWorking
+            || (sessionSemantics.statusClock.timestamp(for: session.id) ?? .min)
+                > (disconnectTimestamp ?? .max)
+        let status: SessionStatus = isOwnedDisconnect
+            ? (hasIndependentRunningOnDisconnect ? projected : .idle)
+            : (session.statusIsRuntimeDerived && !isFooterWorking
+                && (foreground == .unknown || !isSnapshotActive)
+                ? .idle : projected)
+
+        let hasFreshSubagents = isSnapshotActive && snapshot?.activeSubagents.isEmpty == false
+        let hasFreshScheduledTurn = isSnapshotActive && session.scheduledTurnActive
+        let hasBackgroundWork = (!isOwnedDisconnect && session.backgroundAgentsActive
+            && (runtimeTrackedOwners[session.id] == nil || isSnapshotActive))
+            || hasFreshScheduledTurn
+            || hasFreshSubagents
+        guard status == .running || hasBackgroundWork else { return nil }
+
+        let activityText = snapshot?.remoteActivityText(
+            expectedSessionId: owner,
+            at: now
+        ) ?? (status == .running ? session.statusText : nil)
+        return TranscriptWorkingIndicator.resolve(
+            status: status,
+            hasBackgroundWork: hasBackgroundWork,
+            activityText: activityText
+        )
+    }
+
     func performLocalSessionAction(
         sessionId: String,
         action: RemoteSessionAction,

@@ -1025,6 +1025,7 @@ struct DetailView: View {
                     pendingElicitations: model.sessionPendingElicitations(sessionId: sessionId),
                     workflowProvider: { model.sessionWorkflow(sessionId: sessionId) },
                     operationProvider: { model.sessionOperationProjection(sessionId: sessionId) },
+                    workingModelProvider: { model.sessionWorkingModel(sessionId: sessionId) },
                     promptComposer: composer,
                     onAction: { action in
                         await model.performLocalSessionAction(

@@ -6,9 +6,10 @@ import Darwin
 extension AppModel {
     func runtimeForegroundActivity(
         for session: Session,
-        now: Date
+        now: Date,
+        resolvedOwner: String?? = nil
     ) -> ForegroundActivity? {
-        let owner = resumeMarkerValue(sessionId: session.id, suffix: "copilot-session")
+        let owner = resolvedOwner ?? resumeMarkerValue(sessionId: session.id, suffix: "copilot-session")
         guard let snapshot = session.agentActivity else {
             return runtimeTrackedOwners[session.id] == owner?.lowercased()
                 && owner != nil ? .unknown : nil
@@ -42,7 +43,8 @@ extension AppModel {
     func inputWaitWasResolved(
         for session: Session,
         foreground: ForegroundActivity?,
-        now: Date
+        now: Date,
+        resolvedOwner: String?? = nil
     ) -> Bool {
         let nowMs = Int64(now.timeIntervalSince1970 * 1_000)
         guard foreground != .unknown,
@@ -50,9 +52,8 @@ extension AppModel {
               let snapshot = session.agentActivity,
               snapshot.isFresh(at: now),
               snapshot.copilotSessionId?.lowercased() == wait.context.rootSessionId.lowercased(),
-              snapshot.copilotSessionId?.lowercased() == resumeMarkerValue(
-                sessionId: session.id, suffix: "copilot-session"
-              )?.lowercased(),
+              snapshot.copilotSessionId?.lowercased()
+                == (resolvedOwner ?? resumeMarkerValue(sessionId: session.id, suffix: "copilot-session"))?.lowercased(),
               snapshot.conversationEpoch == wait.context.conversationEpoch,
               snapshot.trackedUserInputs?.isEmpty == true,
               snapshot.trackedElicitations?.isEmpty == true,
@@ -84,11 +85,17 @@ extension AppModel {
     func projectedStatus(
         for session: Session,
         foreground: ForegroundActivity?,
-        now: Date
+        now: Date,
+        resolvedOwner: String?? = nil
     ) -> SessionStatus {
         if session.hasPendingInput { return .waiting }
         if session.status == .waiting, !session.statusIsRuntimeDerived {
-            guard inputWaitWasResolved(for: session, foreground: foreground, now: now) else {
+            guard inputWaitWasResolved(
+                for: session,
+                foreground: foreground,
+                now: now,
+                resolvedOwner: resolvedOwner
+            ) else {
                 return .waiting
             }
             if foreground == nil {
@@ -173,6 +180,7 @@ extension AppModel {
                 }
             }
             dismissAnsweredQuestionNotifications(now: now)
+            syncSessionWorkingModels(now: now)
             if changed {
                 save()
                 updateDockBadge()
@@ -391,11 +399,14 @@ extension AppModel {
                         budgetNotifications.append((nextProjects[pi].id, sessionId))
                     }
                 }
-                if snapshot?.runtimeActivity != nil, let owner = snapshot?.copilotSessionId,
-                   owner.lowercased() == resumeMarkerValue(
-                    sessionId: sessionId, suffix: "copilot-session"
-                   )?.lowercased() {
-                    runtimeTrackedOwners[sessionId] = owner.lowercased()
+                if let owner = snapshot?.copilotSessionId?.lowercased() {
+                    let matchesMarker = owner == resumeMarkerValue(
+                        sessionId: sessionId, suffix: "copilot-session"
+                    )?.lowercased()
+                    verifiedCopilotOwners[sessionId] = matchesMarker ? owner : nil
+                    if matchesMarker, snapshot?.runtimeActivity != nil {
+                        runtimeTrackedOwners[sessionId] = owner
+                    }
                 }
                 if nextProjects[pi].sessions[si].startingPrompt == nil,
                    let rawPrompt = validatedActivityStartingPrompt(
@@ -439,6 +450,7 @@ extension AppModel {
                             effectiveFresh.runtimeActivity?.observedAtMilliseconds
                         previous?.workflow?.observedAtMilliseconds =
                             effectiveFresh.workflow?.observedAtMilliseconds ?? 0
+                        previous?.currentIntent = effectiveFresh.currentIntent
                     }
                     activityChanged = activityChanged || previous != effectiveFresh
                     nextProjects[pi].sessions[si].agentActivity = effectiveFresh
@@ -502,6 +514,7 @@ extension AppModel {
                 .filter { seenSessionIds.contains($0.key) }
             agentActivityObservations = agentActivityObservations.filter { seenSessionIds.contains($0.key) }
             runtimeTrackedOwners = runtimeTrackedOwners.filter { seenSessionIds.contains($0.key) }
+            verifiedCopilotOwners = verifiedCopilotOwners.filter { seenSessionIds.contains($0.key) }
             budgetNotificationKeys = budgetNotificationKeys.filter { seenSessionIds.contains($0.key) }
             reconcileRuntimeActivity(now: readTime())
             for target in budgetNotifications {

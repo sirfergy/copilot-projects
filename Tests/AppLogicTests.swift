@@ -16198,6 +16198,492 @@ final class AppLogicTests: XCTestCase {
         try clickStopInOpenPopover()
         XCTAssertEqual(recordedActions.count, 4)
     }
+
+    @MainActor
+    func testTranscriptWorkingIndicatorResolutionAndAppModelLifecycle() throws {
+        _ = NSApplication.shared
+        for empty in [nil, "", "  \n\t "] {
+            let working = try XCTUnwrap(
+                TranscriptWorkingIndicator.resolve(status: .running, activityText: empty)
+            )
+            XCTAssertEqual(working, .working(nil))
+            XCTAssertEqual(working.text, "Copilot is working…")
+            XCTAssertEqual(working.accessibilityLabel, "Copilot is working")
+
+            let runningBackground = try XCTUnwrap(
+                TranscriptWorkingIndicator.resolve(
+                    status: .running,
+                    hasBackgroundWork: true,
+                    activityText: empty
+                )
+            )
+            XCTAssertEqual(runningBackground, .backgroundWork(nil))
+            XCTAssertEqual(runningBackground.text, "Background work active")
+            XCTAssertEqual(runningBackground.accessibilityLabel, "Background work active")
+
+            let idleBackground = try XCTUnwrap(
+                TranscriptWorkingIndicator.resolve(
+                    status: .idle,
+                    hasBackgroundWork: true,
+                    activityText: empty
+                )
+            )
+            XCTAssertEqual(idleBackground, .backgroundWork(nil))
+            XCTAssertEqual(idleBackground.text, "Background work active")
+            XCTAssertEqual(idleBackground.accessibilityLabel, "Background work active")
+        }
+
+        let workingText = try XCTUnwrap(
+            TranscriptWorkingIndicator.resolve(
+                status: .running,
+                hasBackgroundWork: true,
+                activityText: "  Running unit tests \n"
+            )
+        )
+        XCTAssertEqual(workingText, .working("Running unit tests"))
+        XCTAssertEqual(workingText.text, "Running unit tests")
+        XCTAssertEqual(workingText.accessibilityLabel, "Running unit tests")
+
+        let backgroundText = try XCTUnwrap(
+            TranscriptWorkingIndicator.resolve(
+                status: .idle,
+                hasBackgroundWork: true,
+                activityText: "  Waiting for background agents  "
+            )
+        )
+        XCTAssertEqual(backgroundText, .backgroundWork("Waiting for background agents"))
+        XCTAssertEqual(backgroundText.text, "Waiting for background agents")
+        XCTAssertEqual(backgroundText.accessibilityLabel, "Waiting for background agents")
+
+        XCTAssertNil(TranscriptWorkingIndicator.resolve(status: .idle))
+        XCTAssertNil(TranscriptWorkingIndicator.resolve(
+            status: .waiting,
+            hasBackgroundWork: true,
+            activityText: "Running unit tests"
+        ))
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let owner = UUID().uuidString.lowercased()
+        let session = Session(id: UUID().uuidString, title: "working", cwd: root.path)
+        defer { SessionArtifacts.removeFiles(sessionId: session.id) }
+        try Data(owner.utf8).write(to: directory.appendingPathComponent("\(session.id).copilot-session"))
+
+        let project = Project(
+            name: "Work",
+            cwd: root.path,
+            sessions: [session],
+            selectedSessionId: session.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        var injectedPromptTarget: RemotePromptTarget?
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: directory,
+            resumeMarkerDirectory: directory,
+            remotePromptTarget: { _ in injectedPromptTarget }
+        )
+
+        let base = Date()
+        let baseMs = Int64(base.timeIntervalSince1970 * 1_000)
+        let snapshotURL = directory.appendingPathComponent("\(session.id).agent-activity.json")
+        func makeSnapshot(
+            at date: Date = base,
+            processing: Bool = true,
+            intent: String? = nil,
+            subagents: [TrackedSubagent] = [],
+            scheduled: Bool = false,
+            error: String? = nil
+        ) -> AgentActivitySnapshot {
+            let ms = Int64(date.timeIntervalSince1970 * 1_000)
+            return AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: date.formatted(Date.ISO8601FormatStyle(includingFractionalSeconds: true)),
+                foregroundTurnActive: processing,
+                foregroundTransitionAt: base.formatted(Date.ISO8601FormatStyle(includingFractionalSeconds: true)),
+                scheduledTurnActive: scheduled,
+                activeSubagents: subagents,
+                schedules: [],
+                idleGeneration: 1,
+                lastIdleAborted: false,
+                lastIdleTurnKind: nil,
+                error: error,
+                trackedUserInputs: [],
+                trackedElicitations: [],
+                pendingPermissionRequestIds: [],
+                copilotSessionId: owner,
+                conversationEpoch: "\(owner):0",
+                runtimeActivity: RuntimeActivitySnapshot(
+                    processing: processing,
+                    observedAtMilliseconds: ms,
+                    idleAtMilliseconds: processing ? nil : ms,
+                    error: nil
+                ),
+                currentIntent: intent
+            )
+        }
+        func publish(_ snapshot: AgentActivitySnapshot, at date: Date = base) throws {
+            try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
+            model.refreshAgentActivitySnapshots(now: date)
+        }
+
+        XCTAssertNil(model.sessionWorkingIndicator(sessionId: session.id, now: base))
+        model.openTranscriptDrawer(sessionId: session.id)
+        let workingModel = model.sessionWorkingModel(sessionId: session.id)
+        XCTAssertNil(workingModel.indicator)
+
+        // Working without text -> "Copilot is working…".
+        try publish(makeSnapshot(processing: true, intent: nil))
+        XCTAssertEqual(workingModel.indicator, .working(nil))
+        XCTAssertEqual(workingModel.indicator?.text, "Copilot is working…")
+
+        // Activity text changes update the scoped workingModel without publishing AppModel.objectWillChange.
+        var modelPublications = 0
+        let cancellable = model.objectWillChange.sink { modelPublications += 1 }
+        defer { withExtendedLifetime(cancellable) {} }
+
+        try publish(
+            makeSnapshot(at: base.addingTimeInterval(1), processing: true, intent: "Inspecting drawer"),
+            at: base.addingTimeInterval(1)
+        )
+        XCTAssertEqual(workingModel.indicator, .working("Inspecting drawer"))
+        XCTAssertEqual(modelPublications, 0)
+
+        try publish(
+            makeSnapshot(at: base.addingTimeInterval(2), processing: true, intent: "Running tests"),
+            at: base.addingTimeInterval(2)
+        )
+        XCTAssertEqual(workingModel.indicator, .working("Running tests"))
+        XCTAssertEqual(modelPublications, 0)
+
+        // Foreign copilotSessionId (even if disconnected) rejects activity text without hiding a hook-running session.
+        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: baseMs)
+        var foreign = makeSnapshot(
+            at: base.addingTimeInterval(3),
+            processing: true,
+            intent: "Foreign intent",
+            error: "Connection is closed."
+        )
+        foreign.copilotSessionId = UUID().uuidString.lowercased()
+        try publish(foreign, at: base.addingTimeInterval(3))
+        XCTAssertEqual(workingModel.indicator, .working(nil))
+
+        // Pending user input, elicitation, permission, and budget requests hide the working indicator.
+        var withQuestion = makeSnapshot(at: base.addingTimeInterval(4), processing: true, intent: "Running tests")
+        withQuestion.trackedUserInputs = [
+            TrackedUserInput(
+                requestId: "q-1",
+                question: "Continue?",
+                choices: ["Yes", "No"],
+                allowFreeform: false,
+                requestedAt: withQuestion.updatedAt,
+                agentId: nil
+            ),
+        ]
+        try publish(withQuestion, at: base.addingTimeInterval(4))
+        XCTAssertNil(workingModel.indicator)
+
+        var withElicitation = makeSnapshot(at: base.addingTimeInterval(5), processing: true, intent: "Running tests")
+        withElicitation.trackedElicitations = [
+            TrackedElicitation(
+                requestId: "e-1",
+                message: "Select option",
+                requestedAt: withElicitation.updatedAt
+            ),
+        ]
+        try publish(withElicitation, at: base.addingTimeInterval(5))
+        XCTAssertNil(workingModel.indicator)
+
+        var withPermission = makeSnapshot(at: base.addingTimeInterval(6), processing: true, intent: "Running tests")
+        withPermission.pendingPermissionRequestIds = ["perm-1"]
+        try publish(withPermission, at: base.addingTimeInterval(6))
+        XCTAssertNil(workingModel.indicator)
+        model.setBackgroundAgentsActive(sessionId: session.id, active: true)
+        XCTAssertNil(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(25)))
+        model.setBackgroundAgentsActive(sessionId: session.id, active: false)
+
+        var withBudget = makeSnapshot(at: base.addingTimeInterval(7), processing: true, intent: "Running tests")
+        withBudget.workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: baseMs + 7_000,
+            capabilities: [],
+            sendReady: false,
+            budgetRequest: RemoteBudgetRequest(requestId: "b-1", maxAiCredits: 30, usedAiCredits: 31)
+        )
+        try publish(withBudget, at: base.addingTimeInterval(7))
+        XCTAssertNil(workingModel.indicator)
+
+        // Background subagent work while foreground is idle shows subagent intent or "Background work active".
+        let subagent = TrackedSubagent(id: "sub-1", name: "explore", description: "Searching repo", model: nil)
+        try publish(
+            makeSnapshot(
+                at: base.addingTimeInterval(8),
+                processing: false,
+                intent: "Searching repo",
+                subagents: [subagent]
+            ),
+            at: base.addingTimeInterval(8)
+        )
+        XCTAssertEqual(workingModel.indicator, .backgroundWork("Searching repo"))
+
+        try publish(
+            makeSnapshot(
+                at: base.addingTimeInterval(9),
+                processing: false,
+                intent: nil,
+                subagents: [subagent]
+            ),
+            at: base.addingTimeInterval(9)
+        )
+        XCTAssertEqual(workingModel.indicator, .backgroundWork(nil))
+        XCTAssertEqual(workingModel.indicator?.text, "Background work active")
+
+        // Terminal disconnect and snapshot expiry clear runtime-only, hook-driven (without working footer), background-agent, or scheduled indicators so dead sessions never spin forever.
+        try publish(makeSnapshot(at: base.addingTimeInterval(9.2), processing: true, intent: "Before disconnect"), at: base.addingTimeInterval(9.2))
+        try publish(
+            makeSnapshot(
+                at: base.addingTimeInterval(9.4),
+                processing: true,
+                intent: "Stuck intent",
+                subagents: [subagent],
+                error: "Connection is closed."
+            ),
+            at: base.addingTimeInterval(9.4)
+        )
+        XCTAssertNil(workingModel.indicator)
+        injectedPromptTarget = RemotePromptTarget(activity: .working, send: { _ in false })
+        XCTAssertEqual(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(9.4)), .working(nil))
+        injectedPromptTarget = nil
+
+        model.setStatus(sessionId: session.id, status: .running, text: "Stuck hook", timestamp: baseMs + 9_500)
+        model.setBackgroundAgentsActive(sessionId: session.id, active: true)
+        try publish(
+            makeSnapshot(
+                at: base.addingTimeInterval(10),
+                processing: true,
+                intent: "Stuck intent",
+                subagents: [subagent],
+                error: "Connection is closed."
+            ),
+            at: base.addingTimeInterval(10)
+        )
+        XCTAssertNil(workingModel.indicator)
+        injectedPromptTarget = RemotePromptTarget(activity: .working, send: { _ in false })
+        XCTAssertEqual(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(10)), .working("Stuck hook"))
+        injectedPromptTarget = nil
+        model.refreshAgentActivitySnapshots(now: base.addingTimeInterval(26))
+        XCTAssertNil(workingModel.indicator)
+        model.setBackgroundAgentsActive(sessionId: session.id, active: false)
+
+        let scheduledMarkerURL = directory.appendingPathComponent("\(session.id).scheduled-turn")
+        try Data("1".utf8).write(to: scheduledMarkerURL, options: .atomic)
+        try publish(
+            makeSnapshot(at: base.addingTimeInterval(10.5), processing: true, intent: "Scheduled tick", scheduled: true),
+            at: base.addingTimeInterval(10.5)
+        )
+        XCTAssertEqual(workingModel.indicator, .backgroundWork("Scheduled tick"))
+        model.refreshAgentActivitySnapshots(now: base.addingTimeInterval(30))
+        XCTAssertNil(workingModel.indicator)
+        try? FileManager.default.removeItem(at: scheduledMarkerURL)
+
+        try publish(
+            makeSnapshot(at: base.addingTimeInterval(31), processing: true, intent: "Active before expiry"),
+            at: base.addingTimeInterval(31)
+        )
+        XCTAssertEqual(workingModel.indicator, .working("Active before expiry"))
+        model.setBackgroundAgentsActive(sessionId: session.id, active: true)
+        XCTAssertNil(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(50)))
+        injectedPromptTarget = RemotePromptTarget(activity: .working, send: { _ in false })
+        XCTAssertEqual(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(50)), .working(nil))
+        injectedPromptTarget = nil
+        model.setBackgroundAgentsActive(sessionId: session.id, active: false)
+
+        // Turn end clears the indicator; closing the drawer removes the cached workingModel.
+        try publish(
+            makeSnapshot(at: base.addingTimeInterval(32), processing: false, intent: nil),
+            at: base.addingTimeInterval(32)
+        )
+        XCTAssertNil(workingModel.indicator)
+
+        // Legacy snapshots (without runtimeActivity) that resolve an input wait retain .running.
+        model.setStatus(
+            sessionId: session.id,
+            status: .waiting,
+            text: "Waiting",
+            timestamp: baseMs + 33_000,
+            source: "ask_user",
+            copilotSessionId: owner,
+            notification: .elicitation
+        )
+        var legacyResolved = makeSnapshot(at: base.addingTimeInterval(34), processing: true, intent: "Legacy working")
+        legacyResolved.runtimeActivity = nil
+        try publish(legacyResolved, at: base.addingTimeInterval(34))
+        XCTAssertEqual(workingModel.indicator, .working("Legacy working"))
+
+        model.setStatus(sessionId: session.id, status: .running, text: "Hook status", timestamp: baseMs + 35_000)
+        try publish(makeSnapshot(at: base.addingTimeInterval(35), processing: true, intent: "   "), at: base.addingTimeInterval(35))
+        XCTAssertEqual(workingModel.indicator, .working("Hook status"))
+        try? FileManager.default.removeItem(at: snapshotURL)
+        model.refreshAgentActivitySnapshots(now: base.addingTimeInterval(35.5))
+        XCTAssertEqual(workingModel.indicator, .working("Hook status"))
+
+        model.closeTranscriptDrawer(sessionId: session.id)
+        XCTAssertNil(workingModel.indicator)
+        XCTAssertNil(model.sessionWorkingModels[session.id])
+    }
+
+    @MainActor
+    func testTranscriptDrawerWorkingRowScopingAccessibilityAndScrollPinning() throws {
+        _ = NSApplication.shared
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let turns: [TranscriptTurn] = (1...35).map { index in
+            let start = now.addingTimeInterval(Double(index * 10))
+            return TranscriptTurn(
+                id: "turn-\(index)",
+                startedAt: start,
+                endedAt: start.addingTimeInterval(5),
+                kind: "user",
+                userContent: "Prompt \(index)\nSecond line \(index)",
+                assistantMessages: [
+                    TranscriptAssistantMessage(
+                        id: "msg-\(index)",
+                        timestamp: start.addingTimeInterval(2),
+                        content: "Response \(index)\nDetail line A\nDetail line B"
+                    ),
+                ],
+                tools: [],
+                isAborted: false
+            )
+        }
+
+        let workingModel = TranscriptWorkingModel(indicator: nil)
+        var drawerBodyEvaluations = 0
+        let drawer = TranscriptDrawer(
+            turns: turns,
+            imageCapture: nil,
+            workflow: nil,
+            operation: .unavailable,
+            workflowProvider: {
+                drawerBodyEvaluations += 1
+                return nil
+            },
+            operationProvider: nil,
+            workingModel: workingModel,
+            promptComposer: nil,
+            onClose: {},
+            onAction: { _ in RemoteWorkflowActionResult(state: .rejected) },
+            onPreview: { _ in }
+        )
+
+        let window = NSWindow(
+            contentRect: NSRect(x: -4000, y: -4000, width: 420, height: 480),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let host = NSHostingView(rootView: drawer)
+        host.frame = NSRect(x: 0, y: 0, width: 420, height: 480)
+        window.contentView = host
+        defer { window.contentView = nil }
+
+        func pumpLayout() {
+            for _ in 0..<8 {
+                CFRunLoopRunInMode(.defaultMode, 0, false)
+                host.layoutSubtreeIfNeeded()
+            }
+        }
+        func findScrollView(in view: NSView) -> NSScrollView? {
+            if let scroll = view as? NSScrollView,
+               let doc = scroll.documentView,
+               doc.bounds.height > scroll.contentView.bounds.height + 100 {
+                return scroll
+            }
+            return view.subviews.lazy.compactMap(findScrollView(in:)).first
+        }
+        func findProgressIndicators(in view: NSView) -> [NSProgressIndicator] {
+            var result: [NSProgressIndicator] = []
+            if let indicator = view as? NSProgressIndicator {
+                result.append(indicator)
+            }
+            for subview in view.subviews {
+                result.append(contentsOf: findProgressIndicators(in: subview))
+            }
+            return result
+        }
+
+        pumpLayout()
+        let scrollView = try XCTUnwrap(findScrollView(in: host))
+        let docView = try XCTUnwrap(scrollView.documentView)
+        func assertPinnedToBottom() {
+            let docHeight = docView.bounds.height
+            let visibleRect = scrollView.contentView.documentVisibleRect
+            if docView.isFlipped {
+                XCTAssertGreaterThanOrEqual(visibleRect.maxY, docHeight - 12)
+            } else {
+                XCTAssertLessThanOrEqual(visibleRect.minY, 12)
+            }
+            for indicator in findProgressIndicators(in: host) {
+                let rectInClip = scrollView.contentView.convert(indicator.bounds, from: indicator)
+                XCTAssertTrue(
+                    scrollView.contentView.bounds.intersects(rectInClip),
+                    "Expected working indicator \(rectInClip) to be visible in \(scrollView.contentView.bounds)"
+                )
+            }
+        }
+
+        assertPinnedToBottom()
+        XCTAssertTrue(findProgressIndicators(in: host).isEmpty)
+
+        // Showing the working indicator while pinned keeps the scroll view pinned and does not re-evaluate TranscriptDrawer.body.
+        let evaluationsBeforeWorking = drawerBodyEvaluations
+        workingModel.update(.working(nil))
+        pumpLayout()
+        XCTAssertEqual(drawerBodyEvaluations, evaluationsBeforeWorking)
+        XCTAssertEqual(findProgressIndicators(in: host).count, 1)
+        assertPinnedToBottom()
+
+        // Updating activity text in-place keeps TranscriptDrawer.body untouched and stays pinned.
+        workingModel.update(.working("Running targeted tests across the workspace"))
+        pumpLayout()
+        XCTAssertEqual(drawerBodyEvaluations, evaluationsBeforeWorking)
+        XCTAssertEqual(findProgressIndicators(in: host).count, 1)
+        assertPinnedToBottom()
+
+        // Hiding the working indicator while pinned keeps the scroll view pinned to the bottom.
+        workingModel.update(nil)
+        pumpLayout()
+        XCTAssertEqual(drawerBodyEvaluations, evaluationsBeforeWorking)
+        XCTAssertTrue(findProgressIndicators(in: host).isEmpty)
+        assertPinnedToBottom()
+
+        // Scroll up so "transcript-bottom" leaves the viewport and isAtBottom becomes false;
+        // showing/hiding the working indicator must not yank scroll position back to the bottom.
+        for targetY in stride(from: docView.bounds.height, through: 0, by: -300) {
+            NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: scrollView)
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: max(0, targetY)))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
+            NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: scrollView)
+            NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: scrollView)
+            host.layoutSubtreeIfNeeded()
+        }
+        pumpLayout()
+        let scrolledTopOriginY = scrollView.contentView.documentVisibleRect.origin.y
+        XCTAssertLessThan(scrollView.contentView.documentVisibleRect.maxY, docView.bounds.height - 500)
+
+        workingModel.update(.backgroundWork(nil))
+        pumpLayout()
+        XCTAssertEqual(scrollView.contentView.documentVisibleRect.origin.y, scrolledTopOriginY, accuracy: 1)
+
+        workingModel.update(nil)
+        pumpLayout()
+        XCTAssertEqual(scrollView.contentView.documentVisibleRect.origin.y, scrolledTopOriginY, accuracy: 1)
+    }
 }
 
 // MARK: - Remote Kitty test helpers
