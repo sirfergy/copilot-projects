@@ -47,6 +47,7 @@ final class TranscriptController: ObservableObject {
     }
 
     @Published private(set) var snapshot: TranscriptSnapshot?
+    @Published private(set) var promptAttachments = TranscriptPromptAttachments()
 
     let sessionId: String
 
@@ -55,10 +56,16 @@ final class TranscriptController: ObservableObject {
     private var signature: LoadSignature?
     private var reloadGeneration = 0
     private var started = false
+    private let copilotHome: String?
     private let snapshotLoadObserver: (() -> Void)?
 
-    init(sessionId: String, snapshotLoadObserver: (() -> Void)? = nil) {
+    init(
+        sessionId: String,
+        copilotHome: String? = nil,
+        snapshotLoadObserver: (() -> Void)? = nil
+    ) {
         self.sessionId = sessionId
+        self.copilotHome = copilotHome
         self.snapshotLoadObserver = snapshotLoadObserver
     }
 
@@ -99,6 +106,7 @@ final class TranscriptController: ObservableObject {
     func pollTranscriptIfNeeded() {
         let sampledGeneration = reloadGeneration
         let previousSignature = signature
+        let previousAttachments = promptAttachments
         let currentSessionId = sessionId
         let path = Paths.transcriptSnapshotPath(sessionId: currentSessionId)
         Task.detached { [weak self] in
@@ -106,7 +114,9 @@ final class TranscriptController: ObservableObject {
                 sessionId: currentSessionId,
                 transcriptPath: path
             )
-            guard currentSignature != previousSignature else { return }
+            guard currentSignature != previousSignature || previousAttachments.hasWatchedFileChanges() else {
+                return
+            }
             await MainActor.run { [weak self] in
                 guard let self,
                       self.reloadGeneration == sampledGeneration,
@@ -121,6 +131,7 @@ final class TranscriptController: ObservableObject {
         let generation = reloadGeneration
         let previousSignature = signature
         let currentSessionId = sessionId
+        let currentCopilotHome = copilotHome
         let path = Paths.transcriptSnapshotPath(sessionId: currentSessionId)
         Task.detached { [weak self] in
             if delay > 0 {
@@ -128,21 +139,55 @@ final class TranscriptController: ObservableObject {
                     nanoseconds: UInt64(delay * 1_000_000_000)
                 )
             }
-            let isCurrent = await MainActor.run { [weak self] in
-                guard let self, generation == reloadGeneration else { return false }
+            let state = await MainActor.run { [weak self] () -> (isCurrent: Bool, snapshot: TranscriptSnapshot?, attachments: TranscriptPromptAttachments) in
+                guard let self, generation == reloadGeneration else {
+                    return (false, nil, TranscriptPromptAttachments())
+                }
                 snapshotLoadObserver?()
-                return true
+                return (true, snapshot, promptAttachments)
             }
-            guard isCurrent else { return }
-            guard let result = Self.load(
+            guard state.isCurrent else { return }
+            let result = Self.load(
                 sessionId: currentSessionId,
                 path: path,
                 previousSignature: previousSignature
-            ) else { return }
+            )
+            if result == nil, !state.attachments.hasWatchedFileChanges() {
+                return
+            }
+            let targetSnapshot = result?.snapshot ?? (result == nil ? state.snapshot : nil)
+            if let result {
+                let isCurrent = await MainActor.run { [weak self] () -> Bool in
+                    guard let self, generation == reloadGeneration else { return false }
+                    snapshot = result.snapshot
+                    if result.snapshot == nil {
+                        signature = result.signature
+                        promptAttachments = TranscriptPromptAttachments()
+                    } else if result.snapshot?.copilotSessionId != promptAttachments.copilotSessionId {
+                        promptAttachments = TranscriptPromptAttachments()
+                    }
+                    return result.snapshot != nil
+                }
+                guard isCurrent else { return }
+            }
+            guard let targetSnapshot else { return }
+            let resolvedAttachments = TranscriptPromptAttachments.load(
+                sessionId: currentSessionId,
+                snapshot: targetSnapshot,
+                previous: state.attachments,
+                copilotHome: currentCopilotHome
+            )
             await MainActor.run { [weak self] in
-                guard let self, generation == reloadGeneration else { return }
-                signature = result.signature
-                snapshot = result.snapshot
+                guard let self else { return }
+                if generation == reloadGeneration, let result {
+                    signature = result.signature
+                    snapshot = result.snapshot
+                }
+                if (generation == reloadGeneration || resolvedAttachments.scannedEventsBytes > promptAttachments.scannedEventsBytes),
+                   snapshot?.copilotSessionId == resolvedAttachments.copilotSessionId,
+                   promptAttachments != resolvedAttachments {
+                    promptAttachments = resolvedAttachments
+                }
             }
         }
     }

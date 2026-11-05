@@ -86,10 +86,14 @@ struct TranscriptImageView: View {
                         }
                     }
                     .aspectRatio(size, contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: 280, alignment: .leading)
+                    .frame(
+                        maxWidth: 280 * (size.width / max(size.height, 1)),
+                        maxHeight: 280
+                    )
                     .frame(minHeight: 44)
                     .clipShape(RoundedRectangle(cornerRadius: 9))
                     .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.quaternary))
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
                 .disabled(readyImage == nil)
