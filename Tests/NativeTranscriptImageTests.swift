@@ -884,7 +884,7 @@ final class NativeTranscriptImageTests: XCTestCase {
 
         func makePaddedPNG(targetBytes: Int, seed: UInt8) -> Data {
             var out = Data(pngBytes.dropLast(12))
-            let pad = max(4, targetBytes - pngBytes.count)
+            let pad = max(4, targetBytes - pngBytes.count - 12)
             var len = UInt32(pad).bigEndian
             out.append(Data(bytes: &len, count: 4))
             out.append(contentsOf: "tEXt".utf8)
@@ -896,7 +896,7 @@ final class NativeTranscriptImageTests: XCTestCase {
         }
 
         // Oversized (> 5 MiB) inline blob and binary_asset entries with structurally valid PNG bytes are rejected and surface as `data == nil` placeholders.
-        let oversizedValidPNG = makePaddedPNG(targetBytes: 5 * 1_024 * 1_024 + 64 + pngBytes.count, seed: 0x41)
+        let oversizedValidPNG = makePaddedPNG(targetBytes: 5 * 1_024 * 1_024 + 64, seed: 0x41)
         XCTAssertGreaterThan(oversizedValidPNG.count, 5 * 1_024 * 1_024)
         XCTAssertEqual(TranscriptPromptAttachments.pixelSize(oversizedValidPNG), CGSize(width: 180, height: 90))
         let oversizedBase64 = oversizedValidPNG.base64EncodedString()
@@ -917,10 +917,13 @@ final class NativeTranscriptImageTests: XCTestCase {
         // Aggregate 32 MiB total budget: newest turns keep their image data while older turns exceeding 32 MiB become placeholders.
         let fourMiB1 = makePaddedPNG(targetBytes: 4_500_000, seed: 0x41)
         let fourMiB2 = makePaddedPNG(targetBytes: 4_500_000, seed: 0x42)
-        let turn1Attachments = (0..<4).map { _ in #"{"type":"blob","assetId":"sha256:four-1","mimeType":"image/png"}"# }.joined(separator: ",")
+        let exactFiveMiB = makePaddedPNG(targetBytes: 5 * 1_024 * 1_024, seed: 0x43)
+        XCTAssertEqual(exactFiveMiB.count, 5 * 1_024 * 1_024)
+        let turn1Attachments = ((0..<3).map { _ in #"{"type":"blob","assetId":"sha256:four-1","mimeType":"image/png"}"# } + [#"{"type":"blob","assetId":"sha256:exact-5m","mimeType":"image/png"}"#]).joined(separator: ",")
         let turn2Attachments = (0..<4).map { _ in #"{"type":"blob","mimeType":"image/png","data":"\#(fourMiB2.base64EncodedString())"}"# }.joined(separator: ",")
         let totalBudgetEvents = [
             #"{"type":"session.binary_asset","id":"a-4m","data":{"assetId":"sha256:four-1","type":"image","mimeType":"image/png","data":"\#(fourMiB1.base64EncodedString())"}}"#,
+            #"{"type":"session.binary_asset","id":"a-5m","data":{"assetId":"sha256:exact-5m","type":"image","mimeType":"image/png","data":"\#(exactFiveMiB.base64EncodedString())"}}"#,
             #"{"type":"user.message","id":"turn-1","timestamp":"2026-11-05T12:00:01Z","data":{"content":"Older 18MB","attachments":[\#(turn1Attachments)]}}"#,
             #"{"type":"user.message","id":"turn-2","timestamp":"2026-11-05T12:05:00Z","data":{"content":"Newer 18MB","attachments":[\#(turn2Attachments)]}}"#,
         ].joined(separator: "\n") + "\n"
@@ -937,5 +940,18 @@ final class NativeTranscriptImageTests: XCTestCase {
         XCTAssertEqual(olderItems.count, 4)
         XCTAssertEqual(olderItems.compactMap(\.data).count, 3)
         XCTAssertNil(olderItems[3].data)
+
+        // When a newer turn references the exact-5-MiB asset that was previously rejected for insufficient aggregate budget, it loads cleanly.
+        let handle3 = try FileHandle(forWritingTo: eventsURL)
+        try handle3.seekToEnd()
+        try handle3.write(contentsOf: Data((#"{"type":"user.message","id":"turn-4","timestamp":"2026-11-05T12:12:00Z","data":{"content":"Reuse exact 5MB","attachments":[{"type":"blob","assetId":"sha256:exact-5m","mimeType":"image/png"}]}}"# + "\n").utf8))
+        try handle3.close()
+        let afterExact5MReuse = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: snapshotWithTurn4,
+            previous: afterTotalBudget,
+            copilotHome: tempRoot.path
+        )
+        XCTAssertEqual(afterExact5MReuse.items(forTurnId: "turn-4", sessionId: appSessionId, copilotSessionId: copilotSessionId).map(\.data), [exactFiveMiB])
     }
 }

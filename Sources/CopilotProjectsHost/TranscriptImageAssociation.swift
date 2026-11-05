@@ -422,7 +422,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
                 : nil
         }
         guard let base64, !base64.isEmpty else { return nil }
-        let minDecodedBytes = (base64.utf8.count / 4) * 3
+        let minDecodedBytes = max(1, (base64.utf8.count / 4) * 3 - 2)
         payloadBytesBySpan[spanKey] = minDecodedBytes
         guard base64.utf8.count <= ((maxBytes + 2) / 3) * 4,
               let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters),
