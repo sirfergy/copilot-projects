@@ -368,9 +368,14 @@ struct HostHealthPill: View {
     static func summaryLabel(for hosts: [RemoteHostHealth]) -> String {
         guard !hosts.isEmpty else { return "Hosts" }
         let raw: String
-        if let worst = hosts.max(by: { $0.level < $1.level }), worst.level > .healthy {
+        let problemHosts = hosts.filter { $0.level > .healthy }
+        if let worst = problemHosts.max(by: { $0.level < $1.level }) {
             let reason = worst.statusSummary ?? worst.level.rawValue.capitalized
-            raw = hosts.count > 1 ? "\(worst.displayName): \(reason)" : reason
+            if problemHosts.count > 1 {
+                raw = "\(problemHosts.count) hosts: \(worst.displayName): \(reason)"
+            } else {
+                raw = hosts.count > 1 ? "\(worst.displayName): \(reason)" : reason
+            }
         } else {
             let primary = hosts.first(where: \.isLocal) ?? hosts[0]
             if let cpu = primary.cpuUsagePercent, let memory = primary.memoryUsagePercent {
@@ -419,6 +424,7 @@ struct HostHealthPill: View {
         let hosts = model.hostHealth
         let level = Self.overallLevel(for: hosts)
         let label = Self.summaryLabel(for: hosts)
+        let accessibilityLabel = "Host health: \(level.rawValue.capitalized). \(label)"
 
         Button {
             showsPopover.toggle()
@@ -445,8 +451,8 @@ struct HostHealthPill: View {
             )
         }
         .buttonStyle(.plain)
-        .help("Show host health details")
-        .accessibilityLabel("Host health: \(level.rawValue.capitalized). \(label)")
+        .help(accessibilityLabel)
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityIdentifier("fleet-status-host-health")
         .popover(isPresented: $showsPopover, arrowEdge: .bottom) {
             HostHealthPopover(model: model)
