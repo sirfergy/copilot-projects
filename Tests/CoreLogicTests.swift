@@ -839,7 +839,8 @@ final class CoreLogicTests: XCTestCase {
           {id:"multi-a1",type:"assistant.message",timestamp:ts(9002),
            data:{messageId:"multi-m1",content:"first"}},
           {id:"multi-tool1-start",type:"tool.execution_start",timestamp:ts(9003),
-           data:{turnId:"multi-t1",toolCallId:"multi-tool1",toolName:"bash"}},
+           data:{turnId:"multi-t1",toolCallId:"multi-tool1",toolName:"bash",
+             arguments:{command:"GH_TOKEN=secret_token echo hi",description:"Run first check"}}},
           {id:"multi-tool1-done",type:"tool.execution_complete",timestamp:ts(9004),
            data:{turnId:"multi-t1",toolCallId:"multi-tool1",success:true}},
           {id:"multi-te-1",type:"assistant.turn_end",timestamp:ts(9005),data:{turnId:"multi-t1"}},
@@ -848,7 +849,8 @@ final class CoreLogicTests: XCTestCase {
           {id:"multi-a2",type:"assistant.message",timestamp:ts(9007),
            data:{messageId:"multi-m2",content:"second"}},
           {id:"multi-tool2-start",type:"tool.execution_start",timestamp:ts(9008),
-           data:{turnId:"multi-t2",toolCallId:"multi-tool2",toolName:"grep"}},
+           data:{turnId:"multi-t2",toolCallId:"multi-tool2",toolName:"view",
+             arguments:{path:`${process.cwd()}/Sources/CopilotProjectsHost/TranscriptTurnViews.swift`}}},
           {id:"multi-tool2-done",type:"tool.execution_complete",timestamp:ts(9009),
            data:{turnId:"multi-t2",toolCallId:"multi-tool2",success:false}},
           {id:"multi-te-2",type:"assistant.turn_end",timestamp:ts(9010),data:{turnId:"multi-t2"}},
@@ -1080,6 +1082,7 @@ final class CoreLogicTests: XCTestCase {
           multiKind: multi?.kind,
           multiAssistantCount: multi?.assistantMessages.length,
           multiToolCount: multi?.tools.length,
+          multiToolTitles: multi?.tools.map((tool) => tool.title),
           multiToolSecondSuccess: multi?.tools[1]?.success,
           withSkillKind: withSkill?.kind,
           withSkillAssistantCount: withSkill?.assistantMessages.length,
@@ -1165,6 +1168,10 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary?["multiKind"] as? String, "foreground")
         XCTAssertEqual(summary?["multiAssistantCount"] as? Int, 2)
         XCTAssertEqual(summary?["multiToolCount"] as? Int, 2)
+        XCTAssertEqual(
+            summary?["multiToolTitles"] as? [String],
+            ["Run first check", "Sources/CopilotProjectsHost/TranscriptTurnViews.swift"]
+        )
         XCTAssertEqual(summary?["multiToolSecondSuccess"] as? Bool, false)
         // Injected skill context folds into the human turn, never its own turn.
         XCTAssertEqual(summary?["withSkillKind"] as? String, "foreground")
@@ -1211,6 +1218,105 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertLessThanOrEqual(
             summary?["snapshotBytes"] as? Int ?? .max,
             5 * 1_024 * 1_024
+        )
+    }
+
+    func testCopilotExtensionToolTitleAllowlistAndSecretExclusion() throws {
+        try requireNodeForJavaScriptTests()
+        guard let start = CopilotExtension.script.range(of: "const TOOL_TITLE_FIELDS = {"),
+              let end = CopilotExtension.script.range(of: "function boundCompletedPermissionIds()")
+        else {
+            return XCTFail("toolTitle helper not found in extension script")
+        }
+        let toolTitleJS = String(CopilotExtension.script[start.lowerBound..<end.lowerBound])
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let script = root.appendingPathComponent("tool-title.mjs")
+        let harness = """
+        import assert from "node:assert/strict";
+        import { isAbsolute, relative } from "node:path";
+        \(toolTitleJS)
+
+        const cwd = "/Users/example/Repos/project";
+        assert.equal(
+          toolTitle({ toolName: "bash", arguments: { command: "GH_TOKEN=ghp_secret123 curl -s https://api.github.com", description: "Run targeted tests" } }, cwd),
+          "Run targeted tests"
+        );
+        assert.equal(
+          toolTitle({ toolName: "bash", arguments: { command: "GH_TOKEN=ghp_secret123 env" } }, cwd),
+          "bash"
+        );
+        assert.equal(
+          toolTitle({ toolName: "bash", arguments: { command: "GH_TOKEN=ghp_secret123 env", description: "   " } }, cwd),
+          "bash"
+        );
+        assert.equal(
+          toolTitle({ toolName: "bash", arguments: { command: "GH_TOKEN=ghp_secret123 env", description: 42 } }, cwd),
+          "bash"
+        );
+        assert.equal(
+          toolTitle({ toolName: "view", arguments: { path: "/Users/example/Repos/project/Sources/App.swift" } }, cwd),
+          "Sources/App.swift"
+        );
+        assert.equal(
+          toolTitle({ toolName: "view", arguments: { path: "/Users/example/Repos/project" } }, cwd),
+          "."
+        );
+        assert.equal(
+          toolTitle({ toolName: "view", arguments: { path: `${process.cwd()}/Package.swift` } }),
+          "Package.swift"
+        );
+        assert.equal(
+          toolTitle({ toolName: "edit", arguments: { path: "/Users/example/Repos/project/..dotdir/File.swift" } }, cwd),
+          "..dotdir/File.swift"
+        );
+        assert.equal(
+          toolTitle({ toolName: "create", arguments: { path: "/Users/example/Repos/project-sibling/Sources/App.swift" } }, cwd),
+          "/Users/example/Repos/project-sibling/Sources/App.swift"
+        );
+        assert.equal(
+          toolTitle({ toolName: "view", arguments: { path: "/etc/hosts" } }, cwd),
+          "/etc/hosts"
+        );
+        assert.equal(
+          toolTitle({ toolName: "grep", arguments: { pattern: "TranscriptTools", paths: [cwd] } }, cwd),
+          "TranscriptTools"
+        );
+        assert.equal(
+          toolTitle({ toolName: "glob", arguments: { pattern: "Tests/**/*.swift" } }, cwd),
+          "Tests/**/*.swift"
+        );
+        assert.equal(
+          toolTitle({ toolName: "task", arguments: { description: "Audit diff for regressions", prompt: "SECRET_PROMPT" } }, cwd),
+          "Audit diff for regressions"
+        );
+        assert.equal(
+          toolTitle({ toolName: "onepassword-read", arguments: { reference: "op://Private/Token/credential", description: "Should not be used" } }, cwd),
+          "onepassword-read"
+        );
+        assert.equal(
+          toolTitle({ toolName: "custom", toolDescription: { name: "Custom Display" }, arguments: { path: "/tmp/ignored" } }, cwd),
+          "Custom Display"
+        );
+        assert.equal(toolTitle({}), "Tool");
+        """
+        try harness.write(to: script, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", script.path]
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+        let output = stderr.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(
+            process.terminationStatus,
+            0,
+            String(data: output, encoding: .utf8) ?? "toolTitle assertions failed"
         )
     }
 
