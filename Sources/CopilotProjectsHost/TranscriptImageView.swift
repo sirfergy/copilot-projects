@@ -20,7 +20,7 @@ actor TranscriptImageDecoder {
     func decode(_ data: Data, maximumDimension: Int) throws -> CGImage {
         try Task.checkCancellation()
         guard (1...Self.previewDimension).contains(maximumDimension),
-              RemoteKittyPNGValidation.isStructurallyValid(data),
+              TranscriptPromptAttachments.pixelSize(data) != nil,
               let source = CGImageSourceCreateWithData(data as CFData, [
                 kCGImageSourceShouldCache: false
               ] as CFDictionary),
@@ -68,7 +68,7 @@ struct TranscriptImageView: View {
 
     var body: some View {
         Group {
-            if let data, let size = RemoteKittyPNGValidation.pixelSize(data) {
+            if let data, let size = TranscriptPromptAttachments.pixelSize(data) {
                 Button {
                     onPreview(TranscriptImagePreviewItem(id: identity, data: data))
                 } label: {
