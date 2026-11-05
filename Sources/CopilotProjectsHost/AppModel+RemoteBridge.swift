@@ -844,27 +844,6 @@ extension AppModel {
     }
 
     func updateRemoteQuickReplies(
-        from data: Data
-    ) -> RemoteQuickRepliesUpdateOutcome {
-        guard !isTerminating else {
-            return .unavailable("Copilot Projects is closing.")
-        }
-        guard !didFailToLoadWorkspaceState, stateLoadFailure == nil else {
-            return .unavailable("The workspace could not be loaded.")
-        }
-        guard data.count <= RemoteQuickRepliesContract.maximumPayloadBytes else {
-            return .payloadTooLarge
-        }
-        guard let request = try? JSONDecoder().decode(
-            RemoteQuickRepliesUpdateRequest.self,
-            from: data
-        ) else {
-            return .invalid("Invalid quick replies request.")
-        }
-        return updateRemoteQuickReplies(request)
-    }
-
-    func updateRemoteQuickReplies(
         _ request: RemoteQuickRepliesUpdateRequest
     ) -> RemoteQuickRepliesUpdateOutcome {
         guard !isTerminating else {
@@ -893,13 +872,11 @@ extension AppModel {
                 ) else {
                     return .unavailable("Could not save quick replies.")
                 }
-                cachedQuickRepliesDigest = nil
                 objectWillChange.send()
                 return .updated(RemoteQuickRepliesState(items: saved))
             }
         } else {
             QuickReplyConfiguration.reset(in: defaults)
-            cachedQuickRepliesDigest = nil
             objectWillChange.send()
             return .updated(RemoteQuickRepliesState(configuration: .defaultReplies))
         }

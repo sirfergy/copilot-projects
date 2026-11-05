@@ -293,11 +293,6 @@ final class RemoteModelBridge: SessionHost {
         return model.updateRemoteQuickReplies(request)
     }
 
-    func updateQuickReplies(from data: Data) -> RemoteQuickRepliesUpdateOutcome {
-        guard let model else { return .unavailable("Copilot Projects is closing.") }
-        return model.updateRemoteQuickReplies(from: data)
-    }
-
     var sessionSearchCapabilities: [String] {
         model?.remoteSessionSearch.capabilities ?? [
             RemoteSessionSearchContract.capability,

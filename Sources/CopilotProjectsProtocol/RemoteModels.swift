@@ -35,7 +35,7 @@ public struct RemoteHostInfo: Codable, Equatable, Sendable, Identifiable {
 public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
     public fileprivate(set) var projects: [RemoteProjectSnapshot]
     public let selectedProjectId: String?
-    public var protocolInfo: RemoteProtocolInfo?
+    public let protocolInfo: RemoteProtocolInfo?
     /// Hosts where a session can be launched (`This Mac` plus auto-discovered SSH
     /// hosts). Optional and omitted when only the local host is configured so
     /// single-host snapshots stay compact and backward-compatible.
@@ -86,9 +86,16 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
     }
 
     public func withProtocolInfo(_ protocolInfo: RemoteProtocolInfo?) -> RemoteWorkspaceSnapshot {
-        var copy = self
-        copy.protocolInfo = protocolInfo
-        return copy
+        RemoteWorkspaceSnapshot(
+            projects: projects,
+            selectedProjectId: selectedProjectId,
+            protocolInfo: protocolInfo,
+            availableHosts: availableHosts,
+            hostHealth: hostHealth,
+            recentlyClosedSessions: recentlyClosedSessions,
+            quickRepliesDigest: quickRepliesDigest,
+            servedAtMilliseconds: servedAtMilliseconds
+        )
     }
 }
 

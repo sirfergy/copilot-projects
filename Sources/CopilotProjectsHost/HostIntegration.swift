@@ -95,7 +95,6 @@ public protocol SessionHost: AnyObject, Sendable {
     var supportsQuickReplies: Bool { get }
     func quickReplies() -> RemoteQuickRepliesState?
     func updateQuickReplies(_ request: RemoteQuickRepliesUpdateRequest) -> RemoteQuickRepliesUpdateOutcome
-    func updateQuickReplies(from data: Data) -> RemoteQuickRepliesUpdateOutcome
 }
 
 public extension SessionHost {

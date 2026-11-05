@@ -16171,9 +16171,12 @@ final class AppLogicTests: XCTestCase {
             .unavailable("Copilot Projects is closing.")
         )
         XCTAssertEqual(
-            terminatingBridge.updateQuickReplies(from: oversized),
+            terminatingBridge.updateQuickReplies(
+                from: try JSONEncoder().encode(RemoteQuickRepliesUpdateRequest(items: desktopExisting))
+            ),
             .unavailable("Copilot Projects is closing.")
         )
+        XCTAssertEqual(terminatingBridge.updateQuickReplies(from: oversized), .payloadTooLarge)
         XCTAssertEqual(QuickReplyConfiguration.load(from: defaults), .custom([]))
         model.beginTermination()
     }
