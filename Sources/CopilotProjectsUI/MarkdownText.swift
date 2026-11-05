@@ -238,11 +238,11 @@ public final class MarkdownLRUCache<Value: Sendable>: @unchecked Sendable {
 /// it can be unit tested without a view host.
 public enum MarkdownParser {
     private static let maximumRenderedBytes = 256 * 1_024
-    private static let maximumRenderedLines = 2_000
-    private static let maximumRenderedPipes = 4_000
-    fileprivate static let maximumBlockPipes = 1_000
-    fileprivate static let maximumInlineMarkers = 8_000
-    fileprivate static let maximumBlockInlineMarkers = 2_000
+    private static let maximumRenderedLines = 500
+    private static let maximumDocumentLines = 2_000
+    private static let maximumRenderedPipes = 1_000
+    private static let maximumInlineMarkers = 2_000
+    fileprivate static let maximumDocumentInlineMarkers = 8_000
     public static let maximumRenderedTableCells = 1_000
     fileprivate static let maximumDocumentTableCells = 4_000
     public static let maximumDetailsNestingDepth = 4
@@ -262,24 +262,20 @@ public enum MarkdownParser {
     )
 
     fileprivate struct TextCounts {
-        var lines = 1, pipes = 0, maxLinePipes = 0, inlineMarkers = 0
+        var lines = 1, pipes = 0, inlineMarkers = 0
     }
 
     fileprivate static func scanCounts(_ text: String) -> TextCounts {
         var counts = TextCounts()
-        var linePipes = 0
         var previousWasCR = false
         for byte in text.utf8 {
             if byte == 0x0D || byte == 0x0A {
                 if byte == 0x0D || !previousWasCR { counts.lines += 1 }
-                linePipes = 0
                 previousWasCR = (byte == 0x0D)
             } else {
                 previousWasCR = false
                 if byte == 0x7C {
                     counts.pipes += 1
-                    linePipes += 1
-                    counts.maxLinePipes = max(counts.maxLinePipes, linePipes)
                 } else if byte == 0x2A || byte == 0x5F || byte == 0x7E
                             || byte == 0x60 || byte == 0x5B || byte == 0x3C {
                     counts.inlineMarkers += 1
@@ -290,13 +286,16 @@ public enum MarkdownParser {
     }
 
     fileprivate struct RenderBudget: Equatable, Sendable {
-        var inlineMarkersRemaining = MarkdownParser.maximumInlineMarkers
+        var inlineMarkersRemaining = MarkdownParser.maximumDocumentInlineMarkers
         var tableCellsRemaining = MarkdownParser.maximumDocumentTableCells
         var segmentsRemaining = MarkdownParser.maximumRenderedSegments
 
         mutating func consumeInline(_ text: String) -> Bool {
-            let markers = MarkdownParser.scanCounts(text).inlineMarkers
-            guard markers <= MarkdownParser.maximumBlockInlineMarkers,
+            consumeInline(MarkdownParser.scanCounts(text).inlineMarkers)
+        }
+
+        mutating func consumeInline(_ markers: Int) -> Bool {
+            guard markers <= MarkdownParser.maximumInlineMarkers,
                   markers <= inlineMarkersRemaining else { return false }
             inlineMarkersRemaining -= markers
             return true
@@ -311,10 +310,8 @@ public enum MarkdownParser {
             let markers = ([table.header] + table.rows).reduce(0) { total, row in
                 total + row.reduce(0) { $0 + MarkdownParser.scanCounts($1).inlineMarkers }
             }
-            guard markers <= MarkdownParser.maximumBlockInlineMarkers,
-                  markers <= inlineMarkersRemaining else { return false }
+            guard consumeInline(markers) else { return false }
             tableCellsRemaining -= cells
-            inlineMarkersRemaining -= markers
             return true
         }
     }
@@ -325,14 +322,13 @@ public enum MarkdownParser {
     }
 
     fileprivate static func isWithinDocumentLimits(_ text: String) -> Bool {
-        text.utf8.count <= maximumRenderedBytes && scanCounts(text).lines <= maximumRenderedLines
+        text.utf8.count <= maximumRenderedBytes && scanCounts(text).lines <= maximumDocumentLines
     }
 
     public static func isWithinRenderingLimits(_ text: String) -> Bool {
         guard text.utf8.count <= maximumRenderedBytes else { return false }
         let counts = scanCounts(text)
         guard counts.lines <= maximumRenderedLines,
-              counts.maxLinePipes <= maximumBlockPipes,
               counts.pipes <= maximumRenderedPipes,
               counts.inlineMarkers <= maximumInlineMarkers else {
             return false
@@ -355,7 +351,10 @@ public enum MarkdownParser {
     }
 
     public static func isWithinTableCellLimits(_ blocks: [MarkdownBlock], depth: Int = 0) -> Bool {
-        var budget = RenderBudget()
+        var budget = RenderBudget(
+            inlineMarkersRemaining: maximumInlineMarkers,
+            tableCellsRemaining: maximumRenderedTableCells
+        )
         return isWithinTableCellLimits(blocks, depth: depth, budget: &budget)
     }
 
@@ -375,7 +374,7 @@ public enum MarkdownParser {
             case let .heading(_, text), let .paragraph(text), let .quote(text):
                 guard budget.consumeInline(text) else { return false }
             case let .list(items):
-                guard items.allSatisfy({ budget.consumeInline($0.text) }) else { return false }
+                guard budget.consumeInline(items.reduce(0) { $0 + scanCounts($1.text).inlineMarkers }) else { return false }
             case let .details(details):
                 guard depth + 1 <= maximumDetailsNestingDepth,
                       budget.consumeInline(details.summary.isEmpty ? "Details" : details.summary),
@@ -397,7 +396,7 @@ public enum MarkdownParser {
     }
 
     public static func inline(_ string: String) -> AttributedString {
-        guard scanCounts(string).inlineMarkers <= maximumBlockInlineMarkers else {
+        guard scanCounts(string).inlineMarkers <= maximumInlineMarkers else {
             return AttributedString(string)
         }
         return inlineCache.value(for: string, compute: parseInline(_:))
@@ -588,12 +587,12 @@ public enum MarkdownParser {
             if let alignments = tableAlignments(lines, at: index) {
                 flushParagraph()
                 let tableStart = index
-                let headerPipes = scanCounts(trimmed).pipes
-                let header = headerPipes <= maximumBlockPipes ? splitTableRow(trimmed) : []
+                let withinHeaderCap = !alignments.isEmpty && scanCounts(trimmed).pipes <= maximumRenderedPipes
+                let header = withinHeaderCap ? splitTableRow(trimmed) : []
                 var tableCells = header.count
                 index += 2
                 var rows: [[String]] = []
-                var withinCellCap = headerPipes <= maximumBlockPipes && tableCells <= maximumRenderedTableCells
+                var withinCellCap = withinHeaderCap && tableCells <= maximumRenderedTableCells
                 while index < lines.count {
                     let rowLine = lines[index].trimmingCharacters(in: .whitespaces)
                     guard !rowLine.isEmpty,
@@ -609,11 +608,11 @@ public enum MarkdownParser {
                     }
                     if withinCellCap {
                         let rowPipes = scanCounts(rowLine).pipes
-                        let row = rowPipes <= maximumBlockPipes
+                        let row = rowPipes <= maximumRenderedPipes
                             ? Array(splitTableRow(rowLine).prefix(header.count))
                             : []
                         tableCells += row.count
-                        if rowPipes <= maximumBlockPipes, tableCells <= maximumRenderedTableCells {
+                        if rowPipes <= maximumRenderedPipes, tableCells <= maximumRenderedTableCells {
                             rows.append(row)
                         } else {
                             withinCellCap = false
@@ -681,10 +680,20 @@ public enum MarkdownParser {
         guard index + 1 < lines.count else { return nil }
         let headerLine = lines[index].trimmingCharacters(in: .whitespaces)
         let delimiterLine = lines[index + 1].trimmingCharacters(in: .whitespaces)
-        guard rowContainsUnescapedPipe(headerLine),
-              scanCounts(delimiterLine).pipes <= maximumBlockPipes,
-              let alignments = tableDelimiterAlignments(delimiterLine),
-              scanCounts(headerLine).pipes > maximumBlockPipes
+        guard rowContainsUnescapedPipe(headerLine) else { return nil }
+        if scanCounts(delimiterLine).pipes > maximumRenderedPipes {
+            let inner = delimiterLine.dropFirst(delimiterLine.first == "|" ? 1 : 0)
+                .dropLast(delimiterLine.last == "|" ? 1 : 0)
+            let cells = inner.split(separator: "|", omittingEmptySubsequences: false)
+            let valid = !inner.isEmpty && scanCounts(headerLine).pipes + 1 >= cells.count && cells.allSatisfy { raw in
+                let cell = raw.trimmingCharacters(in: .whitespaces)
+                let dashes = cell.dropFirst(cell.first == ":" ? 1 : 0).dropLast(cell.last == ":" ? 1 : 0)
+                return dashes.count >= 3 && dashes.allSatisfy { $0 == "-" }
+            }
+            return valid ? [] : nil
+        }
+        guard let alignments = tableDelimiterAlignments(delimiterLine),
+              scanCounts(headerLine).pipes > maximumRenderedPipes
                   || splitTableRow(headerLine).count == alignments.count else {
             return nil
         }
@@ -960,6 +969,7 @@ public struct MarkdownText: View, Equatable {
     ) -> [RenderSegment] {
         var result: [RenderSegment] = []
         var currentProse: [ProsePart] = []
+        var proseStartBudget = budget
 
         func appendSegment(_ segment: RenderSegment) {
             result.append(segment)
@@ -979,6 +989,7 @@ public struct MarkdownText: View, Equatable {
             }
             if budget.segmentsRemaining <= 1, !currentProse.isEmpty {
                 let startIndex = index - currentProse.count
+                budget = proseStartBudget
                 currentProse = []
                 appendSegment(.plain(blocks[startIndex...].map(plainBlockText(_:)).joined(separator: "\n\n")))
                 return false
@@ -994,6 +1005,7 @@ public struct MarkdownText: View, Equatable {
 
         let lastSegmentStartIndex = blocks.lastIndex(where: \.startsNewSegment) ?? -1
         for (index, block) in blocks.enumerated() {
+            if currentProse.isEmpty { proseStartBudget = budget }
             let remainingAfterProse = budget.segmentsRemaining - (currentProse.isEmpty ? 0 : 1)
             let needsMultipleSegments = index < blocks.count - 1
                 && (block.startsNewSegment || lastSegmentStartIndex > index)
@@ -1018,10 +1030,8 @@ public struct MarkdownText: View, Equatable {
                 flushProse()
                 appendSegment(.plain(text))
             case let .list(items):
-                var listBudget = budget
-                let ok = items.allSatisfy { listBudget.consumeInline($0.text) }
-                if ok { budget = listBudget }
-                if !appendProse(.list(items), inlineOk: ok, at: index) { return result }
+                let markers = items.reduce(0) { $0 + MarkdownParser.scanCounts($1.text).inlineMarkers }
+                if !appendProse(.list(items), inlineOk: budget.consumeInline(markers), at: index) { return result }
             case let .quote(text):
                 if !appendProse(.quote(text), inlineOk: budget.consumeInline(text), at: index) { return result }
             case let .codeBlock(code):

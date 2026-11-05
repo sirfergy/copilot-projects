@@ -8697,12 +8697,21 @@ final class AppLogicTests: XCTestCase {
         )
         let escapedPipeRow = "| " + String(repeating: #"\|"#, count: 1_001) + " | z |"
         let oversizedRowTable = "| A | B |\n| --- | --- |\n| r1 | 1 |\n\(escapedPipeRow)\n| r3 | 3 |"
+        let header1002 = (["**bold_1002**"] + Array(repeating: "h", count: 1_001)).joined(separator: " | ")
+        let delim1002 = Array(repeating: "---", count: 1_002).joined(separator: " | ")
+        let row1002 = Array(repeating: "v", count: 1_002).joined(separator: " | ")
+        let table1002 = "\(header1002)\n\(delim1002)\n\(row1002)"
         XCTAssertEqual(
-            MarkdownParser.blocks(from: "- item\n\(escapedPipeRow)\n| --- | --- |\n| r1 | 1 |\n\n\(oversizedRowTable)\n\n\(smallTable)"),
+            MarkdownParser.blocks(from: "a | b\n\(delim1002)"),
+            [.paragraph("a | b\n\(delim1002)")]
+        )
+        XCTAssertEqual(
+            MarkdownParser.blocks(from: "- item\n\(escapedPipeRow)\n| --- | --- |\n| r1 | 1 |\n\n\(oversizedRowTable)\n\n\(table1002)\n\n\(smallTable)"),
             [
                 .list([MarkdownListItem(marker: "\u{2022}", text: "item", depth: 0)]),
                 .plainText("\(escapedPipeRow)\n| --- | --- |\n| r1 | 1 |"),
                 .plainText(oversizedRowTable),
+                .plainText(table1002),
                 .table(MarkdownTable(header: ["K", "V"], alignments: [.leading, .leading], rows: [["a", "b"]])),
             ]
         )
@@ -8785,17 +8794,14 @@ final class AppLogicTests: XCTestCase {
 
     func testMarkdownRenderingLimitsPreventStructuralAmplification() {
         XCTAssertTrue(MarkdownParser.isWithinRenderingLimits("# Heading\n\nBody"))
-        XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(
-            Array(repeating: "- item", count: 800).joined(separator: "\n")
+        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
+            Array(repeating: "- item", count: 501).joined(separator: "\n")
         ))
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
-            Array(repeating: "- item", count: 2_001).joined(separator: "\n")
+            Array(repeating: "- item", count: 501).joined(separator: "\r\n")
         ))
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
-            Array(repeating: "- item", count: 2_001).joined(separator: "\r\n")
-        ))
-        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
-            Array(repeating: "- item", count: 2_001).joined(separator: "\r")
+            Array(repeating: "- item", count: 501).joined(separator: "\r")
         ))
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
             String(repeating: "|", count: 1_001)
@@ -8827,11 +8833,8 @@ final class AppLogicTests: XCTestCase {
             "\(wideHeader)\n\(wideDelimiter)\n\(sparseRows)"
         ))
         let wrappedTableUnit = "| A | B |\n| --- | --- |\n| \(String(repeating: "wrapped ", count: 250)) | y |"
-        XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(
-            Array(repeating: wrappedTableUnit, count: 10).joined(separator: "\n\n")
-        ))
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
-            Array(repeating: wrappedTableUnit, count: 35).joined(separator: "\n\n")
+            Array(repeating: wrappedTableUnit, count: 10).joined(separator: "\n\n")
         ))
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
             "<details>\n<summary>Huge table</summary>\n\n\(wideHeader)\n\(wideDelimiter)\n\(sparseRows)\n</details>"
@@ -8840,9 +8843,11 @@ final class AppLogicTests: XCTestCase {
             + "Inner"
             + String(repeating: "\n</details>", count: 5)
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(fiveDeepDetails))
-        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
-            Array(repeating: "```\ncode\n```", count: 257).joined(separator: "\n")
-        ))
+        let wide300Header = Array(repeating: "h", count: 300).joined(separator: " | ")
+        let wide300Delim = Array(repeating: "---", count: 300).joined(separator: " | ")
+        let sparse11Rows = Array(repeating: "*a* | *b*", count: 11).joined(separator: "\n")
+        let wideTable8KB = Array(repeating: "\(wide300Header)\n\(wide300Delim)\n\(sparse11Rows)", count: 2).joined(separator: "\n\n")
+        XCTAssertNil(NotificationSummary.preview(wideTable8KB))
     }
 
     @MainActor
@@ -9538,7 +9543,10 @@ final class AppLogicTests: XCTestCase {
         | summarize Total = sum(Count) by Integration
         ```
         """
-        XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(syntheticReport))
+        XCTAssertFalse(
+            MarkdownParser.isWithinRenderingLimits(syntheticReport),
+            "Notification limits stay at 1,000 table cells while MarkdownText renders up to 4,000 document table cells"
+        )
         let reportHost = NSHostingView(
             rootView: MarkdownText(text: syntheticReport)
                 .frame(width: 380, alignment: .leading)
@@ -9564,10 +9572,10 @@ final class AppLogicTests: XCTestCase {
         let wideDelim50 = Array(repeating: "---", count: 50).joined(separator: " | ")
         let sparseRows25 = Array(repeating: "cell_a | cell_b", count: 25).joined(separator: "\n")
         let oversizedTable = "\(wideHeader50)\n\(wideDelim50)\n\(sparseRows25)"
-        let header900 = Array(repeating: "h", count: 900).joined(separator: " | ")
-        let delim900 = Array(repeating: "---", count: 900).joined(separator: " | ")
-        let row900 = (["**bold_900**"] + Array(repeating: "v", count: 899)).joined(separator: " | ")
-        let parserRejectedTable = ([header900, delim900] + Array(repeating: row900, count: 9)).joined(separator: "\n")
+        let header1002 = (["**bold_900**"] + Array(repeating: "h", count: 1_001)).joined(separator: " | ")
+        let delim1002 = Array(repeating: "---", count: 1_002).joined(separator: " | ")
+        let row1002 = Array(repeating: "v", count: 1_002).joined(separator: " | ")
+        let parserRejectedTable = "\(header1002)\n\(delim1002)\n\(row1002)"
         let eligibleSmallTable = "| Key | Val |\n| --- | ---: |\n| ok_key | 42 |"
         let oversizedInlinePara = Array(repeating: "**span** ", count: 600).joined()
         let mixedMarkdown = """
@@ -9706,7 +9714,7 @@ final class AppLogicTests: XCTestCase {
         )
 
         let code255AndProse = ((1...255).map { "```\ncode_\($0)\n```" } + ["# Tail Heading", "Body **bold_tail**"]).joined(separator: "\n\n")
-        XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(code255AndProse))
+        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(code255AndProse))
         let boundaryHost = NSHostingView(
             rootView: MarkdownText(text: code255AndProse)
                 .frame(width: 380, alignment: .leading)
