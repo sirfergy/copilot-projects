@@ -14,7 +14,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
     private static let maxEventLineBytes = 64 * 1_024 * 1_024
     private static let decodePayloadsKey = CodingUserInfoKey(rawValue: "decodePayloads")!
 
-    struct Span: Equatable, Sendable {
+    struct Span: Hashable, Sendable {
         let offset: Int
         let length: Int
     }
@@ -41,6 +41,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
     var resolvedTurnIds: Set<String> = []
     var refsByTurnId: [String: [Ref]] = [:]
     var assetSpans: [String: Span] = [:]
+    var payloadBytesBySpan: [Span: Int] = [:]
     var itemsByTurnId: [String: [Item]] = [:]
     var watchedFiles: [String: String] = [:]
 
@@ -198,8 +199,9 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
             return cursor
         }
         let sameEventsFile = startOffset > 0 && prior?.scannedEventsIdentity == eventsIdentity
-        if sameEventsFile, let priorSpans = prior?.assetSpans {
-            result.assetSpans = priorSpans
+        if sameEventsFile, let prior {
+            result.assetSpans = prior.assetSpans
+            result.payloadBytesBySpan = prior.payloadBytesBySpan
         }
         let consumedEnd = scanRange(startOffset, eventsSize)
         if startOffset > 0,
@@ -267,6 +269,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
                            turnId: turn.id,
                            index: 0,
                            inlineCache: &inlineCache,
+                           payloadBytesBySpan: &result.payloadBytesBySpan,
                            decoder: payloadDecoder,
                            maxBytes: cap
                        ) {
@@ -280,6 +283,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
                            turnId: turn.id,
                            index: ref.index,
                            inlineCache: &inlineCache,
+                           payloadBytesBySpan: &result.payloadBytesBySpan,
                            decoder: payloadDecoder,
                            maxBytes: cap
                        ) {
@@ -381,10 +385,12 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         turnId: String,
         index: Int,
         inlineCache: inout (span: Span, attachments: [RawAttachment]?)?,
+        payloadBytesBySpan: inout [Span: Int],
         decoder: JSONDecoder,
         maxBytes: Int
     ) -> (data: Data, token: String)? {
-        guard maxBytes > 0 else { return nil }
+        let spanKey = id == nil ? Span(offset: span.offset, length: -1 - index) : span
+        guard maxBytes > 0, (payloadBytesBySpan[spanKey] ?? 0) <= maxBytes else { return nil }
         func decodeLine() -> RawUserMessageEvent? {
             var line = Data(count: span.length)
             let readCount = line.withUnsafeMutableBytes {
@@ -415,14 +421,15 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
                 ? inlineCache?.attachments?[index].data
                 : nil
         }
-        guard let base64,
-              !base64.isEmpty,
-              base64.utf8.count <= ((maxBytes + 2) / 3) * 4,
+        guard let base64, !base64.isEmpty else { return nil }
+        let minDecodedBytes = (base64.utf8.count / 4) * 3
+        payloadBytesBySpan[spanKey] = minDecodedBytes
+        guard base64.utf8.count <= ((maxBytes + 2) / 3) * 4,
               let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters),
-              !data.isEmpty,
-              data.count <= maxBytes,
-              Self.pixelSize(data) != nil
+              !data.isEmpty
         else { return nil }
+        payloadBytesBySpan[spanKey] = data.count
+        guard data.count <= maxBytes, Self.pixelSize(data) != nil else { return nil }
         let token = "\(id ?? "inline"):\(span.offset):\(span.length):\(index):\(Self.fnv1a64(data))"
         return (data, token)
     }
