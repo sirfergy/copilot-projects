@@ -2164,7 +2164,10 @@ if (validSessionId && socketPath) {
     function imageCapabilities(entry) {
         if (entry?.capabilities?.supports?.vision !== true) return null;
         const vision = entry.capabilities.limits?.vision;
-        const count = pickKey(vision, "max_prompt_images", "maxPromptImages");
+        // CAPI only enforces registry `max_prompt_images` for Google; other
+        // vendors publish a placeholder of 1 that the runtime ignores.
+        const google = typeof entry.vendor === "string" && entry.vendor.trim().toLowerCase() === "google";
+        const count = google ? pickKey(vision, "max_prompt_images", "maxPromptImages") : 4;
         const bytes = pickKey(vision, "max_prompt_image_size", "maxPromptImageSize");
         const types = pickKey(vision, "supported_media_types", "supportedMediaTypes");
         if (!Number.isSafeInteger(count) || count < 1

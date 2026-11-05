@@ -235,6 +235,7 @@ final class CoreLogicTests: XCTestCase {
         {
             id: "camel",
             name: "Camel",
+            vendor: " google ",
             modelPickerCategory: "versatile",
             supportedReasoningEfforts: ["low", "high"],
             defaultReasoningEffort: "high",
@@ -262,6 +263,22 @@ final class CoreLogicTests: XCTestCase {
         JSON.stringify(camelCase[0].imageAttachments.mimeTypes) === JSON.stringify(["image/jpeg"]),
         "camelCase image MIME types must still map"
     );
+
+    const visionModel = (vendor, maxPromptImages, vision = true) => ({
+        ...(vendor === undefined ? {} : { vendor }),
+        capabilities: {
+            supports: { vision },
+            limits: { vision: {
+                max_prompt_images: maxPromptImages,
+                max_prompt_image_size: 1024,
+                supported_media_types: ["image/png"],
+            } },
+        },
+    });
+    check(imageCapabilities(visionModel("Google", 2))?.maxImages === 2, "Google model must honor its registry image count");
+    check(imageCapabilities(visionModel("OpenAI", 1))?.maxImages === 4, "non-Google model with placeholder 1 must allow 4 images");
+    check(imageCapabilities(visionModel(undefined, 1))?.maxImages === 4, "model without vendor must allow 4 images");
+    check(imageCapabilities(visionModel("Google", 2, false)) === null, "non-vision model must return null");
 
     // `supports.reasoningEffort` is typed as a boolean, so it must not become a list.
     const boolEffort = normalizeAvailableModels([
