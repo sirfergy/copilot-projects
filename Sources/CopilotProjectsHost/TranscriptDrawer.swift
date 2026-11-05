@@ -111,6 +111,8 @@ struct TranscriptOverlay: View {
                     if let capture = imageCapture() {
                         ImageAssociatedTranscriptDrawer(
                             capture: capture, snapshot: controller.snapshot,
+                            sessionId: controller.sessionId,
+                            promptAttachments: controller.promptAttachments,
                             workflow: workflow, operation: operation,
                             pendingUserInputs: pendingUserInputs,
                             pendingElicitations: pendingElicitations,
@@ -131,6 +133,9 @@ struct TranscriptOverlay: View {
                                 TranscriptImageAssociation.attach(images: [], to: $0).turns
                             } ?? [],
                             imageCapture: nil,
+                            sessionId: controller.sessionId,
+                            promptAttachments: controller.promptAttachments,
+                            copilotSessionId: controller.snapshot?.copilotSessionId,
                             workflow: workflow, operation: operation,
                             pendingUserInputs: pendingUserInputs,
                             pendingElicitations: pendingElicitations,
@@ -229,6 +234,8 @@ private struct TranscriptUsageButton: View {
 private struct ImageAssociatedTranscriptDrawer: View {
     @ObservedObject var capture: RemoteKittyImageCapture
     let snapshot: TranscriptSnapshot?
+    let sessionId: String
+    let promptAttachments: TranscriptPromptAttachments
     let workflow: RemoteSessionWorkflow?
     let operation: AgentOperationProjection
     let pendingUserInputs: [RemoteUserInputRequest]
@@ -250,6 +257,9 @@ private struct ImageAssociatedTranscriptDrawer: View {
                 TranscriptImageAssociation.attach(images: capture.retainedImageMetadata(), to: $0).turns
             } ?? [],
             imageCapture: capture,
+            sessionId: sessionId,
+            promptAttachments: promptAttachments,
+            copilotSessionId: snapshot?.copilotSessionId,
             workflow: workflow, operation: operation,
             pendingUserInputs: pendingUserInputs,
             pendingElicitations: pendingElicitations,
@@ -272,6 +282,9 @@ struct TranscriptDrawer: View {
 
     let turns: [TranscriptTurn]
     let imageCapture: RemoteKittyImageCapture?
+    var sessionId: String = ""
+    var promptAttachments = TranscriptPromptAttachments()
+    var copilotSessionId: String? = nil
     let workflow: RemoteSessionWorkflow?
     let operation: AgentOperationProjection
     var pendingUserInputs: [RemoteUserInputRequest] = []
@@ -442,7 +455,16 @@ struct TranscriptDrawer: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(displayedTurns) { turn in
-                            TranscriptTurnCard(turn: turn, imageCapture: imageCapture, onPreview: onPreview)
+                            TranscriptTurnCard(
+                                turn: turn,
+                                imageCapture: imageCapture,
+                                promptAttachments: promptAttachments.items(
+                                    forTurnId: turn.id,
+                                    sessionId: sessionId,
+                                    copilotSessionId: copilotSessionId ?? ""
+                                ),
+                                onPreview: onPreview
+                            )
                         }
                         ForEach(pendingUserInputs, id: \.requestId) { request in
                             DesktopUserInputCard(
@@ -1141,6 +1163,7 @@ private struct StagedAttachmentCard: View {
 private struct TranscriptTurnCard: View {
     let turn: TranscriptTurn
     let imageCapture: RemoteKittyImageCapture?
+    var promptAttachments: [TranscriptPromptAttachments.Item] = []
     let onPreview: (TranscriptImagePreviewItem) -> Void
 
     var body: some View {
@@ -1179,6 +1202,14 @@ private struct TranscriptTurnCard: View {
                         RoundedRectangle(cornerRadius: 9)
                             .fill(StudioStyle.message)
                     )
+            }
+
+            ForEach(promptAttachments) { item in
+                TranscriptImageView(
+                    identity: item.identity,
+                    data: item.data,
+                    onPreview: onPreview
+                )
             }
 
             if !turn.nonEmptyReasoningSteps.isEmpty {
