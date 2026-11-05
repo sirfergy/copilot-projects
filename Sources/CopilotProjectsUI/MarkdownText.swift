@@ -35,7 +35,6 @@ public struct MarkdownTable: Equatable, Sendable {
     public let header: [String]
     public let alignments: [MarkdownColumnAlignment]
     public let rows: [[String]]
-    fileprivate var pipeCount = 0
 
     public init(
         header: [String],
@@ -45,11 +44,6 @@ public struct MarkdownTable: Equatable, Sendable {
         self.header = header
         self.alignments = alignments
         self.rows = rows
-        self.pipeCount = (rows.count + 2) * max(header.count - 1, 0)
-    }
-
-    public static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.header == rhs.header && lhs.alignments == rhs.alignments && lhs.rows == rhs.rows
     }
 }
 
@@ -267,42 +261,59 @@ public enum MarkdownParser {
         maxCostBytes: maxCacheCostBytes
     )
 
+    fileprivate struct TextCounts {
+        var lines = 1, pipes = 0, maxLinePipes = 0, inlineMarkers = 0
+    }
+
+    fileprivate static func scanCounts(_ text: String) -> TextCounts {
+        var counts = TextCounts()
+        var linePipes = 0
+        var previousWasCR = false
+        for byte in text.utf8 {
+            if byte == 0x0D || byte == 0x0A {
+                if byte == 0x0D || !previousWasCR { counts.lines += 1 }
+                linePipes = 0
+                previousWasCR = (byte == 0x0D)
+            } else {
+                previousWasCR = false
+                if byte == 0x7C {
+                    counts.pipes += 1
+                    linePipes += 1
+                    counts.maxLinePipes = max(counts.maxLinePipes, linePipes)
+                } else if byte == 0x2A || byte == 0x5F || byte == 0x7E
+                            || byte == 0x60 || byte == 0x5B || byte == 0x3C {
+                    counts.inlineMarkers += 1
+                }
+            }
+        }
+        return counts
+    }
+
     fileprivate struct RenderBudget: Equatable, Sendable {
-        var pipesRemaining = MarkdownParser.maximumRenderedPipes
         var inlineMarkersRemaining = MarkdownParser.maximumInlineMarkers
         var tableCellsRemaining = MarkdownParser.maximumDocumentTableCells
         var segmentsRemaining = MarkdownParser.maximumRenderedSegments
 
         mutating func consumeInline(_ text: String) -> Bool {
-            let markers = MarkdownParser.inlineMarkerCount(in: text)
-            let pipes = MarkdownParser.pipeCount(in: text)
+            let markers = MarkdownParser.scanCounts(text).inlineMarkers
             guard markers <= MarkdownParser.maximumBlockInlineMarkers,
-                  markers <= inlineMarkersRemaining,
-                  pipes <= MarkdownParser.maximumBlockPipes,
-                  pipes <= pipesRemaining else {
-                return false
-            }
+                  markers <= inlineMarkersRemaining else { return false }
             inlineMarkersRemaining -= markers
-            pipesRemaining -= pipes
             return true
         }
 
         mutating func consumeTable(_ table: MarkdownTable) -> Bool {
             guard let cells = MarkdownParser.estimatedTableVisualCells(table),
                   cells <= MarkdownParser.maximumRenderedTableCells,
-                  cells <= tableCellsRemaining,
-                  table.pipeCount <= pipesRemaining else {
+                  cells <= tableCellsRemaining else {
                 return false
             }
             let markers = ([table.header] + table.rows).reduce(0) { total, row in
-                total + row.reduce(0) { $0 + MarkdownParser.inlineMarkerCount(in: $1) }
+                total + row.reduce(0) { $0 + MarkdownParser.scanCounts($1).inlineMarkers }
             }
             guard markers <= MarkdownParser.maximumBlockInlineMarkers,
-                  markers <= inlineMarkersRemaining else {
-                return false
-            }
+                  markers <= inlineMarkersRemaining else { return false }
             tableCellsRemaining -= cells
-            pipesRemaining -= table.pipeCount
             inlineMarkersRemaining -= markers
             return true
         }
@@ -313,89 +324,20 @@ public enum MarkdownParser {
         inlineCache.removeAll()
     }
 
-    fileprivate static func isInlineMarker(_ character: Character) -> Bool {
-        character == "*" || character == "_" || character == "~"
-            || character == "`" || character == "[" || character == "<"
-    }
-
-    fileprivate static func inlineMarkerCount(in text: String) -> Int {
-        var count = 0
-        for character in text where isInlineMarker(character) {
-            count += 1
-        }
-        return count
-    }
-
-    fileprivate static func pipeCount(in text: String) -> Int {
-        var count = 0
-        for character in text where character == "|" {
-            count += 1
-        }
-        return count
-    }
-
     fileprivate static func isWithinDocumentLimits(_ text: String) -> Bool {
-        guard text.utf8.count <= maximumRenderedBytes else { return false }
-        var lines = 1
-        var previousWasCR = false
-        for byte in text.utf8 {
-            if byte == 0x0D {
-                lines += 1
-                if lines > maximumRenderedLines { return false }
-                previousWasCR = true
-            } else {
-                if byte == 0x0A, !previousWasCR {
-                    lines += 1
-                    if lines > maximumRenderedLines { return false }
-                }
-                previousWasCR = false
-            }
-        }
-        return true
+        text.utf8.count <= maximumRenderedBytes && scanCounts(text).lines <= maximumRenderedLines
     }
 
     public static func isWithinRenderingLimits(_ text: String) -> Bool {
-        guard isWithinDocumentLimits(text) else { return false }
-        var budget = RenderBudget()
-        return isWithinBlockLimits(blocks(from: text), depth: 0, budget: &budget)
-    }
-
-    private static func isWithinBlockLimits(
-        _ blocks: [MarkdownBlock], depth: Int, budget: inout RenderBudget
-    ) -> Bool {
-        var inProse = false
-        for block in blocks {
-            if block.startsNewSegment || !inProse {
-                guard budget.segmentsRemaining > 0 else { return false }
-                budget.segmentsRemaining -= 1
-            }
-            inProse = !block.startsNewSegment
-            switch block {
-            case let .paragraph(text) where isThematicBreak(text):
-                continue
-            case let .heading(_, text), let .paragraph(text), let .quote(text):
-                guard budget.consumeInline(text) else { return false }
-            case let .list(items):
-                for item in items {
-                    guard budget.consumeInline(item.text) else { return false }
-                }
-            case .plainText, .codeBlock:
-                if case .plainText = block { return false }
-            case let .table(table):
-                guard budget.consumeTable(table) else { return false }
-            case let .details(details):
-                guard depth + 1 <= maximumDetailsNestingDepth,
-                      budget.consumeInline(details.summary.isEmpty ? "Details" : details.summary),
-                      isWithinBlockLimits(
-                          self.blocks(from: details.body),
-                          depth: depth + 1,
-                          budget: &budget
-                      ) else {
-                    return false
-                }
-            }
+        guard text.utf8.count <= maximumRenderedBytes else { return false }
+        let counts = scanCounts(text)
+        guard counts.lines <= maximumRenderedLines,
+              counts.maxLinePipes <= maximumBlockPipes,
+              counts.pipes <= maximumRenderedPipes,
+              counts.inlineMarkers <= maximumInlineMarkers else {
+            return false
         }
-        return true
+        return isWithinTableCellLimits(blocks(from: text))
     }
 
     fileprivate static func estimatedTableVisualCells(_ table: MarkdownTable) -> Int? {
@@ -413,29 +355,39 @@ public enum MarkdownParser {
     }
 
     public static func isWithinTableCellLimits(_ blocks: [MarkdownBlock], depth: Int = 0) -> Bool {
-        var totalCells = 0
-        return isWithinTableCellLimits(blocks, depth: depth, totalCells: &totalCells)
+        var budget = RenderBudget()
+        return isWithinTableCellLimits(blocks, depth: depth, budget: &budget)
     }
 
     private static func isWithinTableCellLimits(
-        _ blocks: [MarkdownBlock], depth: Int, totalCells: inout Int
+        _ blocks: [MarkdownBlock], depth: Int, budget: inout RenderBudget
     ) -> Bool {
+        var inProse = false
         for block in blocks {
-            if case let .details(details) = block {
+            if block.startsNewSegment || !inProse {
+                guard budget.segmentsRemaining > 0 else { return false }
+                budget.segmentsRemaining -= 1
+            }
+            inProse = !block.startsNewSegment
+            switch block {
+            case let .paragraph(text) where isThematicBreak(text):
+                break
+            case let .heading(_, text), let .paragraph(text), let .quote(text):
+                guard budget.consumeInline(text) else { return false }
+            case let .list(items):
+                guard items.allSatisfy({ budget.consumeInline($0.text) }) else { return false }
+            case let .details(details):
                 guard depth + 1 <= maximumDetailsNestingDepth,
-                      isWithinTableCellLimits(self.blocks(from: details.body), depth: depth + 1, totalCells: &totalCells)
+                      budget.consumeInline(details.summary.isEmpty ? "Details" : details.summary),
+                      isWithinTableCellLimits(self.blocks(from: details.body), depth: depth + 1, budget: &budget)
                 else { return false }
-                continue
-            }
-            if case .plainText = block { return false }
-            guard case let .table(table) = block else { continue }
-            guard let tableCells = estimatedTableVisualCells(table),
-                  tableCells <= maximumRenderedTableCells else {
+            case .plainText:
                 return false
+            case let .table(table):
+                guard budget.consumeTable(table) else { return false }
+            case .codeBlock:
+                break
             }
-            let (nextTotal, sumOverflow) = totalCells.addingReportingOverflow(tableCells)
-            if sumOverflow || nextTotal > maximumDocumentTableCells { return false }
-            totalCells = nextTotal
         }
         return true
     }
@@ -445,7 +397,7 @@ public enum MarkdownParser {
     }
 
     public static func inline(_ string: String) -> AttributedString {
-        guard inlineMarkerCount(in: string) <= maximumBlockInlineMarkers else {
+        guard scanCounts(string).inlineMarkers <= maximumBlockInlineMarkers else {
             return AttributedString(string)
         }
         return inlineCache.value(for: string, compute: parseInline(_:))
@@ -616,7 +568,7 @@ public enum MarkdownParser {
                     } else if !items.isEmpty,
                               !current.trimmingCharacters(in: .whitespaces).isEmpty,
                               !isBlockStart(current.trimmingCharacters(in: .whitespaces)),
-                              !isTableStart(lines, at: index) {
+                              tableAlignments(lines, at: index) == nil {
                         let last = items.removeLast()
                         let continued = current.trimmingCharacters(in: .whitespaces)
                         items.append(MarkdownListItem(
@@ -636,12 +588,12 @@ public enum MarkdownParser {
             if let alignments = tableAlignments(lines, at: index) {
                 flushParagraph()
                 let tableStart = index
-                let header = splitTableRow(trimmed)
+                let headerPipes = scanCounts(trimmed).pipes
+                let header = headerPipes <= maximumBlockPipes ? splitTableRow(trimmed) : []
                 var tableCells = header.count
-                var tablePipes = pipeCount(in: trimmed) + pipeCount(in: lines[index + 1])
                 index += 2
                 var rows: [[String]] = []
-                var withinCellCap = tableCells <= maximumRenderedTableCells
+                var withinCellCap = headerPipes <= maximumBlockPipes && tableCells <= maximumRenderedTableCells
                 while index < lines.count {
                     let rowLine = lines[index].trimmingCharacters(in: .whitespaces)
                     guard !rowLine.isEmpty,
@@ -656,12 +608,11 @@ public enum MarkdownParser {
                         }
                     }
                     if withinCellCap {
-                        let rowPipes = pipeCount(in: rowLine)
+                        let rowPipes = scanCounts(rowLine).pipes
                         let row = rowPipes <= maximumBlockPipes
                             ? Array(splitTableRow(rowLine).prefix(header.count))
                             : []
                         tableCells += row.count
-                        tablePipes += rowPipes
                         if rowPipes <= maximumBlockPipes, tableCells <= maximumRenderedTableCells {
                             rows.append(row)
                         } else {
@@ -672,9 +623,7 @@ public enum MarkdownParser {
                     index += 1
                 }
                 if withinCellCap {
-                    var table = MarkdownTable(header: header, alignments: alignments, rows: rows)
-                    table.pipeCount = tablePipes
-                    blocks.append(.table(table))
+                    blocks.append(.table(MarkdownTable(header: header, alignments: alignments, rows: rows)))
                 } else {
                     blocks.append(.plainText(lines[tableStart..<index].joined(separator: "\n")))
                 }
@@ -721,22 +670,11 @@ public enum MarkdownParser {
 
     public static func isThematicBreak(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard let first = trimmed.first, first == "-" || first == "*" || first == "_" else {
+        guard let first = trimmed.first, first == "-" || first == "*" || first == "_",
+              trimmed.allSatisfy({ $0 == first || $0 == " " || $0 == "\t" }) else {
             return false
         }
-        var count = 0
-        for character in trimmed {
-            if character == first {
-                count += 1
-            } else if character != " " && character != "\t" {
-                return false
-            }
-        }
-        return count >= 3
-    }
-
-    private static func isTableStart(_ lines: [String], at index: Int) -> Bool {
-        tableAlignments(lines, at: index) != nil
+        return trimmed.filter { $0 == first }.count >= 3
     }
 
     private static func tableAlignments(_ lines: [String], at index: Int) -> [MarkdownColumnAlignment]? {
@@ -744,10 +682,10 @@ public enum MarkdownParser {
         let headerLine = lines[index].trimmingCharacters(in: .whitespaces)
         let delimiterLine = lines[index + 1].trimmingCharacters(in: .whitespaces)
         guard rowContainsUnescapedPipe(headerLine),
-              pipeCount(in: headerLine) <= maximumBlockPipes,
-              pipeCount(in: delimiterLine) <= maximumBlockPipes,
+              scanCounts(delimiterLine).pipes <= maximumBlockPipes,
               let alignments = tableDelimiterAlignments(delimiterLine),
-              splitTableRow(headerLine).count == alignments.count else {
+              scanCounts(headerLine).pipes > maximumBlockPipes
+                  || splitTableRow(headerLine).count == alignments.count else {
             return nil
         }
         return alignments
@@ -883,14 +821,8 @@ public struct MarkdownText: View, Equatable {
     private var initialBudget = MarkdownParser.RenderBudget()
 
     public init(text: String) { self.text = text }
-    fileprivate init(
-        text: String,
-        nestingDepth: Int,
-        budget: MarkdownParser.RenderBudget
-    ) {
-        self.text = text
-        self.nestingDepth = nestingDepth
-        self.initialBudget = budget
+    fileprivate init(text: String, nestingDepth: Int, budget: MarkdownParser.RenderBudget) {
+        self.text = text; self.nestingDepth = nestingDepth; self.initialBudget = budget
     }
 
     public static let quoteBarAttribute = NSAttributedString.Key(
@@ -940,16 +872,11 @@ public struct MarkdownText: View, Equatable {
         case footnote
     }
 
-    fileprivate struct ProseListItem: Equatable {
-        let item: MarkdownListItem
-        let parseInline: Bool
-    }
-
     fileprivate enum ProsePart: Equatable {
-        case heading(level: Int, text: String, parseInline: Bool)
-        case paragraph(String, parseInline: Bool)
-        case list([ProseListItem])
-        case quote(String, parseInline: Bool)
+        case heading(level: Int, text: String)
+        case paragraph(String)
+        case list([MarkdownListItem])
+        case quote(String)
     }
 
     fileprivate enum RenderSegment: Equatable {
@@ -995,11 +922,7 @@ public struct MarkdownText: View, Equatable {
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 var budget = initialBudget
-                let segments = Self.segments(
-                    from: MarkdownParser.blocks(from: text),
-                    nestingDepth: nestingDepth,
-                    budget: &budget
-                )
+                let segments = Self.segments(from: MarkdownParser.blocks(from: text), nestingDepth: nestingDepth, budget: &budget)
                 ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                     view(for: segment)
                 }
@@ -1009,10 +932,8 @@ public struct MarkdownText: View, Equatable {
 
     fileprivate static func plainTableText(_ table: MarkdownTable) -> String {
         let columns = max(table.header.count, 1)
-        return ([table.header] + table.rows).map { row in
-            row.prefix(columns).map {
-                $0.replacingOccurrences(of: "\t", with: "    ")
-            }.joined(separator: "\t")
+        return ([table.header] + table.rows).map {
+            $0.prefix(columns).map { $0.replacingOccurrences(of: "\t", with: "    ") }.joined(separator: "\t")
         }.joined(separator: "\n")
     }
 
@@ -1021,7 +942,9 @@ public struct MarkdownText: View, Equatable {
         case let .heading(_, text), let .paragraph(text), let .plainText(text), let .codeBlock(text), let .quote(text):
             return text
         case let .list(items):
-            return items.map { "\($0.marker) \($0.text)" }.joined(separator: "\n")
+            return items.map { item in
+                String(repeating: "  ", count: max(0, item.depth)) + "\(item.marker) \(item.text)"
+            }.joined(separator: "\n")
         case let .table(table):
             return plainTableText(table)
         case let .details(details):
@@ -1049,6 +972,26 @@ public struct MarkdownText: View, Equatable {
             currentProse = []
         }
 
+        func appendProse(_ part: ProsePart, inlineOk: Bool, at index: Int) -> Bool {
+            if inlineOk {
+                currentProse.append(part)
+                return true
+            }
+            if budget.segmentsRemaining <= 1, !currentProse.isEmpty {
+                let startIndex = index - currentProse.count
+                currentProse = []
+                appendSegment(.plain(blocks[startIndex...].map(plainBlockText(_:)).joined(separator: "\n\n")))
+                return false
+            }
+            flushProse()
+            if budget.segmentsRemaining <= 1, index < blocks.count - 1 {
+                appendSegment(.plain(blocks[index...].map(plainBlockText(_:)).joined(separator: "\n\n")))
+                return false
+            }
+            appendSegment(.plain(plainBlockText(blocks[index])))
+            return true
+        }
+
         let lastSegmentStartIndex = blocks.lastIndex(where: \.startsNewSegment) ?? -1
         for (index, block) in blocks.enumerated() {
             let remainingAfterProse = budget.segmentsRemaining - (currentProse.isEmpty ? 0 : 1)
@@ -1063,30 +1006,24 @@ public struct MarkdownText: View, Equatable {
             }
             switch block {
             case let .heading(level, text):
-                currentProse.append(
-                    .heading(level: level, text: text, parseInline: budget.consumeInline(text))
-                )
+                if !appendProse(.heading(level: level, text: text), inlineOk: budget.consumeInline(text), at: index) { return result }
             case let .paragraph(text):
                 if MarkdownParser.isThematicBreak(text) {
                     flushProse()
                     appendSegment(.thematicBreak)
-                } else {
-                    currentProse.append(
-                        .paragraph(text, parseInline: budget.consumeInline(text))
-                    )
+                } else if !appendProse(.paragraph(text), inlineOk: budget.consumeInline(text), at: index) {
+                    return result
                 }
             case let .plainText(text):
                 flushProse()
                 appendSegment(.plain(text))
             case let .list(items):
-                let proseItems = items.map {
-                    ProseListItem(item: $0, parseInline: budget.consumeInline($0.text))
-                }
-                currentProse.append(.list(proseItems))
+                var listBudget = budget
+                let ok = items.allSatisfy { listBudget.consumeInline($0.text) }
+                if ok { budget = listBudget }
+                if !appendProse(.list(items), inlineOk: ok, at: index) { return result }
             case let .quote(text):
-                currentProse.append(
-                    .quote(text, parseInline: budget.consumeInline(text))
-                )
+                if !appendProse(.quote(text), inlineOk: budget.consumeInline(text), at: index) { return result }
             case let .codeBlock(code):
                 flushProse()
                 appendSegment(.codeBlock(code))
@@ -1100,27 +1037,19 @@ public struct MarkdownText: View, Equatable {
             case let .details(details):
                 flushProse()
                 let outerReserve = index < blocks.count - 1 ? 1 : 0
-                let minSegments = 1 + (details.body.isEmpty ? 0 : 1) + outerReserve
                 guard nestingDepth + 1 <= MarkdownParser.maximumDetailsNestingDepth,
-                      budget.segmentsRemaining >= minSegments else {
+                      budget.segmentsRemaining >= 1 + (details.body.isEmpty ? 0 : 1) + outerReserve else {
                     appendSegment(.plain(plainBlockText(.details(details))))
-                    break
+                    continue
                 }
-                let summaryText = details.summary.isEmpty ? "Details" : details.summary
-                let parseSummaryInline = budget.consumeInline(summaryText)
+                let parseSummaryInline = budget.consumeInline(details.summary.isEmpty ? "Details" : details.summary)
                 budget.segmentsRemaining -= 1 + outerReserve
                 let childBudget = budget
                 if !details.body.isEmpty {
-                    _ = Self.segments(
-                        from: MarkdownParser.blocks(from: details.body),
-                        nestingDepth: nestingDepth + 1,
-                        budget: &budget
-                    )
+                    _ = Self.segments(from: MarkdownParser.blocks(from: details.body), nestingDepth: nestingDepth + 1, budget: &budget)
                 }
                 budget.segmentsRemaining += outerReserve
-                result.append(
-                    .details(details, parseSummaryInline: parseSummaryInline, budget: childBudget)
-                )
+                result.append(.details(details, parseSummaryInline: parseSummaryInline, budget: childBudget))
             }
         }
         flushProse()
@@ -1151,12 +1080,7 @@ public struct MarkdownText: View, Equatable {
         case let .table(table):
             tableView(table)
         case let .details(details, parseSummaryInline, budget):
-            MarkdownDetailsView(
-                details: details,
-                parseSummaryInline: parseSummaryInline,
-                nestingDepth: nestingDepth + 1,
-                budget: budget
-            )
+            MarkdownDetailsView(details: details, parseSummaryInline: parseSummaryInline, nestingDepth: nestingDepth + 1, budget: budget)
         }
     }
 
@@ -1224,24 +1148,14 @@ private struct MarkdownDetailsView: View {
     let budget: MarkdownParser.RenderBudget
     @State private var isExpanded: Bool
 
-    init(
-        details: MarkdownDetails,
-        parseSummaryInline: Bool,
-        nestingDepth: Int,
-        budget: MarkdownParser.RenderBudget
-    ) {
-        self.details = details
-        self.parseSummaryInline = parseSummaryInline
-        self.nestingDepth = nestingDepth
-        self.budget = budget
+    init(details: MarkdownDetails, parseSummaryInline: Bool, nestingDepth: Int, budget: MarkdownParser.RenderBudget) {
+        self.details = details; self.parseSummaryInline = parseSummaryInline; self.nestingDepth = nestingDepth; self.budget = budget
         _isExpanded = State(initialValue: details.isOpen)
     }
 
     var body: some View {
         let summaryText = details.summary.isEmpty ? "Details" : details.summary
-        let attributedSummary = parseSummaryInline
-            ? MarkdownParser.inline(summaryText)
-            : AttributedString(summaryText)
+        let attributedSummary = parseSummaryInline ? MarkdownParser.inline(summaryText) : AttributedString(summaryText)
         VStack(alignment: .leading, spacing: 6) {
             Button { isExpanded.toggle() } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -1259,16 +1173,12 @@ private struct MarkdownDetailsView: View {
             .accessibilityHint(isExpanded ? "Double-tap to collapse" : "Double-tap to expand")
 
             if isExpanded, !details.body.isEmpty {
-                MarkdownText(
-                    text: details.body,
-                    nestingDepth: nestingDepth,
-                    budget: budget
-                )
-                .padding(.leading, 10).padding(.vertical, 2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .overlay(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 1.5).fill(Color.secondary.opacity(0.35)).frame(width: 2)
-                }
+                MarkdownText(text: details.body, nestingDepth: nestingDepth, budget: budget)
+                    .padding(.leading, 10).padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .overlay(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 1.5).fill(Color.secondary.opacity(0.35)).frame(width: 2)
+                    }
             }
         }
         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -1329,13 +1239,6 @@ extension MarkdownText {
         )
     }
 
-    private static func resolvedInline(
-        _ string: String,
-        parseInline: Bool
-    ) -> AttributedString {
-        parseInline ? MarkdownParser.inline(string) : AttributedString(string)
-    }
-
     private static func makeProseAttributedText(
         _ parts: [ProsePart],
         styleContext: StyleContext
@@ -1344,10 +1247,10 @@ extension MarkdownText {
         for (partIndex, part) in parts.enumerated() {
             let isLastPart = partIndex == parts.count - 1
             switch part {
-            case let .heading(level, text, parseInline):
+            case let .heading(level, text):
                 let attributed = NSMutableAttributedString(
                     attributedString: makeAttributedText(
-                        resolvedInline(text, parseInline: parseInline),
+                        MarkdownParser.inline(text),
                         role: .heading(level),
                         weight: .semibold,
                         foregroundColor: primaryLabelColor,
@@ -1368,9 +1271,9 @@ extension MarkdownText {
                 if !isLastPart {
                     result.append(NSAttributedString(string: "\n"))
                 }
-            case let .paragraph(text, parseInline):
+            case let .paragraph(text):
                 let attributed = makeAttributedText(
-                    resolvedInline(text, parseInline: parseInline),
+                    MarkdownParser.inline(text),
                     role: .body,
                     weight: .regular,
                     foregroundColor: primaryLabelColor,
@@ -1383,10 +1286,10 @@ extension MarkdownText {
                 if !isLastPart {
                     result.append(NSAttributedString(string: "\n"))
                 }
-            case let .quote(text, parseInline):
+            case let .quote(text):
                 let attributed = NSMutableAttributedString(
                     attributedString: makeAttributedText(
-                        resolvedInline(text, parseInline: parseInline),
+                        MarkdownParser.inline(text),
                         role: .body,
                         weight: .regular,
                         foregroundColor: secondaryLabelColor,
@@ -1410,12 +1313,11 @@ extension MarkdownText {
                     result.append(NSAttributedString(string: "\n"))
                 }
             case let .list(items):
-                for (itemIndex, entry) in items.enumerated() {
+                for (itemIndex, item) in items.enumerated() {
                     let isLastItem = itemIndex == items.count - 1
                     let spacing: CGFloat = isLastItem ? (isLastPart ? 0 : 8) : 4
                     let attributedItem = makeListItemAttributedText(
-                        entry.item,
-                        parseInline: entry.parseInline,
+                        item,
                         trailingParagraphSpacing: spacing,
                         styleContext: styleContext
                     )
@@ -1431,7 +1333,6 @@ extension MarkdownText {
 
     private static func makeListItemAttributedText(
         _ item: MarkdownListItem,
-        parseInline: Bool,
         trailingParagraphSpacing: CGFloat,
         styleContext: StyleContext
     ) -> NSAttributedString {
@@ -1448,7 +1349,7 @@ extension MarkdownText {
         let textIndent = baseIndent + markerWidth + 8
 
         let bodyAttributed = makeAttributedText(
-            resolvedInline(item.text, parseInline: parseInline),
+            MarkdownParser.inline(item.text),
             role: .body,
             weight: .regular,
             foregroundColor: primaryLabelColor,

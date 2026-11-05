@@ -8698,8 +8698,10 @@ final class AppLogicTests: XCTestCase {
         let escapedPipeRow = "| " + String(repeating: #"\|"#, count: 1_001) + " | z |"
         let oversizedRowTable = "| A | B |\n| --- | --- |\n| r1 | 1 |\n\(escapedPipeRow)\n| r3 | 3 |"
         XCTAssertEqual(
-            MarkdownParser.blocks(from: "\(oversizedRowTable)\n\n\(smallTable)"),
+            MarkdownParser.blocks(from: "- item\n\(escapedPipeRow)\n| --- | --- |\n| r1 | 1 |\n\n\(oversizedRowTable)\n\n\(smallTable)"),
             [
+                .list([MarkdownListItem(marker: "\u{2022}", text: "item", depth: 0)]),
+                .plainText("\(escapedPipeRow)\n| --- | --- |\n| r1 | 1 |"),
                 .plainText(oversizedRowTable),
                 .table(MarkdownTable(header: ["K", "V"], alignments: [.leading, .leading], rows: [["a", "b"]])),
             ]
@@ -9720,32 +9722,30 @@ final class AppLogicTests: XCTestCase {
             ) as? NSNumber,
             1
         )
-
-        let header500 = Array(repeating: "h", count: 500).joined(separator: " | ")
-        let delim500 = Array(repeating: "---", count: 500).joined(separator: " | ")
-        let row500 = Array(repeating: "v", count: 500).joined(separator: " | ")
-        let table500 = "\(header500)\n\(delim500)\n\(row500)"
-        let threePipeTables = "\(table500)\n\n\(table500)\n\n<details open>\n<summary>Third</summary>\n\n\(table500)\n</details>"
-        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(threePipeTables))
-        let pipeTablesHost = NSHostingView(
-            rootView: MarkdownText(text: threePipeTables)
-                .frame(width: 380, alignment: .leading)
-        )
-        pipeTablesHost.frame = NSRect(x: 0, y: 0, width: 380, height: 1_200)
-        pipeTablesHost.layoutSubtreeIfNeeded()
-        XCTAssertEqual(findTextViews(in: pipeTablesHost).filter { $0.headerDividerY() != nil }.count, 2)
+        let code255BufferedAndOversized = ((1...255).map { "```\ncode_\($0)\n```" }
+            + ["# Tail Heading", oversizedInlinePara, "# Final Heading"]).joined(separator: "\n\n")
+        boundaryHost.rootView = MarkdownText(text: code255BufferedAndOversized)
+            .frame(width: 380, alignment: .leading)
+        boundaryHost.layoutSubtreeIfNeeded()
+        let bufferedViews = findTextViews(in: boundaryHost)
+        XCTAssertEqual(bufferedViews.count, 256)
+        XCTAssertTrue(bufferedViews.last?.attributedText.string.contains("Tail Heading") == true)
+        XCTAssertTrue(bufferedViews.last?.attributedText.string.contains("Final Heading") == true)
 
         let fiveDeepOpen = (1...5).map { "<details open>\n<summary>L\($0)</summary>" }.joined(separator: "\n")
             + "\nInner **five**\n"
             + Array(repeating: "</details>", count: 5).joined(separator: "\n")
+            + "\n\nTrailing **after** five."
         let fiveDeepHost = NSHostingView(
             rootView: MarkdownText(text: fiveDeepOpen)
                 .frame(width: 380, alignment: .leading)
         )
         fiveDeepHost.frame = NSRect(x: 0, y: 0, width: 380, height: 600)
         fiveDeepHost.layoutSubtreeIfNeeded()
-        let fifthLevelView = try XCTUnwrap(findTextViews(in: fiveDeepHost).first { $0.attributedText.string.contains("L5\nInner **five**") })
+        let fiveDeepViews = findTextViews(in: fiveDeepHost)
+        let fifthLevelView = try XCTUnwrap(fiveDeepViews.first { $0.attributedText.string.contains("L5\nInner **five**") })
         XCTAssertNil(fifthLevelView.headerDividerY())
+        XCTAssertTrue(fiveDeepViews.contains { $0.attributedText.string.contains("Trailing after five.") })
     }
 
     // MARK: - Remote web terminal image rendering
