@@ -820,6 +820,7 @@ final class ProtocolContractTests: XCTestCase {
 
     // MARK: - Host Health Indicators
 
+    @MainActor
     func testRemoteHostHealthContractAndEvaluationThresholds() throws {
         XCTAssertTrue(RemoteHostHealthLevel.healthy < .warning)
         XCTAssertTrue(RemoteHostHealthLevel.warning < .critical)
@@ -943,6 +944,52 @@ final class ProtocolContractTests: XCTestCase {
             from: JSONEncoder().encode(withHealth)
         )
         XCTAssertEqual(decoded.hostHealth, [healthy, unreachable])
+
+        let woodhavenInfo = RemoteHostInfo(id: "woodhaven", displayName: "woodhaven", isLocal: false)
+        let healthyRemote = HostHealthEvaluator.makeHealth(
+            host: woodhavenInfo,
+            reachable: true,
+            cpuUsagePercent: 18,
+            memoryUsagePercent: 42
+        )
+        let warningLocal = HostHealthEvaluator.makeHealth(
+            host: .local,
+            reachable: true,
+            cpuUsagePercent: 80,
+            memoryUsagePercent: 50
+        )
+        let criticalRemote = HostHealthEvaluator.makeHealth(
+            host: woodhavenInfo,
+            reachable: true,
+            cpuUsagePercent: 95,
+            sustainedCriticalCPU: true,
+            memoryUsagePercent: 50
+        )
+        let multiReasonCriticalRemote = HostHealthEvaluator.makeHealth(
+            host: woodhavenInfo,
+            reachable: true,
+            cpuUsagePercent: 95,
+            sustainedCriticalCPU: true,
+            memoryUsagePercent: 92
+        )
+
+        XCTAssertEqual(HostHealthPill.summaryLabel(for: []), "Hosts")
+        XCTAssertEqual(HostHealthPill.summaryLabel(for: [healthy]), "CPU 24% · Mem 58%")
+        XCTAssertEqual(HostHealthPill.summaryLabel(for: [healthy, healthyRemote]), "2 hosts · CPU 24%")
+        XCTAssertEqual(HostHealthPill.summaryLabel(for: [warningLocal]), "High CPU (80%)")
+        XCTAssertEqual(HostHealthPill.summaryLabel(for: [healthy, criticalRemote]), "woodhaven: High CPU (95%)")
+        XCTAssertEqual(
+            HostHealthPill.summaryLabel(for: [warningLocal, criticalRemote]),
+            "2 hosts: woodhaven: High CPU (95%)"
+        )
+        XCTAssertEqual(HostHealthPill.overallLevel(for: [warningLocal, criticalRemote]), .critical)
+        XCTAssertEqual(
+            HostHealthPill.summaryLabel(for: [healthy, warningLocal, unreachable]),
+            "2 hosts: Surface WSL: Unreachable"
+        )
+        let truncatedSummary = HostHealthPill.summaryLabel(for: [warningLocal, multiReasonCriticalRemote])
+        XCTAssertEqual(truncatedSummary.count, HostHealthPill.maximumSummaryLabelCharacters)
+        XCTAssertEqual(truncatedSummary, "2 hosts: woodhaven: High CPU (95%),…")
     }
 
     @MainActor
