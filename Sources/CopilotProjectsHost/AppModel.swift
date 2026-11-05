@@ -45,6 +45,7 @@ final class AppModel: ObservableObject {
     var projectStorage: [Project] = []
     private var projectPublicationBatchDepth = 0
     private var projectPublicationPending = false
+    var workingModelsSyncNeeded = false
     var projects: [Project] {
         get { projectStorage }
         set {
@@ -56,6 +57,11 @@ final class AppModel: ObservableObject {
                 projectPublicationPending = true
             }
             projectStorage = newValue
+            if projectPublicationBatchDepth == 0 {
+                syncSessionWorkingModels()
+            } else {
+                workingModelsSyncNeeded = true
+            }
         }
     }
 
@@ -65,6 +71,9 @@ final class AppModel: ObservableObject {
             projectPublicationBatchDepth -= 1
             if projectPublicationBatchDepth == 0 {
                 projectPublicationPending = false
+                if workingModelsSyncNeeded {
+                    syncSessionWorkingModels()
+                }
             }
         }
         return try body()
@@ -79,6 +88,7 @@ final class AppModel: ObservableObject {
 
     var controllers: [String: TerminalController] = [:]
     var sessionPromptComposers: [String: DesktopSessionPromptComposer] = [:]
+    var sessionWorkingModels: [String: TranscriptWorkingModel] = [:]
     var localQuestionOperations: [String: (operation: CLIOperationRequest, fingerprint: String?)] = [:]
     private var selectedTranscriptController: TranscriptController?
     private let stateRepository: StateRepository
@@ -436,6 +446,7 @@ final class AppModel: ObservableObject {
     var inputWaits: [String: InputWaitState] = [:]
     var remotePromptFences: [String: RemotePromptFence] = [:]
     var runtimeTrackedOwners: [String: String] = [:]
+    var verifiedCopilotOwners: [String: String] = [:]
     struct PermissionStatusRestore {
         let status: SessionStatus
         let statusText: String?
@@ -1241,6 +1252,7 @@ final class AppModel: ObservableObject {
 
     func closeTranscriptDrawer(sessionId: String) {
         transcriptOpenSessions.remove(sessionId)
+        sessionWorkingModels.removeValue(forKey: sessionId)?.update(nil)
     }
 
     func openTranscriptDrawer(sessionId: String) {
@@ -1945,6 +1957,7 @@ final class AppModel: ObservableObject {
         }
         controllers[sid] = nil
         sessionPromptComposers.removeValue(forKey: sid)?.clearAttachments(force: true)
+        sessionWorkingModels.removeValue(forKey: sid)?.update(nil)
         localQuestionOperations = localQuestionOperations.filter { !$0.key.hasPrefix("\(sid):") }
         if selectedTranscriptController?.sessionId == sid {
             selectedTranscriptController = nil
@@ -1960,6 +1973,7 @@ final class AppModel: ObservableObject {
         inputWaits[sid] = nil
         remotePromptFences[sid] = nil
         runtimeTrackedOwners[sid] = nil
+        verifiedCopilotOwners[sid] = nil
         scheduledSnapshotsSuppressed.remove(sid)
         foregroundIdleGenerationBaselines.removeValue(forKey: sid)
         checkedTranscriptStartingPromptSessions.remove(sid)
@@ -2638,6 +2652,7 @@ final class AppModel: ObservableObject {
             }
             controllers[session.id] = nil
             sessionPromptComposers.removeValue(forKey: session.id)?.clearAttachments(force: true)
+            sessionWorkingModels.removeValue(forKey: session.id)?.update(nil)
             if selectedTranscriptController?.sessionId == session.id {
                 selectedTranscriptController = nil
             }

@@ -1,7 +1,65 @@
 import SwiftUI
 import AppKit
+import CopilotProjectsCore
 import CopilotProjectsProtocol
 import CopilotProjectsUI
+
+enum TranscriptWorkingIndicator: Equatable, Sendable {
+    case working(String? = nil)
+    case backgroundWork(String? = nil)
+
+    var text: String {
+        switch self {
+        case .working(let activityText):
+            return activityText ?? "Copilot is working…"
+        case .backgroundWork(let activityText):
+            return activityText ?? "Background work active"
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .working(let activityText):
+            return activityText ?? "Copilot is working"
+        case .backgroundWork(let activityText):
+            return activityText ?? "Background work active"
+        }
+    }
+
+    static func resolve(
+        status: SessionStatus,
+        hasBackgroundWork: Bool = false,
+        activityText: String? = nil
+    ) -> TranscriptWorkingIndicator? {
+        guard status != .waiting else { return nil }
+        let trimmed = activityText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nonEmptyText = (trimmed?.isEmpty == false) ? trimmed : nil
+        switch status {
+        case .running:
+            return hasBackgroundWork && nonEmptyText == nil
+                ? .backgroundWork(nil)
+                : .working(nonEmptyText)
+        case .idle:
+            return hasBackgroundWork ? .backgroundWork(nonEmptyText) : nil
+        case .waiting:
+            return nil
+        }
+    }
+}
+
+@MainActor
+final class TranscriptWorkingModel: ObservableObject {
+    @Published private(set) var indicator: TranscriptWorkingIndicator?
+
+    init(indicator: TranscriptWorkingIndicator? = nil) {
+        self.indicator = indicator
+    }
+
+    func update(_ next: TranscriptWorkingIndicator?) {
+        guard indicator != next else { return }
+        indicator = next
+    }
+}
 
 struct TranscriptButton: View {
     @ObservedObject var controller: TranscriptController
@@ -37,6 +95,7 @@ struct TranscriptOverlay: View {
     var pendingElicitations: [RemoteElicitationRequest] = []
     var workflowProvider: (() -> RemoteSessionWorkflow?)? = nil
     var operationProvider: (() -> AgentOperationProjection)? = nil
+    var workingModelProvider: (() -> TranscriptWorkingModel)? = nil
     var promptComposer: DesktopSessionPromptComposer? = nil
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
     var onAnswerUserInput: (@MainActor (RemoteUserInputAnswer) async -> RemoteWorkflowActionResult)? = nil
@@ -47,6 +106,7 @@ struct TranscriptOverlay: View {
         if controller.snapshot != nil || workflow != nil
             || !pendingUserInputs.isEmpty || !pendingElicitations.isEmpty {
             if isOpen {
+                let resolvedWorkingModel = workingModelProvider?()
                 Group {
                     if let capture = imageCapture() {
                         ImageAssociatedTranscriptDrawer(
@@ -56,6 +116,7 @@ struct TranscriptOverlay: View {
                             pendingElicitations: pendingElicitations,
                             workflowProvider: workflowProvider,
                             operationProvider: operationProvider,
+                            workingModel: resolvedWorkingModel,
                             promptComposer: promptComposer,
                             onClose: onClose,
                             onFullWidthChange: onFullWidthChange,
@@ -75,6 +136,7 @@ struct TranscriptOverlay: View {
                             pendingElicitations: pendingElicitations,
                             workflowProvider: workflowProvider,
                             operationProvider: operationProvider,
+                            workingModel: resolvedWorkingModel,
                             promptComposer: promptComposer,
                             onClose: onClose,
                             onFullWidthChange: onFullWidthChange,
@@ -173,6 +235,7 @@ private struct ImageAssociatedTranscriptDrawer: View {
     let pendingElicitations: [RemoteElicitationRequest]
     let workflowProvider: (() -> RemoteSessionWorkflow?)?
     let operationProvider: (() -> AgentOperationProjection)?
+    let workingModel: TranscriptWorkingModel?
     let promptComposer: DesktopSessionPromptComposer?
     let onClose: () -> Void
     let onFullWidthChange: ((Bool) -> Void)?
@@ -192,6 +255,7 @@ private struct ImageAssociatedTranscriptDrawer: View {
             pendingElicitations: pendingElicitations,
             workflowProvider: workflowProvider,
             operationProvider: operationProvider,
+            workingModel: workingModel,
             promptComposer: promptComposer,
             onClose: onClose,
             onFullWidthChange: onFullWidthChange,
@@ -214,6 +278,7 @@ struct TranscriptDrawer: View {
     var pendingElicitations: [RemoteElicitationRequest] = []
     let workflowProvider: (() -> RemoteSessionWorkflow?)?
     let operationProvider: (() -> AgentOperationProjection)?
+    var workingModel: TranscriptWorkingModel? = nil
     let promptComposer: DesktopSessionPromptComposer?
     let onClose: () -> Void
     var onFullWidthChange: ((Bool) -> Void)? = nil
@@ -393,6 +458,14 @@ struct TranscriptDrawer: View {
                                 onFocusTerminal: onClose
                             )
                         }
+                        if let workingModel {
+                            ObservedTranscriptWorkingRow(
+                                workingModel: workingModel,
+                                hasPendingInput: !pendingUserInputs.isEmpty
+                                    || !pendingElicitations.isEmpty
+                                    || currentWorkflow?.budgetRequest != nil
+                            )
+                        }
                         Color.clear
                             .frame(height: 1)
                             .id("transcript-bottom")
@@ -401,6 +474,20 @@ struct TranscriptDrawer: View {
                     }
                     .padding(.horizontal, 18)
                     .padding(.vertical, 6)
+                }
+                .background {
+                    if let workingModel {
+                        ObservedTranscriptWorkingScrollObserver(
+                            workingModel: workingModel,
+                            hasPendingInput: !pendingUserInputs.isEmpty
+                                || !pendingElicitations.isEmpty
+                                || currentWorkflow?.budgetRequest != nil,
+                            onVisibilityChange: {
+                                guard isAtBottom else { return }
+                                scrollToBottom(proxy)
+                            }
+                        )
+                    }
                 }
                 .defaultScrollAnchor(.bottom)
                 .onAppear {
@@ -454,6 +541,55 @@ struct TranscriptDrawer: View {
             }
         }
         .shadow(color: .black.opacity(isFullWidth ? 0 : 0.2), radius: isFullWidth ? 0 : 12, x: isFullWidth ? 0 : -4)
+    }
+}
+
+private struct ObservedTranscriptWorkingRow: View {
+    @ObservedObject var workingModel: TranscriptWorkingModel
+    let hasPendingInput: Bool
+
+    var body: some View {
+        if !hasPendingInput, let indicator = workingModel.indicator {
+            TranscriptWorkingRow(indicator: indicator)
+                .equatable()
+        }
+    }
+}
+
+private struct ObservedTranscriptWorkingScrollObserver: View {
+    @ObservedObject var workingModel: TranscriptWorkingModel
+    let hasPendingInput: Bool
+    let onVisibilityChange: () -> Void
+
+    var body: some View {
+        let isVisible = !hasPendingInput && workingModel.indicator != nil
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onChange(of: isVisible) { _, _ in
+                onVisibilityChange()
+            }
+    }
+}
+
+private struct TranscriptWorkingRow: View, Equatable {
+    let indicator: TranscriptWorkingIndicator
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text(indicator.text)
+                .font(.callout)
+                .foregroundStyle(StudioStyle.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(indicator.accessibilityLabel)
+        .accessibilityAddTraits(.updatesFrequently)
+        .accessibilityIdentifier("transcript-working-indicator")
     }
 }
 
