@@ -15867,7 +15867,7 @@ final class AppLogicTests: XCTestCase {
             capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
             sendReady: true
         )
-        let operation = AgentOperationProjection(
+        var operation = AgentOperationProjection(
             conversationEpoch: "epoch-focus",
             support: .receipts,
             receipts: []
@@ -15959,7 +15959,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNotNil(composerField.currentEditor())
         XCTAssertTrue(composer.isPromptFieldFocused)
 
-        // 3. Rejected send restores the failed message alongside any mid-send typing while keeping focus in the message box.
+        // 3. Rejected and indeterminate sends restore the submitted message alongside mid-send typing while keeping focus,
+        //    and a later applied receipt removes only the confirmed message.
         for char in "Retry me" {
             try sendKey(to: window, characters: String(char), keyCode: 0)
         }
@@ -15973,6 +15974,43 @@ final class AppLogicTests: XCTestCase {
         pendingContinuations.removeFirst().resume(returning: RemoteWorkflowActionResult(state: .rejected, message: "Rejected"))
         await pump(drawerHost)
         XCTAssertEqual(composer.prompt, "Retry me\nAfter retry")
+        XCTAssertNotNil(composerField.currentEditor())
+        XCTAssertTrue(composer.isPromptFieldFocused)
+        composer.prompt = "Uncertain send"
+        await pump(drawerHost)
+
+        try sendKey(to: window)
+        await pump(drawerHost)
+        for char in "Follow-up after indeterminate" {
+            try sendKey(to: window, characters: String(char), keyCode: 0)
+        }
+        await pump(drawerHost)
+        pendingContinuations.removeFirst().resume(
+            returning: RemoteWorkflowActionResult(state: .indeterminate, message: "Pending", operationId: "op-focus")
+        )
+        await pump(drawerHost)
+        XCTAssertEqual(composer.pendingOperationId, "op-focus")
+        XCTAssertEqual(composer.prompt, "Uncertain send\nFollow-up after indeterminate")
+        XCTAssertNotNil(composerField.currentEditor())
+        XCTAssertTrue(composer.isPromptFieldFocused)
+
+        operation = AgentOperationProjection(
+            conversationEpoch: "epoch-focus",
+            support: .receipts,
+            receipts: [
+                RemoteOperationReceipt(
+                    operationId: "op-focus",
+                    conversationEpoch: "epoch-focus",
+                    kind: RemoteSessionActionKind.send.rawValue,
+                    state: .applied,
+                    updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000)
+                ),
+            ]
+        )
+        composer.reconcileReceipts(operation.receipts, conversationEpoch: operation.conversationEpoch)
+        await pump(drawerHost)
+        XCTAssertNil(composer.pendingOperationId)
+        XCTAssertEqual(composer.prompt, "Follow-up after indeterminate")
         XCTAssertNotNil(composerField.currentEditor())
         XCTAssertTrue(composer.isPromptFieldFocused)
         composer.prompt = ""

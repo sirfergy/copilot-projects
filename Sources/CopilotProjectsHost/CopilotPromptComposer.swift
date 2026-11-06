@@ -416,7 +416,7 @@ final class DesktopSessionPromptComposer: ObservableObject {
     @Published private(set) var isSending = false
     @Published private(set) var isAttaching = false
     @Published private(set) var pendingOperationId: String?
-    private var pendingOperationEpoch: String?
+    private var pendingOperation: (epoch: String, submittedPrompt: String?)?
     private var previewSequence: UInt32 = 0
     private var attachGeneration: UInt64 = 0
 
@@ -556,9 +556,9 @@ final class DesktopSessionPromptComposer: ObservableObject {
     }
 
     func syncConversationEpoch(_ currentEpoch: String?) {
-        if let currentEpoch, let pendingOperationEpoch, pendingOperationEpoch != currentEpoch {
+        if let currentEpoch, let pendingEpoch = pendingOperation?.epoch, pendingEpoch != currentEpoch {
             pendingOperationId = nil
-            self.pendingOperationEpoch = nil
+            pendingOperation = nil
             statusMessage = "The conversation changed. Check the terminal before sending again."
         }
     }
@@ -576,10 +576,17 @@ final class DesktopSessionPromptComposer: ObservableObject {
               }) else {
             return
         }
+        let submittedPrompt = pendingOperation?.submittedPrompt
         pendingOperationId = nil
-        pendingOperationEpoch = nil
+        pendingOperation = nil
         if receipt.state == .applied {
-            prompt = ""
+            if let submittedPrompt, !submittedPrompt.isEmpty {
+                if prompt == submittedPrompt {
+                    prompt = ""
+                } else if prompt.hasPrefix(submittedPrompt + "\n") {
+                    prompt.removeFirst(submittedPrompt.count + 1)
+                }
+            }
             attachments = []
             attachedEpoch = nil
             statusMessage = nil
@@ -882,17 +889,17 @@ final class DesktopSessionPromptComposer: ObservableObject {
             attachments = []
             attachedEpoch = nil
             pendingOperationId = nil
-            pendingOperationEpoch = nil
+            pendingOperation = nil
             statusMessage = nil
         case .indeterminate:
             restoreSubmittedPrompt()
             pendingOperationId = result.operationId
-            pendingOperationEpoch = submittedEpoch
+            pendingOperation = (submittedEpoch, action.prompt)
             statusMessage = result.message ?? "Couldn't confirm the outcome. Inspect the terminal before trying again."
         case .rejected, .accepted:
             restoreSubmittedPrompt()
             pendingOperationId = nil
-            pendingOperationEpoch = nil
+            pendingOperation = nil
             statusMessage = result.message ?? "Copilot did not accept this message."
         }
     }
