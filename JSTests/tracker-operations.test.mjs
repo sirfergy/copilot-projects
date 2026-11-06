@@ -5317,3 +5317,464 @@ test("an owner lock file unlinked before it was locked does not admit a claim", 
     "tracker did not claim once its lock file stayed linked"
   );
 });
+
+test("cold resume with unflushed in-memory session.resume clears durable ask_user, seals the interrupted turn, and ignores deferred interrupted tool completion", {
+  concurrency: false,
+}, async (t) => {
+  const crashedToolCallId = "call-crashed-ask";
+  const resumeTimestamp = "2026-09-01T02:00:00.000Z";
+  const resumeEvent = {
+    id: uuid(),
+    type: "session.resume",
+    timestamp: resumeTimestamp,
+    data: {
+      resumeTime: resumeTimestamp,
+      eventCount: 5,
+      selectedModel: "gpt-5.6-sol",
+    },
+  };
+  let durablePath;
+  const runtime = await createRuntime(t, (session, runtime) => {
+    const directory = join(
+      runtime.root, "copilot-home", "session-state", runtime.copilotSessionId
+    );
+    realMkdirSync(directory, { recursive: true });
+    durablePath = join(directory, "events.jsonl");
+    const preCrashEvents = [
+      {
+        id: uuid(),
+        type: "user.message",
+        timestamp: "2026-09-01T01:00:00.000Z",
+        data: { content: "Review PR #474926" },
+      },
+      {
+        id: uuid(),
+        type: "assistant.turn_start",
+        timestamp: "2026-09-01T01:00:01.000Z",
+        data: { turnId: "0" },
+      },
+      {
+        id: uuid(),
+        type: "assistant.message",
+        timestamp: "2026-09-01T01:00:02.000Z",
+        data: { content: "Checking whether to post the review." },
+      },
+      {
+        id: uuid(),
+        type: "tool.execution_start",
+        timestamp: "2026-09-01T01:00:03.000Z",
+        data: {
+          toolName: "ask_user",
+          toolCallId: crashedToolCallId,
+          arguments: {
+            message: "Post the adversarial review comment to github/github#474926?",
+            requestedSchema: {
+              properties: {
+                post_review: {
+                  type: "string",
+                  enum: ["Post comment review", "Do not post"],
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        id: uuid(),
+        type: "hook.start",
+        timestamp: "2026-09-01T01:00:03.100Z",
+        data: { hookInvocationId: "hook-1", hookType: "preToolUse" },
+      },
+      {
+        id: uuid(),
+        type: "hook.end",
+        timestamp: "2026-09-01T01:00:03.200Z",
+        data: { hookInvocationId: "hook-1", hookType: "preToolUse", success: true },
+      },
+    ];
+    realWriteFileSync(
+      durablePath,
+      `${preCrashEvents.map((event) => JSON.stringify(event)).join("\n")}\n`
+    );
+    // Cold resume buffers session.resume (plus any startup warnings/system messages)
+    // in memory without flushing them to events.jsonl. An earlier warm-attach
+    // session.resume (sessionWasActive: true) before the crash must not be treated
+    // as an interrupting boundary when replayed.
+    session.history = [
+      ...preCrashEvents,
+      {
+        id: uuid(),
+        type: "session.resume",
+        timestamp: "2026-09-01T01:00:03.500Z",
+        data: {
+          resumeTime: "2026-09-01T01:00:03.500Z",
+          sessionWasActive: true,
+        },
+      },
+      resumeEvent,
+      {
+        id: uuid(),
+        type: "session.model_change",
+        timestamp: "2026-09-01T02:00:00.400Z",
+        data: { newModel: "claude-opus-5.5" },
+      },
+      {
+        id: uuid(),
+        type: "session.warning",
+        timestamp: "2026-09-01T02:00:00.500Z",
+        data: { warningType: "mcp", message: "MCP connection failed" },
+      },
+      {
+        id: uuid(),
+        type: "system.message",
+        timestamp: "2026-09-01T02:00:00.600Z",
+        data: { role: "system", content: "startup notice" },
+      },
+    ];
+  });
+
+  await waitFor(
+    () => runtime.durableReadsFinished > 0,
+    "initial durable read did not finish"
+  );
+  const transcriptPath = join(
+    runtime.sessions, `${runtime.appSessionId}.transcript.json`
+  );
+  const liveTranscriptPath = join(
+    runtime.sessions, `${runtime.appSessionId}.transcript-live.json`
+  );
+  await waitFor(
+    () => realExistsSync(transcriptPath),
+    "sealed transcript was not published"
+  );
+
+  let snapshot = readSnapshot(runtime);
+  assert.deepEqual(snapshot.trackedElicitations, []);
+  assert.deepEqual(snapshot.pendingPermissionRequestIds, []);
+  assert.equal(snapshot.model?.name, "claude-opus-5.5");
+  assert.equal(snapshot.workflow.sendReady, true);
+  assert.equal(
+    snapshot.sessionIdleAtMilliseconds,
+    Date.parse(resumeTimestamp)
+  );
+  assert.ok(
+    snapshot.runtimeActivity.idleAtMilliseconds >= Date.parse(resumeTimestamp)
+  );
+  assert.equal(realExistsSync(liveTranscriptPath), false);
+
+  let transcript = JSON.parse(realReadFileSync(transcriptPath, "utf8"));
+  assert.equal(transcript.turns.length, 2);
+  assert.equal(transcript.turns[0].isAborted, true);
+  assert.equal(transcript.turns[0].tools.length, 1);
+  assert.equal(transcript.turns[0].tools[0].id, crashedToolCallId);
+  assert.equal(transcript.turns[0].tools[0].success, null);
+  assert.equal(transcript.turns[1].id, `session-resume-${resumeEvent.id}`);
+
+  // A subsequent poll with unchanged events.jsonl size must keep the resume boundary intact.
+  const savedEnvironment = saveEnvironment(["COPILOT_HOME"]);
+  process.env.COPILOT_HOME = join(runtime.root, "copilot-home");
+  try {
+    runtime.intervalCallback();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(readSnapshot(runtime).trackedElicitations, []);
+
+    // When the user submits the next prompt, the runtime flushes session.resume,
+    // emits the deferred interrupted tool.execution_complete, and runs the new turn.
+    await runtime.session.emit("permission.requested", {
+      requestId: "permission-after-resume",
+    });
+    const nextAskCallId = "call-next-ask";
+    const flushedEvents = [
+      resumeEvent,
+      {
+        id: uuid(),
+        type: "tool.execution_complete",
+        timestamp: "2026-09-01T02:05:00.000Z",
+        data: {
+          toolCallId: crashedToolCallId,
+          model: "resumed",
+          interactionId: "resume",
+          success: false,
+          error: {
+            message: "Tool execution was interrupted before completion and did not finish.",
+            code: "interrupted",
+          },
+        },
+      },
+      {
+        id: uuid(),
+        type: "user.message",
+        timestamp: "2026-09-01T02:05:00.100Z",
+        data: { content: "Please ask again" },
+      },
+      {
+        id: uuid(),
+        type: "assistant.turn_start",
+        timestamp: "2026-09-01T02:05:01.000Z",
+        data: { turnId: "1" },
+      },
+      {
+        id: uuid(),
+        type: "tool.execution_start",
+        timestamp: "2026-09-01T02:05:02.000Z",
+        data: {
+          toolName: "ask_user",
+          toolCallId: nextAskCallId,
+          arguments: {
+            message: "Confirm posting now?",
+            requestedSchema: {
+              properties: {
+                confirm: { type: "boolean", title: "Confirm" },
+              },
+            },
+          },
+        },
+      },
+    ];
+    const readsBefore = runtime.durableReadsFinished;
+    realWriteFileSync(
+      durablePath,
+      `${flushedEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      { flag: "a" }
+    );
+    runtime.session.history.push(...flushedEvents.slice(1));
+    runtime.intervalCallback();
+    await waitFor(
+      () => runtime.durableReadsFinished > readsBefore,
+      "flushed durable events were not read"
+    );
+    await waitFor(
+      () => readSnapshot(runtime).trackedElicitations.some(
+        (entry) => entry.requestId === `synthetic::durable-ask-user::${nextAskCallId}`
+      ),
+      "new post-resume ask_user was not surfaced"
+    );
+    // A warm observational session.resume arriving while the turn is active must not
+    // clear live permissions or seal the active turn.
+    await runtime.session.emit("session.resume", {
+      sessionId: runtime.copilotSessionId,
+      resumeTime: "2026-09-01T02:05:03.000Z",
+    });
+    runtime.intervalCallback();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(
+      readSnapshot(runtime).pendingPermissionRequestIds,
+      ["permission-after-resume"],
+      "flushing or warm-attaching session.resume must not clear a newer live permission"
+    );
+    assert.equal(realExistsSync(liveTranscriptPath), true);
+  } finally {
+    restoreEnvironment(savedEnvironment);
+  }
+
+  transcript = JSON.parse(realReadFileSync(transcriptPath, "utf8"));
+  assert.equal(
+    transcript.turns.some(
+      (turn) => turn.kind === "automated" && !turn.id.startsWith("session-resume-")
+    ),
+    false,
+    "interrupted resume tool completion must not synthesize a phantom automated turn"
+  );
+  assert.equal(
+    transcript.turns.filter((turn) => turn.id.startsWith("session-resume-")).length,
+    1,
+    "flushed session.resume must not duplicate the resume turn"
+  );
+  assert.equal(transcript.turns[0].tools[0].success, null);
+});
+
+test("rotated /resume applies buffered lifecycle boundaries and newer in-memory activity suppresses stale durable idle", {
+  concurrency: false,
+}, async (t) => {
+  const resumeTimestamp = "2026-09-01T03:00:00.000Z";
+  const resumeEvent = {
+    id: uuid(),
+    type: "session.resume",
+    timestamp: resumeTimestamp,
+    data: { resumeTime: resumeTimestamp, eventCount: 2 },
+  };
+  const postResumePermission = {
+    id: uuid(),
+    type: "permission.requested",
+    timestamp: resumeTimestamp,
+    data: { requestId: "permission-post-resume" },
+  };
+  const runtime = await createRuntime(t, (session, runtime) => {
+    const directory = join(
+      runtime.root, "copilot-home", "session-state", runtime.copilotSessionId
+    );
+    realMkdirSync(directory, { recursive: true });
+    realWriteFileSync(
+      join(directory, "events.jsonl"),
+      `${[resumeEvent, postResumePermission].map((event) => JSON.stringify(event)).join("\n")}\n`
+    );
+    // In-memory history resolves after durable replay and also overlaps with
+    // queued live events at the exact same timestamp after the durable resume.
+    const historyEvents = [
+      resumeEvent,
+      {
+        id: uuid(),
+        type: "subagent.started",
+        agentId: "child-after-resume",
+        timestamp: resumeTimestamp,
+        data: { agentDisplayName: "Reviewer" },
+      },
+      postResumePermission,
+    ];
+    session.getEvents = async () => {
+      for (const listener of session.genericListeners) {
+        await listener(resumeEvent);
+        await listener(postResumePermission);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return historyEvents;
+    };
+  });
+
+  await waitFor(
+    () => runtime.durableReadsFinished > 0,
+    "initial durable read did not finish"
+  );
+  assert.equal(
+    readSnapshot(runtime).sessionIdleAtMilliseconds,
+    null,
+    "newer in-memory turn activity must prevent seeding idle from an older durable resume"
+  );
+  assert.deepEqual(
+    readSnapshot(runtime).pendingPermissionRequestIds,
+    ["permission-post-resume"],
+    "overlapping resume boundaries must not retire a permission requested after the boundary"
+  );
+
+  // Rotate via in-process /resume to a session whose durable log ended in ask_user
+  // and whose rotation session.resume event is only in memory while getEvents() fails.
+  const rotatedSessionId = uuid();
+  const rotatedDirectory = join(
+    runtime.root, "copilot-home", "session-state", rotatedSessionId
+  );
+  realMkdirSync(rotatedDirectory, { recursive: true });
+  const preRotateEvents = [
+    {
+      id: uuid(),
+      type: "user.message",
+      timestamp: "2026-09-01T03:01:00.000Z",
+      data: { content: "Interrupted before /resume" },
+    },
+    {
+      id: uuid(),
+      type: "assistant.turn_start",
+      timestamp: "2026-09-01T03:01:01.000Z",
+      data: { turnId: "0" },
+    },
+    {
+      id: uuid(),
+      type: "tool.execution_start",
+      timestamp: "2026-09-01T03:01:02.000Z",
+      data: {
+        toolName: "bash",
+        toolCallId: "call-rotated-unfinished-tool",
+        arguments: { command: "sleep 10" },
+      },
+    },
+    {
+      id: uuid(),
+      type: "assistant.turn_end",
+      timestamp: "2026-09-01T03:01:02.500Z",
+      data: { turnId: "0" },
+    },
+  ];
+  realWriteFileSync(
+    join(rotatedDirectory, "events.jsonl"),
+    `${preRotateEvents.map((event) => JSON.stringify(event)).join("\n")}\n`
+  );
+  const rotatedResumeTimestamp = "2026-09-01T03:02:00.000Z";
+  const savedEnvironment = saveEnvironment(["COPILOT_HOME"]);
+  process.env.COPILOT_HOME = join(runtime.root, "copilot-home");
+  try {
+    runtime.session.sessionId = rotatedSessionId;
+    const rotatedResume = await runtime.session.emit(
+      "session.resume",
+      { sessionId: rotatedSessionId, resumeTime: rotatedResumeTimestamp },
+      { timestamp: rotatedResumeTimestamp },
+      false
+    );
+    runtime.session.getEvents = async () => {
+      throw new Error("history unavailable during rotation");
+    };
+    const readsBefore = runtime.durableReadsFinished;
+    for (const listener of runtime.session.namedListeners.get("session.resume") ?? []) {
+      await listener(rotatedResume);
+    }
+    for (const listener of runtime.session.genericListeners) {
+      await listener(rotatedResume);
+    }
+    await waitFor(
+      () => runtime.durableReadsFinished > readsBefore,
+      "rotated durable read did not finish"
+    );
+    await waitFor(
+      () => readSnapshot(runtime).copilotSessionId === rotatedSessionId
+        && readSnapshot(runtime).sessionIdleAtMilliseconds === Date.parse(rotatedResumeTimestamp),
+      "rotated session did not seed idle from buffered session.resume"
+    );
+  } finally {
+    restoreEnvironment(savedEnvironment);
+  }
+
+  const snapshot = readSnapshot(runtime);
+  assert.deepEqual(snapshot.trackedElicitations, []);
+  const transcriptPath = join(
+    runtime.sessions, `${runtime.appSessionId}.transcript.json`
+  );
+  const transcript = JSON.parse(realReadFileSync(transcriptPath, "utf8"));
+  assert.equal(transcript.turns.length, 1);
+  assert.equal(transcript.turns[0].isAborted, true);
+  assert.equal(
+    transcript.turns.some((turn) => turn.id.startsWith("session-resume-")),
+    false,
+    "rotationConsumedEventId must suppress the resume separator turn while still sealing the turn"
+  );
+
+  // Identity-only rotation (recovered from session.sessionId on a poll without a live
+  // lifecycle event) must still seed sessionIdleAtMilliseconds from an older buffered resume.
+  const polledSessionId = uuid();
+  const polledResumeTimestamp = "2026-09-01T03:02:30.000Z";
+  runtime.session.sessionId = polledSessionId;
+  runtime.session.getEvents = async () => [{
+    id: uuid(),
+    type: "session.resume",
+    timestamp: polledResumeTimestamp,
+    data: { sessionId: polledSessionId, resumeTime: polledResumeTimestamp },
+  }];
+  runtime.intervalCallback();
+  await waitFor(
+    () => readSnapshot(runtime).copilotSessionId === polledSessionId
+      && readSnapshot(runtime).sessionIdleAtMilliseconds === Date.parse(polledResumeTimestamp),
+    "identity-only rotation did not seed idle from older buffered session.resume"
+  );
+
+  // A warm observational resume (sessionWasActive: true) at bootstrap must preserve
+  // an active durable ask_user and must not seed whole-session idle.
+  const warmRuntime = await createRuntime(t, (session, warm) => {
+    writeDurableQuestion(warm, pendingURLQuestion("warm-req", "call-warm-ask"));
+    session.history = [{
+      id: uuid(),
+      type: "session.resume",
+      timestamp: "2026-09-01T03:03:00.000Z",
+      data: {
+        resumeTime: "2026-09-01T03:03:00.000Z",
+        sessionWasActive: true,
+      },
+    }];
+  });
+  await waitFor(
+    () => warmRuntime.durableReadsFinished > 0,
+    "warm durable read did not finish"
+  );
+  const warmSnapshot = readSnapshot(warmRuntime);
+  assert.equal(
+    warmSnapshot.trackedElicitations[0]?.requestId,
+    "synthetic::durable-ask-user::call-warm-ask"
+  );
+  assert.equal(warmSnapshot.sessionIdleAtMilliseconds, null);
+});

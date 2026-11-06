@@ -435,6 +435,12 @@ if (validSessionId && socketPath) {
     let durableFallbackModel = null;
     let durableAskUser = null;
     let durableAskUserScan = null;
+    const durableLifecycleIdleState = {
+        idleTimestamp: null,
+        activityTimestamp: null,
+    };
+    const durableSeenEventIds = new Set();
+    const pendingDurableLifecycleEvents = new Map();
     let lastLiveQuestionAt = null;
     let sharedFilesOwnershipInitializedFor = null;
     let foregroundSessionActive = false;
@@ -680,6 +686,209 @@ if (validSessionId && socketPath) {
             }
         }
         return turnKind;
+    }
+
+    function isRootLifecycleActivityEvent(event) {
+        if (!event || typeof event !== "object" || event.agentId) return false;
+        if (event.type === "user.message") {
+            return Boolean(classifyUserMessage(event) || isRemoteCommandMessage(event));
+        }
+        return event.type === "assistant.turn_start"
+            || event.type === "tool.execution_start"
+            || (event.type === "hook.start"
+                && PROMPT_HOOK_TYPES.has(event.data?.hookType));
+    }
+
+    function isRootLifecycleBoundaryInvalidatingEvent(event) {
+        if (isRootLifecycleActivityEvent(event)) return true;
+        if (!event || typeof event !== "object" || event.agentId) return false;
+        return event.type === "session.start"
+            || event.type === "assistant.message"
+            || event.type === "assistant.turn_end"
+            || event.type === "tool.execution_complete"
+            || event.type === "session.task_complete"
+            || event.type === "session.idle"
+            || (event.type === "session.error"
+                && transcriptErrorFromEvent(event) !== null);
+    }
+
+    function isInterruptingLifecycleBoundary(event) {
+        if (!event || typeof event !== "object" || event.agentId) return false;
+        if (event.type === "session.shutdown") return true;
+        if (event.type !== "session.resume") return false;
+        return event.data?.sessionWasActive !== true
+            && event.data?.continuePendingWork !== true;
+    }
+
+    function isSessionCurrentlyActive() {
+        return foregroundTurnActive
+            || scheduledTurnActive
+            || activeSubagents.size > 0
+            || liveRequestOpen === true
+            || runtimeActivity?.processing === true;
+    }
+
+    function isSessionLifecycleActivityEvent(event) {
+        if (!event || typeof event !== "object") return false;
+        return event.type === "assistant.turn_start"
+            || event.type === "subagent.started"
+            || isRootLifecycleActivityEvent(event);
+    }
+
+    function stepLifecycleIdleState(state, event) {
+        if (!event || typeof event !== "object") return;
+        if (isInterruptingLifecycleBoundary(event)) {
+            state.idleTimestamp = normalizedTimestamp(event.timestamp);
+        } else if (isSessionLifecycleActivityEvent(event)) {
+            state.idleTimestamp = null;
+            state.activityTimestamp = normalizedTimestamp(event.timestamp);
+        }
+    }
+
+    function observeDurableLifecycleIdleEvent(event) {
+        stepLifecycleIdleState(durableLifecycleIdleState, event);
+    }
+
+    function latestRootLifecycleIdleState(events) {
+        const state = { idleTimestamp: null, activityTimestamp: null };
+        for (const event of events) {
+            stepLifecycleIdleState(state, event);
+        }
+        return state;
+    }
+
+    function restoredLifecycleIdleTimestamp(history, historyLoaded) {
+        const historyState = historyLoaded
+            ? latestRootLifecycleIdleState(history)
+            : { idleTimestamp: null, activityTimestamp: null };
+        const durableIdle = durableLifecycleIdleState.idleTimestamp;
+        const durableActivity = durableLifecycleIdleState.activityTimestamp;
+        let candidate = historyState.idleTimestamp;
+        if (durableIdle !== null
+                && (candidate === null || durableIdle > candidate)) {
+            candidate = durableIdle;
+        }
+        if (candidate === null) return null;
+        if ((historyState.activityTimestamp !== null
+                && (historyState.activityTimestamp > candidate
+                    || (historyState.idleTimestamp === null
+                        && historyState.activityTimestamp === candidate)))
+                || (durableActivity !== null
+                    && (durableActivity > candidate
+                        || (durableIdle === null
+                            && durableActivity === candidate)))) {
+            return null;
+        }
+        return candidate;
+    }
+
+    function trailingRootLifecycleEvents(events) {
+        const trailing = [];
+        for (const event of events) {
+            if (!event || typeof event !== "object" || event.agentId) continue;
+            if (isInterruptingLifecycleBoundary(event)) {
+                trailing.push(event);
+            } else if (isRootLifecycleBoundaryInvalidatingEvent(event)) {
+                trailing.length = 0;
+            }
+        }
+        return trailing;
+    }
+
+    function recordDurableSeenEvent(event) {
+        const id = event?.id;
+        if (typeof id !== "string" || id.length === 0) return;
+        durableSeenEventIds.add(id);
+        while (durableSeenEventIds.size > MAX_TRANSCRIPT_EVENT_IDS) {
+            durableSeenEventIds.delete(durableSeenEventIds.values().next().value);
+        }
+        pendingDurableLifecycleEvents.delete(id);
+    }
+
+    function stagePendingDurableLifecycleEvent(event) {
+        if (!isInterruptingLifecycleBoundary(event)) return;
+        if (event.type === "session.resume" && isSessionCurrentlyActive()) {
+            return;
+        }
+        const id = event.id;
+        if (typeof id !== "string" || id.length === 0
+                || durableSeenEventIds.has(id)
+                || pendingDurableLifecycleEvents.has(id)) {
+            return;
+        }
+        pendingDurableLifecycleEvents.set(id, {
+            event,
+            applied: false,
+        });
+        while (pendingDurableLifecycleEvents.size > 16) {
+            pendingDurableLifecycleEvents.delete(
+                pendingDurableLifecycleEvents.keys().next().value
+            );
+        }
+    }
+
+    function hasUnappliedDurableLifecycleEvents() {
+        for (const entry of pendingDurableLifecycleEvents.values()) {
+            if (!entry.applied) return true;
+        }
+        return false;
+    }
+
+    function applyPendingDurableLifecycleEvents() {
+        let changed = false;
+        for (const [id, entry] of pendingDurableLifecycleEvents) {
+            if (entry.applied) continue;
+            entry.applied = true;
+            if (entry.event.type === "session.resume"
+                    && isSessionCurrentlyActive()) {
+                continue;
+            }
+            observeDurableLifecycleIdleEvent(entry.event);
+            applyDurableAskUserEvent(entry.event);
+            try {
+                processTranscriptEvent(entry.event, false);
+                changed = true;
+            } catch {
+                transcriptEventIds.delete(id);
+            }
+        }
+        return changed;
+    }
+
+    function seedRestoredLifecycleIdle(restoredIdleTimestamp) {
+        if (typeof restoredIdleTimestamp !== "string"
+                || restoredIdleTimestamp.length === 0) {
+            return false;
+        }
+        const restoredIdleMs = Date.parse(restoredIdleTimestamp);
+        if (!Number.isFinite(restoredIdleMs)) return false;
+        if (idleGeneration !== closeActivityIdleBaseline
+                || currentTurnKind !== null
+                || isSessionCurrentlyActive()) {
+            return false;
+        }
+        if (liveRequestOpen !== null
+                && foregroundTransitionAt
+                && restoredIdleTimestamp < foregroundTransitionAt) {
+            return false;
+        }
+        if ((runtimeIdleAtMilliseconds !== null && restoredIdleMs < runtimeIdleAtMilliseconds)
+                || (sessionIdleAtMilliseconds !== null && restoredIdleMs < sessionIdleAtMilliseconds)) {
+            return false;
+        }
+        const nextForegroundTransitionAt =
+            !foregroundTransitionAt || restoredIdleTimestamp > foregroundTransitionAt
+                ? restoredIdleTimestamp
+                : foregroundTransitionAt;
+        foregroundTransitionAt = nextForegroundTransitionAt;
+        runtimeIdleAtMilliseconds = restoredIdleMs;
+        sessionIdleAtMilliseconds = restoredIdleMs;
+        if (runtimeActivity?.processing === false && runtimeActivity.error === null) {
+            runtimeActivity = {
+                ...runtimeActivity,
+                idleAtMilliseconds: runtimeIdleAtMilliseconds,
+            };
+        }
     }
 
     function clearCloseActivityRetry() {
@@ -3250,7 +3459,10 @@ if (validSessionId && socketPath) {
     // remains the last significant root event in durable history.
     function applyDurableAskUserEvent(event) {
         if (event.agentId) return;
-        if (durableAskUserScan && durableHookMayFollowAskUser(event)) {
+        if (durableAskUserScan
+                && (durableHookMayFollowAskUser(event)
+                    || (event.type === "session.resume"
+                        && !isInterruptingLifecycleBoundary(event)))) {
             return;
         }
         durableAskUserScan = event.type === "tool.execution_start"
@@ -4511,12 +4723,19 @@ if (validSessionId && socketPath) {
             break;
         }
         case "tool.execution_complete": {
-            ensureSyntheticTranscriptTurn(event);
             const toolId = boundedMetadataText(event.data.toolCallId);
             const prChanged = prCreateToolCallIds.delete(toolId)
                 && event.data?.success === true
                 && recordPullRequestUrlsFromToolResult(event.data);
-            let tool = pendingTranscriptTurn.tools.find(
+            const pendingTool = pendingTranscriptTurn?.tools.find(
+                (candidate) => candidate.id === toolId
+            );
+            if (!pendingTool && isResumeToolCompletion(event.data)) {
+                if (live && prChanged) publish();
+                break;
+            }
+            ensureSyntheticTranscriptTurn(event);
+            let tool = pendingTool ?? pendingTranscriptTurn.tools.find(
                 (candidate) => candidate.id === toolId
             );
             if (!tool
@@ -4564,8 +4783,11 @@ if (validSessionId && socketPath) {
             // Do not end the transcript turn here; just flush progress.
             if (live && pendingTranscriptTurn) schedulePublishTranscript();
             break;
-        case "session.shutdown":
-            const shutdownWasActive = transcriptAssistantTurnActive;
+        case "session.shutdown": {
+            const shutdownWasActive = transcriptAssistantTurnActive
+                || pendingTranscriptTurn?.tools.some(
+                    (tool) => tool.success === null
+                ) === true;
             transcriptAssistantTurnActive = false;
             // Shutdown is a hard boundary even when turn_end was never
             // persisted (crash, kill, reboot). Preserve partial output but
@@ -4573,16 +4795,25 @@ if (validSessionId && socketPath) {
             finishTranscriptTurn(shutdownWasActive, event.timestamp);
             if (live) schedulePublishTranscript();
             break;
-        case "session.resume":
-            const racingLiveTurn = live && transcriptAssistantTurnActive;
+        }
+        case "session.resume": {
+            const racingLiveTurn = (live && transcriptAssistantTurnActive)
+                || event.data?.sessionWasActive === true
+                || event.data?.continuePendingWork === true;
             if (!racingLiveTurn) {
-                const resumeWasActive = transcriptAssistantTurnActive;
+                const resumeWasActive = transcriptAssistantTurnActive
+                    || pendingTranscriptTurn?.tools.some(
+                        (tool) => tool.success === null
+                    ) === true;
                 transcriptAssistantTurnActive = false;
                 finishTranscriptTurn(resumeWasActive, event.timestamp);
-                appendLatestResumeTurn(event);
+                if (event.id !== rotationConsumedEventId) {
+                    appendLatestResumeTurn(event);
+                }
             }
             if (live) schedulePublishTranscript();
             break;
+        }
         case "session.idle":
             transcriptAssistantTurnActive = false;
             finishTranscriptTurn(event.data.aborted === true, event.timestamp);
@@ -4599,6 +4830,13 @@ if (validSessionId && socketPath) {
             break;
         }
         }
+    }
+
+    function isResumeToolCompletion(data) {
+        return Boolean(
+            data && typeof data === "object"
+                && (data.interactionId === "resume" || data.model === "resumed")
+        );
     }
 
     function replayHistoryEvent(
@@ -4747,6 +4985,12 @@ if (validSessionId && socketPath) {
         durableBaselineComplete = false;
         durableAskUser = null;
         durableAskUserScan = null;
+        durableLifecycleIdleState.idleTimestamp = null;
+        durableLifecycleIdleState.activityTimestamp = null;
+        durableSeenEventIds.clear();
+        for (const entry of pendingDurableLifecycleEvents.values()) {
+            entry.applied = false;
+        }
         resetTranscriptReplayState([], currentModel);
     }
 
@@ -4772,6 +5016,10 @@ if (validSessionId && socketPath) {
         durablePending = Buffer.alloc(0);
         durableDroppingOversizedLine = false;
         durableBaselineComplete = false;
+        durableLifecycleIdleState.idleTimestamp = null;
+        durableLifecycleIdleState.activityTimestamp = null;
+        durableSeenEventIds.clear();
+        pendingDurableLifecycleEvents.clear();
         if (clearDurableAskUser()) publish();
     }
 
@@ -4821,7 +5069,21 @@ if (validSessionId && socketPath) {
         }
 
         if (attributes.size === durableHistoryOffset) {
-            if (!durableBaselineComplete) {
+            const lifecycleChanged = applyPendingDurableLifecycleEvents();
+            const questionChanged =
+                durableAskUser?.requestId !== durableAskUserScan?.requestId;
+            durableAskUser = durableAskUserScan;
+            const startingPromptRecovered = lifecycleChanged
+                ? syncStartingPromptFromTranscript()
+                : false;
+            const pullRequestsRecovered = lifecycleChanged
+                ? syncPullRequestKeysFromTranscript()
+                : false;
+            if (!durableBaselineComplete
+                    || lifecycleChanged
+                    || questionChanged
+                    || startingPromptRecovered
+                    || pullRequestsRecovered) {
                 durableBaselineComplete = true;
                 publish();
                 publishTranscript();
@@ -4872,6 +5134,8 @@ if (validSessionId && socketPath) {
                             try {
                                 const event = JSON.parse(text);
                                 if (event && typeof event === "object") {
+                                    recordDurableSeenEvent(event);
+                                    observeDurableLifecycleIdleEvent(event);
                                     applyDurableAskUserEvent(event);
                                     changed = replayHistoryEvent(
                                         event,
@@ -4892,6 +5156,7 @@ if (validSessionId && socketPath) {
             }
             const completedBaseline = !durableBaselineComplete;
             if (stale()) return;
+            changed = applyPendingDurableLifecycleEvents() || changed;
             durableBaselineComplete = true;
             const questionChanged =
                 durableAskUser?.requestId !== durableAskUserScan?.requestId;
@@ -5020,6 +5285,9 @@ if (validSessionId && socketPath) {
                         applyModelFromEvent(event);
                     } catch {}
                 }
+                for (const event of trailingRootLifecycleEvents(history)) {
+                    stagePendingDurableLifecycleEvent(event);
+                }
             } else {
                 resetTranscriptReplayState([], preservedModel);
                 for (const event of history) {
@@ -5074,6 +5342,12 @@ if (validSessionId && socketPath) {
                 );
             }
         }
+        if (durableTranscriptAuthoritative && hasUnappliedDurableLifecycleEvents()) {
+            try {
+                await reconcileDurableHistory();
+            } catch {}
+            if (stale()) return;
+        }
         transcriptInitialized = true;
         for (const event of queuedTranscriptEvents) {
             // These were delivered live while history loaded. History can
@@ -5086,6 +5360,9 @@ if (validSessionId && socketPath) {
             }
         }
         queuedTranscriptEvents.length = 0;
+        seedRestoredLifecycleIdle(
+            restoredLifecycleIdleTimestamp(history, historyLoaded)
+        );
         publish();
         if (durableTranscriptAuthoritative) {
             scheduleDurableReconcile(0);
@@ -5184,6 +5461,10 @@ if (validSessionId && socketPath) {
         durableFallbackModel = null;
         durableAskUser = null;
         durableAskUserScan = null;
+        durableLifecycleIdleState.idleTimestamp = null;
+        durableLifecycleIdleState.activityTimestamp = null;
+        durableSeenEventIds.clear();
+        pendingDurableLifecycleEvents.clear();
     }
 
     // The current Copilot conversation id according to a root
@@ -5223,6 +5504,7 @@ if (validSessionId && socketPath) {
             : null;
 
         resetConversationState(transitionAt);
+        if (event) stagePendingDurableLifecycleEvent(event);
         rotateOwnerMarker(previousCopilotSessionId);
         if (ownsSharedFiles()) {
             // `rotateOwnerMarker` already discarded the snapshot under the
