@@ -170,4 +170,42 @@ final class HostLifetimeTests: XCTestCase {
             XCTAssertFalse(key.contains("."), "\(key) can't be observed by @AppStorage in the App scene")
         }
     }
+
+    @MainActor
+    func testClickingTerminalDeepLinkFocusesTargetProjectAndSession() throws {
+        try withFocusFixture { model, window, container, projects in
+            let sourceTerminal = try XCTUnwrap(model.activeController?.terminalView)
+            let targetProjectId = projects[1].id
+            let targetSessionId = projects[1].sessions[0].id
+            sourceTerminal.feed(
+                text: "\u{1b}]8;;copilot-projects://focus?project=\(targetProjectId)&session=\(targetSessionId)\u{07}Jump\u{1b}]8;;\u{07}"
+            )
+
+            let dimensions = sourceTerminal.terminalDimensions
+            let rendered = sourceTerminal.getOptimalFrameSize()
+            let pointInView = NSPoint(
+                x: 0.5 * rendered.width / CGFloat(dimensions.cols),
+                y: sourceTerminal.bounds.height - 0.5 * rendered.height / CGFloat(dimensions.rows)
+            )
+            let pointInWindow = sourceTerminal.convert(pointInView, to: nil)
+            let down = try XCTUnwrap(NSEvent.mouseEvent(
+                with: .leftMouseDown, location: pointInWindow, modifierFlags: [],
+                timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                eventNumber: 1, clickCount: 1, pressure: 0
+            ))
+            let up = try XCTUnwrap(NSEvent.mouseEvent(
+                with: .leftMouseUp, location: pointInWindow, modifierFlags: [],
+                timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                eventNumber: 1, clickCount: 1, pressure: 0
+            ))
+            sourceTerminal.mouseDown(with: down)
+            sourceTerminal.mouseUp(with: up)
+
+            XCTAssertEqual(model.selectedProjectId, targetProjectId)
+            XCTAssertEqual(model.globalSelectedSessionId, targetSessionId)
+            sync(container, model: model)
+            let targetTerminal = try XCTUnwrap(model.activeController?.terminalView)
+            XCTAssertTrue(window.firstResponder === targetTerminal)
+        }
+    }
 }

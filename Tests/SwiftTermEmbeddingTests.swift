@@ -867,4 +867,199 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         XCTAssertEqual(bridge.cachedScreenCount, 0)
         await model.detachAllClientsAndDrain()
     }
+
+    @MainActor
+    func testOsc8AppDeepLinkClicksRouteInProcessWithoutPTYMouseOrAlert() async throws {
+        let (view, window) = focusedInputTerminal()
+        defer { window.contentView = nil }
+        let delegate = MouseDelegate()
+        view.terminalDelegate = delegate
+        view.linkHighlightMode = .hover
+        view.feed(text: "\u{1b}[?1000h\u{1b}[?1006h\u{1b}]8;id=f1;copilot-projects://focus?project=proj-2&session=sess-2\u{07}Feature\u{1b}]8;;\u{07} plain")
+
+        var routed: [AppDeepLink] = []
+        view.onDeepLink = { routed.append($0) }
+        let expected = AppDeepLink(projectId: "proj-2", sessionId: "sess-2")
+
+        let dimensions = view.terminalDimensions
+        let rendered = view.getOptimalFrameSize()
+        let cellW = rendered.width / CGFloat(dimensions.cols)
+        let cellH = rendered.height / CGFloat(dimensions.rows)
+        func point(col: Int, row: Int = 0) -> NSPoint {
+            NSPoint(
+                x: (CGFloat(col) + 0.5) * cellW,
+                y: view.bounds.height - (CGFloat(row) + 0.5) * cellH
+            )
+        }
+        func drainMainQueue() async {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+        }
+
+        let linkPoint = point(col: 2)
+        XCTAssertEqual(view.appDeepLink(atCol: 2, row: 0), expected)
+        XCTAssertNil(view.appDeepLink(atCol: 9, row: 0))
+
+        // 1. Plain click with allowMouseReporting enabled (including ?1003h all-motion):
+        // intercepted before PTY reporting, and probe motion sends are suppressed.
+        view.allowMouseReporting = true
+        view.feed(text: "\u{1b}[?1003h")
+        delegate.writes.removeAll()
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: linkPoint, in: view))
+        XCTAssertTrue(view.shouldSuppressAgentClickForwarding(for: try mouseEvent(.leftMouseUp, at: linkPoint, in: view)))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: linkPoint, in: view))
+        await drainMainQueue()
+        XCTAssertEqual(routed, [expected])
+        XCTAssertTrue(delegate.writes.isEmpty)
+        XCTAssertNil(window.attachedSheet)
+        view.feed(text: "\u{1b}[?1003l\u{1b}[?1000h")
+        await drainMainQueue()
+        delegate.writes.removeAll()
+
+        // 2. Command-click: intercepted before SwiftTerm's UntrustedTerminalLink confirmation sheet.
+        routed.removeAll()
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: linkPoint, in: view, modifiers: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: linkPoint, in: view, modifiers: .command))
+        await drainMainQueue()
+        XCTAssertEqual(routed, [expected])
+        XCTAssertTrue(delegate.writes.isEmpty)
+        XCTAssertNil(window.attachedSheet)
+
+        // 3. Live-agent forwardClick + mouseUp sequence (including sub-threshold jitter
+        // with an intervening mouseDragged across a cell boundary inside the same link):
+        // routes once, creates no selection, and sends no SGR mouse bytes.
+        routed.removeAll()
+        view.allowMouseReporting = false
+        let boundaryPress = NSPoint(x: 2 * cellW - 0.5, y: view.bounds.height - 0.5 * cellH)
+        let boundaryRelease = NSPoint(x: 2 * cellW + 0.5, y: view.bounds.height - 0.5 * cellH)
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: boundaryPress, in: view))
+        view.mouseDragged(with: try mouseEvent(.leftMouseDragged, at: boundaryRelease, in: view))
+        let up = try mouseEvent(.leftMouseUp, at: boundaryRelease, in: view)
+        view.forwardClick(up)
+        view.mouseUp(with: up)
+        XCTAssertEqual(routed, [expected])
+        XCTAssertFalse(view.selectionActive)
+        XCTAssertTrue(delegate.writes.isEmpty)
+
+        // Sub-threshold release across the link boundary onto plain text cancels the link
+        // without forwarding a PTY click.
+        routed.removeAll()
+        let edgePress = NSPoint(x: 7 * cellW - 0.5, y: view.bounds.height - 0.5 * cellH)
+        let plainEdgeRelease = NSPoint(x: 7 * cellW + 0.5, y: view.bounds.height - 0.5 * cellH)
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: edgePress, in: view))
+        let plainEdgeUp = try mouseEvent(.leftMouseUp, at: plainEdgeRelease, in: view)
+        view.forwardClick(plainEdgeUp)
+        view.mouseUp(with: plainEdgeUp)
+        XCTAssertTrue(routed.isEmpty)
+        XCTAssertTrue(delegate.writes.isEmpty)
+
+        // 4. Dragging across the link selects text instead of routing the deep link.
+        routed.removeAll()
+        let dragEndPoint = point(col: 5)
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: linkPoint, in: view))
+        view.mouseDragged(with: try mouseEvent(.leftMouseDragged, at: dragEndPoint, in: view))
+        XCTAssertTrue(view.selectionActive)
+        XCTAssertTrue(view.shouldSuppressAgentClickForwarding(for: try mouseEvent(.leftMouseUp, at: dragEndPoint, in: view)))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: dragEndPoint, in: view))
+        XCTAssertTrue(routed.isEmpty)
+        XCTAssertTrue(delegate.writes.isEmpty)
+        XCTAssertEqual(view.getSelection(), "atu")
+        view.selectNone()
+
+        // 5. Displaced mouseUp without an intervening mouseDragged neither routes a link
+        // under the release point nor forwards a PTY click.
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: linkPoint, in: view))
+        let displacedUp = try mouseEvent(.leftMouseUp, at: point(col: 9), in: view)
+        view.forwardClick(displacedUp)
+        view.mouseUp(with: displacedUp)
+        XCTAssertTrue(routed.isEmpty)
+        XCTAssertTrue(delegate.writes.isEmpty)
+        view.selectNone()
+
+        // 6. Clicking unlinked text next to the OSC 8 link (even with ?1003h all-motion
+        // mouse tracking active) still forwards SGR mouse events without latching Command hover.
+        view.feed(text: "\u{1b}[?1003h")
+        let plainPoint = point(col: 9)
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: plainPoint, in: view))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: plainPoint, in: view))
+        view.mouseMoved(with: try mouseEvent(.mouseMoved, at: linkPoint, in: view))
+        XCTAssertTrue(view.subviews.compactMap { $0 as? NSTextField }.isEmpty)
+        view.feed(text: "\u{1b}[?1003l\u{1b}[?1000h")
+        await drainMainQueue()
+        delegate.writes.removeAll()
+        view.forwardClick(try mouseEvent(.leftMouseUp, at: plainPoint, in: view))
+        XCTAssertTrue(routed.isEmpty)
+        XCTAssertEqual(delegate.writes, [
+            Array("\u{1b}[<0;10;1M".utf8),
+            Array("\u{1b}[<0;10;1m".utf8),
+        ])
+
+        // 7. Direct requestOpenLink routes valid AppDeepLink URLs in-process.
+        routed.removeAll()
+        view.requestOpenLink(
+            source: view,
+            link: "copilot-projects://focus?project=proj-2&session=sess-2",
+            params: [:]
+        )
+        XCTAssertEqual(routed, [expected])
+
+        // 8. BiDi-reordered RTL row (including Command-clicking plain text then hovering
+        // the OSC 8 link while Command stays held) translates the clicked visual column.
+        routed.removeAll()
+        delegate.writes.removeAll()
+        let rtlExpected = AppDeepLink(projectId: "proj-rtl", sessionId: "sess-rtl")
+        view.feed(text: "\r\nשלום \u{1b}]8;;copilot-projects://focus?project=proj-rtl&session=sess-rtl\u{07}Jump\u{1b}]8;;\u{07}")
+        let rtlVisualCol = dimensions.cols - 7
+        XCTAssertNil(view.appDeepLink(atCol: 6, row: 1))
+        XCTAssertEqual(view.appDeepLink(atCol: rtlVisualCol, row: 1), rtlExpected)
+        let rtlPoint = point(col: rtlVisualCol, row: 1)
+        view.flagsChanged(with: try keyEvent(in: view, characters: "", modifiers: .command, keyCode: 55))
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: plainPoint, in: view, modifiers: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: plainPoint, in: view, modifiers: .command))
+        view.mouseMoved(with: try mouseEvent(.mouseMoved, at: rtlPoint, in: view, modifiers: .command))
+        XCTAssertEqual((view.subviews.compactMap { $0 as? NSTextField }.last)?.stringValue,
+                       "copilot-projects://focus?project=proj-rtl&session=sess-rtl")
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: rtlPoint, in: view, modifiers: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: rtlPoint, in: view, modifiers: .command))
+        view.flagsChanged(with: try keyEvent(in: view, characters: "", modifiers: [], keyCode: 55))
+        await drainMainQueue()
+        XCTAssertEqual(routed, [rtlExpected])
+        XCTAssertTrue(delegate.writes.isEmpty)
+        XCTAssertNil(window.attachedSheet)
+
+        // 9. Soft-wrapped continuation row of an RTL paragraph reorders ASCII cells too,
+        // and mixed-width RTL rows do not alias neighboring cells.
+        routed.removeAll()
+        view.resize(cols: 3, rows: 4)
+        let wrapExpected = AppDeepLink(projectId: "proj-wrap", sessionId: "sess-wrap")
+        view.feed(text: "\u{1b}[2J\u{1b}[Hאבג\u{1b}]8;;copilot-projects://focus?project=proj-wrap&session=sess-wrap\u{07}-\u{1b}]8;;\u{07}--")
+        XCTAssertNil(view.appDeepLink(atCol: 0, row: 1))
+        XCTAssertEqual(view.appDeepLink(atCol: 2, row: 1), wrapExpected)
+
+        view.resize(cols: 4, rows: 4)
+        view.feed(text: "\u{1b}[2J\u{1b}[Hא\u{1b}]8;;copilot-projects://focus?project=proj-wrap&session=sess-wrap\u{07}ב\u{1b}]8;;\u{07}😀")
+        XCTAssertNil(view.appDeepLink(atCol: 3, row: 0))
+        XCTAssertEqual(view.appDeepLink(atCol: 2, row: 0), wrapExpected)
+        XCTAssertNil(view.appDeepLink(atCol: 1, row: 0))
+        XCTAssertNil(view.appDeepLink(atCol: 0, row: 0))
+
+        // 10. With the production ProcessTerminalView delegate, if output overwrites an
+        // unlinked pressed cell with an OSC 8 deep link before mouseUp, release rejects
+        // the deep link without forwarding a PTY click or popping a confirmation sheet.
+        routed.removeAll()
+        delegate.writes.removeAll()
+        view.terminalDelegate = view
+        view.resize(cols: 40, rows: 4)
+        view.feed(text: "\u{1b}[2J\u{1b}[Hplain")
+        let overwritePoint = point(col: 0, row: 0)
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: overwritePoint, in: view))
+        view.feed(text: "\u{1b}[H\u{1b}]8;;copilot-projects://focus?project=proj-late&session=sess-late\u{07}late!\u{1b}]8;;\u{07}")
+        let overwriteUp = try mouseEvent(.leftMouseUp, at: overwritePoint, in: view)
+        view.forwardClick(overwriteUp)
+        view.mouseUp(with: overwriteUp)
+        await drainMainQueue()
+        XCTAssertTrue(routed.isEmpty)
+        XCTAssertNil(window.attachedSheet)
+    }
 }

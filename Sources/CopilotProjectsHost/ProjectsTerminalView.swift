@@ -1,4 +1,5 @@
 import AppKit
+import CopilotProjectsProtocol
 import SwiftTerm
 
 /// A `ProcessTerminalView` that makes the scroll wheel work inside
@@ -74,6 +75,14 @@ final class ProjectsTerminalView: ProcessTerminalView {
     private var restoredSelectionsAwaitingPlacement: [RemoteKittyRestoredSelection] = []
     private var restoredPlacementReplayGeneration = 0
     private var restoredPlacementBufferWasAlternate: Bool?
+
+    private struct PointerPressState {
+        let point: NSPoint
+        let deepLink: AppDeepLink?
+        var didDrag: Bool
+    }
+
+    private var activePointerPress: PointerPressState?
 
     /// Every PTY write passes here on main: typed input, and terminal responses
     /// after SwiftTerm's main-queue hop. A focus report is sent alone as
@@ -840,13 +849,209 @@ final class ProjectsTerminalView: ProcessTerminalView {
         return Array("\u{1b}[13;\(modifiers.rawValue + 1)u".utf8)
     }
 
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let deepLink: AppDeepLink?
+        if Self.isDeepLinkClickEvent(event), bounds.contains(point) {
+            let pos = gridPosition(for: event)
+            deepLink = appDeepLink(
+                atCol: pos.col,
+                row: pos.row,
+                preserveCommandHover: event.modifierFlags.contains(.command)
+            )
+        } else {
+            deepLink = nil
+        }
+        activePointerPress = PointerPressState(
+            point: point,
+            deepLink: deepLink,
+            didDrag: false
+        )
+        if deepLink != nil {
+            let savedMouseReporting = allowMouseReporting
+            allowMouseReporting = false
+            defer { allowMouseReporting = savedMouseReporting }
+            super.mouseDown(with: event)
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if var press = activePointerPress {
+            let point = convert(event.locationInWindow, from: nil)
+            if isDragFromActivePress(to: point, press: press) {
+                press.didDrag = true
+                activePointerPress = press
+            }
+            if press.deepLink != nil {
+                guard press.didDrag else { return }
+                let savedMouseReporting = allowMouseReporting
+                allowMouseReporting = false
+                defer { allowMouseReporting = savedMouseReporting }
+                super.mouseDragged(with: event)
+                return
+            }
+        }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let press = activePointerPress
+        let releasePoint = convert(event.locationInWindow, from: nil)
+        let releasePos = gridPosition(for: event)
+        let releaseDeepLink = bounds.contains(releasePoint)
+            ? appDeepLink(
+                atCol: releasePos.col,
+                row: releasePos.row,
+                preserveCommandHover: event.modifierFlags.contains(.command)
+            )
+            : nil
+        let deepLink = resolvedDeepLinkForClick(
+            event,
+            releasePoint: releasePoint,
+            releaseDeepLink: releaseDeepLink
+        )
+        let acceptedClick = deepLink != nil
+        let pressHadDeepLink = press?.deepLink != nil
+        let suppressLinkActivation = acceptedClick || pressHadDeepLink || releaseDeepLink != nil
+        activePointerPress = nil
+
+        if suppressLinkActivation {
+            superMouseUpSuppressingLink(
+                with: event,
+                suppressMouseReporting: acceptedClick || pressHadDeepLink,
+                pinToPressPoint: acceptedClick ? press?.point : nil
+            )
+        } else {
+            super.mouseUp(with: event)
+        }
+
+        if let deepLink {
+            _ = routeDeepLink(deepLink)
+        }
+
+        if suppressLinkActivation,
+           event.modifierFlags.contains(.command),
+           !isHidden,
+           window?.firstResponder === self,
+           let flagsOn = NSEvent.keyEvent(
+               with: .flagsChanged,
+               location: event.locationInWindow,
+               modifierFlags: .command,
+               timestamp: 0,
+               windowNumber: window?.windowNumber ?? 0,
+               context: nil,
+               characters: "",
+               charactersIgnoringModifiers: "",
+               isARepeat: false,
+               keyCode: 0
+           ) {
+            flagsChanged(with: flagsOn)
+        }
+    }
+
+    func shouldSuppressAgentClickForwarding(for event: NSEvent) -> Bool {
+        if let press = activePointerPress {
+            let point = convert(event.locationInWindow, from: nil)
+            if isDragFromActivePress(to: point, press: press) || press.deepLink != nil {
+                return true
+            }
+        }
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(point) else { return false }
+        let pos = gridPosition(for: event)
+        return appDeepLink(
+            atCol: pos.col,
+            row: pos.row,
+            preserveCommandHover: event.modifierFlags.contains(.command)
+        ) != nil
+    }
+
+    private static func isDeepLinkClickEvent(_ event: NSEvent) -> Bool {
+        guard event.clickCount <= 1 else { return false }
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        return mods.isEmpty || mods == [.command]
+    }
+
+    private func isDragFromActivePress(
+        to point: NSPoint,
+        press: PointerPressState
+    ) -> Bool {
+        if press.didDrag {
+            return true
+        }
+        let dimensions = terminalDimensions
+        let rendered = getOptimalFrameSize()
+        let cellW = dimensions.cols > 0 ? rendered.width / CGFloat(dimensions.cols) : 0
+        let cellH = dimensions.rows > 0 ? rendered.height / CGFloat(dimensions.rows) : 0
+        let threshold = max(3, min(cellW, cellH) / 2)
+        return hypot(point.x - press.point.x, point.y - press.point.y) >= threshold
+    }
+
+    private func resolvedDeepLinkForClick(
+        _ event: NSEvent,
+        releasePoint point: NSPoint,
+        releaseDeepLink: AppDeepLink?
+    ) -> AppDeepLink? {
+        guard Self.isDeepLinkClickEvent(event),
+              !selectionActive,
+              bounds.contains(point) else {
+            return nil
+        }
+        if let press = activePointerPress {
+            guard !isDragFromActivePress(to: point, press: press),
+                  let pressDeepLink = press.deepLink,
+                  releaseDeepLink == pressDeepLink else {
+                return nil
+            }
+            return pressDeepLink
+        }
+        return releaseDeepLink
+    }
+
+    private func superMouseUpSuppressingLink(
+        with event: NSEvent,
+        suppressMouseReporting: Bool,
+        pinToPressPoint pressPoint: NSPoint?
+    ) {
+        let savedMouseReporting = allowMouseReporting
+        let savedHighlightMode = linkHighlightMode
+        let savedPromptBehavior = semanticPromptClickBehavior
+        if suppressMouseReporting {
+            allowMouseReporting = false
+            semanticPromptClickBehavior = .disabled
+        }
+        linkHighlightMode = .alwaysWithModifier
+        defer {
+            allowMouseReporting = savedMouseReporting
+            linkHighlightMode = savedHighlightMode
+            semanticPromptClickBehavior = savedPromptBehavior
+        }
+        let location = pressPoint.map { convert($0, to: nil) } ?? event.locationInWindow
+        let strippedEvent = NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: location,
+            modifierFlags: event.modifierFlags.subtracting(.command),
+            timestamp: 0,
+            windowNumber: window?.windowNumber ?? 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 0
+        ) ?? event
+        super.mouseUp(with: strippedEvent)
+        mouseExited(with: strippedEvent)
+    }
+
     /// Forward a plain click (button-0 press + release) to a mouse-reporting
     /// agent so its own click handling fires. The Copilot CLI tracks markdown-link
     /// rectangles and opens the URL when it receives the click — it does NOT emit
     /// OSC 8 — so without this, markdown links are dead. Only plain clicks are
     /// forwarded (drags still select text locally), mirroring Terminal.app.
     func forwardClick(_ event: NSEvent) {
-        guard terminalInputStateSnapshot() != nil else { return }
+        guard !shouldSuppressAgentClickForwarding(for: event),
+              terminalInputStateSnapshot() != nil else { return }
         // A resumed session's terminal reverts to the default x10 mouse protocol (dtach
         // replays nothing; the CLI doesn't re-emit ?1006h on reattach), so a forwarded
         // click would be x10-encoded and the CLI's SGR-based link handler ignores it —

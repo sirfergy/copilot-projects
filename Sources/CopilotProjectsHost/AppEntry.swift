@@ -3,6 +3,7 @@ import AppKit
 import AVFoundation
 import CopilotProjectsCore
 import CopilotProjectsProtocol
+import CopilotProjectsUI
 
 struct CopilotProjectsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -253,6 +254,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.model = model
         input = WorkspaceInputController(model: model)
         model.attach(integration: integration)
+        MarkdownSelectableTextView.defaultDeepLinkHandler = { [weak model] deepLink in
+            guard let model else { return false }
+            model.focus(projectId: deepLink.projectId, sessionId: deepLink.sessionId)
+            return true
+        }
         super.init()
     }
 
