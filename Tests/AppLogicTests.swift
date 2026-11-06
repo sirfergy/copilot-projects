@@ -9754,6 +9754,32 @@ final class AppLogicTests: XCTestCase {
         let fifthLevelView = try XCTUnwrap(fiveDeepViews.first { $0.attributedText.string.contains("L5\nInner **five**") })
         XCTAssertNil(fifthLevelView.headerDividerY())
         XCTAssertTrue(fiveDeepViews.contains { $0.attributedText.string.contains("Trailing after five.") })
+
+        let deepLinkHost = NSHostingView(
+            rootView: MarkdownText(
+                text: "[Feature](copilot-projects://focus?project=proj-9&session=sess-9)"
+            )
+            .frame(width: 320, alignment: .leading)
+        )
+        deepLinkHost.frame = NSRect(x: 0, y: 0, width: 320, height: 120)
+        deepLinkHost.layoutSubtreeIfNeeded()
+        let deepLinkTextView = try XCTUnwrap(findTextViews(in: deepLinkHost).first)
+        let linkAttr = try XCTUnwrap(
+            deepLinkTextView.attributedText.attribute(.link, at: 0, effectiveRange: nil)
+        )
+        var capturedDeepLinks: [AppDeepLink] = []
+        let previousDefaultHandler = MarkdownSelectableTextView.defaultDeepLinkHandler
+        MarkdownSelectableTextView.defaultDeepLinkHandler = { deepLink in
+            capturedDeepLinks.append(deepLink)
+            return true
+        }
+        defer { MarkdownSelectableTextView.defaultDeepLinkHandler = previousDefaultHandler }
+        deepLinkTextView.clicked(onLink: linkAttr, at: 0)
+        XCTAssertEqual(
+            capturedDeepLinks,
+            [AppDeepLink(projectId: "proj-9", sessionId: "sess-9")]
+        )
+        XCTAssertFalse(deepLinkTextView.routeDeepLinkIfPossible("https://github.com"))
     }
 
     // MARK: - Remote web terminal image rendering

@@ -22,6 +22,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
     var onTitle: ((String) -> Void)?
     var onDirectory: ((String?) -> Void)?
     var onExit: ((Int32?) -> Void)?
+    var onDeepLink: ((AppDeepLink) -> Void)?
     /// Consulted before relaunching after a launch failure; the model answers
     /// false once this controller no longer backs a live tab.
     var shouldRetryLaunch: (() -> Bool)?
@@ -229,6 +230,9 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
             frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         super.init()
         terminalView.processDelegate = self
+        terminalView.onDeepLink = { [weak self] deepLink in
+            self?.onDeepLink?(deepLink)
+        }
         // Make links clickable on a plain click. `.hover` makes BOTH explicit OSC 8
         // hyperlinks AND implicitly-detected bare URLs (http(s)://…) clickable: on
         // mouseUp SwiftTerm sets the hover range to the link under the cursor, then

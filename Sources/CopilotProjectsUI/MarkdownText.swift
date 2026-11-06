@@ -1,3 +1,4 @@
+import CopilotProjectsProtocol
 import Foundation
 import SwiftUI
 #if canImport(UIKit) && !os(watchOS)
@@ -2357,6 +2358,7 @@ public final class MarkdownSelectableTextView: NSTextView {
 
     @MainActor private static var isPreservingCrossViewSelection = false
     @MainActor private static var lastSelectionAnchor: SelectionAnchor?
+    @MainActor public static var defaultDeepLinkHandler: ((AppDeepLink) -> Bool)?
 
     public var wrapsText = true
     fileprivate var renderKey: MarkdownText.RenderKey?
@@ -2727,6 +2729,32 @@ public final class MarkdownSelectableTextView: NSTextView {
             return nil
         }
         return (linkValue, charIndex)
+    }
+
+    private static func resolvedLinkURL(_ link: Any) -> URL? {
+        if let url = link as? URL {
+            return url
+        }
+        if let string = link as? String {
+            return URL(string: string)
+        }
+        return nil
+    }
+
+    @discardableResult
+    public func routeDeepLinkIfPossible(_ link: Any) -> Bool {
+        guard let url = Self.resolvedLinkURL(link),
+              let deepLink = AppDeepLink(url: url) else {
+            return false
+        }
+        return Self.defaultDeepLinkHandler?(deepLink) == true
+    }
+
+    public override func clicked(onLink link: Any, at charIndex: Int) {
+        if routeDeepLinkIfPossible(link) {
+            return
+        }
+        super.clicked(onLink: link, at: charIndex)
     }
 
     public override func mouseDown(with event: NSEvent) {
