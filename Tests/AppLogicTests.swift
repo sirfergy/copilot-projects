@@ -15862,9 +15862,13 @@ final class AppLogicTests: XCTestCase {
         }
 
         let requestedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let storeRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: storeRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: storeRoot) }
+        let store = RemoteAttachmentStore(sessionsDirectory: storeRoot)
         let workflow = RemoteSessionWorkflow(
             observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
-            capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+            capabilities: RemoteSessionActionKind.allCases.map(\.rawValue) + [RemoteAttachmentContract.fileCapability],
             sendReady: true
         )
         var operation = AgentOperationProjection(
@@ -15872,7 +15876,7 @@ final class AppLogicTests: XCTestCase {
             support: .receipts,
             receipts: []
         )
-        let composer = DesktopSessionPromptComposer(sessionId: "session-focus")
+        let composer = DesktopSessionPromptComposer(sessionId: UUID().uuidString, attachmentStore: store)
         var dispatched: [RemoteSessionAction] = []
         var pendingContinuations: [CheckedContinuation<RemoteWorkflowActionResult, Never>] = []
 
@@ -16048,6 +16052,27 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNotNil(answerField.currentEditor(), "Completing send must not steal focus from the answer box")
         XCTAssertNil(composerField.currentEditor())
         XCTAssertFalse(composer.isPromptFieldFocused)
+
+        // 6. Missing attachment file during verification restores the submitted prompt without invoking onAction.
+        let noteURL = storeRoot.appendingPathComponent("note.md")
+        try Data("# Note\n".utf8).write(to: noteURL)
+        await composer.attachFiles([noteURL], workflow: workflow, operation: operation)
+        let stagedId = try XCTUnwrap(composer.attachments.first?.id)
+        try FileManager.default.removeItem(at: store.root.appendingPathComponent("\(stagedId).image"))
+        let dispatchedBeforeMissingAttachment = dispatched.count
+        composer.prompt = "Send with missing attachment"
+        await composer.send(
+            workflow: workflow,
+            operation: operation,
+            onAction: { action in
+                dispatched.append(action)
+                return RemoteWorkflowActionResult(state: .applied)
+            }
+        )
+        XCTAssertEqual(dispatched.count, dispatchedBeforeMissingAttachment)
+        XCTAssertFalse(composer.isSending)
+        XCTAssertEqual(composer.prompt, "Send with missing attachment")
+        XCTAssertEqual(composer.attachments.count, 1)
     }
 
     @MainActor

@@ -848,8 +848,13 @@ final class DesktopSessionPromptComposer: ObservableObject {
             statusMessage = "Enter a valid prompt of at most 8,192 UTF-8 bytes."
             return
         }
+        prompt = ""
         isSending = true
         statusMessage = "Waiting for Copilot to confirm..."
+        func restoreSubmittedPrompt() {
+            guard let submitted = action.prompt, !submitted.isEmpty else { return }
+            prompt = prompt.isEmpty ? submitted : "\(submitted)\n\(prompt)"
+        }
         if !attachments.isEmpty {
             let ids = attachments.map(\.id)
             let store = attachmentStore
@@ -865,18 +870,14 @@ final class DesktopSessionPromptComposer: ObservableObject {
                 }
             }.value
             guard verified else {
+                restoreSubmittedPrompt()
                 isSending = false
                 statusMessage = "Attachment is missing or expired. Remove and reattach it."
                 return
             }
         }
-        prompt = ""
         let result = await onAction(action)
         isSending = false
-        func restoreSubmittedPrompt() {
-            guard let submitted = action.prompt, !submitted.isEmpty else { return }
-            prompt = prompt.isEmpty ? submitted : "\(submitted)\n\(prompt)"
-        }
         switch result.state {
         case .applied:
             attachments = []
