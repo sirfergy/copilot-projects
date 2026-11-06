@@ -1008,12 +1008,13 @@ struct DetailView: View {
 
             if let sessionId = model.globalSelectedSessionId,
                let transcript = model.activeTranscriptController {
+                let isOpen = model.isTranscriptDrawerOpen(sessionId: sessionId)
                 let operation = model.sessionOperationProjection(sessionId: sessionId)
                 let composer = model.sessionPromptComposer(sessionId: sessionId)
                 TranscriptOverlay(
                     controller: transcript,
                     imageCapture: { model.terminalView(for: sessionId)?.kittyImageCapture },
-                    isOpen: model.isTranscriptDrawerOpen(sessionId: sessionId),
+                    isOpen: isOpen,
                     onClose: {
                         model.closeTranscriptDrawer(sessionId: sessionId)
                         model.focusActiveTerminal()
@@ -1050,9 +1051,8 @@ struct DetailView: View {
                     },
                     onPreview: onPreview
                 )
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isOpen)
                 .id(sessionId)
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value:
-                    model.isTranscriptDrawerOpen(sessionId: sessionId))
             }
         }
     }

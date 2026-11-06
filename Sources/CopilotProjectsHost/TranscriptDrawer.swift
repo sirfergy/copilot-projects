@@ -103,56 +103,58 @@ struct TranscriptOverlay: View {
     let onPreview: (TranscriptImagePreviewItem) -> Void
 
     var body: some View {
-        if controller.snapshot != nil || workflow != nil
-            || !pendingUserInputs.isEmpty || !pendingElicitations.isEmpty {
-            if isOpen {
-                let resolvedWorkingModel = workingModelProvider?()
-                Group {
-                    if let capture = imageCapture() {
-                        ImageAssociatedTranscriptDrawer(
-                            capture: capture, snapshot: controller.snapshot,
-                            sessionId: controller.sessionId,
-                            promptAttachments: controller.promptAttachments,
-                            workflow: workflow, operation: operation,
-                            pendingUserInputs: pendingUserInputs,
-                            pendingElicitations: pendingElicitations,
-                            workflowProvider: workflowProvider,
-                            operationProvider: operationProvider,
-                            workingModel: resolvedWorkingModel,
-                            promptComposer: promptComposer,
-                            onClose: onClose,
-                            onFullWidthChange: onFullWidthChange,
-                            onAction: onAction,
-                            onAnswerUserInput: onAnswerUserInput,
-                            onAnswerElicitation: onAnswerElicitation,
-                            onPreview: onPreview
-                        )
-                    } else {
-                        TranscriptDrawer(
-                            turns: controller.snapshot.map {
-                                TranscriptImageAssociation.attach(images: [], to: $0).turns
-                            } ?? [],
-                            imageCapture: nil,
-                            sessionId: controller.sessionId,
-                            promptAttachments: controller.promptAttachments,
-                            copilotSessionId: controller.snapshot?.copilotSessionId,
-                            workflow: workflow, operation: operation,
-                            pendingUserInputs: pendingUserInputs,
-                            pendingElicitations: pendingElicitations,
-                            workflowProvider: workflowProvider,
-                            operationProvider: operationProvider,
-                            workingModel: resolvedWorkingModel,
-                            promptComposer: promptComposer,
-                            onClose: onClose,
-                            onFullWidthChange: onFullWidthChange,
-                            onAction: onAction,
-                            onAnswerUserInput: onAnswerUserInput,
-                            onAnswerElicitation: onAnswerElicitation,
-                            onPreview: onPreview
-                        )
+        ZStack(alignment: .trailing) {
+            if controller.snapshot != nil || workflow != nil
+                || !pendingUserInputs.isEmpty || !pendingElicitations.isEmpty {
+                if isOpen {
+                    let resolvedWorkingModel = workingModelProvider?()
+                    Group {
+                        if let capture = imageCapture() {
+                            ImageAssociatedTranscriptDrawer(
+                                capture: capture, snapshot: controller.snapshot,
+                                sessionId: controller.sessionId,
+                                promptAttachments: controller.promptAttachments,
+                                workflow: workflow, operation: operation,
+                                pendingUserInputs: pendingUserInputs,
+                                pendingElicitations: pendingElicitations,
+                                workflowProvider: workflowProvider,
+                                operationProvider: operationProvider,
+                                workingModel: resolvedWorkingModel,
+                                promptComposer: promptComposer,
+                                onClose: onClose,
+                                onFullWidthChange: onFullWidthChange,
+                                onAction: onAction,
+                                onAnswerUserInput: onAnswerUserInput,
+                                onAnswerElicitation: onAnswerElicitation,
+                                onPreview: onPreview
+                            )
+                        } else {
+                            TranscriptDrawer(
+                                turns: controller.snapshot.map {
+                                    TranscriptImageAssociation.attach(images: [], to: $0).turns
+                                } ?? [],
+                                imageCapture: nil,
+                                sessionId: controller.sessionId,
+                                promptAttachments: controller.promptAttachments,
+                                copilotSessionId: controller.snapshot?.copilotSessionId,
+                                workflow: workflow, operation: operation,
+                                pendingUserInputs: pendingUserInputs,
+                                pendingElicitations: pendingElicitations,
+                                workflowProvider: workflowProvider,
+                                operationProvider: operationProvider,
+                                workingModel: resolvedWorkingModel,
+                                promptComposer: promptComposer,
+                                onClose: onClose,
+                                onFullWidthChange: onFullWidthChange,
+                                onAction: onAction,
+                                onAnswerUserInput: onAnswerUserInput,
+                                onAnswerElicitation: onAnswerElicitation,
+                                onPreview: onPreview
+                            )
+                        }
                     }
+                    .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
                 }
-                .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
             }
         }
     }
