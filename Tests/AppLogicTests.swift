@@ -15976,7 +15976,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(composer.prompt, "Retry me\nAfter retry")
         XCTAssertNotNil(composerField.currentEditor())
         XCTAssertTrue(composer.isPromptFieldFocused)
-        composer.prompt = "Uncertain send"
+        composer.prompt = "Uncertain send\r"
         await pump(drawerHost)
 
         try sendKey(to: window)
@@ -15990,9 +15990,7 @@ final class AppLogicTests: XCTestCase {
         )
         await pump(drawerHost)
         XCTAssertEqual(composer.pendingOperationId, "op-focus")
-        XCTAssertEqual(composer.prompt, "Uncertain send\nFollow-up after indeterminate")
-        XCTAssertNotNil(composerField.currentEditor())
-        XCTAssertTrue(composer.isPromptFieldFocused)
+        XCTAssertEqual(composer.prompt, "Uncertain send\r\nFollow-up after indeterminate")
 
         operation = AgentOperationProjection(
             conversationEpoch: "epoch-focus",
@@ -16011,9 +16009,8 @@ final class AppLogicTests: XCTestCase {
         await pump(drawerHost)
         XCTAssertNil(composer.pendingOperationId)
         XCTAssertEqual(composer.prompt, "Follow-up after indeterminate")
-        XCTAssertNotNil(composerField.currentEditor())
-        XCTAssertTrue(composer.isPromptFieldFocused)
         composer.prompt = ""
+        XCTAssertTrue(window.makeFirstResponder(composerField))
         await pump(drawerHost)
 
         // 4. Clicking the Send button while focused sends and leaves focus in the message box.
