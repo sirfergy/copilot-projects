@@ -416,7 +416,7 @@ final class DesktopSessionPromptComposer: ObservableObject {
     @Published private(set) var isSending = false
     @Published private(set) var isAttaching = false
     @Published private(set) var pendingOperationId: String?
-    private var pendingOperationEpoch: String?
+    private var pendingOperation: (epoch: String, followUpDraft: String)?
     private var previewSequence: UInt32 = 0
     private var attachGeneration: UInt64 = 0
 
@@ -556,9 +556,9 @@ final class DesktopSessionPromptComposer: ObservableObject {
     }
 
     func syncConversationEpoch(_ currentEpoch: String?) {
-        if let currentEpoch, let pendingOperationEpoch, pendingOperationEpoch != currentEpoch {
+        if let currentEpoch, let pendingEpoch = pendingOperation?.epoch, pendingEpoch != currentEpoch {
             pendingOperationId = nil
-            self.pendingOperationEpoch = nil
+            pendingOperation = nil
             statusMessage = "The conversation changed. Check the terminal before sending again."
         }
     }
@@ -576,10 +576,11 @@ final class DesktopSessionPromptComposer: ObservableObject {
               }) else {
             return
         }
+        let followUpDraft = pendingOperation?.followUpDraft ?? ""
         pendingOperationId = nil
-        pendingOperationEpoch = nil
+        pendingOperation = nil
         if receipt.state == .applied {
-            prompt = ""
+            prompt = followUpDraft
             attachments = []
             attachedEpoch = nil
             statusMessage = nil
@@ -847,8 +848,13 @@ final class DesktopSessionPromptComposer: ObservableObject {
             statusMessage = "Enter a valid prompt of at most 8,192 UTF-8 bytes."
             return
         }
+        prompt = ""
         isSending = true
         statusMessage = "Waiting for Copilot to confirm..."
+        func restoreSubmittedPrompt() {
+            guard let submitted = action.prompt, !submitted.isEmpty else { return }
+            prompt = prompt.isEmpty ? submitted : "\(submitted)\n\(prompt)"
+        }
         if !attachments.isEmpty {
             let ids = attachments.map(\.id)
             let store = attachmentStore
@@ -864,6 +870,7 @@ final class DesktopSessionPromptComposer: ObservableObject {
                 }
             }.value
             guard verified else {
+                restoreSubmittedPrompt()
                 isSending = false
                 statusMessage = "Attachment is missing or expired. Remove and reattach it."
                 return
@@ -873,19 +880,21 @@ final class DesktopSessionPromptComposer: ObservableObject {
         isSending = false
         switch result.state {
         case .applied:
-            prompt = ""
             attachments = []
             attachedEpoch = nil
             pendingOperationId = nil
-            pendingOperationEpoch = nil
+            pendingOperation = nil
             statusMessage = nil
         case .indeterminate:
+            let followUpDraft = prompt
+            restoreSubmittedPrompt()
             pendingOperationId = result.operationId
-            pendingOperationEpoch = submittedEpoch
+            pendingOperation = (submittedEpoch, followUpDraft)
             statusMessage = result.message ?? "Couldn't confirm the outcome. Inspect the terminal before trying again."
         case .rejected, .accepted:
+            restoreSubmittedPrompt()
             pendingOperationId = nil
-            pendingOperationEpoch = nil
+            pendingOperation = nil
             statusMessage = result.message ?? "Copilot did not accept this message."
         }
     }

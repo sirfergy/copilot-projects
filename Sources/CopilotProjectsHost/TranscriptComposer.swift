@@ -214,7 +214,7 @@ struct TranscriptPromptComposerView: View {
                         .lineLimit(1...5)
                         .textFieldStyle(.roundedBorder)
                         .focused($promptFocused)
-                        .disabled(modeDisabled)
+                        .disabled(composer.pendingOperationId != nil)
                         .accessibilityLabel("Message Copilot")
                         .accessibilityIdentifier("desktop-prompt-field")
                         .onSubmit(submitPrompt)
