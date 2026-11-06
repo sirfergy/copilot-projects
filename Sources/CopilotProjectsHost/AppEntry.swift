@@ -10,6 +10,7 @@ struct CopilotProjectsApp: App {
     @AppStorage(HostLifetimePolicy.settingKey) private var keepRunning = false
     @AppStorage(NotificationsAppLauncher.startsWithHostKey) private var startsNotifications = false
     @AppStorage(TranscriptPromptComposerView.showQuickReplyChipsKey) private var showQuickReplyChips = true
+    @AppStorage(TranscriptDrawer.defaultViewKey) private var defaultView: TranscriptDrawer.DefaultView = .terminal
     @AppStorage(TranscriptDrawer.fullWidthTranscriptKey) private var fullWidthTranscript = false
     @State private var showsProjects = true
     @State private var showsQuickRepliesSettings = false
@@ -33,6 +34,7 @@ struct CopilotProjectsApp: App {
                               keepRunning: $keepRunning, startsNotifications: $startsNotifications,
                               showQuickReplyChips: $showQuickReplyChips,
                               showsQuickRepliesSettings: $showsQuickRepliesSettings,
+                              defaultView: $defaultView,
                               fullWidthTranscript: $fullWidthTranscript,
                               showsProjects: $showsProjects)
         }
@@ -153,6 +155,7 @@ private struct WorkspaceCommands: Commands {
     @Binding var startsNotifications: Bool
     @Binding var showQuickReplyChips: Bool
     @Binding var showsQuickRepliesSettings: Bool
+    @Binding var defaultView: TranscriptDrawer.DefaultView
     @Binding var fullWidthTranscript: Bool
     @Binding var showsProjects: Bool
 
@@ -177,6 +180,10 @@ private struct WorkspaceCommands: Commands {
                 showsQuickRepliesSettings = true
             }
             .disabled(hasSheet)
+            Picker("Default View", selection: $defaultView) {
+                Text("Terminal").tag(TranscriptDrawer.DefaultView.terminal)
+                Text("Transcript").tag(TranscriptDrawer.DefaultView.transcript)
+            }
             Toggle("Full-Width Transcript View", isOn: $fullWidthTranscript)
             Divider()
             SSHHostsSettingsMenu(model: model, isSheetPresented: hasSheet)

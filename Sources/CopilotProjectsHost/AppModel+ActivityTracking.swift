@@ -54,7 +54,7 @@ extension AppModel {
               snapshot.copilotSessionId?.lowercased() == wait.context.rootSessionId.lowercased(),
               snapshot.copilotSessionId?.lowercased()
                 == (resolvedOwner ?? resumeMarkerValue(sessionId: session.id, suffix: "copilot-session"))?.lowercased(),
-              snapshot.conversationEpoch == wait.context.conversationEpoch,
+              let epoch = snapshot.conversationEpoch, !epoch.isEmpty,
               snapshot.trackedUserInputs?.isEmpty == true,
               snapshot.trackedElicitations?.isEmpty == true,
               snapshot.pendingPermissionRequestIds?.isEmpty == true,
@@ -65,18 +65,26 @@ extension AppModel {
               observed <= nowMs else {
             return false
         }
-        if snapshot.runtimeActivity == nil, snapshot.inputCompletions == nil,
+        let sameEpoch = epoch == wait.context.conversationEpoch
+        if sameEpoch,
+           snapshot.runtimeActivity == nil, snapshot.inputCompletions == nil,
            snapshot.sessionIdleAtMilliseconds == nil {
             return true
         }
-        if let completed = snapshot.inputCompletions?[wait.context.senderSessionId.lowercased()],
+        if sameEpoch,
+           let completed = snapshot.inputCompletions?[wait.context.senderSessionId.lowercased()],
            completed >= wait.timestamp, completed <= nowMs, completed <= observed {
             return true
         }
         // Whole-session idle is stronger than a child completion and also covers
-        // cancellation, where an individual input-completed event can be absent.
+        // cancellation or a post-crash CLI resume into a new conversationEpoch,
+        // where an individual input-completed event in the old epoch is absent.
         if let idleAt = snapshot.sessionIdleAtMilliseconds,
-           idleAt > wait.timestamp, idleAt <= nowMs, idleAt <= observed {
+           idleAt > wait.timestamp, idleAt <= nowMs, idleAt <= observed,
+           sameEpoch || ((foreground == .idle || foreground == nil)
+               && !snapshot.foregroundTurnActive
+               && !snapshot.scheduledTurnActive
+               && snapshot.activeSubagents.isEmpty) {
             return true
         }
         return false

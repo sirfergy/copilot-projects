@@ -82,6 +82,7 @@ final class AppModel: ObservableObject {
     @Published var numberHint: NumberHint = .none
     @Published var expandedParentSessionIds: Set<String> = []
     @Published private(set) var transcriptOpenSessions: Set<String> = []
+    private var defaultViewAppliedSessions: Set<String> = []
     @Published private(set) var recentlyClosedSessions: [RecentlyClosedSession] = []
     @Published private(set) var hostHealth: [RemoteHostHealth] = []
     var requestMainWindow: (() -> Void)?
@@ -1119,10 +1120,12 @@ final class AppModel: ObservableObject {
             selectedTranscriptController = nil
             return
         }
-        guard selectedTranscriptController?.sessionId != sessionId else { return }
-        let controller = TranscriptController(sessionId: sessionId)
-        selectedTranscriptController = controller
-        controller.start()
+        if selectedTranscriptController?.sessionId != sessionId {
+            let controller = TranscriptController(sessionId: sessionId)
+            selectedTranscriptController = controller
+            controller.start()
+        }
+        relinquishActiveTerminalFocusIfCovered()
     }
 
     private func syncSessionNavigationHistory() {
@@ -1134,6 +1137,9 @@ final class AppModel: ObservableObject {
                 validSessionIds: validIds,
                 currentSessionId: globalSelectedSessionId
             )
+        }
+        if let sessionId = globalSelectedSessionId {
+            applyDefaultViewIfNeeded(sessionId: sessionId)
         }
     }
 
@@ -1237,19 +1243,30 @@ final class AppModel: ObservableObject {
 
     func relinquishActiveTerminalFocusIfCovered(isFullWidth: Bool? = nil) {
         guard isActiveTerminalCoveredByTranscriptDrawer(isFullWidth: isFullWidth),
-              let window = activeController?.terminalView.window ?? NSApp.keyWindow,
+              let window = activeController?.terminalView.window
+                  ?? controllers.values.lazy.compactMap(\.terminalView.window).first
+                  ?? NSApp.keyWindow,
               window.firstResponder is ProjectsTerminalView else {
             return
         }
         window.makeFirstResponder(nil)
     }
 
+    private func applyDefaultViewIfNeeded(sessionId: String) {
+        guard defaultViewAppliedSessions.insert(sessionId).inserted,
+              defaults.string(forKey: TranscriptDrawer.defaultViewKey)
+                  == TranscriptDrawer.DefaultView.transcript.rawValue else { return }
+        openTranscriptDrawer(sessionId: sessionId)
+    }
+
     func closeTranscriptDrawer(sessionId: String) {
+        defaultViewAppliedSessions.insert(sessionId)
         transcriptOpenSessions.remove(sessionId)
         sessionWorkingModels.removeValue(forKey: sessionId)?.update(nil)
     }
 
     func openTranscriptDrawer(sessionId: String) {
+        defaultViewAppliedSessions.insert(sessionId)
         transcriptOpenSessions.insert(sessionId)
         relinquishActiveTerminalFocusIfCovered()
     }
@@ -1957,6 +1974,7 @@ final class AppModel: ObservableObject {
             selectedTranscriptController = nil
         }
         transcriptOpenSessions.remove(sid)
+        defaultViewAppliedSessions.remove(sid)
         sessionSemantics.reset(sessionId: sid)
         backgroundAgentsSuppressed.remove(sid)
         completionPending.remove(sid)
@@ -2651,6 +2669,7 @@ final class AppModel: ObservableObject {
                 selectedTranscriptController = nil
             }
             transcriptOpenSessions.remove(session.id)
+            defaultViewAppliedSessions.remove(session.id)
             backgroundAgentsSuppressed.remove(session.id)
             completionPending.remove(session.id)
             completionSummaryContexts[session.id] = nil
@@ -3651,13 +3670,17 @@ final class AppModel: ObservableObject {
                 now: now
             ) else { return }
         }
-        let restoredStatus = restore.status == .waiting
+        let crossEpoch = inputWaits[sessionId].map {
+            session.agentActivity?.conversationEpoch != $0.context.conversationEpoch
+        } ?? false
+        let useProjectedStatus = restore.status == .waiting || crossEpoch
+        let restoredStatus = useProjectedStatus
             ? projectedStatus(for: session, foreground: foreground, now: now)
             : restore.status
         guard restoredStatus != .waiting else { return }
         session.status = restoredStatus
-        session.statusIsRuntimeDerived = restore.status == .waiting
-        session.statusText = restore.statusText
+        session.statusIsRuntimeDerived = useProjectedStatus
+        session.statusText = crossEpoch ? nil : restore.statusText
         session.runningStartedAtMilliseconds = restoredStatus == .running
             ? (session.runningStartedAtMilliseconds
                 ?? trustedForegroundTransitionMilliseconds(sessionId: sessionId, snapshot: session.agentActivity)

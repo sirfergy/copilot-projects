@@ -279,6 +279,12 @@ private struct ImageAssociatedTranscriptDrawer: View {
 
 struct TranscriptDrawer: View {
     static let fullWidthTranscriptKey = "desktopFullWidthTranscript"
+    static let defaultViewKey = "desktopDefaultView"
+
+    enum DefaultView: String {
+        case terminal
+        case transcript
+    }
 
     let turns: [TranscriptTurn]
     let imageCapture: RemoteKittyImageCapture?

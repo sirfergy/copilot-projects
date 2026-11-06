@@ -15522,6 +15522,351 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testDesktopQuestionCardsReturnSubmitsValidAnswersAndOptionReturnInsertsNewline() async throws {
+        _ = NSApplication.shared
+        let window = NSWindow(
+            contentRect: NSRect(x: -16_000, y: -16_000, width: 420, height: 640),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer {
+            window.makeFirstResponder(nil)
+            window.contentView = nil
+            window.close()
+        }
+
+        func pumpRunLoop(_ host: NSView) {
+            CFRunLoopRunInMode(.defaultMode, 0, false)
+            host.layoutSubtreeIfNeeded()
+        }
+
+        func pump(_ host: NSView) async {
+            for _ in 0..<8 {
+                pumpRunLoop(host)
+                await Task.yield()
+            }
+        }
+
+        func sendKey(
+            to window: NSWindow,
+            characters: String = "\r",
+            modifiers: NSEvent.ModifierFlags = [],
+            keyCode: UInt16 = 36
+        ) throws {
+            let event = try XCTUnwrap(
+                NSEvent.keyEvent(
+                    with: .keyDown,
+                    location: .zero,
+                    modifierFlags: modifiers,
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    characters: characters,
+                    charactersIgnoringModifiers: characters,
+                    isARepeat: false,
+                    keyCode: keyCode
+                )
+            )
+            window.sendEvent(event)
+        }
+
+        func typeText(_ text: String, into field: NSTextField, in window: NSWindow, host: NSView) async throws {
+            XCTAssertTrue(window.makeFirstResponder(field))
+            let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+            editor.insertText(text, replacementRange: editor.selectedRange())
+            await pump(host)
+        }
+
+        let requestedAt = Date(timeIntervalSince1970: 1_700_000_000)
+
+        // 1. DesktopUserInputCard: Return does nothing on empty input, Option-Return inserts newline,
+        //    Return submits without trailing newline and cannot submit twice.
+        var submittedUserInputs: [RemoteUserInputAnswer] = []
+        let userInputHost = NSHostingView(
+            rootView: DesktopUserInputCard(
+                request: RemoteUserInputRequest(
+                    requestId: "req-user-input",
+                    question: "What should we name it?",
+                    choices: ["Default"],
+                    allowFreeform: true,
+                    requestedAt: requestedAt
+                ),
+                onAnswer: { answer in
+                    submittedUserInputs.append(answer)
+                    return RemoteWorkflowActionResult(state: .applied)
+                },
+                onFocusTerminal: {}
+            )
+        )
+        userInputHost.frame = NSRect(x: 0, y: 0, width: 420, height: 320)
+        window.contentView = userInputHost
+        await pump(userInputHost)
+
+        let userField = try XCTUnwrap(findEditableTextFields(in: userInputHost).first)
+        XCTAssertTrue(window.makeFirstResponder(userField))
+        try sendKey(to: window)
+        await pump(userInputHost)
+        XCTAssertTrue(submittedUserInputs.isEmpty)
+        XCTAssertEqual(userField.stringValue, "")
+
+        try await typeText("line 1", into: userField, in: window, host: userInputHost)
+        try sendKey(to: window, modifiers: [.option])
+        await pump(userInputHost)
+        XCTAssertTrue(submittedUserInputs.isEmpty)
+        let editorAfterOptionReturn = try XCTUnwrap(userField.currentEditor() as? NSTextView)
+        editorAfterOptionReturn.insertText("line 2", replacementRange: editorAfterOptionReturn.selectedRange())
+        await pump(userInputHost)
+        XCTAssertEqual(userField.stringValue, "line 1\nline 2")
+
+        try sendKey(to: window)
+        try sendKey(to: window)
+        await pump(userInputHost)
+        XCTAssertEqual(
+            submittedUserInputs,
+            [
+                RemoteUserInputAnswer(
+                    requestId: "req-user-input",
+                    answer: "line 1\nline 2",
+                    wasFreeform: true
+                ),
+            ]
+        )
+
+        // 2. DesktopElicitationCard multi-field form (.string + .number) and custom choice ("Other").
+        let multiFieldSchema: RemoteJSONValue = .object([
+            "type": .string("object"),
+            "required": .array([.string("summary"), .string("count"), .string("mode")]),
+            DesktopElicitationForm.propertyOrderKey: .array([
+                .string("summary"),
+                .string("count"),
+                .string("mode"),
+            ]),
+            "properties": .object([
+                "summary": .object([
+                    "type": .string("string"),
+                    "title": .string("Summary"),
+                    "minLength": .number(3),
+                ]),
+                "count": .object([
+                    "type": .string("integer"),
+                    "title": .string("Count"),
+                    "minimum": .number(1),
+                    "maximum": .number(10),
+                ]),
+                "mode": .object([
+                    "type": .string("string"),
+                    "title": .string("Mode"),
+                    "enum": .array([.string("fast"), .string("safe")]),
+                ]),
+            ]),
+        ])
+        var submittedElicitations: [RemoteElicitationAnswer] = []
+        let elicitationHost = NSHostingView(
+            rootView: DesktopElicitationCard(
+                request: RemoteElicitationRequest(
+                    requestId: "req-elicitation",
+                    message: "Configure run",
+                    schema: multiFieldSchema,
+                    requestedAt: requestedAt
+                ),
+                onAnswer: { answer in
+                    submittedElicitations.append(answer)
+                    return RemoteWorkflowActionResult(state: .applied)
+                },
+                onFocusTerminal: {}
+            )
+        )
+        elicitationHost.frame = NSRect(x: 0, y: 0, width: 420, height: 480)
+        window.contentView = elicitationHost
+        await pump(elicitationHost)
+
+        let elicitationFields = findEditableTextFields(in: elicitationHost)
+        XCTAssertEqual(elicitationFields.count, 2)
+        let summaryField = elicitationFields[0]
+        let countField = elicitationFields[1]
+
+        // Empty / invalid summary: Return neither submits nor inserts a newline.
+        XCTAssertTrue(window.makeFirstResponder(summaryField))
+        try sendKey(to: window)
+        await pump(elicitationHost)
+        XCTAssertTrue(submittedElicitations.isEmpty)
+        XCTAssertEqual(summaryField.stringValue, "")
+
+        // Valid multi-line summary via Option-Return, but required `count` is still missing: Return does not submit.
+        try await typeText("alpha", into: summaryField, in: window, host: elicitationHost)
+        try sendKey(to: window, modifiers: [.option])
+        await pump(elicitationHost)
+        let summaryEditor = try XCTUnwrap(summaryField.currentEditor() as? NSTextView)
+        summaryEditor.insertText("beta", replacementRange: summaryEditor.selectedRange())
+        await pump(elicitationHost)
+        try sendKey(to: window)
+        await pump(elicitationHost)
+        XCTAssertTrue(submittedElicitations.isEmpty)
+        XCTAssertEqual(summaryField.stringValue, "alpha\nbeta")
+
+        // Out-of-range number: Return in the number field does not submit.
+        try await typeText("99", into: countField, in: window, host: elicitationHost)
+        try sendKey(to: window)
+        await pump(elicitationHost)
+        XCTAssertTrue(submittedElicitations.isEmpty)
+
+        // Valid number makes the form valid: Tab / focus change does NOT submit, Return in the number field submits once.
+        let countEditor = try XCTUnwrap(countField.currentEditor() as? NSTextView)
+        countEditor.selectAll(nil)
+        countEditor.insertText("4", replacementRange: countEditor.selectedRange())
+        await pump(elicitationHost)
+        try sendKey(to: window, characters: "\t", keyCode: 48)
+        XCTAssertTrue(window.makeFirstResponder(summaryField))
+        await pump(elicitationHost)
+        XCTAssertTrue(submittedElicitations.isEmpty)
+        XCTAssertTrue(window.makeFirstResponder(countField))
+        await pump(elicitationHost)
+        try sendKey(to: window)
+        try sendKey(to: window)
+        await pump(elicitationHost)
+        XCTAssertEqual(
+            submittedElicitations,
+            [
+                RemoteElicitationAnswer(
+                    requestId: "req-elicitation",
+                    action: .accept,
+                    content: [
+                        "summary": .string("alpha\nbeta"),
+                        "count": .number(4),
+                        "mode": .string("fast"),
+                    ]
+                ),
+            ]
+        )
+
+        // 3. Custom choice ("Other") text field in DesktopElicitationChoiceControl, plus composer isolation in TranscriptDrawer.
+        let customChoiceSchema: RemoteJSONValue = .object([
+            "type": .string("object"),
+            "required": .array([.string("strategy")]),
+            "properties": .object([
+                "strategy": .object([
+                    "type": .string("string"),
+                    "title": .string("Strategy"),
+                    "enum": .array([.string("canary"), .string("full")]),
+                    "default": .string("custom-seed"),
+                ]),
+            ]),
+        ])
+        var drawerActions: [RemoteSessionAction] = []
+        var drawerElicitationAnswers: [RemoteElicitationAnswer] = []
+        let workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+            capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+            sendReady: true
+        )
+        let operation = AgentOperationProjection(conversationEpoch: "epoch-q", support: .receipts, receipts: [])
+        let composer = DesktopSessionPromptComposer(sessionId: "session-q")
+        composer.prompt = "Composer draft"
+        let drawerHost = NSHostingView(
+            rootView: TranscriptDrawer(
+                turns: [],
+                imageCapture: nil,
+                workflow: workflow,
+                operation: operation,
+                pendingElicitations: [
+                    RemoteElicitationRequest(
+                        requestId: "req-other",
+                        message: "Pick strategy",
+                        schema: customChoiceSchema,
+                        requestedAt: requestedAt
+                    ),
+                ],
+                workflowProvider: { workflow },
+                operationProvider: { operation },
+                promptComposer: composer,
+                onClose: {},
+                onAction: { action in
+                    drawerActions.append(action)
+                    return RemoteWorkflowActionResult(state: .applied)
+                },
+                onAnswerElicitation: { answer in
+                    drawerElicitationAnswers.append(answer)
+                    return RemoteWorkflowActionResult(state: .applied)
+                },
+                onPreview: { _ in }
+            )
+        )
+        drawerHost.frame = NSRect(x: 0, y: 0, width: 420, height: 520)
+        window.contentView = drawerHost
+        await pump(drawerHost)
+
+        let drawerFields = findEditableTextFields(in: drawerHost)
+        XCTAssertEqual(drawerFields.count, 2)
+        let otherField = try XCTUnwrap(drawerFields.first(where: { $0.stringValue == "custom-seed" }))
+        let composerField = try XCTUnwrap(drawerFields.first(where: { $0.stringValue == "Composer draft" }))
+
+        // While the elicitation card is valid ("custom-seed") and unanswered, Option-Return and Return in the
+        // composer insert a newline and submit only the composer prompt without submitting the question card.
+        XCTAssertTrue(window.makeFirstResponder(composerField))
+        let composerEditor = try XCTUnwrap(composerField.currentEditor() as? NSTextView)
+        composerEditor.setSelectedRange(NSRange(location: composerEditor.string.utf16.count, length: 0))
+        try sendKey(to: window, modifiers: [.option])
+        await pump(drawerHost)
+        composerEditor.insertText("second line", replacementRange: composerEditor.selectedRange())
+        await pump(drawerHost)
+        XCTAssertTrue(drawerActions.isEmpty)
+        XCTAssertTrue(drawerElicitationAnswers.isEmpty)
+        XCTAssertEqual(composer.prompt, "Composer draft\nsecond line")
+
+        try sendKey(to: window)
+        await pump(drawerHost)
+        XCTAssertEqual(
+            drawerActions,
+            [
+                RemoteSessionAction(
+                    kind: .send,
+                    prompt: "Composer draft\nsecond line",
+                    mode: .immediate
+                ),
+            ]
+        )
+        XCTAssertTrue(drawerElicitationAnswers.isEmpty)
+        composer.prompt = "Unsent composer draft"
+        await pump(drawerHost)
+
+        // Clearing "Other" makes it invalid: Return neither submits nor inserts a newline.
+        XCTAssertTrue(window.makeFirstResponder(otherField))
+        let otherEditor = try XCTUnwrap(otherField.currentEditor() as? NSTextView)
+        otherEditor.selectAll(nil)
+        otherEditor.insertText("", replacementRange: otherEditor.selectedRange())
+        await pump(drawerHost)
+        try sendKey(to: window)
+        await pump(drawerHost)
+        XCTAssertEqual(drawerActions.count, 1)
+        XCTAssertTrue(drawerElicitationAnswers.isEmpty)
+        XCTAssertEqual(otherField.stringValue, "")
+
+        // Multi-line custom choice via Option-Return, then Return in "Other" submits only the elicitation answer.
+        try await typeText("blue", into: otherField, in: window, host: drawerHost)
+        try sendKey(to: window, modifiers: [.option])
+        await pump(drawerHost)
+        let otherEditorAfterNewline = try XCTUnwrap(otherField.currentEditor() as? NSTextView)
+        otherEditorAfterNewline.insertText("green", replacementRange: otherEditorAfterNewline.selectedRange())
+        await pump(drawerHost)
+        try sendKey(to: window)
+        await pump(drawerHost)
+        XCTAssertEqual(drawerActions.count, 1)
+        XCTAssertEqual(
+            drawerElicitationAnswers,
+            [
+                RemoteElicitationAnswer(
+                    requestId: "req-other",
+                    action: .accept,
+                    content: ["strategy": .string("blue\ngreen")]
+                ),
+            ]
+        )
+        XCTAssertEqual(composer.prompt, "Unsent composer draft")
+    }
+
+    @MainActor
     func testPerformLocalUserInputAndElicitationAnswersWriteHandoffAndResolveWhenQuestionClearsOrReceiptArrives() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory
@@ -16016,6 +16361,149 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(model.isActiveTerminalCoveredByTranscriptDrawer())
         model.focusActiveTerminal()
         XCTAssertTrue(window.firstResponder === terminal)
+    }
+
+    @MainActor
+    func testDefaultViewSettingBehavior() throws {
+        let suite = "default-view-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let s1 = Session(id: "s-1", title: "one", cwd: root.path)
+        let s2 = Session(id: "s-2", title: "two", cwd: root.path)
+        let s3 = Session(id: "s-3", title: "three", cwd: root.path)
+        let project = Project(
+            name: "P",
+            cwd: root.path,
+            sessions: [s1, s2, s3],
+            selectedSessionId: s1.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+        // 1. Default is Terminal: restored session opens in terminal.
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { true },
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+            defaults: defaults
+        )
+        defer { model.detachAllClients() }
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s1.id))
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s2.id))
+
+        // 2. Changing to Transcript leaves already-seen s1 alone, but opens unseen s2 once.
+        defaults.set(
+            TranscriptDrawer.DefaultView.transcript.rawValue,
+            forKey: TranscriptDrawer.defaultViewKey
+        )
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s1.id))
+
+        model.selectSession(projectId: project.id, sessionId: s2.id)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: s2.id))
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s3.id))
+
+        // Switching back to already-seen s1 keeps it in terminal.
+        model.selectSession(projectId: project.id, sessionId: s1.id)
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s1.id))
+
+        // 3. Closing s2's transcript sticks when switching away and back.
+        model.selectSession(projectId: project.id, sessionId: s2.id)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: s2.id))
+        model.closeTranscriptDrawer(sessionId: s2.id)
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s2.id))
+
+        model.selectSession(projectId: project.id, sessionId: s1.id)
+        model.selectSession(projectId: project.id, sessionId: s2.id)
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s2.id))
+
+        // 4. Unseen s3 opens in Transcript; changing setting back to Terminal leaves s3 open.
+        model.selectSession(projectId: project.id, sessionId: s3.id)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: s3.id))
+        defaults.set(
+            TranscriptDrawer.DefaultView.terminal.rawValue,
+            forKey: TranscriptDrawer.defaultViewKey
+        )
+        model.selectSession(projectId: project.id, sessionId: s1.id)
+        model.selectSession(projectId: project.id, sessionId: s3.id)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: s3.id))
+
+        // 5. App launch with Transcript selected opens only the restored selected session,
+        // and switching to an unseen session with drawer content in full-width mode relinquishes terminal focus.
+        defaults.set(
+            TranscriptDrawer.DefaultView.transcript.rawValue,
+            forKey: TranscriptDrawer.defaultViewKey
+        )
+        defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        let relaunched = AppModel(
+            stateRepository: repository,
+            isAppActive: { true },
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images-2")),
+            defaults: defaults
+        )
+        defer { relaunched.detachAllClients() }
+        XCTAssertEqual(relaunched.globalSelectedSessionId, s3.id)
+        XCTAssertTrue(relaunched.isTranscriptDrawerOpen(sessionId: s3.id))
+        XCTAssertFalse(relaunched.isTranscriptDrawerOpen(sessionId: s1.id))
+        XCTAssertFalse(relaunched.isTranscriptDrawerOpen(sessionId: s2.id))
+        XCTAssertNil(relaunched.activeTranscriptController)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        let container = TerminalsContainerView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        window.contentView = container
+        defer { window.contentView = nil }
+        let s3Terminal = try XCTUnwrap(relaunched.controller(for: s3.id)?.terminalView)
+        container.sync(
+            order: [s3.id],
+            active: s3.id,
+            allowsTerminalFocus: true,
+            emptyHint: ("", ""),
+            onNew: {},
+            provider: { relaunched.terminalView(for: $0) }
+        )
+        XCTAssertTrue(window.firstResponder === s3Terminal)
+
+        relaunched.projects[0].sessions[0].agentActivity = AgentActivitySnapshot(
+            schemaVersion: 1,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            foregroundTurnActive: false,
+            scheduledTurnActive: false,
+            activeSubagents: [],
+            schedules: [],
+            idleGeneration: 0,
+            lastIdleAborted: false,
+            lastIdleTurnKind: nil,
+            error: nil,
+            trackedUserInputs: [
+                TrackedUserInput(
+                    requestId: "req-default-view",
+                    question: "Proceed?",
+                    choices: ["Yes"],
+                    allowFreeform: false,
+                    requestedAt: ISO8601DateFormatter().string(from: Date()),
+                    agentId: nil
+                ),
+            ]
+        )
+        relaunched.selectSession(projectId: project.id, sessionId: s1.id)
+        XCTAssertTrue(relaunched.isTranscriptDrawerOpen(sessionId: s1.id))
+        XCTAssertTrue(relaunched.isActiveTerminalCoveredByTranscriptDrawer())
+        XCTAssertFalse(window.firstResponder === s3Terminal)
+
+        // Switching away and back to an already-open covered session also relinquishes terminal focus.
+        relaunched.selectSession(projectId: project.id, sessionId: s3.id)
+        XCTAssertTrue(window.makeFirstResponder(s3Terminal))
+        relaunched.selectSession(projectId: project.id, sessionId: s1.id)
+        XCTAssertFalse(window.firstResponder === s3Terminal)
     }
 
     func testQuickReplyConfigurationDefaultsValidationAndCorruptFallback() throws {
