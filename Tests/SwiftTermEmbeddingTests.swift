@@ -875,7 +875,8 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         let delegate = MouseDelegate()
         view.terminalDelegate = delegate
         view.linkHighlightMode = .hover
-        view.feed(text: "\u{1b}[?1000h\u{1b}[?1006h\u{1b}]8;id=f1;copilot-projects://focus?project=proj-2&session=sess-2\u{07}Feature\u{1b}]8;;\u{07} plain")
+        let semicolonTarget = "copilot-projects://focus?ignored=a;b&project=proj-2&session=sess-2"
+        view.feed(text: "\u{1b}[?1000h\u{1b}[?1006h\u{1b}]8;id=f1;\(semicolonTarget)\u{07}Feature\u{1b}]8;;\u{07} plain")
 
         var routed: [AppDeepLink] = []
         view.onDeepLink = { routed.append($0) }
@@ -898,6 +899,7 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         }
 
         let linkPoint = point(col: 2)
+        XCTAssertEqual(view.explicitLink(atCol: 2, row: 0), semicolonTarget)
         XCTAssertEqual(view.appDeepLink(atCol: 2, row: 0), expected)
         XCTAssertNil(view.appDeepLink(atCol: 9, row: 0))
 

@@ -205,6 +205,7 @@ class ProcessTerminalView: TerminalView, TerminalViewDelegate {
             x: (CGFloat(col) + 0.5) * rendered.width / CGFloat(dimensions.cols),
             y: bounds.height - (CGFloat(row) + 0.5) * rendered.height / CGFloat(dimensions.rows)
         )
+        guard bounds.contains(pointInView) else { return nil }
         let pointInWindow = convert(pointInView, to: nil)
         guard let flagsOn = NSEvent.keyEvent(
             with: .flagsChanged,
@@ -233,7 +234,7 @@ class ProcessTerminalView: TerminalView, TerminalViewDelegate {
         }
         let savedLinkReporting = linkReporting
         let savedHighlightMode = linkHighlightMode
-        linkReporting = .none
+        linkReporting = .explicit
         linkHighlightMode = .always
         isProbingExplicitLink = true
         defer {
@@ -246,16 +247,20 @@ class ProcessTerminalView: TerminalView, TerminalViewDelegate {
             }
         }
         mouseExited(with: moveEvent)
-        let existingFields = Set(
-            subviews.compactMap { $0 as? NSTextField }
-                .map(ObjectIdentifier.init)
-        )
         flagsChanged(with: flagsOn)
         mouseMoved(with: moveEvent)
-        let previewField = subviews.compactMap { $0 as? NSTextField }.last {
-            !existingFields.contains(ObjectIdentifier($0))
+        return reportedExplicitLink
+    }
+
+    private var reportedExplicitLink: String? {
+        var mirror: Mirror? = Mirror(reflecting: self)
+        while let current = mirror {
+            for child in current.children where child.label == "lastReportedLink" {
+                return child.value as? String
+            }
+            mirror = current.superclassMirror
         }
-        return previewField?.stringValue
+        return nil
     }
 }
 
