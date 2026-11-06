@@ -15496,6 +15496,52 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    private func pumpRunLoop(_ host: NSView) {
+        CFRunLoopRunInMode(.defaultMode, 0, false)
+        host.layoutSubtreeIfNeeded()
+    }
+
+    @MainActor
+    private func pump(_ host: NSView) async {
+        for _ in 0..<8 {
+            pumpRunLoop(host)
+            await Task.yield()
+        }
+    }
+
+    @MainActor
+    private func sendKey(
+        to window: NSWindow,
+        characters: String = "\r",
+        modifiers: NSEvent.ModifierFlags = [],
+        keyCode: UInt16 = 36
+    ) throws {
+        let event = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: characters,
+                charactersIgnoringModifiers: characters,
+                isARepeat: false,
+                keyCode: keyCode
+            )
+        )
+        window.sendEvent(event)
+    }
+
+    @MainActor
+    private func typeText(_ text: String, into field: NSTextField, in window: NSWindow, host: NSView) async throws {
+        XCTAssertTrue(window.makeFirstResponder(field))
+        let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+        editor.insertText(text, replacementRange: editor.selectedRange())
+        await pump(host)
+    }
+
+    @MainActor
     func testDesktopQuestionCardsReturnSubmitsValidAnswersAndOptionReturnInsertsNewline() async throws {
         _ = NSApplication.shared
         let window = NSWindow(
@@ -15509,48 +15555,6 @@ final class AppLogicTests: XCTestCase {
             window.makeFirstResponder(nil)
             window.contentView = nil
             window.close()
-        }
-
-        func pumpRunLoop(_ host: NSView) {
-            CFRunLoopRunInMode(.defaultMode, 0, false)
-            host.layoutSubtreeIfNeeded()
-        }
-
-        func pump(_ host: NSView) async {
-            for _ in 0..<8 {
-                pumpRunLoop(host)
-                await Task.yield()
-            }
-        }
-
-        func sendKey(
-            to window: NSWindow,
-            characters: String = "\r",
-            modifiers: NSEvent.ModifierFlags = [],
-            keyCode: UInt16 = 36
-        ) throws {
-            let event = try XCTUnwrap(
-                NSEvent.keyEvent(
-                    with: .keyDown,
-                    location: .zero,
-                    modifierFlags: modifiers,
-                    timestamp: ProcessInfo.processInfo.systemUptime,
-                    windowNumber: window.windowNumber,
-                    context: nil,
-                    characters: characters,
-                    charactersIgnoringModifiers: characters,
-                    isARepeat: false,
-                    keyCode: keyCode
-                )
-            )
-            window.sendEvent(event)
-        }
-
-        func typeText(_ text: String, into field: NSTextField, in window: NSWindow, host: NSView) async throws {
-            XCTAssertTrue(window.makeFirstResponder(field))
-            let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
-            editor.insertText(text, replacementRange: editor.selectedRange())
-            await pump(host)
         }
 
         let requestedAt = Date(timeIntervalSince1970: 1_700_000_000)
@@ -15838,6 +15842,177 @@ final class AppLogicTests: XCTestCase {
             ]
         )
         XCTAssertEqual(composer.prompt, "Unsent composer draft")
+    }
+
+    @MainActor
+    func testDesktopComposerKeepsFocusAcrossReturnAndSendClicksWithoutStealingFocus() async throws {
+        _ = NSApplication.shared
+        let window = NSWindow(
+            contentRect: NSRect(x: -16_000, y: -16_000, width: 420, height: 520),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer {
+            window.makeFirstResponder(nil)
+            window.orderOut(nil)
+            window.contentView = nil
+            window.close()
+        }
+
+        let requestedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+            capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+            sendReady: true
+        )
+        let operation = AgentOperationProjection(
+            conversationEpoch: "epoch-focus",
+            support: .receipts,
+            receipts: []
+        )
+        let composer = DesktopSessionPromptComposer(sessionId: "session-focus")
+        var dispatched: [RemoteSessionAction] = []
+        var pendingContinuations: [CheckedContinuation<RemoteWorkflowActionResult, Never>] = []
+
+        let drawerHost = NSHostingView(
+            rootView: TranscriptDrawer(
+                turns: [],
+                imageCapture: nil,
+                workflow: workflow,
+                operation: operation,
+                pendingUserInputs: [
+                    RemoteUserInputRequest(
+                        requestId: "req-other-focus",
+                        question: "Fallback focus target",
+                        choices: [],
+                        allowFreeform: true,
+                        requestedAt: requestedAt
+                    ),
+                ],
+                workflowProvider: { workflow },
+                operationProvider: { operation },
+                promptComposer: composer,
+                onClose: {},
+                onAction: { action in
+                    dispatched.append(action)
+                    return await withCheckedContinuation { continuation in
+                        pendingContinuations.append(continuation)
+                    }
+                },
+                onAnswerUserInput: { _ in RemoteWorkflowActionResult(state: .applied) },
+                onPreview: { _ in }
+            )
+            .environment(\.controlActiveState, .key)
+        )
+        drawerHost.sizingOptions = []
+        drawerHost.frame = NSRect(x: 0, y: 0, width: 420, height: 520)
+        window.contentView = drawerHost
+        window.orderBack(nil)
+        await pump(drawerHost)
+
+        let fields = findEditableTextFields(in: drawerHost)
+        XCTAssertEqual(fields.count, 2)
+        let answerField = fields[0]
+        let composerField = fields[1]
+
+        // 1. Return sends once, clears the box immediately, keeps focus during and after send, and preserves text typed mid-send.
+        try await typeText("First message", into: composerField, in: window, host: drawerHost)
+        XCTAssertNotNil(composerField.currentEditor())
+        XCTAssertTrue(composer.isPromptFieldFocused)
+
+        try sendKey(to: window)
+        try sendKey(to: window)
+        await pump(drawerHost)
+        XCTAssertEqual(dispatched, [RemoteSessionAction(kind: .send, prompt: "First message", mode: .immediate)])
+        XCTAssertEqual(pendingContinuations.count, 1)
+        XCTAssertTrue(composer.isSending)
+        XCTAssertEqual(composer.prompt, "")
+        XCTAssertNotNil(composerField.currentEditor(), "Composer field must retain focus while send is in flight")
+        XCTAssertTrue(composer.isPromptFieldFocused)
+
+        for char in "Next draft" {
+            try sendKey(to: window, characters: String(char), keyCode: 0)
+        }
+        await pump(drawerHost)
+
+        pendingContinuations.removeFirst().resume(returning: RemoteWorkflowActionResult(state: .applied))
+        await pump(drawerHost)
+        XCTAssertFalse(composer.isSending)
+        XCTAssertEqual(composer.prompt, "Next draft")
+        XCTAssertEqual(composerField.stringValue, "Next draft")
+        XCTAssertNotNil(composerField.currentEditor(), "Composer field must retain focus after send completes")
+        XCTAssertTrue(composer.isPromptFieldFocused)
+
+        // 2. Queued send (.enqueue) via Return clears the field and keeps focus for immediate typing.
+        composer.mode = .enqueue
+        await pump(drawerHost)
+        try sendKey(to: window)
+        await pump(drawerHost)
+        XCTAssertEqual(dispatched.last, RemoteSessionAction(kind: .send, prompt: "Next draft", mode: .enqueue))
+        XCTAssertEqual(pendingContinuations.count, 1)
+        pendingContinuations.removeFirst().resume(returning: RemoteWorkflowActionResult(state: .applied))
+        await pump(drawerHost)
+        XCTAssertEqual(composer.prompt, "")
+        XCTAssertEqual(composerField.stringValue, "")
+        XCTAssertNotNil(composerField.currentEditor())
+        XCTAssertTrue(composer.isPromptFieldFocused)
+
+        // 3. Rejected send restores the failed message alongside any mid-send typing while keeping focus in the message box.
+        for char in "Retry me" {
+            try sendKey(to: window, characters: String(char), keyCode: 0)
+        }
+        await pump(drawerHost)
+        try sendKey(to: window)
+        await pump(drawerHost)
+        for char in "After retry" {
+            try sendKey(to: window, characters: String(char), keyCode: 0)
+        }
+        await pump(drawerHost)
+        pendingContinuations.removeFirst().resume(returning: RemoteWorkflowActionResult(state: .rejected, message: "Rejected"))
+        await pump(drawerHost)
+        XCTAssertEqual(composer.prompt, "Retry me\nAfter retry")
+        XCTAssertNotNil(composerField.currentEditor())
+        XCTAssertTrue(composer.isPromptFieldFocused)
+        composer.prompt = ""
+        await pump(drawerHost)
+
+        // 4. Clicking the Send button while focused sends and leaves focus in the message box.
+        for char in "Clicked send" {
+            try sendKey(to: window, characters: String(char), keyCode: 0)
+        }
+        await pump(drawerHost)
+        let sendSegmentPoint = NSPoint(x: drawerHost.bounds.maxX - 12 - 24 - 20, y: 24)
+        try sendClick(in: window, point: sendSegmentPoint)
+        await pump(drawerHost)
+        XCTAssertEqual(dispatched.last, RemoteSessionAction(kind: .send, prompt: "Clicked send", mode: .enqueue))
+        XCTAssertEqual(pendingContinuations.count, 1)
+        pendingContinuations.removeFirst().resume(returning: RemoteWorkflowActionResult(state: .applied))
+        await pump(drawerHost)
+        XCTAssertEqual(composer.prompt, "")
+        XCTAssertNotNil(composerField.currentEditor(), "Clicking Send must keep focus in the message box")
+        XCTAssertTrue(composer.isPromptFieldFocused)
+
+        // 5. Moving focus into another control during send must not steal focus back when the send finishes.
+        for char in "Switch focus mid-send" {
+            try sendKey(to: window, characters: String(char), keyCode: 0)
+        }
+        await pump(drawerHost)
+        try sendKey(to: window)
+        await pump(drawerHost)
+        XCTAssertEqual(pendingContinuations.count, 1)
+        XCTAssertTrue(window.makeFirstResponder(answerField))
+        await pump(drawerHost)
+        XCTAssertNotNil(answerField.currentEditor())
+        XCTAssertNil(composerField.currentEditor())
+        XCTAssertFalse(composer.isPromptFieldFocused)
+
+        pendingContinuations.removeFirst().resume(returning: RemoteWorkflowActionResult(state: .applied))
+        await pump(drawerHost)
+        XCTAssertNotNil(answerField.currentEditor(), "Completing send must not steal focus from the answer box")
+        XCTAssertNil(composerField.currentEditor())
+        XCTAssertFalse(composer.isPromptFieldFocused)
     }
 
     @MainActor
