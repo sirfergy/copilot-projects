@@ -23,6 +23,12 @@ struct DesktopUserInputCard: View {
         return freeform.utf8.count > 8_192
     }
 
+    private var canSubmitFreeform: Bool {
+        !isDisabled
+            && !freeformTooLarge
+            && !freeform.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -66,8 +72,7 @@ struct DesktopUserInputCard: View {
                         .disabled(isDisabled)
                         .accessibilityLabel("Type an answer")
                         .onSubmit {
-                            let trimmed = freeform.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !isDisabled, !freeformTooLarge, !trimmed.isEmpty else { return }
+                            guard canSubmitFreeform else { return }
                             submit(freeform, wasFreeform: true)
                         }
 
@@ -82,11 +87,7 @@ struct DesktopUserInputCard: View {
                             submit(freeform, wasFreeform: true)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(
-                            isDisabled
-                                || freeformTooLarge
-                                || freeform.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        )
+                        .disabled(!canSubmitFreeform)
                     }
                 }
             }
@@ -195,6 +196,15 @@ struct DesktopElicitationCard: View {
         isSubmitting || isApplied || onAnswer == nil
     }
 
+    private var canSubmitForm: Bool {
+        !isDisabled
+            && form?.validatedContent(
+                values: values,
+                touched: touched,
+                customChoiceFields: customChoiceFields
+            ) != nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -221,6 +231,10 @@ struct DesktopElicitationCard: View {
                 ForEach(form.fields) { field in
                     fieldControl(field)
                 }
+                .onSubmit {
+                    guard canSubmitForm else { return }
+                    submit(.accept)
+                }
                 HStack {
                     Button("Decline") { submit(.decline) }
                         .buttonStyle(.bordered)
@@ -228,14 +242,7 @@ struct DesktopElicitationCard: View {
                     Spacer()
                     Button("Send Answer") { submit(.accept) }
                         .buttonStyle(.borderedProminent)
-                        .disabled(
-                            isDisabled
-                                || form.validatedContent(
-                                    values: values,
-                                    touched: touched,
-                                    customChoiceFields: customChoiceFields
-                                ) == nil
-                        )
+                        .disabled(!canSubmitForm)
                 }
             } else {
                 Text("Answer this question in the Copilot terminal.")
