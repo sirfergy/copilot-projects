@@ -3648,13 +3648,17 @@ final class AppModel: ObservableObject {
                 now: now
             ) else { return }
         }
-        let restoredStatus = restore.status == .waiting
+        let crossEpoch = inputWaits[sessionId].map {
+            session.agentActivity?.conversationEpoch != $0.context.conversationEpoch
+        } ?? false
+        let useProjectedStatus = restore.status == .waiting || crossEpoch
+        let restoredStatus = useProjectedStatus
             ? projectedStatus(for: session, foreground: foreground, now: now)
             : restore.status
         guard restoredStatus != .waiting else { return }
         session.status = restoredStatus
-        session.statusIsRuntimeDerived = restore.status == .waiting
-        session.statusText = restore.statusText
+        session.statusIsRuntimeDerived = useProjectedStatus
+        session.statusText = crossEpoch ? nil : restore.statusText
         session.runningStartedAtMilliseconds = restoredStatus == .running
             ? (session.runningStartedAtMilliseconds
                 ?? trustedForegroundTransitionMilliseconds(sessionId: sessionId, snapshot: session.agentActivity)

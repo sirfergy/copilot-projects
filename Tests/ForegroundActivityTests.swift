@@ -1094,13 +1094,16 @@ final class ForegroundActivityTests: XCTestCase {
         defer { fixture.cleanup() }
         let waitAt = fixture.baseMs + 100
         let sender = fixture.owner
-        var snapshot = fixture.snapshot(background: false)
+        var snapshot = fixture.snapshot(processing: true, background: false)
         try fixture.publish(snapshot)
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .running)
         try fixture.beginWait(sender: sender, timestamp: waitAt)
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .waiting)
 
         // Simulate CLI --resume after a remote crash/reboot rotating conversationEpoch.
         snapshot.conversationEpoch = "\(UUID().uuidString.lowercased()):0"
+        snapshot.foregroundTurnActive = false
+        snapshot.runtimeActivity?.processing = false
         snapshot.runtimeActivity?.observedAtMilliseconds = waitAt + 300
         snapshot.runtimeActivity?.idleAtMilliseconds = waitAt + 200
         snapshot.inputCompletions = [sender: waitAt + 200]
@@ -1112,7 +1115,8 @@ final class ForegroundActivityTests: XCTestCase {
             "Cross-epoch per-sender inputCompletions alone must not resolve a wait without whole-session idle"
         )
 
-        // A cross-epoch snapshot with active subagents must not resolve the wait even if sessionIdleAtMilliseconds is set.
+        // Cross-epoch snapshots with active subagents, an active foreground turn, or runtime processing
+        // must not resolve the wait even if sessionIdleAtMilliseconds is set.
         snapshot.sessionIdleAtMilliseconds = waitAt + 200
         snapshot.activeSubagents = [
             TrackedSubagent(id: "child-1", name: "explore", description: "Running", model: nil)
@@ -1120,19 +1124,42 @@ final class ForegroundActivityTests: XCTestCase {
         try fixture.publish(snapshot)
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .waiting)
 
-        // Once the resumed session is genuinely whole-session idle with no active turn or subagents,
-        // the pre-reboot wait is resolved and remote prompts are admitted again.
         snapshot.activeSubagents = []
-        snapshot.foregroundTurnActive = false
+        snapshot.foregroundTurnActive = true
         try fixture.publish(snapshot)
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .waiting)
+
+        snapshot.foregroundTurnActive = false
+        snapshot.runtimeActivity?.processing = true
+        try fixture.publish(snapshot)
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .waiting)
+
+        // Once the resumed session is genuinely whole-session idle with no active turn or subagents,
+        // the pre-reboot wait is resolved to .idle (not the pre-crash .running restore state)
+        // and remote prompts are admitted again.
+        snapshot.runtimeActivity?.processing = false
+        try fixture.publish(snapshot)
+        let recordURL = fixture.directory.appendingPathComponent("\(fixture.session.id).status-record.json")
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .idle)
+        XCTAssertEqual(
+            try JSONDecoder().decode(SessionStatusRecord.self, from: Data(contentsOf: recordURL)).status,
+            .idle
+        )
         XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "resumed"), .sent)
 
-        // Legacy/remote runtime snapshots (foreground == nil) also resolve cross-epoch waits
+        // Legacy/remote runtime snapshots (foreground == nil) also resolve cross-epoch waits to .idle
         // when sessionIdleAtMilliseconds is present and no foreground/scheduled/subagent work is active.
         let remoteWaitAt = waitAt + 400
+        fixture.model.setStatus(
+            sessionId: fixture.session.id,
+            status: .running,
+            text: nil,
+            timestamp: remoteWaitAt - 10
+        )
+        XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .running)
         try fixture.beginWait(sender: sender, timestamp: remoteWaitAt)
         snapshot.conversationEpoch = "\(UUID().uuidString.lowercased()):0"
+        snapshot.foregroundTurnActive = false
         snapshot.updatedAt = Date(timeIntervalSince1970: Double(remoteWaitAt + 200) / 1_000)
             .formatted(Date.ISO8601FormatStyle(includingFractionalSeconds: true))
         snapshot.runtimeActivity?.error = "remote"
@@ -1145,6 +1172,10 @@ final class ForegroundActivityTests: XCTestCase {
         snapshot.scheduledTurnActive = false
         try fixture.publish(snapshot)
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .idle)
+        XCTAssertEqual(
+            try JSONDecoder().decode(SessionStatusRecord.self, from: Data(contentsOf: recordURL)).status,
+            .idle
+        )
     }
 
     @MainActor

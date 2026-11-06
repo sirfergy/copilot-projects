@@ -5391,17 +5391,6 @@ test("cold resume with unflushed in-memory session.resume clears durable ask_use
         timestamp: "2026-09-01T01:00:03.200Z",
         data: { hookInvocationId: "hook-1", hookType: "preToolUse", success: true },
       },
-    ];
-    realWriteFileSync(
-      durablePath,
-      `${preCrashEvents.map((event) => JSON.stringify(event)).join("\n")}\n`
-    );
-    // Cold resume buffers session.resume (plus any startup warnings/system messages)
-    // in memory without flushing them to events.jsonl. An earlier warm-attach
-    // session.resume (sessionWasActive: true) before the crash must not be treated
-    // as an interrupting boundary when replayed.
-    session.history = [
-      ...preCrashEvents,
       {
         id: uuid(),
         type: "session.resume",
@@ -5411,6 +5400,17 @@ test("cold resume with unflushed in-memory session.resume clears durable ask_use
           sessionWasActive: true,
         },
       },
+    ];
+    realWriteFileSync(
+      durablePath,
+      `${preCrashEvents.map((event) => JSON.stringify(event)).join("\n")}\n`
+    );
+    // Cold resume buffers session.resume (plus any startup warnings/system messages)
+    // in memory without flushing them to events.jsonl. An earlier warm-attach
+    // session.resume (sessionWasActive: true) persisted before the crash must not
+    // be treated as an interrupting boundary when replayed.
+    session.history = [
+      ...preCrashEvents,
       resumeEvent,
       {
         id: uuid(),
@@ -5753,28 +5753,84 @@ test("rotated /resume applies buffered lifecycle boundaries and newer in-memory 
     "identity-only rotation did not seed idle from older buffered session.resume"
   );
 
-  // A warm observational resume (sessionWasActive: true) at bootstrap must preserve
-  // an active durable ask_user and must not seed whole-session idle.
-  const warmRuntime = await createRuntime(t, (session, warm) => {
-    writeDurableQuestion(warm, pendingURLQuestion("warm-req", "call-warm-ask"));
-    session.history = [{
-      id: uuid(),
-      type: "session.resume",
-      timestamp: "2026-09-01T03:03:00.000Z",
-      data: {
-        resumeTime: "2026-09-01T03:03:00.000Z",
-        sessionWasActive: true,
-      },
-    }];
-  });
-  await waitFor(
-    () => warmRuntime.durableReadsFinished > 0,
-    "warm durable read did not finish"
-  );
-  const warmSnapshot = readSnapshot(warmRuntime);
-  assert.equal(
-    warmSnapshot.trackedElicitations[0]?.requestId,
-    "synthetic::durable-ask-user::call-warm-ask"
-  );
-  assert.equal(warmSnapshot.sessionIdleAtMilliseconds, null);
+  // A warm observational or continuing resume (sessionWasActive: true or
+  // continuePendingWork: true) persisted in events.jsonl after an unfinished
+  // ask_user must preserve the question and open transcript turn without
+  // seeding whole-session idle.
+  for (const warmData of [
+    { sessionWasActive: true },
+    { continuePendingWork: true },
+  ]) {
+    const warmRuntime = await createRuntime(t, (session, warm) => {
+      const directory = join(
+        warm.root, "copilot-home", "session-state", warm.copilotSessionId
+      );
+      realMkdirSync(directory, { recursive: true });
+      const warmEvents = [
+        {
+          id: "warm-turn",
+          type: "user.message",
+          timestamp: "2026-09-01T03:02:58.000Z",
+          data: { content: "Wait on warm ask_user" },
+        },
+        {
+          id: uuid(),
+          type: "assistant.turn_start",
+          timestamp: "2026-09-01T03:02:59.000Z",
+          data: { turnId: "0" },
+        },
+        {
+          id: uuid(),
+          type: "tool.execution_start",
+          timestamp: "2026-09-01T03:02:59.500Z",
+          data: {
+            toolName: "ask_user",
+            toolCallId: "call-warm-ask",
+            arguments: {
+              message: "Continue after warm attach?",
+              requestedSchema: {
+                properties: {
+                  confirm: { type: "boolean", title: "Confirm", default: true },
+                },
+              },
+            },
+          },
+        },
+        {
+          id: uuid(),
+          type: "session.resume",
+          timestamp: "2026-09-01T03:03:00.000Z",
+          data: {
+            resumeTime: "2026-09-01T03:03:00.000Z",
+            ...warmData,
+          },
+        },
+      ];
+      realWriteFileSync(
+        join(directory, "events.jsonl"),
+        `${warmEvents.map((event) => JSON.stringify(event)).join("\n")}\n`
+      );
+      session.history = warmEvents;
+    });
+    await waitFor(
+      () => warmRuntime.durableReadsFinished > 0
+        && readTranscript(warmRuntime)?.turns.length === 1,
+      "warm durable read did not finish"
+    );
+    const warmSnapshot = readSnapshot(warmRuntime);
+    assert.equal(
+      warmSnapshot.trackedElicitations[0]?.requestId,
+      "synthetic::durable-ask-user::call-warm-ask"
+    );
+    assert.equal(warmSnapshot.sessionIdleAtMilliseconds, null);
+    const warmTranscript = readTranscript(warmRuntime);
+    assert.equal(warmTranscript.turns.length, 1);
+    assert.equal(warmTranscript.turns[0].id, "warm-turn");
+    assert.equal(warmTranscript.turns[0].endedAt, null);
+    assert.equal(warmTranscript.turns[0].isAborted, false);
+    assert.equal(
+      realExistsSync(liveTranscriptFile(transcriptFile(warmRuntime))),
+      true
+    );
+  }
 });
