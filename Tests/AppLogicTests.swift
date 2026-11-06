@@ -18241,6 +18241,239 @@ final class AppLogicTests: XCTestCase {
         pumpLayout()
         XCTAssertEqual(scrollView.contentView.documentVisibleRect.origin.y, scrolledTopOriginY, accuracy: 1)
     }
+
+    @MainActor
+    func testTranscriptOverlayAnimationOnSwitchVersusSameSessionToggle() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let environmentKeys = ["SHELL", "COPILOT_PROJECTS_STATE_DIR", "COPILOT_PROJECTS_SOCKET", "COPILOT_PROJECTS_DTACH"]
+        let previousEnvironment = environmentKeys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
+        defer {
+            for (key, value) in previousEnvironment {
+                if let value { setenv(key, value, 1) } else { unsetenv(key) }
+            }
+        }
+        setenv("SHELL", "/bin/cat", 1)
+        setenv("COPILOT_PROJECTS_STATE_DIR", root.path, 1)
+        setenv("COPILOT_PROJECTS_SOCKET", root.appendingPathComponent("control.sock").path, 1)
+        unsetenv("COPILOT_PROJECTS_DTACH")
+        guard Paths.dtachExecutable == nil else {
+            XCTFail("Animation fixtures must not create persistent dtach sessions")
+            return
+        }
+
+        let suite = "drawer-anim-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let nowIso = ISO8601DateFormatter().string(from: Date())
+        let snapshotWithQuestion = AgentActivitySnapshot(
+            schemaVersion: 1,
+            updatedAt: nowIso,
+            foregroundTurnActive: false,
+            scheduledTurnActive: false,
+            activeSubagents: [],
+            schedules: [],
+            idleGeneration: 0,
+            lastIdleAborted: false,
+            lastIdleTurnKind: nil,
+            error: nil,
+            trackedUserInputs: [
+                TrackedUserInput(
+                    requestId: "req-1",
+                    question: "Continue?",
+                    choices: ["Yes", "No"],
+                    allowFreeform: false,
+                    requestedAt: nowIso,
+                    agentId: nil
+                ),
+            ]
+        )
+
+        var sessionA = Session(title: "A", cwd: root.path)
+        sessionA.agentActivity = snapshotWithQuestion
+        var sessionB = Session(title: "B", cwd: root.path)
+        sessionB.agentActivity = snapshotWithQuestion
+        var sessionC = Session(title: "C", cwd: root.path)
+        sessionC.agentActivity = snapshotWithQuestion
+        var sessionD = Session(title: "D", cwd: root.path)
+        sessionD.agentActivity = snapshotWithQuestion
+
+        let project = Project(
+            name: "P",
+            cwd: root.path,
+            sessions: [sessionA, sessionB, sessionC, sessionD],
+            selectedSessionId: sessionA.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { true },
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+            defaults: defaults
+        )
+        defer { model.detachAllClients() }
+        for index in model.projects[0].sessions.indices {
+            model.projects[0].sessions[index].agentActivity = snapshotWithQuestion
+        }
+        model.refreshSelectedTranscriptController()
+
+        // Pre-open B and C so switching to them lands on an already-open transcript.
+        model.openTranscriptDrawer(sessionId: sessionB.id)
+        model.openTranscriptDrawer(sessionId: sessionC.id)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: -4000, y: -4000, width: 900, height: 600),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let host = NSHostingView(
+            rootView: DetailView(model: model, onPreview: { _ in })
+                .defaultAppStorage(defaults)
+        )
+        host.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+        window.contentView = host
+        defer { window.contentView = nil }
+
+        func findScrollViews(in view: NSView) -> [NSScrollView] {
+            var out: [NSScrollView] = []
+            if let s = view as? NSScrollView { out.append(s) }
+            for sub in view.subviews { out.append(contentsOf: findScrollViews(in: sub)) }
+            return out
+        }
+        func findTerminalsContainer(in view: NSView) -> TerminalsContainerView? {
+            if let container = view as? TerminalsContainerView { return container }
+            return view.subviews.lazy.compactMap(findTerminalsContainer(in:)).first
+        }
+        func drawerFramesInHost() -> [NSRect] {
+            findScrollViews(in: host).map { host.convert($0.bounds, from: $0) }
+        }
+        func assertTerminalFrameUnchanged(file: StaticString = #filePath, line: UInt = #line) throws {
+            let container = try XCTUnwrap(findTerminalsContainer(in: host), file: file, line: line)
+            let frame = host.convert(container.bounds, from: container)
+            XCTAssertEqual(frame.origin.x, 0, accuracy: 0.5, file: file, line: line)
+            XCTAssertEqual(frame.origin.y, 0, accuracy: 0.5, file: file, line: line)
+            XCTAssertEqual(frame.width, 900, accuracy: 0.5, file: file, line: line)
+            XCTAssertEqual(frame.height, 600, accuracy: 0.5, file: file, line: line)
+        }
+
+        func assertSingleDrawerFrame(
+            minX: CGFloat,
+            width: CGFloat,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) throws {
+            let frames = drawerFramesInHost()
+            XCTAssertEqual(frames.count, 1, file: file, line: line)
+            let frame = try XCTUnwrap(frames.first, file: file, line: line)
+            XCTAssertEqual(frame.minX, minX, accuracy: 1, file: file, line: line)
+            XCTAssertEqual(frame.width, width, accuracy: 1, file: file, line: line)
+        }
+
+        // 1. Side-drawer mode: switching between closed/open/open/closed sessions never slides.
+        defaults.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(drawerFramesInHost().isEmpty)
+        try assertTerminalFrameUnchanged()
+
+        // Switch closed A -> already-open B: lands immediately at resting minX (900 - 420 = 480).
+        model.selectSession(projectId: project.id, sessionId: sessionB.id)
+        host.layoutSubtreeIfNeeded()
+        try assertSingleDrawerFrame(minX: 480, width: 420)
+        try assertTerminalFrameUnchanged()
+
+        // Switch open B -> already-open C: lands immediately at resting minX = 480.
+        model.selectSession(projectId: project.id, sessionId: sessionC.id)
+        host.layoutSubtreeIfNeeded()
+        try assertSingleDrawerFrame(minX: 480, width: 420)
+        try assertTerminalFrameUnchanged()
+
+        // Switch open C -> closed A: immediately gone (no lingering exit transition).
+        model.selectSession(projectId: project.id, sessionId: sessionA.id)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(drawerFramesInHost().isEmpty)
+        try assertTerminalFrameUnchanged()
+
+        // Auto-opening a session's transcript on first show via Default View = Transcript does not slide.
+        defaults.set(TranscriptDrawer.DefaultView.transcript.rawValue, forKey: TranscriptDrawer.defaultViewKey)
+        model.selectSession(projectId: project.id, sessionId: sessionD.id)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: sessionD.id))
+        host.layoutSubtreeIfNeeded()
+        try assertSingleDrawerFrame(minX: 480, width: 420)
+        defaults.set(TranscriptDrawer.DefaultView.terminal.rawValue, forKey: TranscriptDrawer.defaultViewKey)
+        model.closeTranscriptDrawer(sessionId: sessionD.id)
+
+        // Same-session manual open on A starts at the trailing edge (minX = 900) to slide in when Reduce Motion is off.
+        let expectedManualOpenMinX: CGFloat = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 480 : 900
+        model.selectSession(projectId: project.id, sessionId: sessionA.id)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(drawerFramesInHost().isEmpty)
+        model.openTranscriptDrawer(sessionId: sessionA.id)
+        host.layoutSubtreeIfNeeded()
+        try assertSingleDrawerFrame(minX: expectedManualOpenMinX, width: 420)
+        model.closeTranscriptDrawer(sessionId: sessionA.id)
+
+        // Same-session manual close on settled B keeps the departing drawer in the hierarchy during its slide-out transition,
+        // whereas switching away to closed A removes it immediately.
+        model.selectSession(projectId: project.id, sessionId: sessionB.id)
+        host.layoutSubtreeIfNeeded()
+        try assertSingleDrawerFrame(minX: 480, width: 420)
+        model.closeTranscriptDrawer(sessionId: sessionB.id)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(
+            drawerFramesInHost().count,
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 1
+        )
+        model.selectSession(projectId: project.id, sessionId: sessionA.id)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(drawerFramesInHost().isEmpty)
+
+        // 2. Full-width mode: switching sessions never slides or resizes the terminal container, while manual open/close still slides.
+        defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        model.openTranscriptDrawer(sessionId: sessionB.id)
+        model.openTranscriptDrawer(sessionId: sessionC.id)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(drawerFramesInHost().isEmpty)
+
+        model.selectSession(projectId: project.id, sessionId: sessionB.id)
+        host.layoutSubtreeIfNeeded()
+        try assertSingleDrawerFrame(minX: 0, width: 900)
+        try assertTerminalFrameUnchanged()
+
+        model.selectSession(projectId: project.id, sessionId: sessionC.id)
+        host.layoutSubtreeIfNeeded()
+        try assertSingleDrawerFrame(minX: 0, width: 900)
+        try assertTerminalFrameUnchanged()
+
+        model.selectSession(projectId: project.id, sessionId: sessionA.id)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(drawerFramesInHost().isEmpty)
+        try assertTerminalFrameUnchanged()
+
+        let expectedFullWidthManualOpenMinX: CGFloat = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 900
+        model.openTranscriptDrawer(sessionId: sessionA.id)
+        host.layoutSubtreeIfNeeded()
+        try assertSingleDrawerFrame(minX: expectedFullWidthManualOpenMinX, width: 900)
+        model.closeTranscriptDrawer(sessionId: sessionA.id)
+
+        model.selectSession(projectId: project.id, sessionId: sessionB.id)
+        host.layoutSubtreeIfNeeded()
+        try assertSingleDrawerFrame(minX: 0, width: 900)
+        model.closeTranscriptDrawer(sessionId: sessionB.id)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(
+            drawerFramesInHost().count,
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 1
+        )
+        model.selectSession(projectId: project.id, sessionId: sessionA.id)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(drawerFramesInHost().isEmpty)
+    }
 }
 
 // MARK: - Remote Kitty test helpers
