@@ -193,6 +193,7 @@ private struct WorkspaceHeading: View {
                     controller: transcript,
                     isOpen: model.isTranscriptDrawerOpen(sessionId: sessionId),
                     workflow: model.sessionWorkflow(sessionId: sessionId),
+                    workflowProvider: { model.sessionWorkflow(sessionId: sessionId) },
                     receipts: operation.receipts ?? [],
                     conversationEpoch: operation.conversationEpoch,
                     hasPendingQuestions: !model.sessionPendingUserInputs(sessionId: sessionId).isEmpty

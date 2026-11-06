@@ -65,6 +65,7 @@ struct TranscriptButton: View {
     @ObservedObject var controller: TranscriptController
     let isOpen: Bool
     var workflow: RemoteSessionWorkflow? = nil
+    var workflowProvider: (() -> RemoteSessionWorkflow?)? = nil
     var receipts: [RemoteOperationReceipt] = []
     var conversationEpoch: String? = nil
     var hasPendingQuestions: Bool = false
@@ -76,12 +77,14 @@ struct TranscriptButton: View {
     @AppStorage(TranscriptDrawer.fullWidthTranscriptKey) private var isFullWidth = false
 
     var body: some View {
-        if controller.snapshot != nil || workflow != nil || hasPendingQuestions {
+        let currentWorkflow = workflowProvider?() ?? workflow
+        if controller.snapshot != nil || currentWorkflow != nil || hasPendingQuestions {
             if isOpen {
                 HStack(spacing: 4) {
-                    if let workflow {
+                    if let currentWorkflow {
                         TranscriptUsageButton(
-                            workflow: workflow,
+                            workflow: currentWorkflow,
+                            workflowProvider: workflowProvider,
                             receipts: receipts,
                             onAction: onAction
                         )
@@ -205,14 +208,16 @@ struct TranscriptOverlay: View {
 
 private struct TranscriptUsageButton: View {
     let workflow: RemoteSessionWorkflow
+    var workflowProvider: (() -> RemoteSessionWorkflow?)? = nil
     let receipts: [RemoteOperationReceipt]
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
     @State private var showsPopover = false
     @State private var workflowState = SessionWorkflowState()
 
     var body: some View {
-        let hasBudgetRequest = workflow.budgetRequest != nil
-        let accessibilityText = TranscriptDrawer.usageAccessibilityLabel(for: workflow)
+        let currentWorkflow = workflowProvider?() ?? workflow
+        let hasBudgetRequest = currentWorkflow.budgetRequest != nil
+        let accessibilityText = TranscriptDrawer.usageAccessibilityLabel(for: currentWorkflow)
         Button {
             showsPopover.toggle()
         } label: {
@@ -225,7 +230,7 @@ private struct TranscriptUsageButton: View {
         .help(accessibilityText)
         .accessibilityLabel(accessibilityText)
         .accessibilityIdentifier("session-usage-button")
-        .onChange(of: workflow.budgetRequest?.requestId) { _, _ in
+        .onChange(of: currentWorkflow.budgetRequest?.requestId) { _, _ in
             workflowState.resetBudgetAnswer()
         }
         .onChange(of: receipts) { _, values in
@@ -235,7 +240,7 @@ private struct TranscriptUsageButton: View {
             Color.clear.popover(isPresented: $showsPopover, arrowEdge: .bottom) {
                 ScrollView {
                     SessionWorkflowContentView(
-                        workflow: workflow,
+                        workflow: currentWorkflow,
                         canWrite: true,
                         receipts: receipts,
                         state: $workflowState,

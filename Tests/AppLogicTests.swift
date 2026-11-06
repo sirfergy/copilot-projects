@@ -18285,11 +18285,20 @@ final class AppLogicTests: XCTestCase {
         let operation = AgentOperationProjection(conversationEpoch: "epoch-1", support: .receipts, receipts: [])
         let controller = TranscriptController(sessionId: "usage-popover-refresh")
         var closeCount = 0
-        func makeControls(isOpen: Bool = true) -> TranscriptButton {
+        let staleCapturedWorkflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000) - 60_000,
+            capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+            sendReady: true,
+            totalAiCredits: 12.5,
+            limitsKnown: true,
+            maxAiCredits: 40
+        )
+        func makeControls(isOpen: Bool = true, captured: RemoteSessionWorkflow = activeWorkflow) -> TranscriptButton {
             TranscriptButton(
                 controller: controller,
                 isOpen: isOpen,
-                workflow: activeWorkflow,
+                workflow: captured,
+                workflowProvider: { activeWorkflow },
                 receipts: operation.receipts ?? [],
                 conversationEpoch: operation.conversationEpoch,
                 onClose: { closeCount += 1 },
@@ -18302,7 +18311,8 @@ final class AppLogicTests: XCTestCase {
             styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
         window.isReleasedWhenClosed = false
-        let host = NSHostingView(rootView: makeControls())
+        // Seed a stale captured workflow while workflowProvider returns fresh heartbeat state (simulating heartbeat-only projectStorage refresh without re-rendering WorkspaceHeading).
+        let host = NSHostingView(rootView: makeControls(captured: staleCapturedWorkflow))
         window.contentView = host
         window.orderFrontRegardless()
         defer { window.close() }
