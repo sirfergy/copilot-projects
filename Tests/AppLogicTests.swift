@@ -16337,6 +16337,149 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === terminal)
     }
 
+    @MainActor
+    func testDefaultViewSettingBehavior() throws {
+        let suite = "default-view-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let s1 = Session(id: "s-1", title: "one", cwd: root.path)
+        let s2 = Session(id: "s-2", title: "two", cwd: root.path)
+        let s3 = Session(id: "s-3", title: "three", cwd: root.path)
+        let project = Project(
+            name: "P",
+            cwd: root.path,
+            sessions: [s1, s2, s3],
+            selectedSessionId: s1.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+        // 1. Default is Terminal: restored session opens in terminal.
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { true },
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+            defaults: defaults
+        )
+        defer { model.detachAllClients() }
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s1.id))
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s2.id))
+
+        // 2. Changing to Transcript leaves already-seen s1 alone, but opens unseen s2 once.
+        defaults.set(
+            TranscriptDrawer.DefaultView.transcript.rawValue,
+            forKey: TranscriptDrawer.defaultViewKey
+        )
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s1.id))
+
+        model.selectSession(projectId: project.id, sessionId: s2.id)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: s2.id))
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s3.id))
+
+        // Switching back to already-seen s1 keeps it in terminal.
+        model.selectSession(projectId: project.id, sessionId: s1.id)
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s1.id))
+
+        // 3. Closing s2's transcript sticks when switching away and back.
+        model.selectSession(projectId: project.id, sessionId: s2.id)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: s2.id))
+        model.closeTranscriptDrawer(sessionId: s2.id)
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s2.id))
+
+        model.selectSession(projectId: project.id, sessionId: s1.id)
+        model.selectSession(projectId: project.id, sessionId: s2.id)
+        XCTAssertFalse(model.isTranscriptDrawerOpen(sessionId: s2.id))
+
+        // 4. Unseen s3 opens in Transcript; changing setting back to Terminal leaves s3 open.
+        model.selectSession(projectId: project.id, sessionId: s3.id)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: s3.id))
+        defaults.set(
+            TranscriptDrawer.DefaultView.terminal.rawValue,
+            forKey: TranscriptDrawer.defaultViewKey
+        )
+        model.selectSession(projectId: project.id, sessionId: s1.id)
+        model.selectSession(projectId: project.id, sessionId: s3.id)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: s3.id))
+
+        // 5. App launch with Transcript selected opens only the restored selected session,
+        // and switching to an unseen session with drawer content in full-width mode relinquishes terminal focus.
+        defaults.set(
+            TranscriptDrawer.DefaultView.transcript.rawValue,
+            forKey: TranscriptDrawer.defaultViewKey
+        )
+        defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        let relaunched = AppModel(
+            stateRepository: repository,
+            isAppActive: { true },
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images-2")),
+            defaults: defaults
+        )
+        defer { relaunched.detachAllClients() }
+        XCTAssertEqual(relaunched.globalSelectedSessionId, s3.id)
+        XCTAssertTrue(relaunched.isTranscriptDrawerOpen(sessionId: s3.id))
+        XCTAssertFalse(relaunched.isTranscriptDrawerOpen(sessionId: s1.id))
+        XCTAssertFalse(relaunched.isTranscriptDrawerOpen(sessionId: s2.id))
+        XCTAssertNil(relaunched.activeTranscriptController)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        let container = TerminalsContainerView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        window.contentView = container
+        defer { window.contentView = nil }
+        let s3Terminal = try XCTUnwrap(relaunched.controller(for: s3.id)?.terminalView)
+        container.sync(
+            order: [s3.id],
+            active: s3.id,
+            allowsTerminalFocus: true,
+            emptyHint: ("", ""),
+            onNew: {},
+            provider: { relaunched.terminalView(for: $0) }
+        )
+        XCTAssertTrue(window.firstResponder === s3Terminal)
+
+        relaunched.projects[0].sessions[0].agentActivity = AgentActivitySnapshot(
+            schemaVersion: 1,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            foregroundTurnActive: false,
+            scheduledTurnActive: false,
+            activeSubagents: [],
+            schedules: [],
+            idleGeneration: 0,
+            lastIdleAborted: false,
+            lastIdleTurnKind: nil,
+            error: nil,
+            trackedUserInputs: [
+                TrackedUserInput(
+                    requestId: "req-default-view",
+                    question: "Proceed?",
+                    choices: ["Yes"],
+                    allowFreeform: false,
+                    requestedAt: ISO8601DateFormatter().string(from: Date()),
+                    agentId: nil
+                ),
+            ]
+        )
+        relaunched.selectSession(projectId: project.id, sessionId: s1.id)
+        XCTAssertTrue(relaunched.isTranscriptDrawerOpen(sessionId: s1.id))
+        XCTAssertTrue(relaunched.isActiveTerminalCoveredByTranscriptDrawer())
+        XCTAssertFalse(window.firstResponder === s3Terminal)
+
+        // Switching away and back to an already-open covered session also relinquishes terminal focus.
+        relaunched.selectSession(projectId: project.id, sessionId: s3.id)
+        XCTAssertTrue(window.makeFirstResponder(s3Terminal))
+        relaunched.selectSession(projectId: project.id, sessionId: s1.id)
+        XCTAssertFalse(window.firstResponder === s3Terminal)
+    }
+
     func testQuickReplyConfigurationDefaultsValidationAndCorruptFallback() throws {
         let suite = "quick-replies-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
