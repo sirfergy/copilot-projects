@@ -18261,7 +18261,7 @@ final class AppLogicTests: XCTestCase {
 
     @MainActor
     private func toggleUsagePopover(_ window: NSWindow, host: NSView) throws {
-        let local = NSPoint(x: 185, y: host.isFlipped ? 22 : host.bounds.height - 22)
+        let local = NSPoint(x: 14, y: 14)
         try sendClick(in: window, point: host.convert(local, to: nil))
         for _ in 0..<8 {
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
@@ -18283,22 +18283,26 @@ final class AppLogicTests: XCTestCase {
             schedules: ["every 10m"]
         )
         let operation = AgentOperationProjection(conversationEpoch: "epoch-1", support: .receipts, receipts: [])
-        func makeDrawer() -> TranscriptDrawer {
-            TranscriptDrawer(
-                turns: [], imageCapture: nil, workflow: activeWorkflow, operation: operation,
-                workflowProvider: { activeWorkflow }, operationProvider: { operation },
-                promptComposer: nil, onClose: {},
-                onAction: { _ in RemoteWorkflowActionResult(state: .applied) },
-                onPreview: { _ in }
+        let controller = TranscriptController(sessionId: "usage-popover-refresh")
+        var closeCount = 0
+        func makeControls(isOpen: Bool = true) -> TranscriptButton {
+            TranscriptButton(
+                controller: controller,
+                isOpen: isOpen,
+                workflow: activeWorkflow,
+                receipts: operation.receipts ?? [],
+                conversationEpoch: operation.conversationEpoch,
+                onClose: { closeCount += 1 },
+                onAction: { _ in RemoteWorkflowActionResult(state: .applied) }
             )
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: -4000, y: -4000, width: 420, height: 480),
+            contentRect: NSRect(x: -4000, y: -4000, width: 92, height: 28),
             styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
         window.isReleasedWhenClosed = false
-        let host = NSHostingView(rootView: makeDrawer())
+        let host = NSHostingView(rootView: makeControls())
         window.contentView = host
         window.orderFrontRegardless()
         defer { window.close() }
@@ -18323,7 +18327,7 @@ final class AppLogicTests: XCTestCase {
             capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
             sendReady: true, totalAiCredits: 15.0, limitsKnown: true, maxAiCredits: 40
         )
-        host.rootView = makeDrawer()
+        host.rootView = makeControls()
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
         XCTAssertTrue(window.childWindows?.contains(popover) == true)
         XCTAssertEqual(try XCTUnwrap(findEditableTextFields(in: content).first).stringValue, "55")
@@ -18335,7 +18339,7 @@ final class AppLogicTests: XCTestCase {
             sendReady: true, totalAiCredits: 32.5, limitsKnown: true, maxAiCredits: 30,
             budgetRequest: RemoteBudgetRequest(requestId: "req-1", maxAiCredits: 30, usedAiCredits: 32.5)
         )
-        host.rootView = makeDrawer()
+        host.rootView = makeControls()
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
         let additionalField = try XCTUnwrap(findEditableTextFields(in: content).first)
         XCTAssertEqual(additionalField.placeholderString, "Additional AI credits")
@@ -18351,11 +18355,17 @@ final class AppLogicTests: XCTestCase {
             sendReady: true, totalAiCredits: 32.5, limitsKnown: true, maxAiCredits: 30,
             budgetRequest: RemoteBudgetRequest(requestId: "req-2", maxAiCredits: 30, usedAiCredits: 32.5)
         )
-        host.rootView = makeDrawer()
+        host.rootView = makeControls()
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
         try toggleUsagePopover(window, host: host)
         let reopenedContent = try XCTUnwrap(window.childWindows?.first?.contentView)
         XCTAssertEqual(try XCTUnwrap(findEditableTextFields(in: reopenedContent).first).stringValue, "")
+
+        // Close button in title-bar controls invokes onClose.
+        try toggleUsagePopover(window, host: host)
+        try sendClick(in: window, point: host.convert(NSPoint(x: 78, y: 14), to: nil))
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        XCTAssertEqual(closeCount, 1)
     }
 
     @MainActor
@@ -18364,6 +18374,7 @@ final class AppLogicTests: XCTestCase {
         var recordedActions: [RemoteSessionAction] = []
         var nextResult = RemoteWorkflowActionResult(state: .indeterminate, operationId: "op-budget-stop")
         var activeOperation = AgentOperationProjection(conversationEpoch: "epoch-1", support: .receipts, receipts: [])
+        let controller = TranscriptController(sessionId: "usage-popover-receipts")
         func budgetWorkflow() -> RemoteSessionWorkflow {
             RemoteSessionWorkflow(
                 observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
@@ -18372,26 +18383,26 @@ final class AppLogicTests: XCTestCase {
                 budgetRequest: RemoteBudgetRequest(requestId: "req-budget-1", maxAiCredits: 30, usedAiCredits: 32.5)
             )
         }
-        func makeDrawer() -> TranscriptDrawer {
-            let wf = budgetWorkflow()
-            return TranscriptDrawer(
-                turns: [], imageCapture: nil, workflow: wf, operation: activeOperation,
-                workflowProvider: { wf }, operationProvider: { activeOperation },
-                promptComposer: nil, onClose: {},
+        func makeControls() -> TranscriptButton {
+            TranscriptButton(
+                controller: controller,
+                isOpen: true,
+                workflow: budgetWorkflow(),
+                receipts: activeOperation.receipts ?? [],
+                conversationEpoch: activeOperation.conversationEpoch,
                 onAction: { action in
                     recordedActions.append(action)
                     return nextResult
-                },
-                onPreview: { _ in }
+                }
             )
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: -4000, y: -4000, width: 420, height: 480),
+            contentRect: NSRect(x: -4000, y: -4000, width: 92, height: 28),
             styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
         window.isReleasedWhenClosed = false
-        let host = NSHostingView(rootView: makeDrawer())
+        let host = NSHostingView(rootView: makeControls())
         window.contentView = host
         window.orderFrontRegardless()
         defer { window.close() }
@@ -18440,7 +18451,7 @@ final class AppLogicTests: XCTestCase {
             ]
         )
         nextResult = RemoteWorkflowActionResult(state: .applied)
-        host.rootView = makeDrawer()
+        host.rootView = makeControls()
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
 
         try toggleUsagePopover(window, host: host)
@@ -18458,7 +18469,7 @@ final class AppLogicTests: XCTestCase {
 
         activeOperation = AgentOperationProjection(conversationEpoch: "epoch-2", support: .receipts, receipts: [])
         nextResult = RemoteWorkflowActionResult(state: .applied)
-        host.rootView = makeDrawer()
+        host.rootView = makeControls()
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
 
         try toggleUsagePopover(window, host: host)
