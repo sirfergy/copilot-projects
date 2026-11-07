@@ -661,6 +661,8 @@ final class ProjectsTerminalView: ProcessTerminalView {
         applyRendererState()
     }
 
+    override func addCursorRect(_ aRect: NSRect, cursor anObj: NSCursor) {}
+
     private func enterCoreGraphicsFallback() {
         rendererMode = .coreGraphicsFallback
         applyCoreGraphicsRenderer(name: "coregraphics-fallback")
