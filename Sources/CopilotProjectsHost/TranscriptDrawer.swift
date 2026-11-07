@@ -429,10 +429,73 @@ struct TranscriptDrawer: View {
         )
     }
 
+    private static let maxEagerBottomTurnCount = 8
+
+    private static func defaultEagerTurnCount(for turns: [TranscriptTurn]) -> Int {
+        var count = 0
+        var estimatedHeight = 0
+        for turn in turns.reversed() {
+            count += 1
+            let chars = turn.userContent.count + turn.assistantMessages.reduce(0) { $0 + $1.content.count }
+            estimatedHeight += 130 + chars / 3
+            if count >= 2 && (estimatedHeight >= 800 || count >= 6) {
+                break
+            }
+        }
+        return count
+    }
+
+    private struct ScrollMetrics: Equatable {
+        let offsetY: CGFloat
+        let containerWidth: CGFloat
+        let isNearBottom: Bool
+    }
+
+    @State private var firstEagerTurnId: String?
+
+    private var resolvedLazyTurnCount: Int {
+        let turns = displayedTurns
+        let total = turns.count
+        let maxLazy = max(0, total - Self.defaultEagerTurnCount(for: turns))
+        let pinnedIndex = firstEagerTurnId.flatMap { id in
+            turns.firstIndex(where: { $0.id == id }) ?? (isAtBottom ? nil : 0)
+        }
+        guard isAtBottom else {
+            return min(pinnedIndex ?? maxLazy, total)
+        }
+        let minLazy = max(0, total - Self.maxEagerBottomTurnCount)
+        return min(max(pinnedIndex ?? maxLazy, minLazy), maxLazy)
+    }
+
+    private func syncLazyTurnCount() {
+        let turns = displayedTurns
+        let index = resolvedLazyTurnCount
+        firstEagerTurnId = index < turns.count ? turns[index].id : nil
+    }
+
+    private func turnCard(_ turn: TranscriptTurn) -> some View {
+        TranscriptTurnCard(
+            turn: turn,
+            imageCapture: imageCapture,
+            promptAttachments: promptAttachments.items(
+                forTurnId: turn.id,
+                sessionId: sessionId,
+                copilotSessionId: copilotSessionId ?? ""
+            ),
+            onPreview: onPreview
+        )
+    }
+
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        isAtBottom = true
         proxy.scrollTo("transcript-bottom", anchor: .bottom)
         DispatchQueue.main.async {
+            guard isAtBottom else { return }
             proxy.scrollTo("transcript-bottom", anchor: .bottom)
+            DispatchQueue.main.async {
+                guard isAtBottom else { return }
+                proxy.scrollTo("transcript-bottom", anchor: .bottom)
+            }
         }
     }
 
@@ -440,19 +503,23 @@ struct TranscriptDrawer: View {
         let currentWorkflow = workflowProvider?() ?? workflow
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
+                let turns = displayedTurns
+                let lazyCount = resolvedLazyTurnCount
+                let eagerEnd = min(turns.count, lazyCount + Self.maxEagerBottomTurnCount)
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(displayedTurns) { turn in
-                            TranscriptTurnCard(
-                                turn: turn,
-                                imageCapture: imageCapture,
-                                promptAttachments: promptAttachments.items(
-                                    forTurnId: turn.id,
-                                    sessionId: sessionId,
-                                    copilotSessionId: copilotSessionId ?? ""
-                                ),
-                                onPreview: onPreview
-                            )
+                    VStack(alignment: .leading, spacing: 14) {
+                        if lazyCount > 0 {
+                            LazyVStack(alignment: .leading, spacing: 14) {
+                                ForEach(turns.prefix(lazyCount), content: turnCard)
+                            }
+                        }
+                        ForEach(turns[lazyCount..<eagerEnd], content: turnCard)
+                        // Keep turns appended beyond maxEagerBottomTurnCount while scrolled up in a
+                        // trailing LazyVStack so the eager window stays bounded without shifting lazyCount.
+                        if eagerEnd < turns.count {
+                            LazyVStack(alignment: .leading, spacing: 14) {
+                                ForEach(turns.dropFirst(eagerEnd), content: turnCard)
+                            }
                         }
                         ForEach(pendingUserInputs, id: \.requestId) { request in
                             DesktopUserInputCard(
@@ -479,14 +546,33 @@ struct TranscriptDrawer: View {
                         Color.clear
                             .frame(height: 1)
                             .id("transcript-bottom")
-                            .onAppear { isAtBottom = true }
-                            .onDisappear { isAtBottom = false }
                     }
                     .padding(.horizontal, 18)
                     .padding(.top, 5)
                     .padding(.bottom, 6)
                 }
                 .padding(.top, 1)
+                .onScrollGeometryChange(for: ScrollMetrics.self) { geometry in
+                    ScrollMetrics(
+                        offsetY: geometry.contentOffset.y,
+                        containerWidth: geometry.containerSize.width,
+                        isNearBottom: geometry.contentSize.height <= geometry.containerSize.height + 1
+                            || geometry.visibleRect.maxY >= geometry.contentSize.height - 24
+                    )
+                } action: { oldValue, newValue in
+                    if newValue.containerWidth != oldValue.containerWidth {
+                        if isAtBottom {
+                            scrollToBottom(proxy)
+                        }
+                    }
+                    if newValue.isNearBottom {
+                        isAtBottom = true
+                        syncLazyTurnCount()
+                    } else if newValue.containerWidth == oldValue.containerWidth
+                        && newValue.offsetY < oldValue.offsetY {
+                        isAtBottom = false
+                    }
+                }
                 .background {
                     if let workingModel {
                         ObservedTranscriptWorkingScrollObserver(
@@ -503,6 +589,7 @@ struct TranscriptDrawer: View {
                 }
                 .defaultScrollAnchor(.bottom)
                 .onAppear {
+                    syncLazyTurnCount()
                     isAtBottom = true
                     scrollToBottom(proxy)
                     if isFullWidth {
@@ -515,9 +602,13 @@ struct TranscriptDrawer: View {
                     }
                 }
                 .onChange(of: isFullWidth) { _, newValue in
+                    if isAtBottom {
+                        scrollToBottom(proxy)
+                    }
                     onFullWidthChange?(newValue)
                 }
                 .onChange(of: turns) { _, _ in
+                    syncLazyTurnCount()
                     guard isAtBottom else { return }
                     scrollToBottom(proxy)
                 }
