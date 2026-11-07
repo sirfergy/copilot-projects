@@ -186,18 +186,30 @@ private struct WorkspaceHeading: View {
                 SessionMemoryBadge(bytes: memoryBytes)
             }
             Spacer(minLength: 0)
-            Image(systemName: "terminal")
-                .foregroundStyle(StudioStyle.secondaryText)
-                .accessibilityHidden(true)
             if let sessionId = model.globalSelectedSessionId,
                let transcript = model.activeTranscriptController {
+                let operation = model.sessionOperationProjection(sessionId: sessionId)
                 TranscriptButton(
                     controller: transcript,
                     isOpen: model.isTranscriptDrawerOpen(sessionId: sessionId),
-                    hasWorkflow: model.sessionWorkflow(sessionId: sessionId) != nil,
+                    workflow: model.sessionWorkflow(sessionId: sessionId),
+                    workflowProvider: { model.sessionWorkflow(sessionId: sessionId) },
+                    receipts: operation.receipts ?? [],
+                    conversationEpoch: operation.conversationEpoch,
                     hasPendingQuestions: !model.sessionPendingUserInputs(sessionId: sessionId).isEmpty
                         || !model.sessionPendingElicitations(sessionId: sessionId).isEmpty,
-                    onOpen: { model.openTranscriptDrawer(sessionId: sessionId) }
+                    onOpen: { model.openTranscriptDrawer(sessionId: sessionId) },
+                    onClose: {
+                        model.closeTranscriptDrawer(sessionId: sessionId)
+                        model.focusActiveTerminal()
+                    },
+                    onAction: { action in
+                        await model.performLocalSessionAction(
+                            sessionId: sessionId,
+                            action: action,
+                            expectedConversationEpoch: operation.conversationEpoch
+                        )
+                    }
                 )
                 .id(sessionId)
             }
@@ -1363,7 +1375,7 @@ private struct SessionCreationButtons: View {
     }
 }
 
-private struct HoverHighlightModifier: ViewModifier {
+struct HoverHighlightModifier: ViewModifier {
     @State private var isHovering = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -1379,7 +1391,7 @@ private struct HoverHighlightModifier: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     func hoverHighlight() -> some View {
         modifier(HoverHighlightModifier())
     }
