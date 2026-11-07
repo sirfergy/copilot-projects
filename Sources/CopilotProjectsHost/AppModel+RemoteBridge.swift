@@ -1960,17 +1960,22 @@ extension AppModel {
     nonisolated static func elicitationValue(
         _ value: RemoteJSONValue,
         satisfies schema: RemoteJSONValue,
-        allowFreeformStringChoice: Bool = false
+        allowFreeformStringChoice: Bool = false,
+        allowAnyOfChoiceSet: Bool = false
     ) -> Bool {
         guard case .object(let schema) = schema else { return true }
         let oneOfValues = jsonArray(schema["oneOf"])
+        let anyOfValues = jsonArray(schema["anyOf"])
         let enumValues = jsonArray(schema["enum"])
-        let hasOneOfChoices = oneOfValues?.isEmpty == false
-        let hasEnumChoices = enumValues?.isEmpty == false
+        let labeledValues = allowAnyOfChoiceSet ? (oneOfValues ?? anyOfValues) : oneOfValues
+        let hasOneOfChoices = (allowAnyOfChoiceSet ? (oneOfValues == nil) != (anyOfValues == nil) : anyOfValues == nil)
+            && labeledValues?.isEmpty == false
+        let hasEnumChoices = anyOfValues == nil && enumValues?.isEmpty == false
         let hasFreeformChoiceSet: Bool
-        if schema["anyOf"] == nil, hasOneOfChoices != hasEnumChoices {
-            if let oneOfValues, hasOneOfChoices {
-                hasFreeformChoiceSet = oneOfValues.allSatisfy { alternative in
+        if [schema["oneOf"], schema["anyOf"], schema["enum"]].compactMap({ $0 }).count == 1,
+           hasOneOfChoices != hasEnumChoices {
+            if let labeledValues, hasOneOfChoices {
+                hasFreeformChoiceSet = labeledValues.allSatisfy { alternative in
                     guard case .object(let option) = alternative,
                           case .string = option["const"] else {
                         return false
@@ -1991,14 +1996,16 @@ extension AppModel {
         let isNonEmptyFreeformString: Bool
         if allowFreeformStringChoice,
            hasFreeformChoiceSet,
-           jsonString(schema["type"]) == "string",
+           jsonString(schema["type"]) == "string"
+               || (allowAnyOfChoiceSet && schema["type"] == nil),
            case .string(let string) = value {
-            isNonEmptyFreeformString = !string.isEmpty
+            isNonEmptyFreeformString = !string
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         } else {
             isNonEmptyFreeformString = false
         }
         if !isNonEmptyFreeformString,
-           let alternatives = oneOfValues ?? jsonArray(schema["anyOf"]) {
+           let alternatives = oneOfValues ?? anyOfValues {
             guard alternatives.contains(where: { alternative in
                 guard case .object(let option) = alternative,
                       let expected = option["const"] else { return false }
@@ -2042,11 +2049,22 @@ extension AppModel {
             if let maximum = jsonNumber(schema["maxItems"]),
                Double(values.count) > maximum { return false }
             if let items = schema["items"] {
-                return values.allSatisfy {
-                    elicitationValue(
-                        $0,
+                var customCount = 0
+                return values.allSatisfy { item in
+                    if elicitationValue(item, satisfies: items, allowFreeformStringChoice: false) {
+                        return true
+                    }
+                    guard allowFreeformStringChoice, customCount == 0,
+                          case .object(let itemSchema) = items,
+                          itemSchema["type"] == nil || itemSchema["type"] == .string("string") else {
+                        return false
+                    }
+                    customCount += 1
+                    return elicitationValue(
+                        item,
                         satisfies: items,
-                        allowFreeformStringChoice: false
+                        allowFreeformStringChoice: true,
+                        allowAnyOfChoiceSet: true
                     )
                 }
             }

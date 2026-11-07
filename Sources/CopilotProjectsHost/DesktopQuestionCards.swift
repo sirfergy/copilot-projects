@@ -366,7 +366,7 @@ struct DesktopElicitationCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             switch field.kind {
-            case .stringEnum, .stringOneOf:
+            case .stringEnum, .stringOneOf, .stringMultiSelect:
                 DesktopElicitationChoiceControl(
                     field: field,
                     choices: field.singleChoiceOptions,
@@ -420,28 +420,6 @@ struct DesktopElicitationCard: View {
                     Text(requirement)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
-                }
-            case .stringMultiSelect(let choices, _):
-                ForEach(choices, id: \.value) { choice in
-                    let selected = DesktopElicitationField.selectedStrings(values[field.key]).contains(choice.value)
-                    Button {
-                        guard let updated = field.toggledSelectionValue(choice.value, in: values[field.key]) else { return }
-                        values[field.key] = updated
-                        touched.insert(field.key)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: selected ? "checkmark.square.fill" : "square")
-                            Text(choice.title)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isDisabled)
-                    .opacity(isDisabled ? 0.5 : 1)
-                    .accessibilityAddTraits(selected ? .isSelected : [])
-                    .accessibilityValue(selected ? "Selected" : "Not selected")
-                    .accessibilityLabel(choice.title)
                 }
             }
         }
@@ -595,27 +573,59 @@ private struct DesktopElicitationChoiceControl: View {
 
     var body: some View {
         Group {
-            Picker(field.title, selection: choiceSelectionBinding) {
-                if !field.required {
-                    Text("Not set").tag(DesktopElicitationChoiceSelection.unset)
-                }
-                if field.kind == .bool {
-                    Text("True").tag(DesktopElicitationChoiceSelection.boolean(true))
-                    Text("False").tag(DesktopElicitationChoiceSelection.boolean(false))
-                } else {
-                    ForEach(choices, id: \.value) { choice in
-                        Text(choice.title)
-                            .tag(DesktopElicitationChoiceSelection.option(choice.value))
+            if case .stringMultiSelect = field.kind {
+                let isCustom = choiceSelection == .other
+                let selectedChoices = field.multiSelectParts(
+                    values[field.key],
+                    allowsFreeform: allowsFreeform,
+                    isCustom: isCustom
+                ).listed
+                ForEach(choices, id: \.value) { choice in
+                    checkboxRow(title: choice.title, selected: selectedChoices.contains(choice.value)) {
+                        guard let updated = field.toggledSelectionValue(
+                            choice.value,
+                            in: values[field.key],
+                            allowsFreeform: allowsFreeform,
+                            isCustom: isCustom
+                        ) else { return }
+                        values[field.key] = updated
+                        touched.insert(field.key)
                     }
                 }
                 if allowsFreeform {
-                    Text("Other").tag(DesktopElicitationChoiceSelection.other)
+                    checkboxRow(title: "Other", selected: isCustom) {
+                        guard let nowCustom = field.toggledCustomSelection(
+                            allowsFreeform: allowsFreeform,
+                            values: &values,
+                            customChoiceFields: &customChoiceFields
+                        ) else { return }
+                        focusCustomChoice(isCustom: nowCustom)
+                        touched.insert(field.key)
+                    }
                 }
+            } else {
+                Picker(field.title, selection: choiceSelectionBinding) {
+                    if !field.required {
+                        Text("Not set").tag(DesktopElicitationChoiceSelection.unset)
+                    }
+                    if field.kind == .bool {
+                        Text("True").tag(DesktopElicitationChoiceSelection.boolean(true))
+                        Text("False").tag(DesktopElicitationChoiceSelection.boolean(false))
+                    } else {
+                        ForEach(choices, id: \.value) { choice in
+                            Text(choice.title)
+                                .tag(DesktopElicitationChoiceSelection.option(choice.value))
+                        }
+                    }
+                    if allowsFreeform {
+                        Text("Other").tag(DesktopElicitationChoiceSelection.other)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .disabled(isDisabled)
+                .accessibilityIdentifier("desktop-elicitation-choice-\(field.key)")
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .disabled(isDisabled)
-            .accessibilityIdentifier("desktop-elicitation-choice-\(field.key)")
 
             if allowsFreeform, choiceSelection == .other {
                 TextField(
@@ -630,6 +640,39 @@ private struct DesktopElicitationChoiceControl: View {
                 .accessibilityIdentifier("desktop-elicitation-other-\(field.key)")
                 .focused($focusedCustomChoice, equals: field.key)
             }
+        }
+    }
+
+    private func checkboxRow(
+        title: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: selected ? "checkmark.square.fill" : "square")
+                Text(title)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.5 : 1)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(selected ? "Selected" : "Not selected")
+        .accessibilityLabel(title)
+    }
+
+    private func focusCustomChoice(isCustom: Bool) {
+        if isCustom {
+            Task { @MainActor in
+                if customChoiceFields.contains(field.key) {
+                    focusedCustomChoice = field.key
+                }
+            }
+        } else if focusedCustomChoice == field.key {
+            focusedCustomChoice = nil
         }
     }
 
@@ -654,15 +697,7 @@ private struct DesktopElicitationChoiceControl: View {
                     values: &values,
                     customChoiceFields: &customChoiceFields
                 )
-                if selection == .other {
-                    Task { @MainActor in
-                        if customChoiceFields.contains(field.key) {
-                            focusedCustomChoice = field.key
-                        }
-                    }
-                } else if focusedCustomChoice == field.key {
-                    focusedCustomChoice = nil
-                }
+                focusCustomChoice(isCustom: selection == .other)
                 touched.insert(field.key)
             }
         )
@@ -671,11 +706,15 @@ private struct DesktopElicitationChoiceControl: View {
     private var customChoiceBinding: Binding<String> {
         Binding(
             get: {
-                DesktopElicitationChoiceSelection.customText(from: values[field.key])
+                field.customChoiceText(from: values[field.key])
             },
             set: {
-                guard customChoiceFields.contains(field.key) else { return }
-                values[field.key] = .string($0)
+                guard let updated = field.updatedCustomChoiceValue(
+                    $0,
+                    in: values[field.key],
+                    customChoiceFields: &customChoiceFields
+                ) else { return }
+                values[field.key] = updated
                 touched.insert(field.key)
             }
         )

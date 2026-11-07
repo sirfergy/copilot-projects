@@ -63,9 +63,9 @@ struct DesktopElicitationField: Identifiable, Equatable {
         switch kind {
         case .stringEnum(let options):
             options.map { Choice(value: $0, title: $0.isEmpty ? "Empty string" : $0) }
-        case .stringOneOf(let choices):
+        case .stringOneOf(let choices), .stringMultiSelect(let choices, _):
             choices
-        case .bool, .number, .string, .stringMultiSelect:
+        case .bool, .number, .string:
             []
         }
     }
@@ -94,19 +94,86 @@ struct DesktopElicitationField: Identifiable, Equatable {
         }
     }
 
-    func toggledSelectionValue(_ value: String, in current: RemoteJSONValue?) -> RemoteJSONValue?? {
-        guard case let .stringMultiSelect(choices, maxItems) = kind,
-              let ordered = Self.toggledSelection(
-                  value,
-                  in: Self.selectedStrings(current),
-                  choices: choices,
-                  maxItems: maxItems
-              ) else { return nil }
-        let selection = RemoteJSONValue.array(ordered.map(RemoteJSONValue.string))
-        if ordered.isEmpty, !required, !accepts(selection) {
-            return .some(nil)
+    func multiSelectParts(
+        _ current: RemoteJSONValue?,
+        allowsFreeform: Bool = false,
+        isCustom: Bool = false
+    ) -> (listed: [String], custom: String?) {
+        guard case let .stringMultiSelect(choices, _) = kind else { return ([], nil) }
+        var strings = Self.selectedStrings(current)
+        let choiceValues = Set(choices.map(\.value))
+        let unlistedIndex = strings.lastIndex(where: { !choiceValues.contains($0) })
+        guard isCustom || (allowsFreeform && unlistedIndex != nil) else {
+            return (choices.map(\.value).filter(strings.contains), nil)
         }
-        return .some(selection)
+        let custom = (unlistedIndex ?? strings.indices.last).map { strings.remove(at: $0) } ?? ""
+        return (choices.map(\.value).filter(strings.contains), custom)
+    }
+
+    private func multiSelectValue(listed: [String], custom: String?) -> RemoteJSONValue? {
+        let all = listed + (custom.map { [$0] } ?? [])
+        let selection = RemoteJSONValue.array(all.map(RemoteJSONValue.string))
+        return (all.isEmpty && !required && !accepts(selection)) ? nil : selection
+    }
+
+    func toggledSelectionValue(
+        _ value: String,
+        in current: RemoteJSONValue?,
+        allowsFreeform: Bool = false,
+        isCustom: Bool = false
+    ) -> RemoteJSONValue?? {
+        guard case let .stringMultiSelect(choices, maxItems) = kind else { return nil }
+        let parts = multiSelectParts(current, allowsFreeform: allowsFreeform, isCustom: isCustom)
+        let limit = parts.custom == nil ? maxItems : maxItems.map { max(0, $0 - 1) }
+        guard let ordered = Self.toggledSelection(
+            value,
+            in: parts.listed,
+            choices: choices,
+            maxItems: limit
+        ) else { return nil }
+        return .some(multiSelectValue(listed: ordered, custom: parts.custom))
+    }
+
+    func toggledCustomSelection(
+        allowsFreeform: Bool = true,
+        values: inout [String: RemoteJSONValue],
+        customChoiceFields: inout Set<String>
+    ) -> Bool? {
+        guard allowsFreeform, case let .stringMultiSelect(_, maxItems) = kind else { return nil }
+        let parts = multiSelectParts(
+            values[key],
+            allowsFreeform: true,
+            isCustom: customChoiceFields.contains(key)
+        )
+        if parts.custom != nil {
+            customChoiceFields.remove(key)
+            values[key] = multiSelectValue(listed: parts.listed, custom: nil)
+            return false
+        }
+        if let maxItems, parts.listed.count >= maxItems { return nil }
+        customChoiceFields.insert(key)
+        values[key] = multiSelectValue(listed: parts.listed, custom: "")
+        return true
+    }
+
+    func customChoiceText(from value: RemoteJSONValue?) -> String {
+        multiSelectParts(value, allowsFreeform: true, isCustom: true).custom
+            ?? DesktopElicitationChoiceSelection.customText(from: value)
+    }
+
+    func updatedCustomChoiceValue(
+        _ text: String,
+        in current: RemoteJSONValue?,
+        customChoiceFields: inout Set<String>
+    ) -> RemoteJSONValue? {
+        guard customChoiceFields.contains(key)
+            || multiSelectParts(current, allowsFreeform: true).custom != nil else { return nil }
+        if case .stringMultiSelect = kind {
+            customChoiceFields.insert(key)
+            let listed = multiSelectParts(current, allowsFreeform: true, isCustom: true).listed
+            return multiSelectValue(listed: listed, custom: text)
+        }
+        return .string(text)
     }
 }
 
@@ -196,8 +263,8 @@ struct DesktopElicitationForm: Equatable {
                 continue
             }
             if customChoiceFields.contains(field.key),
-               case let .string(text) = value,
-               text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+               field.customChoiceText(from: value)
+                   .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return nil
             }
             guard field.accepts(
@@ -473,6 +540,13 @@ enum DesktopElicitationChoiceSelection: Hashable {
         allowsFreeform: Bool,
         isCustom: Bool
     ) -> Self {
+        if case .stringMultiSelect = field.kind {
+            return field.multiSelectParts(
+                value,
+                allowsFreeform: allowsFreeform,
+                isCustom: allowsFreeform && isCustom
+            ).custom != nil ? .other : .unset
+        }
         if field.kind == .bool, value == nil {
             return field.required ? .boolean(false) : .unset
         }
