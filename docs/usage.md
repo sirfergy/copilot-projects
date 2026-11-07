@@ -679,10 +679,15 @@ Run `/experimental on` once before starting app-managed sessions, or pass
 `--experimental` when launching Copilot manually. Without it, hook-based status and terminal
 reattach still work, but the completed-turn drawer, tracker-backed session details, native session
 controls, and reboot conversation resume are unavailable. Existing CLI sessions must use
-`/restart` after enabling experimental features. After installing or upgrading the tracker, reload
-the extension or use `/restart`. Wait for current work and interactive prompts to finish before
-restarting.
-Relaunching Copilot Projects only reattaches the terminals; it does not reload their extensions.
+`/restart` after enabling experimental features. When the app upgrades the tracker, a session
+already running a tracker with hot reload asks Copilot to reload its extensions once it is idle
+on two consecutive heartbeats (about ten seconds), which restarts that session's other extensions
+too. Sessions whose tracker predates hot reload, or whose Copilot does not support it, still need
+an extension reload or `/restart`. `/restart` also loads the installed tracker, so a session that
+needs both needs only `/restart`; hot reload never restarts Copilot itself. Wait for current work
+and interactive prompts to finish before restarting.
+Relaunching Copilot Projects only reattaches the terminals; extensions reload only when that
+launch installs a different tracker, as above.
 Copilot can reject the tracker's join while it is still reloading hooks for a session that just
 started. The tracker retries that race for up to 20 seconds. Any other join failure, or a race that
 outlasts that window, leaves the session without tracker metadata until you reload the extension or
