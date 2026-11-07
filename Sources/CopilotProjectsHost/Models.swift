@@ -56,6 +56,7 @@ struct Session: Identifiable, Codable, Equatable {
     var backgroundAgentsActive: Bool = false
     var scheduledTurnActive: Bool = false
     var agentActivity: AgentActivitySnapshot?
+    var trackerWarning: String? = nil
     var memoryUsageBytes: Int64? = nil
 
     var activeSubagentCount: Int { agentActivity?.activeSubagents.count ?? 0 }

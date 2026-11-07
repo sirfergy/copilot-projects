@@ -208,6 +208,7 @@ extension AppModel {
             reconcileLiveness(markFinished: false)
         } else {
             liveAgentSessions = []
+            liveCopilotSessions = []
         }
 
         // Footer backstop: recovers an actively-working attached session after an app
@@ -313,16 +314,21 @@ extension AppModel {
         let observations = agentActivityObservations
         let directory = agentActivityDirectory
         let reader = agentActivityReader
+        let warningCheck = copilotTrackerWarningMessage
         agentActivityReadQueue.async { [weak self] in
             let reads = reader(sessionIds, directory, cached, { Date() })
+            let warningMessage = warningCheck()
             Task { @MainActor [weak self] in
-                self?.finishAgentActivityRead(reads, observations: observations, generation: generation)
+                self?.finishAgentActivityRead(
+                    reads, warningMessage: warningMessage, observations: observations, generation: generation
+                )
             }
         }
     }
 
     private func finishAgentActivityRead(
         _ reads: [String: AgentActivityRead],
+        warningMessage: String,
         observations: [String: Int],
         generation: Int
     ) {
@@ -331,7 +337,9 @@ extension AppModel {
         agentActivityReadQueued = false
         // Tracking restarted or stopped since this read began.
         if generation == agentActivityRefreshGeneration,
-           !applyAgentActivityReads(reads, observations: observations, clock: { Date() }) {
+           !applyAgentActivityReads(
+               reads, warningMessage: warningMessage, observations: observations, clock: { Date() }
+           ) {
             again = true
         }
         if again { startAgentActivityRead() }
@@ -349,7 +357,10 @@ extension AppModel {
             projects.flatMap { $0.sessions.map(\.id) }, agentActivityDirectory,
             agentActivitySnapshotCache.mapValues(\.signature), readTime
         )
-        applyAgentActivityReads(reads, observations: agentActivityObservations, clock: readTime)
+        applyAgentActivityReads(
+            reads, warningMessage: copilotTrackerWarningMessage(),
+            observations: agentActivityObservations, clock: readTime
+        )
     }
 
     /// Applies a scan's reads to the current sessions. A session the scan didn't
@@ -359,6 +370,7 @@ extension AppModel {
     @discardableResult
     private func applyAgentActivityReads(
         _ reads: [String: AgentActivityRead],
+        warningMessage: String,
         observations: [String: Int],
         clock readTime: () -> Date
     ) -> Bool {
@@ -463,6 +475,15 @@ extension AppModel {
                     activityChanged = activityChanged || previous != effectiveFresh
                     nextProjects[pi].sessions[si].agentActivity = effectiveFresh
                 }
+                let warning = resolvedTrackerWarning(
+                    for: nextProjects[pi].sessions[si],
+                    warningMessage: warningMessage,
+                    now: judgedAt
+                )
+                if nextProjects[pi].sessions[si].trackerWarning != warning {
+                    nextProjects[pi].sessions[si].trackerWarning = warning
+                    activityChanged = true
+                }
                 if nextProjects[pi].sessions[si].status != .idle,
                    let transitionMs = trustedForegroundTransitionMilliseconds(
                        sessionId: sessionId,
@@ -523,6 +544,7 @@ extension AppModel {
             agentActivityObservations = agentActivityObservations.filter { seenSessionIds.contains($0.key) }
             runtimeTrackedOwners = runtimeTrackedOwners.filter { seenSessionIds.contains($0.key) }
             verifiedCopilotOwners = verifiedCopilotOwners.filter { seenSessionIds.contains($0.key) }
+            trackerMissingSince = trackerMissingSince.filter { seenSessionIds.contains($0.key) }
             budgetNotificationKeys = budgetNotificationKeys.filter { seenSessionIds.contains($0.key) }
             reconcileRuntimeActivity(now: readTime())
             for target in budgetNotifications {
@@ -873,6 +895,25 @@ extension AppModel {
         }
     }
 
+    func resolvedTrackerWarning(
+        for session: Session,
+        warningMessage: String,
+        now: Date
+    ) -> String? {
+        let hasHealthyActivity = session.agentActivity.map { !$0.reportsTerminalDisconnect } ?? false
+        guard session.hostId == nil,
+              liveCopilotSessions.contains(session.id),
+              !hasHealthyActivity else {
+            trackerMissingSince[session.id] = nil
+            return nil
+        }
+        let missingSince = trackerMissingSince[session.id] ?? {
+            trackerMissingSince[session.id] = now
+            return now
+        }()
+        return now.timeIntervalSince(missingSince) >= 45 ? warningMessage : nil
+    }
+
     private func reconcileLiveness(markFinished: Bool = true) {
         withCoalescedProjectPublications {
             let snapshot = ProcessTree.snapshot()
@@ -881,11 +922,21 @@ extension AppModel {
             // (SwiftTerm restarted in the normal buffer, copilot never re-emits its
             // mouse mode), but copilot's input parser still expects mouse events — so
             // the wheel is force-forwarded as mouse when the session has a live agent.
-            liveAgentSessions = ProcessTree.agentSessions(agentNames: agentProcessNames, in: snapshot)
+            let names = agentProcessNames
+            liveAgentSessions = ProcessTree.agentSessions(agentNames: names, in: snapshot)
+            liveCopilotSessions = names == ["copilot"]
+                ? liveAgentSessions
+                : ProcessTree.agentSessions(agentNames: ["copilot"], in: snapshot)
 
             for pi in projects.indices {
                 for si in projects[pi].sessions.indices {
                     let sid = projects[pi].sessions[si].id
+                    if !liveCopilotSessions.contains(sid) {
+                        if projects[pi].sessions[si].trackerWarning != nil {
+                            projects[pi].sessions[si].trackerWarning = nil
+                        }
+                        trackerMissingSince[sid] = nil
+                    }
                     if projects[pi].sessions[si].backgroundAgentsActive,
                        !liveAgentSessions.contains(sid) {
                         setBackgroundAgentsActive(sessionId: sid, active: false)

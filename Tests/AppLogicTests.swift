@@ -881,6 +881,141 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testTrackerWarningDetectsDeadOwnerAndExperimentalOffWithoutStartupFalsePositives() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sessionsDir = root.appendingPathComponent("sessions", isDirectory: true)
+        let copilotHome = root.appendingPathComponent("copilot-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: copilotHome, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = CopilotSessionStore(environment: ["COPILOT_HOME": copilotHome.path], home: root.path)
+        XCTAssertEqual(store.trackerWarningMessage(), RemoteSessionSnapshot.experimentalOffWarning)
+        let settingsURL = copilotHome.appendingPathComponent("settings.json")
+        try Data("// comment\n{\"experimental\": true}\n".utf8).write(to: settingsURL)
+        XCTAssertEqual(store.trackerWarningMessage(), RemoteSessionSnapshot.trackerStoppedWarning)
+        try Data("{\"experimental\": false, \"enabledFeatureFlags\": {\"EXTENSIONS\": true}}\n".utf8)
+            .write(to: settingsURL)
+        XCTAssertEqual(store.trackerWarningMessage(), RemoteSessionSnapshot.trackerStoppedWarning)
+        try Data("{\"experimental\": true, \"enabledFeatureFlags\": {\"EXTENSIONS\": false}}\n".utf8)
+            .write(to: settingsURL)
+        XCTAssertEqual(store.trackerWarningMessage(), RemoteSessionSnapshot.extensionsDisabledWarning)
+        try Data("{\"experimental\": false}\n".utf8).write(to: settingsURL)
+        XCTAssertEqual(store.trackerWarningMessage(), RemoteSessionSnapshot.experimentalOffWarning)
+
+        let copilotSession = Session(title: "copilot", cwd: root.path)
+        let shellSession = Session(title: "shell", cwd: root.path)
+        let remoteSession = Session(title: "remote", cwd: root.path, hostId: "devbox")
+        let otherAgentSession = Session(title: "other-agent", cwd: root.path)
+        let project = Project(
+            name: "project",
+            cwd: root.path,
+            sessions: [copilotSession, shellSession, remoteSession, otherAgentSession],
+            selectedSessionId: copilotSession.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let model = AppModel(
+            stateRepository: repository,
+            agentActivityDirectory: sessionsDir,
+            resumeMarkerDirectory: sessionsDir
+        )
+        model.copilotTrackerWarningMessage = { store.trackerWarningMessage() }
+        model.setLiveAgentSessionsForTesting(
+            [copilotSession.id, remoteSession.id, otherAgentSession.id],
+            copilotSessions: [copilotSession.id, remoteSession.id]
+        )
+
+        // Before 45s of missing heartbeat: no warning. Plain shell, remote SSH, and
+        // non-Copilot agent sessions never record `trackerMissingSince`.
+        model.refreshAgentActivitySnapshots(now: start)
+        XCTAssertNil(model.projects[0].sessions[0].trackerWarning)
+        XCTAssertEqual(Set(model.trackerMissingSince.keys), [copilotSession.id])
+        model.refreshAgentActivitySnapshots(now: start.addingTimeInterval(44))
+        XCTAssertNil(model.projects[0].sessions[0].trackerWarning)
+        XCTAssertNil(model.projects[0].sessions[1].trackerWarning)
+        XCTAssertNil(model.projects[0].sessions[2].trackerWarning)
+        XCTAssertNil(model.projects[0].sessions[3].trackerWarning)
+
+        // After 45s of missing heartbeat: shows the appropriate warning from settings.json
+        // and projects it into `RemoteSessionSnapshot`.
+        model.refreshAgentActivitySnapshots(now: start.addingTimeInterval(46))
+        XCTAssertEqual(
+            model.projects[0].sessions[0].trackerWarning,
+            RemoteSessionSnapshot.experimentalOffWarning
+        )
+        XCTAssertNil(model.projects[0].sessions[3].trackerWarning)
+        XCTAssertEqual(
+            model.remoteWorkspaceSnapshot().projects[0].sessions[0].trackerWarning,
+            RemoteSessionSnapshot.experimentalOffWarning
+        )
+
+        try Data("{\"experimental\": true, \"enabledFeatureFlags\": {\"EXTENSIONS\": false}}\n".utf8)
+            .write(to: settingsURL)
+        model.refreshAgentActivitySnapshots(now: start.addingTimeInterval(47))
+        XCTAssertEqual(
+            model.projects[0].sessions[0].trackerWarning,
+            RemoteSessionSnapshot.extensionsDisabledWarning
+        )
+
+        try Data("{\"experimental\": true}\n".utf8).write(to: settingsURL)
+        model.refreshAgentActivitySnapshots(now: start.addingTimeInterval(48))
+        XCTAssertEqual(
+            model.projects[0].sessions[0].trackerWarning,
+            RemoteSessionSnapshot.trackerStoppedWarning
+        )
+
+        // A healthy heartbeat clears the warning and resets `trackerMissingSince`.
+        let freshAt = start.addingTimeInterval(49)
+        let activityURL = sessionsDir.appendingPathComponent("\(copilotSession.id).agent-activity.json")
+        let snapshot = AgentActivitySnapshot(
+            schemaVersion: AgentActivitySnapshot.currentSchemaVersion,
+            updatedAt: ISO8601DateFormatter().string(from: freshAt),
+            foregroundTurnActive: false,
+            scheduledTurnActive: false,
+            activeSubagents: [],
+            schedules: [],
+            idleGeneration: 1,
+            lastIdleAborted: false,
+            lastIdleTurnKind: nil,
+            error: nil
+        )
+        try JSONEncoder().encode(snapshot).write(to: activityURL)
+        model.refreshAgentActivitySnapshots(now: freshAt)
+        XCTAssertNil(model.projects[0].sessions[0].trackerWarning)
+        XCTAssertNil(model.trackerMissingSince[copilotSession.id])
+
+        // A fresh heartbeat reporting a terminal RPC disconnect counts as unhealthy
+        // and warns after 45s.
+        let disconnectAt = freshAt.addingTimeInterval(5)
+        var disconnectedSnapshot = snapshot
+        disconnectedSnapshot.updatedAt = ISO8601DateFormatter().string(from: disconnectAt)
+        disconnectedSnapshot.error = "Connection is closed."
+        try JSONEncoder().encode(disconnectedSnapshot).write(to: activityURL)
+        model.refreshAgentActivitySnapshots(now: disconnectAt)
+        XCTAssertNil(model.projects[0].sessions[0].trackerWarning)
+        XCTAssertNotNil(model.trackerMissingSince[copilotSession.id])
+
+        let postGraceAt = disconnectAt.addingTimeInterval(46)
+        disconnectedSnapshot.updatedAt = ISO8601DateFormatter().string(from: postGraceAt)
+        try JSONEncoder().encode(disconnectedSnapshot).write(to: activityURL)
+        model.refreshAgentActivitySnapshots(now: postGraceAt)
+        XCTAssertEqual(
+            model.projects[0].sessions[0].trackerWarning,
+            RemoteSessionSnapshot.trackerStoppedWarning
+        )
+
+        // When the Copilot process exits, `trackerMissingSince` and `trackerWarning` clear.
+        model.setLiveAgentSessionsForTesting([])
+        model.refreshAgentActivitySnapshots(now: postGraceAt.addingTimeInterval(1))
+        XCTAssertNil(model.projects[0].sessions[0].trackerWarning)
+        XCTAssertNil(model.trackerMissingSince[copilotSession.id])
+    }
+
+    @MainActor
     func testCloseProjectSchedulesEverySessionForGracefulDestruction() throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory

@@ -452,6 +452,10 @@ final class AppModel: ObservableObject {
     var remotePromptFences: [String: RemotePromptFence] = [:]
     var runtimeTrackedOwners: [String: String] = [:]
     var verifiedCopilotOwners: [String: String] = [:]
+    var trackerMissingSince: [String: Date] = [:]
+    var copilotTrackerWarningMessage: @Sendable () -> String = {
+        CopilotSessionStore().trackerWarningMessage()
+    }
     struct PermissionStatusRestore {
         let status: SessionStatus
         let statusText: String?
@@ -533,9 +537,14 @@ final class AppModel: ObservableObject {
     /// Sessions hosting a live agent (refreshed by the liveness reconciler). Used
     /// by scroll-wheel forwarding to keep working on resumed (desynced) sessions.
     var liveAgentSessions: Set<String> = []
+    var liveCopilotSessions: Set<String> = []
 
-    func setLiveAgentSessionsForTesting(_ sessions: Set<String>) {
+    func setLiveAgentSessionsForTesting(
+        _ sessions: Set<String>,
+        copilotSessions: Set<String>? = nil
+    ) {
         liveAgentSessions = sessions
+        liveCopilotSessions = copilotSessions ?? sessions
     }
 
     /// Process names treated as a live coding agent for the liveness backstop.

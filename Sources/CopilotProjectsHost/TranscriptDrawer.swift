@@ -69,6 +69,7 @@ struct TranscriptButton: View {
     var receipts: [RemoteOperationReceipt] = []
     var conversationEpoch: String? = nil
     var hasPendingQuestions: Bool = false
+    var trackerWarning: String? = nil
     var onOpen: () -> Void = {}
     var onClose: () -> Void = {}
     var onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult = { _ in
@@ -78,6 +79,14 @@ struct TranscriptButton: View {
 
     var body: some View {
         let currentWorkflow = workflowProvider?() ?? workflow
+        if let trackerWarning {
+            Text(trackerWarning)
+                .font(.caption)
+                .foregroundStyle(StudioStyle.secondaryText)
+                .lineLimit(1)
+                .help(trackerWarning)
+                .accessibilityIdentifier("session-tracker-warning")
+        }
         if controller.snapshot != nil || currentWorkflow != nil || hasPendingQuestions {
             if isOpen {
                 HStack(spacing: 4) {

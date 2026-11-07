@@ -198,6 +198,7 @@ private struct WorkspaceHeading: View {
                     conversationEpoch: operation.conversationEpoch,
                     hasPendingQuestions: !model.sessionPendingUserInputs(sessionId: sessionId).isEmpty
                         || !model.sessionPendingElicitations(sessionId: sessionId).isEmpty,
+                    trackerWarning: session?.trackerWarning,
                     onOpen: { model.openTranscriptDrawer(sessionId: sessionId) },
                     onClose: {
                         model.closeTranscriptDrawer(sessionId: sessionId)
