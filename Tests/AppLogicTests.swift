@@ -3985,7 +3985,9 @@ final class AppLogicTests: XCTestCase {
             ["fruit": .array([.array([.string("apple")])])],
             ["ripe": .bool(true)],
             ["fruit": .string("apple"), "count": .number(4)],
-            ["fruit": .string("apple"), "colors": .array([.string("blue")])],
+            ["fruit": .string("apple"), "colors": .array([.string("")])],
+            ["fruit": .string("apple"), "colors": .array([.string(" \n\t")])],
+            ["fruit": .string("apple"), "colors": .array([.string("blue"), .string("yellow")])],
             ["fruit": .string("apple"), "nickname": .string("a")],
             ["fruit": .string("apple"), "tokens": .array([])],
             ["fruit": .string("apple"), "email": .string("not an email")],
@@ -4063,6 +4065,7 @@ final class AppLogicTests: XCTestCase {
         let customChoiceContent: [String: RemoteJSONValue] = [
             "fruit": .string("banana"),
             "drink": .string("tea"),
+            "colors": .array([.string("red"), .string("blue")]),
         ]
         XCTAssertEqual(
             model.answerElicitation(
@@ -4099,6 +4102,10 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(
             (writtenCustomChoice["content"] as? [String: Any])?["drink"] as? String,
             "tea"
+        )
+        XCTAssertEqual(
+            (writtenCustomChoice["content"] as? [String: Any])?["colors"] as? [String],
+            ["red", "blue"]
         )
         try FileManager.default.removeItem(at: responseURL)
 
@@ -15552,6 +15559,168 @@ final class AppLogicTests: XCTestCase {
                 allowFreeformStringChoices: false
             )
         )
+
+        // Multi-select "Other" counts toward minItems/maxItems, blocks when blank, preserves choice order,
+        // and seeds unlisted defaults only when allowFreeformChoices is true.
+        XCTAssertNil(
+            regionsField.toggledCustomSelection(
+                values: &values,
+                customChoiceFields: &customFields
+            ),
+            "Cannot enable Other when maxItems (2) is already reached"
+        )
+        values["regions"] = try XCTUnwrap(
+            regionsField.toggledSelectionValue("eu-west", in: values["regions"])
+        )
+        XCTAssertEqual(values["regions"], .array([.string("us-east")]))
+        XCTAssertEqual(
+            regionsField.toggledCustomSelection(
+                values: &values,
+                customChoiceFields: &customFields
+            ),
+            true
+        )
+        XCTAssertTrue(customFields.contains("regions"))
+        XCTAssertEqual(values["regions"], .array([.string("us-east"), .string("")]))
+        XCTAssertTrue(
+            regionsField.toggledSelectionValue(
+                "eu-west",
+                in: values["regions"],
+                allowsFreeform: true,
+                isCustom: true
+            ) == nil,
+            "Checked Other counts toward maxItems (2)"
+        )
+        XCTAssertNil(
+            form.validatedContent(
+                values: values,
+                touched: touched,
+                customChoiceFields: customFields
+            ),
+            "Empty Other blocks submission"
+        )
+        values["regions"] = try XCTUnwrap(
+            regionsField.updatedCustomChoiceValue(
+                "ca-central",
+                in: values["regions"],
+                customChoiceFields: &customFields
+            )
+        )
+        values["regions"] = try XCTUnwrap(
+            regionsField.toggledSelectionValue(
+                "us-east",
+                in: values["regions"],
+                allowsFreeform: true,
+                isCustom: true
+            )
+        )
+        XCTAssertEqual(values["regions"], .array([.string("ca-central")]))
+        values["regions"] = try XCTUnwrap(
+            regionsField.toggledSelectionValue(
+                "eu-west",
+                in: values["regions"],
+                allowsFreeform: true,
+                isCustom: true
+            )
+        )
+        XCTAssertEqual(values["regions"], .array([.string("eu-west"), .string("ca-central")]))
+        let multiCustomPayload = try XCTUnwrap(
+            form.validatedContent(
+                values: values,
+                touched: touched,
+                customChoiceFields: customFields
+            )
+        )
+        XCTAssertEqual(
+            multiCustomPayload["regions"],
+            .array([.string("eu-west"), .string("ca-central")])
+        )
+        XCTAssertTrue(
+            AppModel.elicitationContent(
+                multiCustomPayload,
+                satisfies: schema,
+                allowFreeformStringChoices: true
+            )
+        )
+        XCTAssertFalse(
+            AppModel.elicitationContent(
+                multiCustomPayload,
+                satisfies: schema,
+                allowFreeformStringChoices: false
+            )
+        )
+        XCTAssertEqual(
+            regionsField.toggledCustomSelection(
+                values: &values,
+                customChoiceFields: &customFields
+            ),
+            false
+        )
+        XCTAssertFalse(customFields.contains("regions"))
+        XCTAssertEqual(values["regions"], .array([.string("eu-west")]))
+
+        var optionalCustomFields: Set<String> = []
+        XCTAssertEqual(
+            tagsField.toggledCustomSelection(
+                values: &optionalValues,
+                customChoiceFields: &optionalCustomFields
+            ),
+            true
+        )
+        optionalValues["tags"] = try XCTUnwrap(
+            tagsField.updatedCustomChoiceValue(
+                "custom-tag",
+                in: optionalValues["tags"],
+                customChoiceFields: &optionalCustomFields
+            )
+        )
+        XCTAssertEqual(
+            tagsField.toggledCustomSelection(
+                values: &optionalValues,
+                customChoiceFields: &optionalCustomFields
+            ),
+            false
+        )
+        XCTAssertTrue(optionalCustomFields.isEmpty)
+        XCTAssertNil(optionalValues["tags"])
+        XCTAssertEqual(
+            optionalMultiForm.validatedContent(
+                values: optionalValues,
+                touched: ["tags"],
+                customChoiceFields: optionalCustomFields
+            ),
+            [:]
+        )
+
+        let multiDefaultSchema: RemoteJSONValue = .object([
+            "type": .string("object"),
+            "required": .array([.string("toppings")]),
+            "properties": .object([
+                "toppings": .object([
+                    "type": .string("array"),
+                    "minItems": .number(2),
+                    "maxItems": .number(2),
+                    "default": .array([.string("cheese"), .string("olives")]),
+                    "items": .object([
+                        "type": .string("string"),
+                        "enum": .array([.string("cheese"), .string("pepperoni")]),
+                    ]),
+                ]),
+            ]),
+        ])
+        let agentMultiDefault = try XCTUnwrap(
+            DesktopElicitationForm.parse(multiDefaultSchema, allowFreeformChoices: true)
+        ).initialState()
+        XCTAssertEqual(
+            agentMultiDefault.values["toppings"],
+            .array([.string("cheese"), .string("olives")])
+        )
+        XCTAssertEqual(agentMultiDefault.customChoiceFields, ["toppings"])
+        let mcpMultiDefault = try XCTUnwrap(
+            DesktopElicitationForm.parse(multiDefaultSchema, allowFreeformChoices: false)
+        ).initialState()
+        XCTAssertEqual(mcpMultiDefault.values["toppings"], .array([]))
+        XCTAssertTrue(mcpMultiDefault.customChoiceFields.isEmpty)
     }
 
     @MainActor
@@ -15901,6 +16070,90 @@ final class AppLogicTests: XCTestCase {
             ]
         )
         XCTAssertEqual(composer.prompt, "Unsent composer draft")
+
+        // 4. Multi-select "Other": hidden for MCP elicitations, shown and preselected for agent defaults,
+        //    blocks when empty or below minItems, and submits on Return when valid.
+        let multiSelectSchema: RemoteJSONValue = .object([
+            "type": .string("object"),
+            "required": .array([.string("toppings")]),
+            "properties": .object([
+                "toppings": .object([
+                    "type": .string("array"),
+                    "title": .string("Toppings"),
+                    "minItems": .number(1),
+                    "maxItems": .number(2),
+                    "default": .array([.string("cheese"), .string("olives")]),
+                    "items": .object([
+                        "type": .string("string"),
+                        "enum": .array([.string("cheese"), .string("pepperoni")]),
+                    ]),
+                ]),
+            ]),
+        ])
+        let mcpMultiHost = NSHostingView(
+            rootView: DesktopElicitationCard(
+                request: RemoteElicitationRequest(
+                    requestId: "req-mcp-multi",
+                    message: "Pick toppings",
+                    schema: multiSelectSchema,
+                    elicitationSource: "mcp-server",
+                    requestedAt: requestedAt
+                ),
+                onAnswer: { _ in RemoteWorkflowActionResult(state: .applied) },
+                onFocusTerminal: {}
+            )
+        )
+        mcpMultiHost.frame = NSRect(x: 0, y: 0, width: 420, height: 320)
+        window.contentView = mcpMultiHost
+        await pump(mcpMultiHost)
+        XCTAssertTrue(findEditableTextFields(in: mcpMultiHost).isEmpty)
+
+        var submittedMultiAnswers: [RemoteElicitationAnswer] = []
+        let agentMultiHost = NSHostingView(
+            rootView: DesktopElicitationCard(
+                request: RemoteElicitationRequest(
+                    requestId: "req-agent-multi",
+                    message: "Pick up to two toppings",
+                    schema: multiSelectSchema,
+                    requestedAt: requestedAt
+                ),
+                onAnswer: { answer in
+                    submittedMultiAnswers.append(answer)
+                    return RemoteWorkflowActionResult(state: .applied)
+                },
+                onFocusTerminal: {}
+            )
+        )
+        agentMultiHost.frame = NSRect(x: 0, y: 0, width: 420, height: 360)
+        window.contentView = agentMultiHost
+        await pump(agentMultiHost)
+
+        let multiOtherField = try XCTUnwrap(findEditableTextFields(in: agentMultiHost).first)
+        XCTAssertEqual(multiOtherField.stringValue, "olives")
+        XCTAssertTrue(window.makeFirstResponder(multiOtherField))
+        let multiOtherEditor = try XCTUnwrap(multiOtherField.currentEditor() as? NSTextView)
+        multiOtherEditor.selectAll(nil)
+        multiOtherEditor.insertText("   ", replacementRange: multiOtherEditor.selectedRange())
+        await pump(agentMultiHost)
+        try sendKey(to: window)
+        await pump(agentMultiHost)
+        XCTAssertTrue(submittedMultiAnswers.isEmpty)
+
+        multiOtherEditor.selectAll(nil)
+        multiOtherEditor.insertText("capers", replacementRange: multiOtherEditor.selectedRange())
+        await pump(agentMultiHost)
+        try sendKey(to: window)
+        await pump(agentMultiHost)
+        XCTAssertEqual(
+            submittedMultiAnswers,
+            [
+                RemoteElicitationAnswer(
+                    requestId: "req-agent-multi",
+                    action: .accept,
+                    content: ["toppings": .array([.string("cheese"), .string("capers")])]
+                ),
+            ]
+        )
     }
 
     @MainActor
