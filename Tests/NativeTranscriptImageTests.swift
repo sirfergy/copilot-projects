@@ -954,4 +954,170 @@ final class NativeTranscriptImageTests: XCTestCase {
         )
         XCTAssertEqual(afterExact5MReuse.items(forTurnId: "turn-4", sessionId: appSessionId, copilotSessionId: copilotSessionId).map(\.data), [exactFiveMiB])
     }
+
+    func testTimelineItemsHidesMatchingPromptAttachmentAndKeepsDifferentOrOtherTurnImages() throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prompt-dedupe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let copilotSessionId = UUID().uuidString.lowercased()
+        let sessionDir = tempRoot
+            .appendingPathComponent("session-state", isDirectory: true)
+            .appendingPathComponent(copilotSessionId, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+        let t1 = ISO8601DateFormatter().date(from: "2026-11-06T12:00:00Z")!
+        let t2 = ISO8601DateFormatter().date(from: "2026-11-06T12:05:00Z")!
+        let t3 = ISO8601DateFormatter().date(from: "2026-11-06T12:10:00Z")!
+
+        let promptPNG = remoteKittyTestPNGBytes(width: 240, height: 120)
+        let differentPNG = remoteKittyTestPNGBytes(width: 180, height: 90)
+
+        func makeScreenshotPNG(width: Int, height: Int, changedLine: Bool = false) throws -> Data {
+            let rep = try XCTUnwrap(
+                NSBitmapImageRep(
+                    bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+                )
+            )
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            NSColor(calibratedWhite: 0.14, alpha: 1).setFill()
+            NSBezierPath(rect: NSRect(x: 0, y: 0, width: width, height: height)).fill()
+            NSColor(calibratedWhite: 0.30, alpha: 1).setFill()
+            NSBezierPath(rect: NSRect(x: 0, y: 0, width: width, height: max(8, height / 8))).fill()
+            if changedLine {
+                NSColor(calibratedWhite: 0.90, alpha: 1).setFill()
+                NSBezierPath(rect: NSRect(x: width / 8, y: height / 2, width: width / 3, height: max(6, height / 36))).fill()
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        }
+
+        let retinaPromptPNG = try makeScreenshotPNG(width: 1_230, height: 436)
+        let downscaledEchoPNG = try makeScreenshotPNG(width: 896, height: 318)
+        let oneLineChangedPNG = try makeScreenshotPNG(width: 896, height: 318, changedLine: true)
+        let differentAspectPNG = try makeScreenshotPNG(width: 896, height: 360)
+
+        let events = [
+            #"{"type":"user.message","id":"turn-1","timestamp":"2026-11-06T12:00:00Z","data":{"content":"Turn 1 with duplicate attachments","attachments":[{"type":"blob","mimeType":"image/png","data":"\#(promptPNG.base64EncodedString())"},{"type":"blob","mimeType":"image/png","data":"\#(promptPNG.base64EncodedString())"}]}}"#,
+            #"{"type":"user.message","id":"turn-2","timestamp":"2026-11-06T12:05:00Z","data":{"content":"Turn 2 without prompt attachment","attachments":[]}}"#,
+            #"{"type":"user.message","id":"turn-3","timestamp":"2026-11-06T12:10:00Z","data":{"content":"Turn 3 with Retina prompt screenshot","attachments":[{"type":"blob","mimeType":"image/png","data":"\#(retinaPromptPNG.base64EncodedString())"}]}}"#,
+        ].joined(separator: "\n") + "\n"
+        try events.write(
+            to: sessionDir.appendingPathComponent("events.jsonl", isDirectory: false),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        var currentNow = t1.addingTimeInterval(0.2)
+        let appSessionId = "desktop-dedupe-session"
+        let capture = RemoteKittyImageCapture(
+            sessionId: appSessionId,
+            epoch: 7,
+            budget: RemoteKittyImageCaptureBudget(),
+            now: { currentNow }
+        )
+        func ingest(id: UInt32, data: Data, at time: Date) {
+            currentNow = time
+            capture.ingest(remoteKittyFrameBytes(
+                control: "a=T,f=100,t=d,U=1,i=\(id),q=2",
+                base64Payload: data.base64EncodedString()
+            )[...])
+        }
+
+        // Turn 1: two identical attachments hide at most two pre-reply echoes (ids 10 and 11),
+        // keeping a third pre-reply same-byte capture (id 12), a different image (id 13),
+        // and a post-reply tool capture of the same bytes (id 14).
+        ingest(id: 10, data: promptPNG, at: t1.addingTimeInterval(0.1))
+        ingest(id: 11, data: promptPNG, at: t1.addingTimeInterval(0.2))
+        ingest(id: 12, data: promptPNG, at: t1.addingTimeInterval(0.3))
+        ingest(id: 13, data: differentPNG, at: t1.addingTimeInterval(1.0))
+        ingest(id: 14, data: promptPNG, at: t1.addingTimeInterval(3.0))
+        // Turn 2: the same image from Turn 1 is displayed in a later turn (id 15).
+        ingest(id: 15, data: promptPNG, at: t2.addingTimeInterval(1.0))
+        // Turn 3: downscaled copy of 1230x436 -> 896x318 (id 16) is hidden;
+        // near-identical 896x318 with one changed line (id 17) and different aspect ratio 896x360 (id 18) are kept.
+        ingest(id: 16, data: downscaledEchoPNG, at: t3.addingTimeInterval(0.15))
+        ingest(id: 17, data: oneLineChangedPNG, at: t3.addingTimeInterval(0.25))
+        ingest(id: 18, data: differentAspectPNG, at: t3.addingTimeInterval(0.35))
+
+        let snapshot = TranscriptSnapshot(
+            schemaVersion: 4,
+            updatedAt: t3.addingTimeInterval(5),
+            copilotSessionId: copilotSessionId,
+            turns: [
+                TranscriptTurn(
+                    id: "turn-1",
+                    startedAt: t1,
+                    endedAt: t1.addingTimeInterval(5),
+                    kind: "foreground",
+                    userContent: "Turn 1",
+                    assistantMessages: [
+                        TranscriptAssistantMessage(id: "m1", timestamp: t1.addingTimeInterval(2.0), content: "Checked.")
+                    ],
+                    tools: [],
+                    isAborted: false
+                ),
+                TranscriptTurn(id: "turn-2", startedAt: t2, endedAt: t2.addingTimeInterval(5), kind: "foreground", userContent: "Turn 2", assistantMessages: [], tools: [], isAborted: false),
+                TranscriptTurn(id: "turn-3", startedAt: t3, endedAt: t3.addingTimeInterval(5), kind: "foreground", userContent: "Turn 3", assistantMessages: [], tools: [], isAborted: false),
+            ]
+        )
+
+        let promptAttachments = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: snapshot,
+            copilotHome: tempRoot.path
+        )
+        let attached = TranscriptImageAssociation.attach(
+            images: capture.retainedImageMetadata(),
+            to: snapshot
+        )
+
+        // Two identical attachments in one message keep their existing promptAttachments behavior.
+        let turn1Attachments = promptAttachments.items(
+            forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: copilotSessionId
+        )
+        XCTAssertEqual(turn1Attachments.map(\.data), [promptPNG, promptPNG])
+
+        // Turn 1 timeline: matching prompt echoes (ids 10, 11) are hidden; exhausted 3rd copy (id 12),
+        // different image (id 13), and post-reply tool image (id 14) are kept.
+        let turn1Timeline = TranscriptImageAssociation.timelineItems(
+            for: attached.turns[0], imageCapture: capture, promptAttachments: turn1Attachments
+        )
+        XCTAssertEqual(turn1Timeline.map(\.id), ["image-12", "image-13", "assistant-m1", "image-14"])
+
+        // Turn 2 timeline: same image in another turn (id 15) is kept.
+        let turn2Attachments = promptAttachments.items(
+            forTurnId: "turn-2", sessionId: appSessionId, copilotSessionId: copilotSessionId
+        )
+        let turn2Timeline = TranscriptImageAssociation.timelineItems(
+            for: attached.turns[1], imageCapture: capture, promptAttachments: turn2Attachments
+        )
+        XCTAssertEqual(turn2Timeline.map(\.id), ["image-15"])
+
+        // Turn 3 timeline: downscaled copy (id 16) is hidden; similar-with-one-changed-line (id 17)
+        // and different-aspect-ratio (id 18) are kept.
+        let turn3Attachments = promptAttachments.items(
+            forTurnId: "turn-3", sessionId: appSessionId, copilotSessionId: copilotSessionId
+        )
+        let turn3Timeline = TranscriptImageAssociation.timelineItems(
+            for: attached.turns[2], imageCapture: capture, promptAttachments: turn3Attachments
+        )
+        XCTAssertEqual(turn3Timeline.map(\.id), ["image-17", "image-18"])
+
+        // Updating imageId 16 with a new content version (now carrying the one-line-changed image)
+        // invalidates the cached signature for that imageId and shows the new version.
+        ingest(id: 16, data: oneLineChangedPNG, at: t3.addingTimeInterval(0.5))
+        let reattached = TranscriptImageAssociation.attach(
+            images: capture.retainedImageMetadata(),
+            to: snapshot
+        )
+        let updatedTurn3Timeline = TranscriptImageAssociation.timelineItems(
+            for: reattached.turns[2], imageCapture: capture, promptAttachments: turn3Attachments
+        )
+        XCTAssertEqual(updatedTurn3Timeline.map(\.id), ["image-17", "image-18", "image-16"])
+    }
 }
