@@ -483,8 +483,10 @@ struct TranscriptDrawer: View {
                             .onDisappear { isAtBottom = false }
                     }
                     .padding(.horizontal, 18)
-                    .padding(.vertical, 6)
+                    .padding(.top, 5)
+                    .padding(.bottom, 6)
                 }
+                .padding(.top, 1)
                 .background {
                     if let workingModel {
                         ObservedTranscriptWorkingScrollObserver(
