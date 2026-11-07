@@ -215,6 +215,7 @@ observation; raw terminal input is independent of these composer checks.
 Older trackers on a newer host remain blocked even with a fresh heartbeat:
 restart/reload the tracker to activate the updated workflow metadata, or use Terminal.
 Deploy the Mac host before clients using the new protocol.
+See [Supported versions](#supported-versions) for the window and when a gate may be removed.
 
 An optional offline integration test exercises the installed CLI/SDK pair against
 a loopback model fixture, without real model requests:
@@ -454,6 +455,43 @@ public and usable by existing clients. They do not require a private dependency.
 An integrating app can reuse `scripts/build-app.sh` with `--binary`, `--resources`,
 and `--output`; its executable must include its additional assets in `check-assets`.
 The normal build and release do not resolve or bundle optional integrations.
+
+#### Supported versions
+
+A client supports hosts released in the last 30 days, and a host supports clients
+released in the last 30 days. Clients are the separately built web and iOS apps; a
+host is the integrated Mac app that runs their gateway. That app serves the web
+client, so the two differ only in a tab left open across an update.
+
+Inside that window, a client checks `RemoteProtocolInfo.capabilities`, or handles the
+host's 404 or 501, before it relies on a newer route or request field, and tolerates a
+missing response field. A host keeps accepting the requests older clients send and
+keeps advertising a capability while a supported client checks it.
+
+Outside it the pairing is unsupported, and nothing detects that: no code compares
+release versions or `RemoteProtocolInfo.revision`. The gateway answers an unknown route
+with 404 and a control message it does not know with 400, and clients show most of
+those as the failed request's error. Neither client explains an event stream it cannot
+read: the iOS app keeps reconnecting, and the web client drops the event while still
+showing connected. Both sides ignore JSON fields they do not know, and clients ignore
+unknown stream events, so an older peer can also act on a request without the
+safeguard a newer field carried. Update the older side.
+
+A gate or fallback that exists only for an older peer may be removed once the first
+host release that advertised the feature (for a client's check), or the first release
+of every client that sends it (for a host's fallback), is more than 30 days old.
+
+The window does not cover the following, and their checks stay:
+
+- Copilot CLI versions, including the tracker's fallbacks for older CLI runtimes.
+- What a session can do now: `RemoteSessionWorkflow.capabilities` (for example
+  `session-bounce`, present only while a `bounce` command is loaded) and
+  `legacyPromptFallback`.
+- A capability or field a current peer can still leave out, such as `workflow` for a
+  session without a tracker.
+- Records a host stored from a client, such as a push registration, until that client
+  registers again.
+- A tracker still running an earlier host's code. Reload it after an upgrade.
 
 #### Configured remote session creation
 
