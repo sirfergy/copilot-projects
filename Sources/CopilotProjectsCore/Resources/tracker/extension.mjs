@@ -2074,12 +2074,7 @@ if (validSessionId && socketPath) {
                 pendingMessages = next;
                 publish();
             }
-        } catch {
-            if (seq === pendingMessagesSeq && operationAuthorityCurrent(context) && pendingMessages.length > 0) {
-                pendingMessages = [];
-                publish();
-            }
-        }
+        } catch {}
     }
 
     function workflowSnapshot() {
