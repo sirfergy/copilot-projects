@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import XCTest
 import CopilotProjectsCore
 import CopilotProjectsProtocol
@@ -1629,6 +1630,100 @@ final class AppModelTests: XCTestCase {
             try node.run()
             node.waitUntilExit()
             XCTAssertEqual(node.terminationStatus, 0)
+        }
+    }
+
+    func testWorkspaceMenuStateIgnoresUnrelatedModelPublishesAndTracksMenuChanges() throws {
+        try withTempStateDirectory { root in
+            let s1 = Session(title: "Active", cwd: root.path)
+            let s2 = Session(title: "Background", cwd: root.path)
+            let project = Project(
+                name: "Alpha",
+                cwd: root.path,
+                sessions: [s1, s2],
+                selectedSessionId: s1.id
+            )
+            let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+            try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+
+            let model = AppModel(
+                stateRepository: repository,
+                isAppActive: { false },
+                agentActivityDirectory: root,
+                resumeMarkerDirectory: root,
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} },
+                forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                model.forcePendingSessionDestroys()
+                model.detachAllClients()
+            }
+            let input = WorkspaceInputController(model: model, sessionRanker: OfflineRanker())
+
+            var modelPublications = 0
+            var menuPublications = 0
+            let modelCancellable = model.objectWillChange.sink { modelPublications += 1 }
+            let menuCancellable = model.menuState.objectWillChange.sink { menuPublications += 1 }
+            defer { withExtendedLifetime((modelCancellable, menuCancellable)) {} }
+
+            // Starting, streaming, waiting, and finishing sessions, plus number-hint and drawer changes,
+            // publish on AppModel without re-evaluating WorkspaceMenuState.
+            model.setStatus(sessionId: s1.id, status: .running, text: "Thinking…", timestamp: 1)
+            model.setStatus(sessionId: s1.id, status: .running, text: "Running bash…", timestamp: 2)
+            model.setStatus(sessionId: s2.id, status: .running, text: "Background work…", timestamp: 3)
+            model.setStatus(sessionId: s2.id, status: .waiting, text: "Approve?", timestamp: 4)
+            model.setStatus(sessionId: s2.id, status: .idle, text: nil, timestamp: 5)
+            model.setStatus(sessionId: s1.id, status: .idle, text: nil, timestamp: 6)
+            model.setNumberHint(.projects)
+            model.setNumberHint(.none)
+            model.openTranscriptDrawer(sessionId: s1.id)
+            model.closeTranscriptDrawer(sessionId: s1.id)
+
+            XCTAssertGreaterThanOrEqual(modelPublications, 10)
+            XCTAssertEqual(menuPublications, 0)
+
+            // Opening the menu bar refreshes runtime attention state.
+            model.syncMenuState(includeRuntimeAttention: true)
+            XCTAssertTrue(model.menuState.snapshot.hasAttentionSessions)
+            XCTAssertEqual(menuPublications, 1)
+
+            // Toggling read state and navigating sessions update menuState synchronously.
+            model.markActiveSessionSeen()
+            XCTAssertFalse(model.menuState.snapshot.selectedSessionOffersMarkAsRead)
+            model.toggleSelectedSessionRead()
+            XCTAssertTrue(model.menuState.snapshot.selectedSessionOffersMarkAsRead)
+            model.toggleSelectedSessionRead()
+            XCTAssertFalse(model.menuState.snapshot.selectedSessionOffersMarkAsRead)
+
+            model.selectSession(projectId: project.id, sessionId: s2.id)
+            XCTAssertTrue(model.menuState.snapshot.canNavigateSessionBack)
+            XCTAssertFalse(model.menuState.snapshot.canNavigateSessionForward)
+            model.navigateSessionBack()
+            XCTAssertFalse(model.menuState.snapshot.canNavigateSessionBack)
+            XCTAssertTrue(model.menuState.snapshot.canNavigateSessionForward)
+
+            // Closing and reopening a session updates Recently Closed Sessions state.
+            XCTAssertFalse(model.menuState.canReopenClosedSession)
+            XCTAssertTrue(model.destroySession(projectId: project.id, sessionId: s2.id))
+            XCTAssertTrue(model.menuState.canReopenClosedSession)
+            XCTAssertEqual(model.menuState.snapshot.recentlyClosedSessionItems.map(\.id), [s2.id])
+            _ = try XCTUnwrap(model.reopenClosedSession())
+            XCTAssertFalse(model.menuState.canReopenClosedSession)
+            XCTAssertTrue(model.menuState.snapshot.recentlyClosedSessionItems.isEmpty)
+
+            // SSH host changes and workspace sheets update menuState synchronously.
+            model.setAutoDiscoverSSHHosts(false)
+            XCTAssertFalse(model.menuState.snapshot.autoDiscoverSSHHosts)
+            _ = try XCTUnwrap(model.addManualSSHHost(sshTarget: "dev@box.example.com", displayName: "DevBox"))
+            XCTAssertEqual(model.menuState.snapshot.manualSSHHosts.map(\.displayName), ["DevBox"])
+            model.removeManualSSHHost(id: "dev@box.example.com")
+            XCTAssertTrue(model.menuState.snapshot.manualSSHHosts.isEmpty)
+
+            input.presentReleaseNotes()
+            XCTAssertTrue(model.menuState.snapshot.hasWorkspaceSheet)
+            input.showsReleaseNotes = false
+            XCTAssertFalse(model.menuState.snapshot.hasWorkspaceSheet)
         }
     }
 }

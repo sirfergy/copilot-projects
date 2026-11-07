@@ -4,9 +4,9 @@ import CopilotProjectsCore
 
 @MainActor
 final class WorkspaceInputController: ObservableObject {
-    @Published var imagePreview: TranscriptImagePreviewItem?
-    @Published var showsReleaseNotes = false
-    @Published private(set) var sessionFinder: SessionFinderModel?
+    @Published var imagePreview: TranscriptImagePreviewItem? { didSet { syncMenuState() } }
+    @Published var showsReleaseNotes = false { didSet { syncMenuState() } }
+    @Published private(set) var sessionFinder: SessionFinderModel? { didSet { syncMenuState() } }
     private let model: AppModel
     private let sessionRanker: SessionRanking
     private let sessionHistorySearcher: SessionHistorySearching?
@@ -26,6 +26,12 @@ final class WorkspaceInputController: ObservableObject {
 
     /// A workspace sheet owns the keyboard, so workspace commands stay disabled.
     var hasWorkspaceSheet: Bool { imagePreview != nil || sessionFinder != nil || showsReleaseNotes }
+
+    private func syncMenuState() {
+        var next = model.menuState.snapshot
+        next.hasWorkspaceSheet = hasWorkspaceSheet
+        model.menuState.update(next)
+    }
 
     func presentReleaseNotes() {
         guard !hasWorkspaceSheet, NSApp.modalWindow == nil else { return }

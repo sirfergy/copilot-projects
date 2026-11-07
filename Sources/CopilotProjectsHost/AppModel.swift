@@ -59,6 +59,7 @@ final class AppModel: ObservableObject {
             projectStorage = newValue
             if projectPublicationBatchDepth == 0 {
                 syncSessionWorkingModels()
+                syncMenuState()
             } else {
                 workingModelsSyncNeeded = true
             }
@@ -73,6 +74,7 @@ final class AppModel: ObservableObject {
                 projectPublicationPending = false
                 if workingModelsSyncNeeded {
                     syncSessionWorkingModels()
+                    syncMenuState()
                 }
             }
         }
@@ -83,8 +85,9 @@ final class AppModel: ObservableObject {
     @Published var expandedParentSessionIds: Set<String> = []
     @Published private(set) var transcriptOpenSessions: Set<String> = []
     private var defaultViewAppliedSessions: Set<String> = []
-    @Published private(set) var recentlyClosedSessions: [RecentlyClosedSession] = []
+    @Published private(set) var recentlyClosedSessions: [RecentlyClosedSession] = [] { didSet { syncMenuState() } }
     @Published private(set) var hostHealth: [RemoteHostHealth] = []
+    let menuState = WorkspaceMenuState()
     var requestMainWindow: (() -> Void)?
 
     var controllers: [String: TerminalController] = [:]
@@ -668,6 +671,7 @@ final class AppModel: ObservableObject {
         if let sessionMemoryProvider {
             self.applySessionMemoryUsage(sessionMemoryProvider())
         }
+        syncMenuState(reloadSSHHosts: true, includeRuntimeAttention: true)
     }
 
     // MARK: - lifecycle wiring
@@ -888,6 +892,7 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshHostHealthAfterCatalogChange() {
+        syncMenuState(reloadSSHHosts: true)
         if hostHealthTimer != nil
             || hostHealthProvider != nil
             || stateRepository.path.standardizedFileURL == Paths.statePath.standardizedFileURL {
@@ -1141,6 +1146,31 @@ final class AppModel: ObservableObject {
         if let sessionId = globalSelectedSessionId {
             applyDefaultViewIfNeeded(sessionId: sessionId)
         }
+        syncMenuState(includeRuntimeAttention: true)
+    }
+
+    func syncMenuState(reloadSSHHosts: Bool = false, includeRuntimeAttention: Bool = false) {
+        guard projectPublicationBatchDepth == 0 else {
+            workingModelsSyncNeeded = true
+            return
+        }
+        var next = menuState.snapshot
+        if reloadSSHHosts {
+            let config = SSHHostCatalog.loadConfiguration(statePath: stateRepository.path)
+            next.autoDiscoverSSHHosts = config.autoDiscover
+            next.manualSSHHosts = config.hosts
+        }
+        let key = [currentSelectedSessionId ?? ""]
+            + projects.flatMap { $0.sessions.map { "\($0.id):\($0.markedUnread)" } }
+        if includeRuntimeAttention || key != menuState.selectionUnreadKey {
+            menuState.selectionUnreadKey = key
+            next.selectedSessionOffersMarkAsRead = selectedSessionOffersMarkAsRead
+            next.hasAttentionSessions = hasAttentionSessions
+        }
+        next.canNavigateSessionBack = canNavigateSessionBack
+        next.canNavigateSessionForward = canNavigateSessionForward
+        next.recentlyClosedSessionItems = recentlyClosedSessions.isEmpty ? [] : recentlyClosedSessionItems
+        menuState.update(next)
     }
 
     var canNavigateSessionBack: Bool { sessionNavigationHistory.canGoBack }
@@ -2961,6 +2991,7 @@ final class AppModel: ObservableObject {
             }
         }
         updateDockBadge()
+        syncMenuState(includeRuntimeAttention: true)
         if clearedMark { save() }
     }
 
@@ -3868,6 +3899,7 @@ final class AppModel: ObservableObject {
         projects[loc.p].sessions[loc.s].finishedUnseen = false
         if clearsMark { projects[loc.p].sessions[loc.s].markedUnread = false }
         updateDockBadge()
+        syncMenuState(includeRuntimeAttention: true)
         if clearsMark { save() }
     }
 

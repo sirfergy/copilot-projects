@@ -31,6 +31,7 @@ struct CopilotProjectsApp: App {
         .windowStyle(.hiddenTitleBar)
         .commands {
             WorkspaceCommands(model: appDelegate.model, input: appDelegate.input,
+                              menu: appDelegate.model.menuState,
                               keepRunning: $keepRunning, startsNotifications: $startsNotifications,
                               showQuickReplyChips: $showQuickReplyChips,
                               showsQuickRepliesSettings: $showsQuickRepliesSettings,
@@ -52,82 +53,48 @@ struct OpenPullRequestsButton: View {
     }
 }
 
-/// Session ▸ Mark as Unread / Mark as Read (⇧⌘U). Observes the model on its own so
-/// the title follows the current session without re-rendering the whole menu bar.
-private struct SessionReadStateButton: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        Button(model.selectedSessionOffersMarkAsRead ? "Mark as Read" : "Mark as Unread") {
-            model.toggleSelectedSessionRead()
-        }
-        .keyboardShortcut("u", modifiers: [.command, .shift])
+/// Narrow menu-bar state so active session publishes don't rebuild open submenus.
+@MainActor
+final class WorkspaceMenuState: ObservableObject {
+    struct Snapshot: Equatable {
+        var hasWorkspaceSheet = false
+        var selectedSessionOffersMarkAsRead = false
+        var hasAttentionSessions = false
+        var canNavigateSessionBack = false
+        var canNavigateSessionForward = false
+        var recentlyClosedSessionItems: [RemoteRecentlyClosedSession] = []
+        var autoDiscoverSSHHosts = true
+        var manualSSHHosts: [RemoteHostInfo] = []
     }
-}
 
-/// Session ▸ Next Session Needing Attention (⇧⌘A).
-private struct NextAttentionSessionButton: View {
-    @ObservedObject var model: AppModel
+    @Published private(set) var snapshot = Snapshot()
+    var selectionUnreadKey: [String] = []
 
-    var body: some View {
-        Button("Next Session Needing Attention") {
-            model.selectNextAttentionSession()
-        }
-        .keyboardShortcut("a", modifiers: [.command, .shift])
-        .disabled(!model.hasAttentionSessions)
-    }
-}
+    var canReopenClosedSession: Bool { !snapshot.recentlyClosedSessionItems.isEmpty }
 
-private struct ReopenClosedSessionButton: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        Button("Reopen Closed Session") {
-            _ = model.reopenClosedSession()
-        }
-        .keyboardShortcut("t", modifiers: [.command, .shift])
-        .disabled(!model.canReopenClosedSession)
-
-        Menu("Recently Closed Sessions") {
-            ForEach(model.recentlyClosedSessionItems) { item in
-                Button("\(item.title) — \(item.projectName)") {
-                    _ = model.reopenClosedSession(id: item.id)
-                }
-            }
-        }
-        .disabled(!model.canReopenClosedSession)
-    }
-}
-
-/// Session ▸ Back (⌘[) / Forward (⌘]).
-private struct SessionHistoryMenuButtons: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        Button("Back") {
-            model.navigateSessionBack()
-        }
-        .keyboardShortcut("[", modifiers: .command)
-        .disabled(!model.canNavigateSessionBack)
-
-        Button("Forward") {
-            model.navigateSessionForward()
-        }
-        .keyboardShortcut("]", modifiers: .command)
-        .disabled(!model.canNavigateSessionForward)
+    func update(_ next: Snapshot) {
+        guard snapshot != next else { return }
+        snapshot = next
     }
 }
 
 struct SSHHostsSettingsMenu: View {
-    @ObservedObject var model: AppModel
+    let model: AppModel
+    @ObservedObject private var menu: WorkspaceMenuState
     var isSheetPresented: Bool = false
+
+    init(model: AppModel, isSheetPresented: Bool = false) {
+        self.model = model
+        self.menu = model.menuState
+        self.isSheetPresented = isSheetPresented
+    }
 
     var body: some View {
         Menu("SSH Hosts") {
             Toggle(
                 "Auto-Discover from ~/.ssh/config",
                 isOn: Binding(
-                    get: { model.autoDiscoverSSHHosts },
+                    get: { menu.snapshot.autoDiscoverSSHHosts },
                     set: { model.setAutoDiscoverSSHHosts($0) }
                 )
             )
@@ -135,9 +102,9 @@ struct SSHHostsSettingsMenu: View {
                 model.addManualSSHHostInteractive()
             }
             .disabled(isSheetPresented)
-            if !model.manualSSHHosts.isEmpty {
+            if !menu.snapshot.manualSSHHosts.isEmpty {
                 Divider()
-                ForEach(model.manualSSHHosts) { host in
+                ForEach(menu.snapshot.manualSSHHosts) { host in
                     Button("Remove \(host.displayName) (\(host.sshTarget ?? host.id))") {
                         model.removeManualSSHHost(id: host.id)
                     }
@@ -150,7 +117,8 @@ struct SSHHostsSettingsMenu: View {
 private struct WorkspaceCommands: Commands {
     @Environment(\.openWindow) private var openWindow
     let model: AppModel
-    @ObservedObject var input: WorkspaceInputController
+    let input: WorkspaceInputController
+    @ObservedObject var menu: WorkspaceMenuState
     @Binding var keepRunning: Bool
     @Binding var startsNotifications: Bool
     @Binding var showQuickReplyChips: Bool
@@ -160,7 +128,7 @@ private struct WorkspaceCommands: Commands {
     @Binding var showsProjects: Bool
 
     private var hasSheet: Bool {
-        input.hasWorkspaceSheet || showsQuickRepliesSettings
+        menu.snapshot.hasWorkspaceSheet || showsQuickRepliesSettings
     }
 
     var body: some Commands {
@@ -217,17 +185,45 @@ private struct WorkspaceCommands: Commands {
                 Button("New Terminal") { model.addTerminalToSelected() }
                     .keyboardShortcut("t", modifiers: [.command, .option])
                 Divider()
-                SessionReadStateButton(model: model)
+                Button(menu.snapshot.selectedSessionOffersMarkAsRead ? "Mark as Read" : "Mark as Unread") {
+                    model.toggleSelectedSessionRead()
+                }
+                .keyboardShortcut("u", modifiers: [.command, .shift])
                 Divider()
                 Button("End Session") { model.closeSelectedSession() }
                     .keyboardShortcut("w", modifiers: .command)
-                ReopenClosedSessionButton(model: model)
+                Button("Reopen Closed Session") {
+                    _ = model.reopenClosedSession()
+                }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+                .disabled(!menu.canReopenClosedSession)
+                Menu("Recently Closed Sessions") {
+                    ForEach(menu.snapshot.recentlyClosedSessionItems) { item in
+                        Button("\(item.title) — \(item.projectName)") {
+                            _ = model.reopenClosedSession(id: item.id)
+                        }
+                    }
+                }
+                .disabled(!menu.canReopenClosedSession)
                 Divider()
                 Button("Find Session…") { input.presentSessionFinder() }
                     .keyboardShortcut("k", modifiers: .command)
-                NextAttentionSessionButton(model: model)
+                Button("Next Session Needing Attention") {
+                    model.selectNextAttentionSession()
+                }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
+                .disabled(!menu.snapshot.hasAttentionSessions)
                 Divider()
-                SessionHistoryMenuButtons(model: model)
+                Button("Back") {
+                    model.navigateSessionBack()
+                }
+                .keyboardShortcut("[", modifiers: .command)
+                .disabled(!menu.snapshot.canNavigateSessionBack)
+                Button("Forward") {
+                    model.navigateSessionForward()
+                }
+                .keyboardShortcut("]", modifiers: .command)
+                .disabled(!menu.snapshot.canNavigateSessionForward)
                 Button("Next Session") { model.selectAdjacentSession(1) }
                     .keyboardShortcut("]", modifiers: [.command, .shift])
                 Button("Previous Session") { model.selectAdjacentSession(-1) }
@@ -341,6 +337,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor [weak self] in
                 self?.hintWork?.cancel()
                 self?.model.setNumberHint(.none)
+            }
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, (note.object as? NSMenu) === NSApp.mainMenu else { return }
+                self.model.syncMenuState(reloadSSHHosts: true, includeRuntimeAttention: true)
             }
         }
 
