@@ -453,18 +453,19 @@ The normal build and release do not resolve or bundle optional integrations.
 A client supports hosts released in the last 30 days, and a host supports clients
 released in the last 30 days. Clients are the separately built web and iOS apps; a
 host is the Mac app that runs their gateway. Release versions start with the release
-date (`YYYY.M.D`), so a build's version shows its age.
+date (`YYYY.M.D`), so a release's version shows its age.
 
 Inside that window, a client checks `RemoteProtocolInfo.capabilities` before it uses a
-newer route or field, and a host keeps accepting the requests older clients send.
+newer route, tolerates a missing newer field, and a host keeps accepting the requests
+older clients send.
 
 Outside it the pairing is unsupported, and nothing detects that: neither side sends
-its version, and no code reads `RemoteProtocolInfo.revision`. Each request fails on its
-own instead. The gateway answers an unknown route with 404 and a control message it
+its version, and nothing compares `RemoteProtocolInfo.revision`. Each request fails on
+its own instead. The gateway answers an unknown route with 404 and a control message it
 does not know with 400, and the client shows that request's error. A client that cannot
 decode the event stream keeps reconnecting without saying why. Both sides ignore JSON
-fields and events they do not know, so an older peer can also act on a request
-without the safeguard a newer field carried. Update the older side.
+fields they do not know, and clients ignore unknown stream events, so an older peer can
+also act on a request without the safeguard a newer field carried. Update the older side.
 
 A check for a capability or field, or a fallback for a peer without it, may be removed
 once the first release that shipped it is more than 30 days old. Count from the first
@@ -477,6 +478,8 @@ The window does not cover the following, and their checks stay:
 - What a session can do now: `RemoteSessionWorkflow.capabilities` (for example
   `session-bounce`, present only while a `bounce` command is loaded) and
   `legacyPromptFallback`.
+- A capability a current host can still withhold because its `SessionHost` does not
+  implement the feature.
 - A tracker still running an earlier host's code. Reload it after an upgrade.
 
 #### Configured remote session creation
