@@ -452,25 +452,26 @@ The normal build and release do not resolve or bundle optional integrations.
 
 A client supports hosts released in the last 30 days, and a host supports clients
 released in the last 30 days. Clients are the separately built web and iOS apps; a
-host is the Mac app that runs their gateway. Release versions start with the release
-date (`YYYY.M.D`), so a release's version shows its age.
+host is the integrated Mac app that runs their gateway. That app serves the web
+client, so the two differ only in a tab left open across an update.
 
-Inside that window, a client checks `RemoteProtocolInfo.capabilities` before it uses a
-newer route, tolerates a missing newer field, and a host keeps accepting the requests
-older clients send.
+Inside that window, a client checks `RemoteProtocolInfo.capabilities`, or handles the
+host's 404 or 501, before it relies on a newer route or request field, and tolerates a
+missing response field. A host keeps accepting the requests older clients send and
+keeps advertising a capability while a supported client checks it.
 
-Outside it the pairing is unsupported, and nothing detects that: neither side sends
-its version, and nothing compares `RemoteProtocolInfo.revision`. Each request fails on
-its own instead. The gateway answers an unknown route with 404 and a control message it
-does not know with 400, and the client shows that request's error. A client that cannot
-decode the event stream keeps reconnecting without saying why. Both sides ignore JSON
-fields they do not know, and clients ignore unknown stream events, so an older peer can
-also act on a request without the safeguard a newer field carried. Update the older side.
+Outside it the pairing is unsupported, and nothing detects that: no code compares
+release versions or `RemoteProtocolInfo.revision`. The gateway answers an unknown route
+with 404 and a control message it does not know with 400, and clients show most of
+those as the failed request's error. Neither client explains an event stream it cannot
+read: the iOS app keeps reconnecting, and the web client drops the event while still
+showing connected. Both sides ignore JSON fields they do not know, and clients ignore
+unknown stream events, so an older peer can also act on a request without the
+safeguard a newer field carried. Update the older side.
 
-A check for a capability or field, or a fallback for a peer without it, may be removed
-once the first release that shipped it is more than 30 days old. Count from the first
-host release that advertised it to remove a client's check, and from the first release
-of each client that sends it to remove a host's fallback.
+A gate or fallback that exists only for an older peer may be removed once the first
+host release that advertised the feature (for a client's check), or the first release
+of every client that sends it (for a host's fallback), is more than 30 days old.
 
 The window does not cover the following, and their checks stay:
 
@@ -478,8 +479,10 @@ The window does not cover the following, and their checks stay:
 - What a session can do now: `RemoteSessionWorkflow.capabilities` (for example
   `session-bounce`, present only while a `bounce` command is loaded) and
   `legacyPromptFallback`.
-- A capability a current host can still withhold because its `SessionHost` does not
-  implement the feature.
+- A capability or field a current peer can still leave out, such as `workflow` for a
+  session without a tracker.
+- Records a host stored from a client, such as a push registration, until that client
+  registers again.
 - A tracker still running an earlier host's code. Reload it after an upgrade.
 
 #### Configured remote session creation
