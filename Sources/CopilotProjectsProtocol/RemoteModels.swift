@@ -241,6 +241,11 @@ public struct RemoteProjectSnapshot: Codable, Equatable, Sendable {
 }
 
 public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
+    public static let trackerStoppedWarning = "Tracker stopped — run /restart"
+    public static let experimentalOffWarning = "Tracker off — run /experimental on then /restart"
+    public static let extensionsDisabledWarning =
+        "Tracker off — enable EXTENSIONS in settings.json then /restart"
+
     public let id: String
     public let title: String
     public let status: String
@@ -292,6 +297,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     public let runningStartedAtMilliseconds: Int64?
     /// Canonical pull request keys (`owner/repo#number`) linked to this session (`nil` when none).
     public let pullRequestKeys: [String]?
+    /// Short warning when a live local Copilot session's tracker is not running (`nil` when healthy).
+    public let trackerWarning: String?
 
     public init(
         id: String,
@@ -319,7 +326,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         memoryUsageBytes: Int64? = nil,
         startingPrompt: String? = nil,
         runningStartedAtMilliseconds: Int64? = nil,
-        pullRequestKeys: [String]? = nil
+        pullRequestKeys: [String]? = nil,
+        trackerWarning: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -347,6 +355,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.startingPrompt = startingPrompt
         self.runningStartedAtMilliseconds = runningStartedAtMilliseconds
         self.pullRequestKeys = pullRequestKeys
+        self.trackerWarning = trackerWarning
     }
 }
 

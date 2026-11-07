@@ -803,7 +803,8 @@ extension AppModel {
                             } ?? session.memoryUsageBytes,
                             startingPrompt: resolvedStartingPrompt,
                             runningStartedAtMilliseconds: runningStartedAt,
-                            pullRequestKeys: effectivePRKeys.isEmpty ? nil : effectivePRKeys
+                            pullRequestKeys: effectivePRKeys.isEmpty ? nil : effectivePRKeys,
+                            trackerWarning: session.trackerWarning
                         )
                     }
                 )

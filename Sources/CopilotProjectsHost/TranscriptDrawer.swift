@@ -69,6 +69,7 @@ struct TranscriptButton: View {
     var receipts: [RemoteOperationReceipt] = []
     var conversationEpoch: String? = nil
     var hasPendingQuestions: Bool = false
+    var trackerWarning: String? = nil
     var onOpen: () -> Void = {}
     var onClose: () -> Void = {}
     var onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult = { _ in
@@ -78,6 +79,14 @@ struct TranscriptButton: View {
 
     var body: some View {
         let currentWorkflow = workflowProvider?() ?? workflow
+        if let trackerWarning {
+            Text(trackerWarning)
+                .font(.caption)
+                .foregroundStyle(StudioStyle.secondaryText)
+                .lineLimit(1)
+                .help(trackerWarning)
+                .accessibilityIdentifier("session-tracker-warning")
+        }
         if controller.snapshot != nil || currentWorkflow != nil || hasPendingQuestions {
             if isOpen {
                 HStack(spacing: 4) {
@@ -537,6 +546,26 @@ struct TranscriptDrawer: View {
                                     || currentWorkflow?.budgetRequest != nil
                             )
                         }
+                        ForEach(currentWorkflow?.pendingMessages ?? []) { pending in
+                            TranscriptTurnCard(
+                                turn: TranscriptTurn(
+                                    id: pending.messageId,
+                                    startedAt: Date(
+                                        timeIntervalSince1970: Double(currentWorkflow?.observedAtMilliseconds ?? 0) / 1_000
+                                    ),
+                                    endedAt: nil,
+                                    kind: "foreground",
+                                    userContent: pending.text,
+                                    assistantMessages: [],
+                                    tools: [],
+                                    isAborted: false
+                                ),
+                                imageCapture: nil,
+                                isPending: true,
+                                pendingMode: pending.mode,
+                                onPreview: onPreview
+                            )
+                        }
                         Color.clear
                             .frame(height: 1)
                             .id("transcript-bottom")
@@ -594,6 +623,10 @@ struct TranscriptDrawer: View {
                 }
                 .onChange(of: turns) { _, _ in
                     syncLazyTurnCount()
+                    guard isAtBottom else { return }
+                    scrollToBottom(proxy)
+                }
+                .onChange(of: currentWorkflow?.pendingMessages) { _, _ in
                     guard isAtBottom else { return }
                     scrollToBottom(proxy)
                 }

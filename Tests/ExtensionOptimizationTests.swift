@@ -135,6 +135,20 @@ final class ExtensionOptimizationTests: XCTestCase {
         XCTAssertEqual(summary["errorCleared"] as? Bool, true)
     }
 
+    func testPendingMessagesPublishedFromRuntimeQueue() throws {
+        try requireNodeForJavaScriptTests()
+        let summary = try runExtensionHarness(
+            name: "pending-messages-queue",
+            prelude: Self.pendingMessagesRpcPrelude,
+            epilogue: Self.pendingMessagesRpcEpilogue
+        )
+        XCTAssertEqual(summary["hasCapability"] as? Bool, true)
+        XCTAssertEqual(summary["pendingIds"] as? [String], ["steering-1", "msg-q-1"])
+        XCTAssertEqual(summary["pendingModes"] as? [String], ["immediate", "enqueue"])
+        XCTAssertEqual(summary["pendingTexts"] as? [String], ["Steer me", "Queued item"])
+        XCTAssertEqual(summary["afterClear"] as? Int, 0)
+    }
+
     // MARK: - Harnesses
 
     /// Extracts the shipped transcript-budget function (plus the text helpers
@@ -1030,6 +1044,104 @@ extension ExtensionOptimizationTests {
             }
         }
         console.log(JSON.stringify({ sawError, errorCleared, scheduleListCalls }));
+        process.exit(0);
+
+        """#
+    }
+
+    fileprivate static let pendingMessagesRpcPrelude = #"""
+    const genericListeners = [];
+    let queueState = {
+        items: [],
+        steeringMessages: [],
+        inFlightSteeringCount: 0,
+    };
+    const fakeSession = {
+        sessionId: "11111111-1111-4111-8111-111111111111",
+        connection: {
+            async sendRequest(method) {
+                switch (method) {
+                case "status.get":
+                    return { protocolVersion: 3, version: "1.0.107" };
+                case "session.metadata.snapshot":
+                case "session.metadata.get":
+                    return {
+                        sessionId: "11111111-1111-4111-8111-111111111111",
+                        isRemote: false,
+                        sessionLimits: null,
+                    };
+                case "session.usage.getMetrics":
+                    return { totalNanoAiu: 0 };
+                case "session.commands.list":
+                    return { commands: [] };
+                case "session.queue.pendingItems":
+                    return queueState;
+                default:
+                    return {};
+                }
+            },
+        },
+        rpc: {
+            schedule: { list: async () => ({ entries: [] }) },
+            model: { list: async () => ({ list: [] }) },
+            permissions: { getAllowAll: async () => ({ enabled: false }) },
+            eventLog: {
+                registerInterest: async () => ({ success: true, handle: "h-1" }),
+                releaseInterest: async () => ({ success: true }),
+                getEvents: async () => ({ events: [], hasMore: false }),
+            },
+        },
+        on(typeOrFn) {
+            if (typeof typeOrFn === "function") genericListeners.push(typeOrFn);
+        },
+        async getEvents() { return []; },
+    };
+
+    """#
+
+    fileprivate static var pendingMessagesRpcEpilogue: String {
+        snapshotReaderHelpers + #"""
+
+        let initial = null;
+        for (let i = 0; i < 40; i += 1) {
+            await sleep(25);
+            try {
+                const snap = readSnapshot();
+                if ((snap.workflow?.capabilities || []).includes("pending-messages-v1")) {
+                    initial = snap;
+                    break;
+                }
+            } catch {}
+        }
+
+        queueState = {
+            items: [
+                { id: "q-1", messageId: "msg-q-1", kind: "message", displayText: "Queued item" },
+                { id: "q-cmd", kind: "command", displayText: "/compact" },
+            ],
+            steeringMessages: ["Already delivered", "Steer me"],
+            inFlightSteeringCount: 1,
+        };
+        for (const fn of genericListeners) {
+            fn({ id: "e-1", type: "pending_messages.modified", timestamp: new Date().toISOString(), data: {} });
+        }
+        await sleep(60);
+        const populated = readSnapshot().workflow?.pendingMessages || [];
+
+        queueState = { items: [], steeringMessages: ["Already delivered", "Steer me"], inFlightSteeringCount: 2 };
+        for (const fn of genericListeners) {
+            fn({ id: "e-2", type: "pending_messages.modified", timestamp: new Date().toISOString(), data: {} });
+        }
+        await sleep(60);
+        const cleared = readSnapshot().workflow?.pendingMessages || [];
+
+        console.log(JSON.stringify({
+            hasCapability: (initial?.workflow?.capabilities || []).includes("pending-messages-v1"),
+            pendingIds: populated.map((m) => m.messageId),
+            pendingModes: populated.map((m) => m.mode),
+            pendingTexts: populated.map((m) => m.text),
+            afterClear: cleared.length,
+        }));
         process.exit(0);
 
         """#
