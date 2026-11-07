@@ -29,6 +29,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
     struct Item: Equatable, Identifiable, Sendable {
         let identity: TranscriptImageIdentity
         let data: Data?
+        var contentHash: UInt64? = nil
         var id: TranscriptImageIdentity { identity }
     }
 
@@ -259,7 +260,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
             var inlineCache: (span: Span, attachments: [RawAttachment]?)?
             for (index, ref) in refs.enumerated() {
                 let cap = min(Self.maxBytesPerImage, remainingBudget)
-                let loaded: (data: Data, token: String)? = autoreleasepool {
+                let loaded: (data: Data, token: String, hash: UInt64)? = autoreleasepool {
                     if let id = ref.assetId,
                        let span = result.assetSpans[id],
                        let asset = Self.readValidatedAsset(
@@ -305,7 +306,8 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
                     ?? (Self.fnv1a64("\(occurrenceKey)\0missing".utf8) & ~(1 << 63))
                 items.append(Item(
                     identity: TranscriptImageIdentity(sessionId: sessionId, imageId: imageId, version: version),
-                    data: loaded?.data
+                    data: loaded?.data,
+                    contentHash: loaded?.hash
                 ))
             }
             if !items.isEmpty {
@@ -388,7 +390,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         payloadBytesBySpan: inout [Span: Int],
         decoder: JSONDecoder,
         maxBytes: Int
-    ) -> (data: Data, token: String)? {
+    ) -> (data: Data, token: String, hash: UInt64)? {
         let spanKey = id == nil ? Span(offset: span.offset, length: -1 - index) : span
         guard maxBytes > 0, (payloadBytesBySpan[spanKey] ?? 0) <= maxBytes else { return nil }
         func decodeLine() -> RawUserMessageEvent? {
@@ -430,15 +432,16 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         else { return nil }
         payloadBytesBySpan[spanKey] = data.count
         guard data.count <= maxBytes, Self.pixelSize(data) != nil else { return nil }
-        let token = "\(id ?? "inline"):\(span.offset):\(span.length):\(index):\(Self.fnv1a64(data))"
-        return (data, token)
+        let hash = Self.fnv1a64(data)
+        let token = "\(id ?? "inline"):\(span.offset):\(span.length):\(index):\(hash)"
+        return (data, token, hash)
     }
 
     private static func readValidatedImage(
         atPath path: String,
         maxModifiedAt: Date,
         maxBytes: Int
-    ) -> (data: Data, token: String)? {
+    ) -> (data: Data, token: String, hash: UInt64)? {
         guard !path.isEmpty, maxBytes > 0 else { return nil }
         let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         guard fd >= 0 else { return nil }
@@ -456,7 +459,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
               Self.pixelSize(buffer) != nil else { return nil }
         let token = Self.statToken(st)
         guard Self.fileStatToken(atPath: path) == token else { return nil }
-        return (buffer, token)
+        return (buffer, token, Self.fnv1a64(buffer))
     }
 
     private static func fileStatToken(atPath path: String) -> String {
@@ -467,6 +470,10 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
 
     private static func statToken(_ st: stat) -> String {
         "\(st.st_dev):\(st.st_ino):\(st.st_size):\(st.st_mtimespec.tv_sec):\(st.st_mtimespec.tv_nsec):\(st.st_ctimespec.tv_sec):\(st.st_ctimespec.tv_nsec)"
+    }
+
+    static func fnv1a64(_ data: Data) -> UInt64 {
+        data.withUnsafeBytes(fnv1a64)
     }
 
     private static func fnv1a64<S: Sequence>(_ bytes: S) -> UInt64 where S.Element == UInt8 {
@@ -701,5 +708,38 @@ enum TranscriptImageAssociation {
             return nil
         }
         return index
+    }
+
+    @MainActor private static var capturedImageHashes: [TranscriptImageIdentity: UInt64] = [:]
+
+    @MainActor static func timelineItems(
+        for turn: TranscriptTurn,
+        imageCapture: RemoteKittyImageCapture?,
+        promptAttachments: [TranscriptPromptAttachments.Item]
+    ) -> [TranscriptTurnTimelineItem] {
+        let items = turn.timelineItems(includingBlankAssistantMessages: true)
+        guard let imageCapture else { return items }
+        var remainingHashes = promptAttachments.compactMap {
+            $0.contentHash ?? $0.data.map(TranscriptPromptAttachments.fnv1a64)
+        }
+        guard !remainingHashes.isEmpty else { return items }
+        return items.filter { item in
+            guard case .image(let img) = item,
+                  img.afterAssistantMessageId == nil,
+                  let data = imageCapture.imageData(imageId: img.imageId, version: img.contentVersion)
+            else { return true }
+            let id = TranscriptImageIdentity(
+                sessionId: imageCapture.sessionId, imageId: img.imageId, version: img.contentVersion
+            )
+            let hash = capturedImageHashes[id] ?? {
+                if capturedImageHashes.count >= 64 { capturedImageHashes.removeAll(keepingCapacity: true) }
+                let computed = TranscriptPromptAttachments.fnv1a64(data)
+                capturedImageHashes[id] = computed
+                return computed
+            }()
+            guard let match = remainingHashes.firstIndex(of: hash) else { return true }
+            remainingHashes.remove(at: match)
+            return false
+        }
     }
 }

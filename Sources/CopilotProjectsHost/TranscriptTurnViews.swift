@@ -63,7 +63,13 @@ struct TranscriptTurnCard: View {
                 )
             }
 
-            ForEach(turn.timelineItems(includingBlankAssistantMessages: true)) { item in
+            ForEach(
+                TranscriptImageAssociation.timelineItems(
+                    for: turn,
+                    imageCapture: imageCapture,
+                    promptAttachments: promptAttachments
+                )
+            ) { item in
                 switch item {
                 case .assistant(let message):
                     VStack(alignment: .leading, spacing: 5) {

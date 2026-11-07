@@ -954,4 +954,113 @@ final class NativeTranscriptImageTests: XCTestCase {
         )
         XCTAssertEqual(afterExact5MReuse.items(forTurnId: "turn-4", sessionId: appSessionId, copilotSessionId: copilotSessionId).map(\.data), [exactFiveMiB])
     }
+
+    func testTimelineItemsHidesMatchingPromptAttachmentAndKeepsDifferentOrOtherTurnImages() throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prompt-dedupe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let copilotSessionId = UUID().uuidString.lowercased()
+        let sessionDir = tempRoot
+            .appendingPathComponent("session-state", isDirectory: true)
+            .appendingPathComponent(copilotSessionId, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+        let t1 = ISO8601DateFormatter().date(from: "2026-11-06T12:00:00Z")!
+        let t2 = ISO8601DateFormatter().date(from: "2026-11-06T12:05:00Z")!
+
+        let promptPNG = remoteKittyTestPNGBytes(width: 240, height: 120)
+        let differentPNG = remoteKittyTestPNGBytes(width: 180, height: 90)
+
+        let events = [
+            #"{"type":"user.message","id":"turn-1","timestamp":"2026-11-06T12:00:00Z","data":{"content":"Turn 1 with duplicate attachments","attachments":[{"type":"blob","mimeType":"image/png","data":"\#(promptPNG.base64EncodedString())"},{"type":"blob","mimeType":"image/png","data":"\#(promptPNG.base64EncodedString())"}]}}"#,
+            #"{"type":"user.message","id":"turn-2","timestamp":"2026-11-06T12:05:00Z","data":{"content":"Turn 2 without prompt attachment","attachments":[]}}"#,
+        ].joined(separator: "\n") + "\n"
+        try events.write(
+            to: sessionDir.appendingPathComponent("events.jsonl", isDirectory: false),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        var currentNow = t1.addingTimeInterval(0.2)
+        let appSessionId = "desktop-dedupe-session"
+        let capture = RemoteKittyImageCapture(
+            sessionId: appSessionId,
+            epoch: 7,
+            budget: RemoteKittyImageCaptureBudget(),
+            now: { currentNow }
+        )
+        func ingest(id: UInt32, data: Data, at time: Date) {
+            currentNow = time
+            capture.ingest(remoteKittyFrameBytes(
+                control: "a=T,f=100,t=d,U=1,i=\(id),q=2",
+                base64Payload: data.base64EncodedString()
+            )[...])
+        }
+
+        // Turn 1: two identical attachments hide at most two pre-reply echoes (ids 10 and 11),
+        // keeping a third pre-reply same-byte capture (id 12), a different image (id 13),
+        // and a post-reply tool capture of the same bytes (id 14).
+        ingest(id: 10, data: promptPNG, at: t1.addingTimeInterval(0.1))
+        ingest(id: 11, data: promptPNG, at: t1.addingTimeInterval(0.2))
+        ingest(id: 12, data: promptPNG, at: t1.addingTimeInterval(0.3))
+        ingest(id: 13, data: differentPNG, at: t1.addingTimeInterval(1.0))
+        ingest(id: 14, data: promptPNG, at: t1.addingTimeInterval(3.0))
+        // Turn 2: the same image from Turn 1 is displayed in a later turn (id 15).
+        ingest(id: 15, data: promptPNG, at: t2.addingTimeInterval(1.0))
+
+        let snapshot = TranscriptSnapshot(
+            schemaVersion: 4,
+            updatedAt: t2.addingTimeInterval(5),
+            copilotSessionId: copilotSessionId,
+            turns: [
+                TranscriptTurn(
+                    id: "turn-1",
+                    startedAt: t1,
+                    endedAt: t1.addingTimeInterval(5),
+                    kind: "foreground",
+                    userContent: "Turn 1",
+                    assistantMessages: [
+                        TranscriptAssistantMessage(id: "m1", timestamp: t1.addingTimeInterval(2.0), content: "Checked.")
+                    ],
+                    tools: [],
+                    isAborted: false
+                ),
+                TranscriptTurn(id: "turn-2", startedAt: t2, endedAt: t2.addingTimeInterval(5), kind: "foreground", userContent: "Turn 2", assistantMessages: [], tools: [], isAborted: false),
+            ]
+        )
+
+        let promptAttachments = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: snapshot,
+            copilotHome: tempRoot.path
+        )
+        let attached = TranscriptImageAssociation.attach(
+            images: capture.retainedImageMetadata(),
+            to: snapshot
+        )
+
+        // Two identical attachments in one message keep their existing promptAttachments behavior.
+        let turn1Attachments = promptAttachments.items(
+            forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: copilotSessionId
+        )
+        XCTAssertEqual(turn1Attachments.map(\.data), [promptPNG, promptPNG])
+
+        // Turn 1 timeline: matching prompt echoes (ids 10, 11) are hidden; exhausted 3rd copy (id 12),
+        // different image (id 13), and post-reply tool image (id 14) are kept.
+        let turn1Timeline = TranscriptImageAssociation.timelineItems(
+            for: attached.turns[0], imageCapture: capture, promptAttachments: turn1Attachments
+        )
+        XCTAssertEqual(turn1Timeline.map(\.id), ["image-12", "image-13", "assistant-m1", "image-14"])
+
+        // Turn 2 timeline: same image in another turn (id 15) is kept.
+        let turn2Attachments = promptAttachments.items(
+            forTurnId: "turn-2", sessionId: appSessionId, copilotSessionId: copilotSessionId
+        )
+        let turn2Timeline = TranscriptImageAssociation.timelineItems(
+            for: attached.turns[1], imageCapture: capture, promptAttachments: turn2Attachments
+        )
+        XCTAssertEqual(turn2Timeline.map(\.id), ["image-15"])
+    }
 }
