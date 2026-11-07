@@ -88,7 +88,7 @@ struct RootView: View {
         if let terminal = model.activeController?.terminalView,
            !terminal.isHidden, terminal.window === window {
             model.focusActiveTerminal()
-        } else {
+        } else if !(window.firstResponder is NSTextView) {
             window.makeFirstResponder(nil)
         }
     }
@@ -1000,6 +1000,7 @@ struct DetailView: View {
     @ObservedObject var model: AppModel
     let onPreview: (TranscriptImagePreviewItem) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage(TranscriptDrawer.fullWidthTranscriptKey) private var isFullWidth = false
 
     var body: some View {
         // One persistent AppKit container hosts every session's terminal across all
@@ -1015,7 +1016,7 @@ struct DetailView: View {
                 model: model,
                 activeSessionId: model.globalSelectedSessionId,
                 hostedIds: model.hostedTerminals.map(\.id),
-                allowsTerminalFocus: !model.isActiveTerminalCoveredByTranscriptDrawer()
+                showsTerminal: !model.isActiveTerminalCoveredByTranscriptDrawer(isFullWidth: isFullWidth)
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -1031,13 +1032,6 @@ struct DetailView: View {
                     onClose: {
                         model.closeTranscriptDrawer(sessionId: sessionId)
                         model.focusActiveTerminal()
-                    },
-                    onFullWidthChange: { isFullWidth in
-                        if isFullWidth {
-                            model.relinquishActiveTerminalFocusIfCovered(isFullWidth: true)
-                        } else if !(NSApp.keyWindow?.firstResponder is NSTextView) {
-                            model.focusActiveTerminal()
-                        }
                     },
                     workflow: model.sessionWorkflow(sessionId: sessionId),
                     operation: operation,

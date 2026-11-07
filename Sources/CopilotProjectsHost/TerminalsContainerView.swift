@@ -25,7 +25,7 @@ final class TerminalsContainerView: NSView {
     /// state a real affordance without a SwiftUI overlay punching through the NSView.
     private let cover = EmptyStateView()
     private var activeId: String?
-    private var allowsTerminalFocus = true
+    private var showsTerminal = true
     private var rendererLRU: [String] = []
     private var cursorMonitor: Any?
     private var installedPointingHand = false
@@ -72,18 +72,10 @@ final class TerminalsContainerView: NSView {
     ///   - onNew: backs the cover's button (new session, or new project).
     ///   - provider: supplies the terminal view for a newly-created session.
     func sync(order: [String], active: String?,
-              allowsTerminalFocus: Bool = true,
+              showsTerminal: Bool = true,
               emptyHint: (message: String, button: String),
               onNew: @escaping () -> Void,
               provider: (String) -> ProjectsTerminalView?) {
-        if allowsTerminalFocus, !self.allowsTerminalFocus,
-           activeId == active,
-           let active, let view = hosted[active], !view.isHidden,
-           let window = view.window,
-           window.firstResponder == nil || window.firstResponder === window {
-            window.makeFirstResponder(view)
-        }
-        self.allowsTerminalFocus = allowsTerminalFocus
         let live = Set(order)
         var inserted = Set<String>()
         // Add new sessions AND replace a session whose view INSTANCE changed: when a
@@ -113,11 +105,13 @@ final class TerminalsContainerView: NSView {
 
         let activeChanged = activeId != active
         activeId = active
-        let needsReveal = activeChanged || active.map(inserted.contains) == true
+        let sessionChanged = activeChanged || active.map(inserted.contains) == true
+        let needsReveal = showsTerminal && (sessionChanged || !self.showsTerminal)
+        self.showsTerminal = showsTerminal
         // Hide the outgoing and incoming panes before parking/activating renderers.
         // Keeping the NSView hierarchy stable avoids the blank-on-switch backing
         // layer bug while ensuring renderer teardown is never visible.
-        for (id, view) in hosted where id != active || needsReveal {
+        for (id, view) in hosted where id != active || !showsTerminal || needsReveal {
             view.isHidden = true
         }
 
@@ -140,12 +134,8 @@ final class TerminalsContainerView: NSView {
             cover.isHidden = true
             layer?.backgroundColor = view.nativeBackgroundColor.cgColor
             layoutVisible()
-            view.isHidden = false
-            if !allowsTerminalFocus, let window = view.window,
-               window.firstResponder is ProjectsTerminalView {
-                window.makeFirstResponder(nil)
-            }
-            if needsReveal { reveal(view) }
+            view.isHidden = !showsTerminal
+            if needsReveal { reveal(view, preserveEditorFocus: !sessionChanged) }
         } else {
             cover.isHidden = false
             layoutVisible()
@@ -173,11 +163,12 @@ final class TerminalsContainerView: NSView {
 
     /// Size, request the current frame, and focus the newly revealed terminal.
     /// The view also schedules one deferred redraw for drawable readiness.
-    private func reveal(_ view: ProjectsTerminalView) {
+    private func reveal(_ view: ProjectsTerminalView, preserveEditorFocus: Bool = false) {
         view.frame = bounds
         view.layoutSubtreeIfNeeded()
         view.forceRedraw()
-        if allowsTerminalFocus, let window, window.firstResponder !== view {
+        if let window, window.firstResponder !== view,
+           !(preserveEditorFocus && window.firstResponder is NSTextView) {
             window.makeFirstResponder(view)
         }
     }
@@ -195,7 +186,7 @@ final class TerminalsContainerView: NSView {
             NSEvent.removeMonitor(cursorMonitor)
             self.cursorMonitor = nil
         }
-        guard window != nil, let id = activeId, let view = hosted[id] else { return }
+        guard window != nil, showsTerminal, let id = activeId, let view = hosted[id] else { return }
         reveal(view)
     }
 
@@ -283,7 +274,7 @@ struct TerminalsContainer: NSViewRepresentable {
     let model: AppModel
     let activeSessionId: String?
     let hostedIds: [String]
-    var allowsTerminalFocus = true
+    var showsTerminal = true
 
     func makeNSView(context: Context) -> TerminalsContainerView {
         TerminalsContainerView(frame: .zero)
@@ -298,7 +289,7 @@ struct TerminalsContainer: NSViewRepresentable {
         nsView.sync(
             order: model.hostedTerminals.map(\.id),
             active: model.globalSelectedSessionId,
-            allowsTerminalFocus: allowsTerminalFocus,
+            showsTerminal: showsTerminal,
             emptyHint: model.emptyContextHint,
             onNew: { [weak model] in model?.newInActiveContext() },
             provider: { id in model.terminalView(for: id) }

@@ -94,7 +94,16 @@ final class AppModel: ObservableObject {
     var sessionPromptComposers: [String: DesktopSessionPromptComposer] = [:]
     var sessionWorkingModels: [String: TranscriptWorkingModel] = [:]
     var localQuestionOperations: [String: (operation: CLIOperationRequest, fingerprint: String?)] = [:]
-    private var selectedTranscriptController: TranscriptController?
+    private var selectedTranscriptController: TranscriptController? {
+        didSet {
+            selectedTranscriptCancellable = selectedTranscriptController?.$snapshot
+                .map { $0 != nil }
+                .removeDuplicates()
+                .dropFirst()
+                .sink { [weak self] _ in self?.objectWillChange.send() }
+        }
+    }
+    private var selectedTranscriptCancellable: AnyCancellable?
     private let stateRepository: StateRepository
     /// User settings this model reads. Tests inject a suite so a saved review
     /// prompt cannot leak into another test through `UserDefaults.standard`.
@@ -1144,7 +1153,6 @@ final class AppModel: ObservableObject {
             selectedTranscriptController = controller
             controller.start()
         }
-        relinquishActiveTerminalFocusIfCovered()
     }
 
     private func syncSessionNavigationHistory() {
@@ -1282,17 +1290,6 @@ final class AppModel: ObservableObject {
         return isFullWidth ?? defaults.bool(forKey: TranscriptDrawer.fullWidthTranscriptKey)
     }
 
-    func relinquishActiveTerminalFocusIfCovered(isFullWidth: Bool? = nil) {
-        guard isActiveTerminalCoveredByTranscriptDrawer(isFullWidth: isFullWidth),
-              let window = activeController?.terminalView.window
-                  ?? controllers.values.lazy.compactMap(\.terminalView.window).first
-                  ?? NSApp.keyWindow,
-              window.firstResponder is ProjectsTerminalView else {
-            return
-        }
-        window.makeFirstResponder(nil)
-    }
-
     private func applyDefaultViewIfNeeded(sessionId: String) {
         guard defaultViewAppliedSessions.insert(sessionId).inserted,
               defaults.string(forKey: TranscriptDrawer.defaultViewKey)
@@ -1306,12 +1303,21 @@ final class AppModel: ObservableObject {
         transcriptOpenSessions.remove(sessionId)
         sessionPromptComposers[sessionId]?.shouldFocusOnAppear = false
         sessionWorkingModels.removeValue(forKey: sessionId)?.update(nil)
+        if sessionId == globalSelectedSessionId,
+           let window = activeController?.terminalView.window,
+           window.firstResponder is NSTextView {
+            window.makeFirstResponder(nil)
+        }
     }
 
     func openTranscriptDrawer(sessionId: String) {
         defaultViewAppliedSessions.insert(sessionId)
         transcriptOpenSessions.insert(sessionId)
-        relinquishActiveTerminalFocusIfCovered()
+        if isActiveTerminalCoveredByTranscriptDrawer(),
+           let window = activeController?.terminalView.window,
+           window.firstResponder is ProjectsTerminalView {
+            window.makeFirstResponder(nil)
+        }
     }
 
     /// Message + button title shown by the container when nothing is selected.
@@ -3956,10 +3962,6 @@ final class AppModel: ObservableObject {
     /// Make the visible session's terminal the first responder on activation or
     /// an explicit focus request. Hidden/unattached targets are focused on reveal.
     func focusActiveTerminal() {
-        guard !isActiveTerminalCoveredByTranscriptDrawer() else {
-            relinquishActiveTerminalFocusIfCovered()
-            return
-        }
         guard let view = activeController?.terminalView, !view.isHidden,
               let window = view.window, window.firstResponder !== view else { return }
         if let sessionId = globalSelectedSessionId, isTranscriptDrawerOpen(sessionId: sessionId),
