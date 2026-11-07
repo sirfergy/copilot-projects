@@ -16768,7 +16768,6 @@ final class AppLogicTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        var fullWidthCallbackValues: [Bool] = []
         let drawer = TranscriptDrawer(
             turns: turns,
             imageCapture: nil,
@@ -16778,7 +16777,6 @@ final class AppLogicTests: XCTestCase {
             operationProvider: nil,
             promptComposer: nil,
             onClose: {},
-            onFullWidthChange: { fullWidthCallbackValues.append($0) },
             onAction: { _ in RemoteWorkflowActionResult(state: .rejected) },
             onPreview: { _ in }
         )
@@ -16798,9 +16796,14 @@ final class AppLogicTests: XCTestCase {
             window.contentView = nil
         }
 
-        for _ in 0..<8 {
-            host.layoutSubtreeIfNeeded()
-            try await Task.sleep(for: .milliseconds(25))
+        let scrollDeadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < scrollDeadline {
+            await pump(host)
+            if let sv = findTranscriptScrollView(in: host),
+               let dv = sv.documentView,
+               dv.bounds.height > 1_500 {
+                break
+            }
         }
 
         let scrollView = try XCTUnwrap(findTranscriptScrollView(in: host))
@@ -16815,17 +16818,24 @@ final class AppLogicTests: XCTestCase {
         }
 
         defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
-        try await Task.sleep(for: .milliseconds(30))
-        host.layoutSubtreeIfNeeded()
+        await pump(host)
         defaults.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
-        try await Task.sleep(for: .milliseconds(30))
-        host.layoutSubtreeIfNeeded()
-        XCTAssertEqual(fullWidthCallbackValues, [true, false])
+        await pump(host)
 
-        // Verify terminal focus isolation when full-width transcript drawer covers the terminal.
+        // Verify terminal hiding and focus when full-width transcript drawer covers the terminal.
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let envKeys = ["SHELL", "COPILOT_PROJECTS_STATE_DIR", "COPILOT_PROJECTS_DTACH"]
+        let previousEnv = Dictionary(uniqueKeysWithValues: envKeys.map { ($0, ProcessInfo.processInfo.environment[$0]) })
+        setenv("SHELL", "/bin/cat", 1)
+        setenv("COPILOT_PROJECTS_STATE_DIR", root.path, 1)
+        unsetenv("COPILOT_PROJECTS_DTACH")
+        defer {
+            for (key, value) in previousEnv {
+                if let value { setenv(key, value, 1) } else { unsetenv(key) }
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let session = Session(id: "s-focus", title: "focus", cwd: root.path)
         let project = Project(name: "P", cwd: root.path, sessions: [session], selectedSessionId: session.id)
@@ -16840,25 +16850,26 @@ final class AppLogicTests: XCTestCase {
         defer { model.detachAllClients() }
         let controller = try XCTUnwrap(model.controller(for: session.id))
         let terminal = controller.terminalView
-        let container = TerminalsContainerView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-        window.contentView = container
-        container.sync(
-            order: [session.id],
-            active: session.id,
-            allowsTerminalFocus: true,
-            emptyHint: ("", ""),
-            onNew: {},
-            provider: { model.terminalView(for: $0) }
+        model.refreshSelectedTranscriptController()
+        let detailHost = NSHostingView(
+            rootView: DetailView(model: model, onPreview: { _ in })
+                .defaultAppStorage(defaults)
         )
+        detailHost.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        window.contentView = detailHost
+        await pump(detailHost)
+        XCTAssertFalse(terminal.isHidden)
         XCTAssertTrue(window.firstResponder === terminal)
 
         // Without drawer content, an open flag does not treat the terminal as covered.
         defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
         model.openTranscriptDrawer(sessionId: session.id)
+        await pump(detailHost)
         XCTAssertFalse(model.isActiveTerminalCoveredByTranscriptDrawer())
+        XCTAssertFalse(terminal.isHidden)
         XCTAssertTrue(window.firstResponder === terminal)
 
-        // Once the session has drawer content (e.g. a pending question), full-width mode covers the terminal and relinquishes focus.
+        // Once the session has drawer content (e.g. a pending question), full-width mode hides the terminal and relinquishes focus.
         model.projects[0].sessions[0].agentActivity = AgentActivitySnapshot(
             schemaVersion: 1,
             updatedAt: ISO8601DateFormatter().string(from: Date()),
@@ -16881,61 +16892,96 @@ final class AppLogicTests: XCTestCase {
                 ),
             ]
         )
-        model.openTranscriptDrawer(sessionId: session.id)
+        await pump(detailHost)
         XCTAssertTrue(model.isActiveTerminalCoveredByTranscriptDrawer())
+        XCTAssertTrue(terminal.isHidden)
         XCTAssertFalse(window.firstResponder === terminal)
 
         model.focusActiveTerminal()
         XCTAssertFalse(window.firstResponder === terminal)
 
-        container.sync(
-            order: [session.id],
-            active: session.id,
-            allowsTerminalFocus: !model.isActiveTerminalCoveredByTranscriptDrawer(),
-            emptyHint: ("", ""),
-            onNew: {},
-            provider: { model.terminalView(for: $0) }
-        )
-        XCTAssertFalse(window.firstResponder === terminal)
+        // Toggling expand and collapse repeatedly through DetailView hides/unhides and focuses the terminal.
+        for _ in 0..<2 {
+            defaults.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+            await pump(detailHost)
+            XCTAssertFalse(terminal.isHidden)
+            XCTAssertTrue(window.firstResponder === terminal)
 
-        // Even if terminal somehow regains firstResponder, WorkspaceInputController swallows keyDown.
-        XCTAssertTrue(window.makeFirstResponder(terminal))
-        let input = WorkspaceInputController(model: model)
-        let keyEvent = try XCTUnwrap(
-            NSEvent.keyEvent(
-                with: .keyDown,
-                location: .zero,
-                modifierFlags: [],
-                timestamp: 0,
-                windowNumber: window.windowNumber,
-                context: nil,
-                characters: "a",
-                charactersIgnoringModifiers: "a",
-                isARepeat: false,
-                keyCode: 0
-            )
-        )
-        XCTAssertNil(input.handleKeyDown(keyEvent))
-        XCTAssertFalse(window.firstResponder === terminal)
+            defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+            await pump(detailHost)
+            XCTAssertTrue(terminal.isHidden)
+            XCTAssertFalse(window.firstResponder === terminal)
+        }
 
-        // Clearing the last drawer content while open restores terminal focus on sync.
+        // Clearing the last drawer content while open unhides and focuses the terminal via reveal.
         model.projects[0].sessions[0].agentActivity = nil
+        await pump(detailHost)
         XCTAssertFalse(model.isActiveTerminalCoveredByTranscriptDrawer())
-        container.sync(
-            order: [session.id],
-            active: session.id,
-            allowsTerminalFocus: !model.isActiveTerminalCoveredByTranscriptDrawer(),
-            emptyHint: ("", ""),
-            onNew: {},
-            provider: { model.terminalView(for: $0) }
-        )
+        XCTAssertFalse(terminal.isHidden)
         XCTAssertTrue(window.firstResponder === terminal)
 
-        // Closing the drawer also keeps terminal focus capability.
+        // Closing the drawer from full-width unhides and focuses the terminal.
+        model.projects[0].sessions[0].agentActivity = AgentActivitySnapshot(
+            schemaVersion: 1,
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            foregroundTurnActive: false,
+            scheduledTurnActive: false,
+            activeSubagents: [],
+            schedules: [],
+            idleGeneration: 0,
+            lastIdleAborted: false,
+            lastIdleTurnKind: nil,
+            error: nil,
+            trackedUserInputs: [
+                TrackedUserInput(
+                    requestId: "req-focus-2",
+                    question: "Continue?",
+                    choices: ["Yes"],
+                    allowFreeform: false,
+                    requestedAt: ISO8601DateFormatter().string(from: Date()),
+                    agentId: nil
+                ),
+            ]
+        )
+        await pump(detailHost)
+        XCTAssertTrue(terminal.isHidden)
         model.closeTranscriptDrawer(sessionId: session.id)
-        XCTAssertFalse(model.isActiveTerminalCoveredByTranscriptDrawer())
         model.focusActiveTerminal()
+        await pump(detailHost)
+        XCTAssertFalse(model.isActiveTerminalCoveredByTranscriptDrawer())
+        XCTAssertFalse(terminal.isHidden)
         XCTAssertTrue(window.firstResponder === terminal)
+
+        // With no agentActivity, opening in full-width keeps the terminal visible until a transcript snapshot loads.
+        model.projects[0].sessions[0].agentActivity = nil
+        model.openTranscriptDrawer(sessionId: session.id)
+        await pump(detailHost)
+        XCTAssertFalse(model.isActiveTerminalCoveredByTranscriptDrawer())
+        XCTAssertFalse(terminal.isHidden)
+
+        Paths.ensureStateDir()
+        let snapshotPath = URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: session.id))
+        defer { try? FileManager.default.removeItem(at: snapshotPath) }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(
+            TranscriptSnapshot(
+                schemaVersion: 3,
+                updatedAt: now,
+                copilotSessionId: "cid-focus",
+                turns: [turns[0]]
+            )
+        ).write(to: snapshotPath, options: .atomic)
+        model.activeTranscriptController?.reload()
+        let reloadDeadline = ContinuousClock.now + .seconds(5)
+        while model.activeTranscriptController?.snapshot == nil, ContinuousClock.now < reloadDeadline {
+            await pump(detailHost)
+        }
+        await pump(detailHost)
+        XCTAssertNotNil(model.activeTranscriptController?.snapshot)
+        XCTAssertTrue(model.isActiveTerminalCoveredByTranscriptDrawer())
+        XCTAssertTrue(terminal.isHidden)
+        XCTAssertFalse(window.firstResponder === terminal)
     }
 
     @MainActor
@@ -17037,14 +17083,19 @@ final class AppLogicTests: XCTestCase {
         window.contentView = container
         defer { window.contentView = nil }
         let s3Terminal = try XCTUnwrap(relaunched.controller(for: s3.id)?.terminalView)
-        container.sync(
-            order: [s3.id],
-            active: s3.id,
-            allowsTerminalFocus: true,
-            emptyHint: ("", ""),
-            onNew: {},
-            provider: { relaunched.terminalView(for: $0) }
-        )
+        let s1Terminal = try XCTUnwrap(relaunched.controller(for: s1.id)?.terminalView)
+        func syncContainer() {
+            container.sync(
+                order: [s1.id, s3.id],
+                active: relaunched.globalSelectedSessionId,
+                showsTerminal: !relaunched.isActiveTerminalCoveredByTranscriptDrawer(),
+                emptyHint: ("", ""),
+                onNew: {},
+                provider: { relaunched.terminalView(for: $0) }
+            )
+        }
+        syncContainer()
+        XCTAssertFalse(s3Terminal.isHidden)
         XCTAssertTrue(window.firstResponder === s3Terminal)
 
         relaunched.projects[0].sessions[0].agentActivity = AgentActivitySnapshot(
@@ -17070,15 +17121,25 @@ final class AppLogicTests: XCTestCase {
             ]
         )
         relaunched.selectSession(projectId: project.id, sessionId: s1.id)
+        syncContainer()
         XCTAssertTrue(relaunched.isTranscriptDrawerOpen(sessionId: s1.id))
         XCTAssertTrue(relaunched.isActiveTerminalCoveredByTranscriptDrawer())
+        XCTAssertTrue(s1Terminal.isHidden)
+        XCTAssertTrue(s3Terminal.isHidden)
         XCTAssertFalse(window.firstResponder === s3Terminal)
+        XCTAssertFalse(window.firstResponder === s1Terminal)
 
-        // Switching away and back to an already-open covered session also relinquishes terminal focus.
+        // Switching away to uncovered s3 reveals and focuses s3Terminal; switching back to covered s1 hides both.
         relaunched.selectSession(projectId: project.id, sessionId: s3.id)
-        XCTAssertTrue(window.makeFirstResponder(s3Terminal))
+        syncContainer()
+        XCTAssertFalse(s3Terminal.isHidden)
+        XCTAssertTrue(window.firstResponder === s3Terminal)
         relaunched.selectSession(projectId: project.id, sessionId: s1.id)
+        syncContainer()
+        XCTAssertTrue(s1Terminal.isHidden)
+        XCTAssertTrue(s3Terminal.isHidden)
         XCTAssertFalse(window.firstResponder === s3Terminal)
+        XCTAssertFalse(window.firstResponder === s1Terminal)
     }
 
     @MainActor

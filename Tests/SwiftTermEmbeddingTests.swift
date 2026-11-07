@@ -1064,4 +1064,187 @@ final class SwiftTermEmbeddingTests: XCTestCase {
         XCTAssertTrue(routed.isEmpty)
         XCTAssertNil(window.attachedSheet)
     }
+
+    @MainActor
+    func testHiddenFullWidthTerminalStopsDrawingCapturesKittyImagesAndRevealsCurrentContent() async throws {
+        let frame = NSRect(x: 0, y: 0, width: 800, height: 480)
+        let container = TerminalsContainerView(frame: frame)
+        let window = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = container
+        let view = makeRendererView(preference: nil)
+        view.suspendsRenderingWhenNotVisible = false
+        defer {
+            view.setRendererActive(false)
+            window.makeFirstResponder(nil)
+            window.contentView = nil
+        }
+
+        func drainMainQueue() async {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+        }
+
+        container.sync(
+            order: ["s1"],
+            active: "s1",
+            showsTerminal: true,
+            emptyHint: ("", ""),
+            onNew: {},
+            provider: { _ in view }
+        )
+        XCTAssertFalse(view.isHidden)
+        XCTAssertTrue(view.superview === container)
+        XCTAssertEqual(view.frame, frame)
+        XCTAssertTrue(window.firstResponder === view)
+        let initialDimensions = view.terminalDimensions
+
+        view.consumeProcessOutput(Array("initial-visible\r\n".utf8)[...])
+        view.forceRedraw()
+        await drainMainQueue()
+        await drainMainQueue()
+        XCTAssertTrue(view.renderOwner.inspection().rowTexts.contains { $0.contains("initial-visible") })
+
+        // Enter full-width transcript mode: hides active view without detaching or resizing it.
+        container.sync(
+            order: ["s1"],
+            active: "s1",
+            showsTerminal: false,
+            emptyHint: ("", ""),
+            onNew: {},
+            provider: { _ in view }
+        )
+        XCTAssertTrue(view.isHidden)
+        XCTAssertTrue(view.superview === container)
+        XCTAssertEqual(view.frame, frame)
+        XCTAssertEqual(view.terminalDimensions.cols, initialDimensions.cols)
+        XCTAssertEqual(view.terminalDimensions.rows, initialDimensions.rows)
+        XCTAssertFalse(window.firstResponder === view)
+
+        // Measure drawing while hidden across multiple PTY output batches + Kitty image frames.
+        view.resetDiagnostics()
+        let png = try makePNG()
+        let placeholder = "\u{10EEEE}\u{0305}\u{030D}"
+        let kittyBytes = RemoteKittyReplayEncoding.transmitOnlyFrames(imageId: 42, data: png)
+            + RemoteKittyReplayEncoding.placementFrame(
+                imageId: 42, placementId: 9, rows: 1, columns: 2,
+                x: nil, y: nil, z: nil)
+            + Array(("\u{1b}[38;2;0;0;42;58;2;0;0;9m" + placeholder + placeholder
+                     + "\u{1b}[0m hidden-marker\r\n").utf8)
+        view.consumeProcessOutput(kittyBytes[...])
+        for batch in 0..<5 {
+            view.consumeProcessOutput(Array("batch-\(batch)\r\n".utf8)[...])
+        }
+        await drainMainQueue()
+        await drainMainQueue()
+
+        let hiddenDiag = view.diagnostics
+        XCTAssertEqual(hiddenDiag.batches, 6)
+        XCTAssertEqual(hiddenDiag.ticks, 0)
+        XCTAssertEqual(hiddenDiag.frames, 0)
+        XCTAssertEqual(hiddenDiag.renders, 0)
+        XCTAssertFalse(view.renderOwner.inspection().rowTexts.contains { $0.contains("hidden-marker") })
+
+        // Kitty image capture and transcript association still work while the terminal is hidden.
+        let version = try XCTUnwrap(view.kittyImageCapture.currentVersion(for: 42, placementId: 9))
+        XCTAssertEqual(view.kittyImageCapture.imageData(imageId: 42, version: version), png)
+        let now = Date()
+        let snapshot = TranscriptSnapshot(
+            schemaVersion: 3,
+            updatedAt: now,
+            copilotSessionId: "cid-hidden",
+            turns: [
+                TranscriptTurn(
+                    id: "t-1",
+                    startedAt: now.addingTimeInterval(-5),
+                    endedAt: now,
+                    kind: "user",
+                    userContent: "Show image",
+                    assistantMessages: [
+                        TranscriptAssistantMessage(id: "m-1", timestamp: now, content: "Done")
+                    ],
+                    tools: [],
+                    isAborted: false
+                ),
+            ]
+        )
+        let associated = TranscriptImageAssociation.attach(
+            images: view.kittyImageCapture.retainedImageMetadata(),
+            to: snapshot
+        )
+        XCTAssertEqual(associated.turns.first?.images?.map(\.imageId), [42])
+        XCTAssertEqual(associated.turns.first?.images?.map(\.contentVersion), [version])
+
+        // Repeated expand/collapse toggles preserve terminal geometry, draw current content, and restore focus.
+        for iteration in 0..<3 {
+            container.sync(
+                order: ["s1"],
+                active: "s1",
+                showsTerminal: true,
+                emptyHint: ("", ""),
+                onNew: {},
+                provider: { _ in view }
+            )
+            XCTAssertFalse(view.isHidden, "iteration \(iteration)")
+            XCTAssertEqual(view.frame, frame)
+            XCTAssertEqual(view.terminalDimensions.cols, initialDimensions.cols)
+            XCTAssertEqual(view.terminalDimensions.rows, initialDimensions.rows)
+            XCTAssertTrue(window.firstResponder === view, "iteration \(iteration)")
+            XCTAssertTrue(view.renderOwner.inspection().rowTexts.contains { $0.contains("hidden-marker") })
+
+            let viewport = try XCTUnwrap(view.terminalContentSnapshot(region: .viewport))
+            let cells = RemoteKittyPlacementScanner.gridCells(
+                from: viewport.rows, relativeTo: viewport.capturedRange.lowerBound
+            )
+            XCTAssertEqual(cells.map(\.col), [0, 1])
+            XCTAssertTrue(cells.allSatisfy { $0.imageId == 42 && $0.placementId == 9 })
+
+            container.sync(
+                order: ["s1"],
+                active: "s1",
+                showsTerminal: false,
+                emptyHint: ("", ""),
+                onNew: {},
+                provider: { _ in view }
+            )
+            XCTAssertTrue(view.isHidden, "iteration \(iteration)")
+            XCTAssertEqual(view.frame, frame)
+            XCTAssertEqual(view.terminalDimensions.cols, initialDimensions.cols)
+            XCTAssertEqual(view.terminalDimensions.rows, initialDimensions.rows)
+            XCTAssertFalse(window.firstResponder === view, "iteration \(iteration)")
+        }
+
+        // Resizing the container while hidden still updates the active view's frame via layoutVisible().
+        let resizedFrame = NSRect(x: 0, y: 0, width: 920, height: 540)
+        container.setFrameSize(resizedFrame.size)
+        XCTAssertEqual(view.frame, resizedFrame)
+
+        // Switching sessions across full-width and terminal modes hides/reveals the right terminal.
+        let view2 = makeRendererView(preference: nil)
+        view2.suspendsRenderingWhenNotVisible = false
+        defer { view2.setRendererActive(false) }
+        container.sync(
+            order: ["s1", "s2"],
+            active: "s2",
+            showsTerminal: false,
+            emptyHint: ("", ""),
+            onNew: {},
+            provider: { $0 == "s1" ? view : view2 }
+        )
+        XCTAssertTrue(view.isHidden)
+        XCTAssertTrue(view2.isHidden)
+        XCTAssertFalse(window.firstResponder === view2)
+
+        container.sync(
+            order: ["s1", "s2"],
+            active: "s2",
+            showsTerminal: true,
+            emptyHint: ("", ""),
+            onNew: {},
+            provider: { $0 == "s1" ? view : view2 }
+        )
+        XCTAssertTrue(view.isHidden)
+        XCTAssertFalse(view2.isHidden)
+        XCTAssertTrue(window.firstResponder === view2)
+    }
 }

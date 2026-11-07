@@ -267,6 +267,64 @@ final class WorkspaceLayoutTests: XCTestCase {
                     XCTAssertTrue(window.firstResponder === model.activeController?.terminalView)
                 }
             }
+
+            // In full-width transcript mode, hiding Projects clears focus from the Projects table
+            // without focusing the hidden terminal, while preserving an active drawer editor.
+            let previousFullWidth = UserDefaults.standard.object(forKey: TranscriptDrawer.fullWidthTranscriptKey)
+            defer {
+                if let previousFullWidth {
+                    UserDefaults.standard.set(previousFullWidth, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: TranscriptDrawer.fullWidthTranscriptKey)
+                }
+            }
+            UserDefaults.standard.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+            let populatedProject = try XCTUnwrap(model.projects.first { !$0.sessions.isEmpty })
+            model.selectProject(populatedProject.id)
+            let sid = try XCTUnwrap(model.globalSelectedSessionId)
+            let now = Date()
+            model.projects[0].sessions[0].agentActivity = AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: ISO8601DateFormatter().string(from: now),
+                foregroundTurnActive: false,
+                scheduledTurnActive: false,
+                activeSubagents: [],
+                schedules: [],
+                idleGeneration: 1,
+                lastIdleAborted: false,
+                lastIdleTurnKind: "user",
+                error: nil,
+                conversationEpoch: "epoch-1",
+                workflow: RemoteSessionWorkflow(
+                    observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1000),
+                    capabilities: ["session-send"],
+                    sendReady: true
+                )
+            )
+            model.openTranscriptDrawer(sessionId: sid)
+            navigation.showsProjects = true
+            try await settle(window)
+            let terminal = try XCTUnwrap(model.activeController?.terminalView)
+            XCTAssertTrue(terminal.isHidden)
+            let table = try XCTUnwrap(projectTable(in: try XCTUnwrap(window.contentView)))
+            XCTAssertTrue(window.makeFirstResponder(table))
+            navigation.showsProjects = false
+            try await settle(window)
+            XCTAssertFalse((window.firstResponder as? NSView)?.isDescendant(of: table) ?? false)
+            XCTAssertFalse(window.firstResponder === terminal)
+
+            navigation.showsProjects = true
+            try await settle(window)
+            @MainActor func findTextFields(in view: NSView) -> [NSTextField] {
+                ((view as? NSTextField).map { [$0] } ?? []) + view.subviews.flatMap(findTextFields(in:))
+            }
+            let promptField = try XCTUnwrap(findTextFields(in: try XCTUnwrap(window.contentView)).first { $0.isEditable })
+            XCTAssertTrue(window.makeFirstResponder(promptField))
+            XCTAssertNotNil(promptField.currentEditor())
+            navigation.showsProjects = false
+            try await settle(window)
+            XCTAssertNotNil(promptField.currentEditor())
+            XCTAssertFalse(window.firstResponder === terminal)
         }
     }
 

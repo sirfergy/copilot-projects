@@ -262,13 +262,6 @@ final class WorkspaceInputController: ObservableObject {
         }
         clearNumberHint()
         if let controller = model.activeController {
-            if model.isActiveTerminalCoveredByTranscriptDrawer() {
-                if event.window?.firstResponder is ProjectsTerminalView {
-                    event.window?.makeFirstResponder(nil)
-                    return nil
-                }
-                return event
-            }
             if event.window?.firstResponder === controller.terminalView {
                 controller.terminalView.onUserInteraction?()
             }

@@ -134,7 +134,6 @@ struct TranscriptOverlay: View {
     let imageCapture: () -> RemoteKittyImageCapture?
     let isOpen: Bool
     let onClose: () -> Void
-    var onFullWidthChange: ((Bool) -> Void)? = nil
     let workflow: RemoteSessionWorkflow?
     let operation: AgentOperationProjection
     var pendingUserInputs: [RemoteUserInputRequest] = []
@@ -168,7 +167,6 @@ struct TranscriptOverlay: View {
                                 workingModel: resolvedWorkingModel,
                                 promptComposer: promptComposer,
                                 onClose: onClose,
-                                onFullWidthChange: onFullWidthChange,
                                 onAction: onAction,
                                 onAnswerUserInput: onAnswerUserInput,
                                 onAnswerElicitation: onAnswerElicitation,
@@ -191,7 +189,6 @@ struct TranscriptOverlay: View {
                                 workingModel: resolvedWorkingModel,
                                 promptComposer: promptComposer,
                                 onClose: onClose,
-                                onFullWidthChange: onFullWidthChange,
                                 onAction: onAction,
                                 onAnswerUserInput: onAnswerUserInput,
                                 onAnswerElicitation: onAnswerElicitation,
@@ -270,7 +267,6 @@ private struct ImageAssociatedTranscriptDrawer: View {
     let workingModel: TranscriptWorkingModel?
     let promptComposer: DesktopSessionPromptComposer?
     let onClose: () -> Void
-    let onFullWidthChange: ((Bool) -> Void)?
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
     let onAnswerUserInput: (@MainActor (RemoteUserInputAnswer) async -> RemoteWorkflowActionResult)?
     let onAnswerElicitation: (@MainActor (RemoteElicitationAnswer) async -> RemoteWorkflowActionResult)?
@@ -293,7 +289,6 @@ private struct ImageAssociatedTranscriptDrawer: View {
             workingModel: workingModel,
             promptComposer: promptComposer,
             onClose: onClose,
-            onFullWidthChange: onFullWidthChange,
             onAction: onAction,
             onAnswerUserInput: onAnswerUserInput,
             onAnswerElicitation: onAnswerElicitation,
@@ -325,7 +320,6 @@ struct TranscriptDrawer: View {
     var workingModel: TranscriptWorkingModel? = nil
     let promptComposer: DesktopSessionPromptComposer?
     let onClose: () -> Void
-    var onFullWidthChange: ((Bool) -> Void)? = nil
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
     var onAnswerUserInput: (@MainActor (RemoteUserInputAnswer) async -> RemoteWorkflowActionResult)? = nil
     var onAnswerElicitation: (@MainActor (RemoteElicitationAnswer) async -> RemoteWorkflowActionResult)? = nil
@@ -592,20 +586,11 @@ struct TranscriptDrawer: View {
                     syncLazyTurnCount()
                     isAtBottom = true
                     scrollToBottom(proxy)
-                    if isFullWidth {
-                        onFullWidthChange?(true)
-                    }
                 }
-                .onDisappear {
-                    if isFullWidth {
-                        onFullWidthChange?(false)
-                    }
-                }
-                .onChange(of: isFullWidth) { _, newValue in
+                .onChange(of: isFullWidth) { _, _ in
                     if isAtBottom {
                         scrollToBottom(proxy)
                     }
-                    onFullWidthChange?(newValue)
                 }
                 .onChange(of: turns) { _, _ in
                     syncLazyTurnCount()
