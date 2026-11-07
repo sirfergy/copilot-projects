@@ -575,6 +575,8 @@ The public `CopilotProjectsHost`, `CopilotProjectsProtocol`, and
 `CopilotProjectsUI` package products support separately built integrations without
 making the desktop depend on a private repository. The standalone app reports
 remote commands as unavailable and leaves existing remote settings unchanged.
+Hosts and clients support each other's releases from the last 30 days; see
+[Supported versions](docs/usage.md#supported-versions).
 
 `SessionHost.createProject` creates an empty, named group without starting a shell
 or requiring Copilot, `dtach`, or a repository folder. Integrations retain the

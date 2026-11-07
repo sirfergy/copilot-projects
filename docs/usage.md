@@ -215,6 +215,7 @@ observation; raw terminal input is independent of these composer checks.
 Older trackers on a newer host remain blocked even with a fresh heartbeat:
 restart/reload the tracker to activate the updated workflow metadata, or use Terminal.
 Deploy the Mac host before clients using the new protocol.
+See [Supported versions](#supported-versions) for the window and when a gate may be removed.
 
 An optional offline integration test exercises the installed CLI/SDK pair against
 a loopback model fixture, without real model requests:
@@ -446,6 +447,37 @@ public and usable by existing clients. They do not require a private dependency.
 An integrating app can reuse `scripts/build-app.sh` with `--binary`, `--resources`,
 and `--output`; its executable must include its additional assets in `check-assets`.
 The normal build and release do not resolve or bundle optional integrations.
+
+#### Supported versions
+
+A client supports hosts released in the last 30 days, and a host supports clients
+released in the last 30 days. Clients are the separately built web and iOS apps; a
+host is the Mac app that runs their gateway. Release versions start with the release
+date (`YYYY.M.D`), so a build's version shows its age.
+
+Inside that window, a client checks `RemoteProtocolInfo.capabilities` before it uses a
+newer route or field, and a host keeps accepting the requests older clients send.
+
+Outside it the pairing is unsupported, and nothing detects that: neither side sends
+its version, and no code reads `RemoteProtocolInfo.revision`. Each request fails on its
+own instead. The gateway answers an unknown route with 404 and a control message it
+does not know with 400, and the client shows that request's error. A client that cannot
+decode the event stream keeps reconnecting without saying why. Both sides ignore JSON
+fields and events they do not know, so an older peer can also act on a request
+without the safeguard a newer field carried. Update the older side.
+
+A check for a capability or field, or a fallback for a peer without it, may be removed
+once the first release that shipped it is more than 30 days old. Count from the first
+host release that advertised it to remove a client's check, and from the first release
+of each client that sends it to remove a host's fallback.
+
+The window does not cover the following, and their checks stay:
+
+- Copilot CLI versions, including the tracker's fallbacks for older CLI runtimes.
+- What a session can do now: `RemoteSessionWorkflow.capabilities` (for example
+  `session-bounce`, present only while a `bounce` command is loaded) and
+  `legacyPromptFallback`.
+- A tracker still running an earlier host's code. Reload it after an upgrade.
 
 #### Configured remote session creation
 
