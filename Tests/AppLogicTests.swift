@@ -18313,9 +18313,14 @@ final class AppLogicTests: XCTestCase {
         window.isReleasedWhenClosed = false
         // Seed a stale captured workflow while workflowProvider returns fresh heartbeat state (simulating heartbeat-only projectStorage refresh without re-rendering WorkspaceHeading).
         let host = NSHostingView(rootView: makeControls(captured: staleCapturedWorkflow))
+        host.sizingOptions = []
+        host.frame = NSRect(x: 0, y: 0, width: 92, height: 28)
         window.contentView = host
         window.orderFrontRegardless()
-        defer { window.close() }
+        defer {
+            window.contentView = nil
+            window.close()
+        }
         for _ in 0..<6 {
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
             host.layoutSubtreeIfNeeded()
@@ -18413,9 +18418,14 @@ final class AppLogicTests: XCTestCase {
         )
         window.isReleasedWhenClosed = false
         let host = NSHostingView(rootView: makeControls())
+        host.sizingOptions = []
+        host.frame = NSRect(x: 0, y: 0, width: 92, height: 28)
         window.contentView = host
         window.orderFrontRegardless()
-        defer { window.close() }
+        defer {
+            window.contentView = nil
+            window.close()
+        }
         for _ in 0..<6 {
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
             host.layoutSubtreeIfNeeded()

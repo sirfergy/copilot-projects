@@ -96,7 +96,7 @@ struct TranscriptButton: View {
                         Image(systemName: isFullWidth ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                             .frame(width: 28, height: 28)
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.plain)
                     .hoverHighlight()
                     .help(isFullWidth ? "Restore side drawer" : "Expand to full terminal area")
                     .accessibilityLabel(isFullWidth ? "Restore side drawer" : "Expand to full terminal area")
@@ -105,7 +105,7 @@ struct TranscriptButton: View {
                         Image(systemName: "xmark")
                             .frame(width: 28, height: 28)
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.plain)
                     .hoverHighlight()
                     .help("Hide session details")
                     .accessibilityLabel("Hide session details")
@@ -225,7 +225,7 @@ private struct TranscriptUsageButton: View {
                 .foregroundStyle(hasBudgetRequest ? Color.orange : StudioStyle.secondaryText)
                 .frame(width: 28, height: 28)
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.plain)
         .hoverHighlight()
         .help(accessibilityText)
         .accessibilityLabel(accessibilityText)
