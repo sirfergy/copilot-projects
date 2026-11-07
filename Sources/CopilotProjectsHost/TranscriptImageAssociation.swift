@@ -30,6 +30,8 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         let identity: TranscriptImageIdentity
         let data: Data?
         var contentHash: UInt64? = nil
+        var pixelSize: CGSize? = nil
+        var grayscaleGrid: [UInt8]? = nil
         var id: TranscriptImageIdentity { identity }
     }
 
@@ -260,7 +262,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
             var inlineCache: (span: Span, attachments: [RawAttachment]?)?
             for (index, ref) in refs.enumerated() {
                 let cap = min(Self.maxBytesPerImage, remainingBudget)
-                let loaded: (data: Data, token: String, hash: UInt64)? = autoreleasepool {
+                let loaded: (data: Data, token: String, hash: UInt64, size: CGSize)? = autoreleasepool {
                     if let id = ref.assetId,
                        let span = result.assetSpans[id],
                        let asset = Self.readValidatedAsset(
@@ -304,10 +306,11 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
                 let imageId = (UInt32(truncatingIfNeeded: Self.fnv1a64(occurrenceKey.utf8)) & 0x00FF_FFFF) | (1 << 24)
                 let version = loaded.map { Self.fnv1a64("\(occurrenceKey)\0\($0.token)".utf8) | (1 << 63) }
                     ?? (Self.fnv1a64("\(occurrenceKey)\0missing".utf8) & ~(1 << 63))
+                let isTranscoded = loaded.map { $0.data.starts(with: [0xFF, 0xD8]) || max($0.size.width, $0.size.height) > 896 } == true
                 items.append(Item(
                     identity: TranscriptImageIdentity(sessionId: sessionId, imageId: imageId, version: version),
-                    data: loaded?.data,
-                    contentHash: loaded?.hash
+                    data: loaded?.data, contentHash: loaded?.hash, pixelSize: loaded?.size,
+                    grayscaleGrid: isTranscoded ? loaded.flatMap { Self.grayscaleGrid($0.data) } : nil
                 ))
             }
             if !items.isEmpty {
@@ -390,7 +393,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         payloadBytesBySpan: inout [Span: Int],
         decoder: JSONDecoder,
         maxBytes: Int
-    ) -> (data: Data, token: String, hash: UInt64)? {
+    ) -> (data: Data, token: String, hash: UInt64, size: CGSize)? {
         let spanKey = id == nil ? Span(offset: span.offset, length: -1 - index) : span
         guard maxBytes > 0, (payloadBytesBySpan[spanKey] ?? 0) <= maxBytes else { return nil }
         func decodeLine() -> RawUserMessageEvent? {
@@ -431,17 +434,17 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
               !data.isEmpty
         else { return nil }
         payloadBytesBySpan[spanKey] = data.count
-        guard data.count <= maxBytes, Self.pixelSize(data) != nil else { return nil }
+        guard data.count <= maxBytes, let size = Self.pixelSize(data) else { return nil }
         let hash = Self.fnv1a64(data)
         let token = "\(id ?? "inline"):\(span.offset):\(span.length):\(index):\(hash)"
-        return (data, token, hash)
+        return (data, token, hash, size)
     }
 
     private static func readValidatedImage(
         atPath path: String,
         maxModifiedAt: Date,
         maxBytes: Int
-    ) -> (data: Data, token: String, hash: UInt64)? {
+    ) -> (data: Data, token: String, hash: UInt64, size: CGSize)? {
         guard !path.isEmpty, maxBytes > 0 else { return nil }
         let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         guard fd >= 0 else { return nil }
@@ -456,10 +459,29 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         guard modifiedTime < maxModifiedAt.timeIntervalSince1970 + 0.001,
               let buffer = try? FileHandle(fileDescriptor: fd, closeOnDealloc: false).readToEnd(),
               buffer.count == Int(st.st_size),
-              Self.pixelSize(buffer) != nil else { return nil }
+              let size = Self.pixelSize(buffer) else { return nil }
         let token = Self.statToken(st)
         guard Self.fileStatToken(atPath: path) == token else { return nil }
-        return (buffer, token, Self.fnv1a64(buffer))
+        return (buffer, token, Self.fnv1a64(buffer), size)
+    }
+
+    static func grayscaleGrid(_ data: Data) -> [UInt8]? {
+        let side = 64
+        var buf = [UInt8](repeating: 0, count: side * side)
+        guard let src = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 896,
+                  kCGImageSourceShouldCacheImmediately: true,
+              ] as CFDictionary),
+              let ctx = CGContext(
+                  data: &buf, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side,
+                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+              ) else { return nil }
+        ctx.interpolationQuality = .medium
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: side, height: side))
+        return buf
     }
 
     private static func fileStatToken(atPath path: String) -> String {
@@ -710,7 +732,7 @@ enum TranscriptImageAssociation {
         return index
     }
 
-    @MainActor private static var capturedImageHashes: [TranscriptImageIdentity: UInt64] = [:]
+    @MainActor private static var capturedImageHashes: [TranscriptImageIdentity: (hash: UInt64, grid: [UInt8]?)] = [:]
 
     @MainActor static func timelineItems(
         for turn: TranscriptTurn,
@@ -718,27 +740,44 @@ enum TranscriptImageAssociation {
         promptAttachments: [TranscriptPromptAttachments.Item]
     ) -> [TranscriptTurnTimelineItem] {
         let items = turn.timelineItems(includingBlankAssistantMessages: true)
-        guard let imageCapture else { return items }
-        var remainingHashes = promptAttachments.compactMap {
-            $0.contentHash ?? $0.data.map(TranscriptPromptAttachments.fnv1a64)
-        }
-        guard !remainingHashes.isEmpty else { return items }
+        var remaining = promptAttachments.filter { $0.data != nil }
+        guard let imageCapture, !remaining.isEmpty else { return items }
         return items.filter { item in
-            guard case .image(let img) = item,
-                  img.afterAssistantMessageId == nil,
+            guard case .image(let img) = item, img.afterAssistantMessageId == nil,
                   let data = imageCapture.imageData(imageId: img.imageId, version: img.contentVersion)
             else { return true }
             let id = TranscriptImageIdentity(
                 sessionId: imageCapture.sessionId, imageId: img.imageId, version: img.contentVersion
             )
-            let hash = capturedImageHashes[id] ?? {
+            var sig = capturedImageHashes[id] ?? {
+                capturedImageHashes = capturedImageHashes.filter { $0.key.sessionId != id.sessionId || $0.key.imageId != id.imageId }
                 if capturedImageHashes.count >= 64 { capturedImageHashes.removeAll(keepingCapacity: true) }
-                let computed = TranscriptPromptAttachments.fnv1a64(data)
-                capturedImageHashes[id] = computed
-                return computed
+                let entry = (hash: TranscriptPromptAttachments.fnv1a64(data), grid: nil as [UInt8]?)
+                capturedImageHashes[id] = entry
+                return entry
             }()
-            guard let match = remainingHashes.firstIndex(of: hash) else { return true }
-            remainingHashes.remove(at: match)
+            if let i = remaining.firstIndex(where: { ($0.contentHash ?? $0.data.map(TranscriptPromptAttachments.fnv1a64)) == sig.hash }) {
+                remaining.remove(at: i)
+                return false
+            }
+            guard let kw = img.pixelWidth, let kh = img.pixelHeight, kw > 0, kh > 0,
+                  let i = remaining.firstIndex(where: { att in
+                      guard let d = att.data, let sz = att.pixelSize ?? TranscriptPromptAttachments.pixelSize(d) else { return false }
+                      let pw = Int(sz.width), ph = Int(sz.height)
+                      let sized = (d.starts(with: [0xFF, 0xD8]) && pw <= 896 && ph <= 896 && kw == pw && kh == ph)
+                          || ((pw > 896 || ph > 896) && (894...896).contains(max(kw, kh)) && kw <= pw && kh <= ph
+                              && abs(pw * kh - ph * kw) <= max(pw, ph))
+                      guard sized, let ag = att.grayscaleGrid ?? TranscriptPromptAttachments.grayscaleGrid(d) else { return false }
+                      if sig.grid == nil {
+                          sig.grid = TranscriptPromptAttachments.grayscaleGrid(data)
+                          capturedImageHashes[id] = sig
+                      }
+                      guard let cg = sig.grid, cg.count == ag.count else { return false }
+                      let diffs = zip(ag, cg).map { abs(Int($0) - Int($1)) }
+                      return diffs.reduce(0, +) <= ag.count * 3 / 2 && (diffs.max() ?? 0) <= 16
+                  })
+            else { return true }
+            remaining.remove(at: i)
             return false
         }
     }
