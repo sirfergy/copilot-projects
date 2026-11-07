@@ -1281,6 +1281,13 @@ class CiWorkflowTests(unittest.TestCase):
             workflow,
         )
 
+    def test_release_keeps_one_waiting_run_and_never_cancels_a_running_release(self):
+        # No `queue: max`: a later run replaces the waiting run instead of queueing behind it.
+        self.assertIn(
+            "concurrency:\n  group: release\n  cancel-in-progress: false\n\njobs:\n",
+            WORKFLOW.read_text(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
