@@ -1313,6 +1313,11 @@ final class AppModel: ObservableObject {
     func openTranscriptDrawer(sessionId: String) {
         defaultViewAppliedSessions.insert(sessionId)
         transcriptOpenSessions.insert(sessionId)
+        if isActiveTerminalCoveredByTranscriptDrawer(),
+           let window = activeController?.terminalView.window,
+           window.firstResponder is ProjectsTerminalView {
+            window.makeFirstResponder(nil)
+        }
     }
 
     /// Message + button title shown by the container when nothing is selected.
