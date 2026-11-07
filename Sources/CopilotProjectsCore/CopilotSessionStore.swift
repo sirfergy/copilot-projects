@@ -1,3 +1,4 @@
+import CopilotProjectsProtocol
 import Darwin
 import Foundation
 
@@ -31,6 +32,21 @@ public struct CopilotSessionStore: Sendable {
 
     public var databasePath: String {
         (copilotHome as NSString).appendingPathComponent("session-store.db")
+    }
+
+    public func trackerWarningMessage() -> String {
+        let url = URL(fileURLWithPath: (copilotHome as NSString).appendingPathComponent("settings.json"))
+        guard let data = try? Data(contentsOf: url),
+              let root = (try? JSONSerialization.jsonObject(with: data, options: [.json5Allowed])) as? [String: Any]
+        else { return RemoteSessionSnapshot.experimentalOffWarning }
+        if let ext = (root["enabledFeatureFlags"] as? [String: Any])?["EXTENSIONS"] as? Bool {
+            return ext
+                ? RemoteSessionSnapshot.trackerStoppedWarning
+                : RemoteSessionSnapshot.extensionsDisabledWarning
+        }
+        return (root["experimental"] as? Bool == true)
+            ? RemoteSessionSnapshot.trackerStoppedWarning
+            : RemoteSessionSnapshot.experimentalOffWarning
     }
 
     /// A session id the CLI writes and `copilot --resume` accepts: a strict UUID.
