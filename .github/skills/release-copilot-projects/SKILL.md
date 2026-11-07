@@ -51,6 +51,8 @@ dispatch, use today's Pacific date: the next `N` after today's latest release, o
 next day). The workflow rejects any other version and names the expected one.
 Never use a future date; it blocks automatic releases until that day.
 Never overwrite an existing tag or release asset.
+Dispatch only when no Release run is running or waiting: a dispatch replaces the
+waiting run, and is rejected if the running release publishes that version first.
 
 ### 3. Validate
 
