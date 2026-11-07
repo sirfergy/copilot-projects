@@ -8954,6 +8954,39 @@ final class AppLogicTests: XCTestCase {
         XCTAssertGreaterThan(intrinsic.width, 0)
         XCTAssertLessThan(intrinsic.width, 1_000)
 
+        let longCode = """
+            let endpoint = "https://api.example.invalid/v1/workspaces/65656978-e32a-431f-9253-bc781012803d/artifacts"
+
+            let digest = "sha256:e449292e54992e2cbb7c771d8011b49e48b5a5d6e449292e54992e2cbb7c771d8011b49e48b5a5d6"
+        """
+        let codeHost = NSHostingView(
+            rootView: MarkdownText(text: "```swift\n\(longCode)\n```")
+                .frame(width: 320, alignment: .leading)
+        )
+        codeHost.frame = NSRect(x: 0, y: 0, width: 320, height: 320)
+        codeHost.layoutSubtreeIfNeeded()
+        let codeView = try XCTUnwrap(findTextViews(in: codeHost).first)
+        XCTAssertTrue(codeView.wrapsText)
+        XCTAssertNil(codeView.enclosingScrollView)
+        let codeContainer = try XCTUnwrap(codeView.textContainer)
+        let codeLayout = try XCTUnwrap(codeView.layoutManager)
+        codeLayout.ensureLayout(for: codeContainer)
+        let narrowUsed = codeLayout.usedRect(for: codeContainer)
+        XCTAssertLessThanOrEqual(narrowUsed.width, 300.5)
+        XCTAssertGreaterThan(narrowUsed.height, 60)
+        XCTAssertEqual(codeView.attributedText.string, longCode)
+        codeView.selectAll(nil)
+        XCTAssertEqual(codeView.selectedCopiedText(), longCode)
+        codeHost.rootView = MarkdownText(text: "```swift\n\(longCode)\n```")
+            .frame(width: 640, alignment: .leading)
+        codeHost.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
+        codeHost.layoutSubtreeIfNeeded()
+        codeLayout.ensureLayout(for: codeContainer)
+        let wideUsed = codeLayout.usedRect(for: codeContainer)
+        XCTAssertLessThanOrEqual(wideUsed.width, 620.5)
+        XCTAssertLessThan(wideUsed.height, narrowUsed.height)
+        XCTAssertEqual(codeView.attributedText.string, longCode)
+
         let tableMarkdown = """
         | Arm | Score |
         | --- | ---: |
@@ -9423,7 +9456,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(topMessageView.selectedRange(), NSRange(location: targetCharRange.location, length: 0))
         XCTAssertEqual(bottomTrailingView.selectedRange(), NSRange(location: 0, length: 0))
 
-        // Double-clicking inside a horizontally-scrollable code block and Shift-clicking into the top
+        // Double-clicking inside a code block and Shift-clicking into the top
         // message view preserves the full double-clicked word boundary across the transcript scope.
         let codeNSString = codeBlockView.attributedText.string as NSString
         let codeMidWordAnchor = codeNSString.range(of: "status").location + 2

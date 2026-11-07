@@ -1072,7 +1072,16 @@ public struct MarkdownText: View, Equatable {
         case .thematicBreak:
             Divider()
                 .padding(.vertical, 2)
-        case .codeBlock, .table:
+        case .codeBlock:
+            SelectableMarkdownText(wraps: true, segment: segment)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    Self.containerBackgroundColor,
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+        case .table:
             ScrollView(.horizontal, showsIndicators: false) {
                 SelectableMarkdownText(wraps: false, segment: segment)
                     .padding(10)
@@ -1385,7 +1394,7 @@ extension MarkdownText {
         )
         let paragraphStyle = defaultParagraphStyle(
             alignment: .natural,
-            wraps: false,
+            wraps: true,
             firstLineHeadIndent: 0,
             headIndent: 0,
             tabStopLocation: nil,
