@@ -282,6 +282,12 @@ copilot-projects ping            # -> pong
 
 The [Release workflow](../.github/workflows/release.yml) is the primary publisher.
 It automatically publishes the next version for eligible PR merges to `main`.
+Releases run one at a time. A merge that lands while one is running waits for it,
+and a later merge or manual dispatch replaces the waiting run, which then shows as
+cancelled. The remaining run releases the commit that triggered it, with notes
+covering every merge since the previous release. GitHub does not guarantee the
+order of runs queued seconds apart; if the newest merge is left unreleased, the
+next merge releases it, or dispatch the workflow manually.
 
 Versions are `YYYY.M.D.N`, tagged `vYYYY.M.D.N`: the date in Pacific time
 (`America/Los_Angeles`) when the workflow computes the version, then the release's
@@ -303,7 +309,9 @@ gh workflow run release.yml \
 ```
 
 Replace `YYYY.M.D.N` with the version an automatic release would pick now; the
-workflow rejects any other version and names the expected one. Publishing with
+workflow rejects any other version and names the expected one. Dispatch only when
+no Release run is running or waiting: a dispatch replaces the waiting run, and is
+rejected if the running release publishes that version first. Publishing with
 `scripts/release.sh --publish` likewise refuses a version dated after today. The
 workflow runs validation and tests before entering the protected `release`
 environment for signing and publishing.

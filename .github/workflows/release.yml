@@ -14,10 +14,12 @@ permissions:
   contents: read
   pull-requests: read
 
+# One release runs at a time. A merge that lands meanwhile waits, and a later run
+# replaces the waiting one, which then shows as cancelled. The remaining run
+# releases its own commit, with notes covering every merge since the last release.
 concurrency:
   group: release
   cancel-in-progress: false
-  queue: max
 
 jobs:
   validate:
