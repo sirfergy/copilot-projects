@@ -2745,6 +2745,10 @@ public final class MarkdownSelectableTextView: NSTextView {
         return (linkValue, charIndex)
     }
 
+    public func hasLink(at localPoint: NSPoint) -> Bool {
+        linkTarget(at: localPoint) != nil
+    }
+
     private static func resolvedLinkURL(_ link: Any) -> URL? {
         if let url = link as? URL {
             return url
@@ -3091,6 +3095,7 @@ private struct SelectableMarkdownText: NSViewRepresentable {
         textView.isRichText = true
         textView.drawsBackground = false
         textView.backgroundColor = .clear
+        textView.clipsToBounds = true
         textView.textContainerInset = .zero
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = !wraps

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CopilotProjectsUI
 import SwiftTerm
 
 /// One long-lived AppKit view that hosts EVERY session's terminal across all
@@ -26,7 +27,13 @@ final class TerminalsContainerView: NSView {
     private var activeId: String?
     private var allowsTerminalFocus = true
     private var rendererLRU: [String] = []
+    private var cursorMonitor: Any?
+    private var installedPointingHand = false
     private static let rendererWarmCapacity = 3
+
+    deinit {
+        if let cursorMonitor { NSEvent.removeMonitor(cursorMonitor) }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -177,8 +184,51 @@ final class TerminalsContainerView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window != nil, cursorMonitor == nil {
+            cursorMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
+                MainActor.assumeIsolated {
+                    self?.syncCursor(for: event)
+                }
+                return event
+            }
+        } else if window == nil, let cursorMonitor {
+            NSEvent.removeMonitor(cursorMonitor)
+            self.cursorMonitor = nil
+        }
         guard window != nil, let id = activeId, let view = hosted[id] else { return }
         reveal(view)
+    }
+
+    private func syncCursor(for event: NSEvent) {
+        guard let window, event.window === window else { return }
+        window.acceptsMouseMovedEvents = true
+        var targetCursor: NSCursor?
+        if let hit = window.contentView?.hitTest(event.locationInWindow) {
+            for view in sequence(first: hit, next: \.superview) {
+                if let markdown = view as? MarkdownSelectableTextView {
+                    let point = markdown.convert(event.locationInWindow, from: nil)
+                    targetCursor = markdown.hasLink(at: point) ? .pointingHand : .iBeam
+                    break
+                }
+                if view is ProjectsTerminalView
+                    || (view as? NSTextView).map({ $0.isEditable || $0.isSelectable }) == true
+                    || (view as? NSTextField).map({ $0.isEditable || $0.isSelectable }) == true {
+                    targetCursor = .iBeam
+                    break
+                }
+            }
+        }
+        if let targetCursor {
+            installedPointingHand = targetCursor == .pointingHand
+            if NSCursor.current != targetCursor {
+                targetCursor.set()
+            }
+        } else {
+            if NSCursor.current == .iBeam || (installedPointingHand && NSCursor.current == .pointingHand) {
+                NSCursor.arrow.set()
+            }
+            installedPointingHand = false
+        }
     }
 }
 
