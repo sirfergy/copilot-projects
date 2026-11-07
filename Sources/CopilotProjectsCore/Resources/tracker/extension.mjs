@@ -468,6 +468,8 @@ if (validSessionId && socketPath) {
     const liveMessageStreams = new Map();
     let workflowLiveTurnId = null;
     const unavailableWorkflowActions = new Set();
+    let pendingMessages = [];
+    let pendingMessagesSeq = 0;
     // Id of the lifecycle event that performed the most recent rotation. The
     // SDK delivers one event to BOTH the named and the generic listener; the
     // one that fires second must not re-enter it as ordinary conversation
@@ -2038,6 +2040,43 @@ if (validSessionId && socketPath) {
         }
     }
 
+    async function refreshPendingMessages() {
+        if (shuttingDown || !ownsSharedFiles() || runtimeActivityUnsupported || workflowRuntime === false) return;
+        const context = workflowContextToken();
+        const seq = ++pendingMessagesSeq;
+        try {
+            const snapshot = await workflowRead("session.queue.pendingItems", {}, context);
+            if (seq !== pendingMessagesSeq || !operationAuthorityCurrent(context)) return;
+            const inFlight = Number.isSafeInteger(snapshot?.inFlightSteeringCount) && snapshot.inFlightSteeringCount >= 0
+                ? snapshot.inFlightSteeringCount : null;
+            const rawSteering = inFlight !== null && Array.isArray(snapshot?.steeringMessages)
+                ? snapshot.steeringMessages.slice(inFlight) : [];
+            const steered = rawSteering
+                .filter((text) => typeof text === "string" && text.trim().length > 0)
+                .map((text, index) => ({
+                    messageId: `steering-${inFlight + index}`,
+                    text: truncatedText(text, 8_192),
+                    mode: "immediate",
+                }));
+            const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+            const queued = items
+                .filter((item) => item?.kind === "message"
+                    && typeof item.displayText === "string"
+                    && item.displayText.trim().length > 0)
+                .map((item) => ({
+                    messageId: boundedMetadataText(item.messageId || item.id),
+                    text: truncatedText(item.displayText, 8_192),
+                    mode: "enqueue",
+                }))
+                .filter((item) => item.messageId.length > 0);
+            const next = [...steered, ...queued].slice(0, 32);
+            if (!isDeepStrictEqual(pendingMessages, next)) {
+                pendingMessages = next;
+                publish();
+            }
+        } catch {}
+    }
+
     function workflowSnapshot() {
         const observation = workflowObservation;
         const fresh = observation
@@ -2049,6 +2088,7 @@ if (validSessionId && socketPath) {
         const capabilities = fresh && !bounceRequested ? observation.capabilities.filter(
             (kind) => !unavailableWorkflowActions.has(kind)
         ) : [];
+        const activePendingMessages = fresh && !bounceRequested ? pendingMessages : [];
         return {
             version: 1,
             observedAtMilliseconds: observation?.observedAtMilliseconds ?? 0,
@@ -2058,6 +2098,7 @@ if (validSessionId && socketPath) {
             imageAttachments: fresh ? availableModels?.find(
                 (model) => model.id === currentModel?.name
             )?.imageAttachments ?? null : null,
+            ...(activePendingMessages.length > 0 ? { pendingMessages: activePendingMessages } : {}),
             legacyPromptFallback: !bounceRequested && (workflowRuntime === false || runtimeActivityUnsupported
                 || runtimeMetadataError === "remote"
                 || runtimeActivity?.error === "remote"
@@ -2214,7 +2255,7 @@ if (validSessionId && socketPath) {
                 metadataSeq: newerHeartbeat ? newerHeartbeat.metadataSeq : workflowMetadataSeq,
                 capabilities: [
                     "session-send", "session-abort", "answer-session-budget",
-                    "image-attachments-v1", "file-attachments-v1",
+                    "image-attachments-v1", "file-attachments-v1", "pending-messages-v1",
                     ...(effectiveLimitsKnown ? ["set-session-budget"] : []),
                     ...(bounceAvailable ? ["session-bounce"] : []),
                 ],
@@ -2226,6 +2267,7 @@ if (validSessionId && socketPath) {
                 error: usageError,
             };
             publish();
+            refreshPendingMessages();
         } catch (error) {
             if (!operationAuthorityCurrent(context)) return;
             const unsupported = error?.message === "unsupported-runtime"
@@ -2616,6 +2658,9 @@ if (validSessionId && socketPath) {
         try {
             const outcome = await invokeWorkflowAction(action, context, attachments);
             if (!operationAuthorityCurrent(context)) return;
+            if (kind === "session-send" && outcome.state === "applied") {
+                refreshPendingMessages();
+            }
             if (publishTerminalReceipt(context, outcome.state, outcome.errorCode)) {
                 removeCapturedHandoff(path, encoded, context);
             }
@@ -2646,6 +2691,10 @@ if (validSessionId && socketPath) {
         if (root && event.type === "user.message" && classifyUserMessage(event)) {
             workflowLiveTurnId = event.id;
             liveMessageStreams.clear();
+            refreshPendingMessages();
+        }
+        if (root && event.type === "pending_messages.modified") {
+            refreshPendingMessages();
         }
         if (root && ["assistant.message_delta", "assistant.message"].includes(event.type)
                 && typeof event.data.messageId === "string") {
@@ -2704,6 +2753,7 @@ if (validSessionId && socketPath) {
             pendingBudgetIds.clear();
             pendingBudgetRequest = null;
             workflowLiveTurnId = null;
+            refreshPendingMessages();
             refreshWorkflow(true);
         }
     }
@@ -5388,6 +5438,8 @@ if (validSessionId && socketPath) {
         pendingBudgetIds.clear();
         workflowLiveTurnId = null;
         liveMessageStreams.clear();
+        pendingMessagesSeq += 1;
+        pendingMessages = [];
         foregroundSessionActive = false;
         foregroundObservationStartedAt = 0;
         operationReceipts.clear();

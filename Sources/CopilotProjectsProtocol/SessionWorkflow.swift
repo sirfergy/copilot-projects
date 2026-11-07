@@ -32,6 +32,21 @@ public struct RemoteWorkflowActionResult: Equatable, Sendable {
     }
 }
 
+public struct RemotePendingMessage: Codable, Equatable, Sendable, Identifiable {
+    public static let capability = "pending-messages-v1"
+
+    public let messageId: String
+    public let text: String
+    public let mode: RemotePromptMode
+    public var id: String { messageId }
+
+    public init(messageId: String, text: String, mode: RemotePromptMode = .immediate) {
+        self.messageId = messageId
+        self.text = text
+        self.mode = mode
+    }
+}
+
 /// A closed set of user actions, not an arbitrary SDK RPC proxy.
 public struct RemoteSessionAction: Codable, Equatable, Sendable {
     public let kind: RemoteSessionActionKind
@@ -130,6 +145,7 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
     public let schedules: [String]
     public let error: String?
     public let imageAttachments: RemoteImageCapabilities?
+    public let pendingMessages: [RemotePendingMessage]?
 
     public init(
         version: Int = 1,
@@ -147,7 +163,8 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
         agents: [RemoteWorkflowAgent] = [],
         schedules: [String] = [],
         error: String? = nil,
-        imageAttachments: RemoteImageCapabilities? = nil
+        imageAttachments: RemoteImageCapabilities? = nil,
+        pendingMessages: [RemotePendingMessage]? = nil
     ) {
         self.version = version
         self.observedAtMilliseconds = observedAtMilliseconds
@@ -165,6 +182,7 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
         self.schedules = schedules
         self.error = error
         self.imageAttachments = imageAttachments
+        self.pendingMessages = pendingMessages
     }
 
     /// Wall-clock freshness, for code running on the Mac that observed the workflow.

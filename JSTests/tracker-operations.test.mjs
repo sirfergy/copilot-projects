@@ -214,6 +214,11 @@ class FakeSession {
           this.questionEventCalls.push(params);
           return this.questionEventHandler(params);
         }
+        if (method === "session.queue.pendingItems") {
+          return this.pendingItemsHandler
+            ? this.pendingItemsHandler(params)
+            : { items: [], steeringMessages: [], inFlightSteeringCount: 0 };
+        }
         this.runtimeCalls.push({ method, ...params });
         if (method === "session.metadata.snapshot") return this.metadataHandler(params);
         if (method === "session.metadata.isProcessing") return this.processingHandler(params);

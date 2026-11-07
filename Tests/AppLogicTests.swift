@@ -19423,6 +19423,92 @@ final class AppLogicTests: XCTestCase {
         layoutHost(expectingDrawer: false)
         XCTAssertTrue(drawerFramesInHost().isEmpty)
     }
+
+    @MainActor
+    func testDesktopTranscriptRendersWorkflowPendingMessages() async throws {
+        _ = NSApplication.shared
+        XCTAssertEqual(RemotePendingMessage.capability, "pending-messages-v1")
+
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        var workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+            capabilities: ["session-send", RemotePendingMessage.capability],
+            sendReady: true
+        )
+        let turns = [
+            TranscriptTurn(
+                id: "turn-1",
+                startedAt: now.addingTimeInterval(-30),
+                endedAt: nil,
+                kind: "foreground",
+                userContent: "Run the regression suite",
+                assistantMessages: [],
+                tools: [],
+                isAborted: false
+            ),
+        ]
+        let window = NSWindow(
+            contentRect: NSRect(x: -16_000, y: -16_000, width: 420, height: 480),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+            window.close()
+        }
+        func makeDrawer() -> TranscriptDrawer {
+            TranscriptDrawer(
+                turns: turns,
+                imageCapture: nil,
+                workflow: workflow,
+                operation: .unavailable,
+                workflowProvider: { workflow },
+                operationProvider: nil,
+                promptComposer: nil,
+                onClose: {},
+                onAction: { _ in RemoteWorkflowActionResult(state: .rejected) },
+                onPreview: { _ in }
+            )
+        }
+        let host = NSHostingView(rootView: makeDrawer())
+        host.sizingOptions = []
+        host.frame = NSRect(x: 0, y: 0, width: 420, height: 480)
+        window.contentView = host
+        window.orderBack(nil)
+        await pump(host)
+
+        func findScrollView(in view: NSView) -> NSScrollView? {
+            (view as? NSScrollView) ?? view.subviews.lazy.compactMap(findScrollView(in:)).first
+        }
+        let docView = try XCTUnwrap(findScrollView(in: host)?.documentView)
+        let baselineHeight = docView.bounds.height
+
+        workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+            capabilities: workflow.capabilities,
+            sendReady: true,
+            pendingMessages: [
+                RemotePendingMessage(messageId: "steering-0", text: "Steer now", mode: .immediate),
+                RemotePendingMessage(messageId: "msg-q-1", text: "Queued next", mode: .enqueue),
+            ]
+        )
+        host.rootView = makeDrawer()
+        await pump(host)
+        XCTAssertGreaterThan(docView.bounds.height, baselineHeight + 60)
+
+        workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+            capabilities: workflow.capabilities,
+            sendReady: true,
+            pendingMessages: nil
+        )
+        host.rootView = makeDrawer()
+        await pump(host)
+        XCTAssertEqual(docView.bounds.height, baselineHeight, accuracy: 2)
+    }
 }
 
 // MARK: - Remote Kitty test helpers
