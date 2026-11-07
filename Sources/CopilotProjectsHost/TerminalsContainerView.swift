@@ -105,8 +105,8 @@ final class TerminalsContainerView: NSView {
 
         let activeChanged = activeId != active
         activeId = active
-        let needsReveal = showsTerminal
-            && (activeChanged || active.map(inserted.contains) == true || !self.showsTerminal)
+        let sessionChanged = activeChanged || active.map(inserted.contains) == true
+        let needsReveal = showsTerminal && (sessionChanged || !self.showsTerminal)
         self.showsTerminal = showsTerminal
         // Hide the outgoing and incoming panes before parking/activating renderers.
         // Keeping the NSView hierarchy stable avoids the blank-on-switch backing
@@ -135,7 +135,7 @@ final class TerminalsContainerView: NSView {
             layer?.backgroundColor = view.nativeBackgroundColor.cgColor
             layoutVisible()
             view.isHidden = !showsTerminal
-            if needsReveal { reveal(view) }
+            if needsReveal { reveal(view, preserveEditorFocus: !sessionChanged) }
         } else {
             cover.isHidden = false
             layoutVisible()
@@ -163,11 +163,12 @@ final class TerminalsContainerView: NSView {
 
     /// Size, request the current frame, and focus the newly revealed terminal.
     /// The view also schedules one deferred redraw for drawable readiness.
-    private func reveal(_ view: ProjectsTerminalView) {
+    private func reveal(_ view: ProjectsTerminalView, preserveEditorFocus: Bool = false) {
         view.frame = bounds
         view.layoutSubtreeIfNeeded()
         view.forceRedraw()
-        if let window, window.firstResponder !== view {
+        if let window, window.firstResponder !== view,
+           !(preserveEditorFocus && window.firstResponder is NSTextView) {
             window.makeFirstResponder(view)
         }
     }

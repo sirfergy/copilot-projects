@@ -17055,7 +17055,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(terminal.isHidden)
         XCTAssertTrue(window.firstResponder === terminal)
 
-        // Closing the drawer from full-width unhides and focuses the terminal.
+        // Collapsing from full-width with an active question editor preserves editor focus,
+        // while closing the drawer from full-width unhides and focuses the terminal.
         model.projects[0].sessions[0].agentActivity = AgentActivitySnapshot(
             schemaVersion: 1,
             updatedAt: ISO8601DateFormatter().string(from: Date()),
@@ -17072,7 +17073,7 @@ final class AppLogicTests: XCTestCase {
                     requestId: "req-focus-2",
                     question: "Continue?",
                     choices: ["Yes"],
-                    allowFreeform: false,
+                    allowFreeform: true,
                     requestedAt: ISO8601DateFormatter().string(from: Date()),
                     agentId: nil
                 ),
@@ -17080,6 +17081,21 @@ final class AppLogicTests: XCTestCase {
         )
         await pump(detailHost)
         XCTAssertTrue(terminal.isHidden)
+        let answerField = try XCTUnwrap(findEditableTextFields(in: detailHost).first)
+        XCTAssertTrue(window.makeFirstResponder(answerField))
+        XCTAssertNotNil(answerField.currentEditor())
+
+        defaults.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        await pump(detailHost)
+        XCTAssertFalse(terminal.isHidden)
+        XCTAssertNotNil(answerField.currentEditor())
+        XCTAssertFalse(window.firstResponder === terminal)
+
+        defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        await pump(detailHost)
+        XCTAssertTrue(terminal.isHidden)
+        XCTAssertNotNil(answerField.currentEditor())
+
         model.closeTranscriptDrawer(sessionId: session.id)
         model.focusActiveTerminal()
         await pump(detailHost)
@@ -17462,7 +17478,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(model.globalSelectedSessionId, s2.id)
         XCTAssertTrue(window.firstResponder === s2Terminal)
 
-        // 5. Default-view setting (#307) opening the transcript on first visit (and full-width mode) focuses the composer.
+        // 5. Default-view setting (#307) opening the transcript on first visit (and full-width mode) focuses the composer,
+        //    and collapsing full-width to side-drawer preserves the focused composer while unhiding the terminal.
         defaults.set(
             TranscriptDrawer.DefaultView.transcript.rawValue,
             forKey: TranscriptDrawer.defaultViewKey
@@ -17471,13 +17488,20 @@ final class AppLogicTests: XCTestCase {
         let input = WorkspaceInputController(model: model)
         input.openFromSessionFinder(s4.id)
         await pump(host)
+        let s4Terminal = try XCTUnwrap(model.terminalView(for: s4.id))
         XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: s4.id))
+        XCTAssertTrue(s4Terminal.isHidden)
         let s4ComposerField = try XCTUnwrap(
             findEditableTextFields(in: host).last { $0.placeholderString == "Message Copilot" }
         )
         XCTAssertNotNil(s4ComposerField.currentEditor())
         XCTAssertTrue(model.sessionPromptComposer(sessionId: s4.id).isPromptFieldFocused)
         defaults.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        await pump(host)
+        XCTAssertFalse(s4Terminal.isHidden)
+        XCTAssertNotNil(s4ComposerField.currentEditor())
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s4.id).isPromptFieldFocused)
+        XCTAssertFalse(window.firstResponder === s4Terminal)
 
         // 6. Moving focus to s1's terminal in side-drawer mode and receiving background updates or re-selecting s1 does not steal focus.
         model.show(projectId: project.id, sessionId: s1.id)

@@ -1303,6 +1303,11 @@ final class AppModel: ObservableObject {
         transcriptOpenSessions.remove(sessionId)
         sessionPromptComposers[sessionId]?.shouldFocusOnAppear = false
         sessionWorkingModels.removeValue(forKey: sessionId)?.update(nil)
+        if sessionId == globalSelectedSessionId,
+           let window = activeController?.terminalView.window,
+           window.firstResponder is NSTextView {
+            window.makeFirstResponder(nil)
+        }
     }
 
     func openTranscriptDrawer(sessionId: String) {
