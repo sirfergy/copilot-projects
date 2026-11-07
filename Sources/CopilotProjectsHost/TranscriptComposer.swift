@@ -273,9 +273,13 @@ struct TranscriptPromptComposerView: View {
             composer.isPromptFieldFocused = promptFocused
             let currentOp = liveOperation
             composer.reconcileReceipts(currentOp.receipts, conversationEpoch: currentOp.conversationEpoch)
+            focusPromptIfNeeded()
         }
         .onDisappear {
             composer.isPromptFieldFocused = false
+        }
+        .onChange(of: composer.shouldFocusOnAppear) { _, _ in
+            focusPromptIfNeeded()
         }
         .onChange(of: promptFocused) { _, focused in
             composer.isPromptFieldFocused = focused
@@ -290,6 +294,14 @@ struct TranscriptPromptComposerView: View {
             let currentOp = liveOperation
             composer.reconcileReceipts(currentOp.receipts, conversationEpoch: currentOp.conversationEpoch)
         }
+    }
+
+    private func focusPromptIfNeeded() {
+        guard composer.shouldFocusOnAppear else { return }
+        composer.shouldFocusOnAppear = false
+        guard AppModel.canMoveSelectionFocus() else { return }
+        promptFocused = true
+        composer.isPromptFieldFocused = true
     }
 
     private func pasteScreenshots() {

@@ -1063,6 +1063,11 @@ final class AppModel: ObservableObject {
         c.onDeepLink = { [weak self] deepLink in
             self?.focus(projectId: deepLink.projectId, sessionId: deepLink.sessionId)
         }
+        c.terminalView.onUserInteraction = { [weak self] in
+            if self?.sessionPromptComposers[sessionId]?.shouldFocusOnAppear == true {
+                self?.sessionPromptComposers[sessionId]?.shouldFocusOnAppear = false
+            }
+        }
         c.shouldRetryLaunch = { [weak self, weak c] in
             guard let self, let c else { return false }
             return !self.isTerminating && self.controllers[sessionId] === c
@@ -1193,7 +1198,6 @@ final class AppModel: ObservableObject {
         defer { isNavigatingSessionHistory = false }
         show(projectId: projectId, sessionId: targetId)
         save()
-        focusActiveTerminal()
         return (projectId, targetId)
     }
 
@@ -1207,7 +1211,6 @@ final class AppModel: ObservableObject {
         defer { isNavigatingSessionHistory = false }
         show(projectId: projectId, sessionId: targetId)
         save()
-        focusActiveTerminal()
         return (projectId, targetId)
     }
 
@@ -1221,7 +1224,6 @@ final class AppModel: ObservableObject {
         defer { isNavigatingSessionHistory = false }
         show(projectId: projectId, sessionId: targetId)
         save()
-        focusActiveTerminal()
         return (projectId, targetId)
     }
 
@@ -1257,11 +1259,13 @@ final class AppModel: ObservableObject {
               defaults.string(forKey: TranscriptDrawer.defaultViewKey)
                   == TranscriptDrawer.DefaultView.transcript.rawValue else { return }
         openTranscriptDrawer(sessionId: sessionId)
+        sessionPromptComposer(sessionId: sessionId).shouldFocusOnAppear = true
     }
 
     func closeTranscriptDrawer(sessionId: String) {
         defaultViewAppliedSessions.insert(sessionId)
         transcriptOpenSessions.remove(sessionId)
+        sessionPromptComposers[sessionId]?.shouldFocusOnAppear = false
         sessionWorkingModels.removeValue(forKey: sessionId)?.update(nil)
     }
 
@@ -2210,9 +2214,8 @@ final class AppModel: ObservableObject {
                 projects[loc.p].sessions[loc.s].startingPrompt = prompt
                 save()
             }
-            selectedProjectId = projects[loc.p].id
-            selectSession(projectId: projects[loc.p].id, sessionId: existingId)
-            focusActiveTerminal()
+            show(projectId: projects[loc.p].id, sessionId: existingId)
+            save()
             return existingId
         }
         for j in index..<recentlyClosedSessions.count
@@ -2242,6 +2245,7 @@ final class AppModel: ObservableObject {
             parentSessionId: validParentId,
             startingPrompt: entry.startingPrompt
         )
+        let previousSessionId = globalSelectedSessionId
         let insertIndex = min(max(0, entry.sessionIndex), projects[pi].sessions.count)
         projects[pi].sessions.insert(session, at: insertIndex)
         selectedProjectId = entry.projectId
@@ -2265,7 +2269,7 @@ final class AppModel: ObservableObject {
         refreshSelectedTranscriptController()
         updateDockBadge()
         save()
-        focusActiveTerminal()
+        focusSelectedSession(replacing: previousSessionId)
         return session.id
     }
 
@@ -2714,6 +2718,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectProject(_ id: String?) {
+        let previousSessionId = globalSelectedSessionId
         selectedProjectId = id
         if let id, let pi = projectIndex(id) {
             for i in projects[pi].sessions.indices {
@@ -2733,10 +2738,12 @@ final class AppModel: ObservableObject {
         refreshSelectedTranscriptController()
         updateDockBadge()
         save()
+        focusSelectedSession(replacing: previousSessionId)
     }
 
     func selectSession(projectId pid: String, sessionId sid: String) {
         guard let pi = projectIndex(pid) else { return }
+        let previousSessionId = globalSelectedSessionId
         if let si = projects[pi].sessions.firstIndex(where: { $0.id == sid }) {
             projects[pi].sessions[si].hasUnread = false
             projects[pi].sessions[si].finishedUnseen = false
@@ -2747,6 +2754,7 @@ final class AppModel: ObservableObject {
         refreshSelectedTranscriptController()
         updateDockBadge()
         save()
+        focusSelectedSession(replacing: previousSessionId)
     }
 
     func selectSessionByIndex(_ index: Int) {
@@ -3015,7 +3023,6 @@ final class AppModel: ObservableObject {
             guard kind.matches(candidate.session) else { continue }
             show(projectId: candidate.projectId, sessionId: candidate.session.id)
             save()
-            focusActiveTerminal()
             return (candidate.projectId, candidate.session.id)
         }
         return nil
@@ -3057,7 +3064,6 @@ final class AppModel: ObservableObject {
         }
         show(projectId: target.projectId, sessionId: target.sessionId)
         save()
-        focusActiveTerminal()
         return (target.projectId, target.sessionId)
     }
 
@@ -3777,6 +3783,7 @@ final class AppModel: ObservableObject {
 
     /// Selects a session, or a project's shown session, and marks it read.
     func show(projectId: String?, sessionId: String?) {
+        let previousSessionId = globalSelectedSessionId
         var clearedMark = false
         if let sessionId, let loc = locateIndex(sessionId) {
             selectedProjectId = projects[loc.p].id
@@ -3801,6 +3808,7 @@ final class AppModel: ObservableObject {
         refreshSelectedTranscriptController()
         updateDockBadge()
         if clearedMark { save() }
+        focusSelectedSession(replacing: previousSessionId)
     }
 
     /// Mark a session read on behalf of a remote client that is now viewing it (iOS
@@ -3871,6 +3879,31 @@ final class AppModel: ObservableObject {
         if clearsMark { save() }
     }
 
+    static func canMoveSelectionFocus(in window: NSWindow? = nil) -> Bool {
+        guard let app = NSApp else { return true }
+        guard app.modalWindow == nil else { return false }
+        let candidate = window ?? app.keyWindow ?? app.windows.last {
+            $0.isVisible && $0.parent == nil && $0.sheetParent == nil
+        }
+        guard let target = candidate?.sheetParent ?? candidate?.parent ?? candidate else { return true }
+        guard target.childWindows?.contains(where: {
+            $0.isVisible && $0.sheetParent == nil && !$0.className.contains("FullScreen")
+        }) != true else {
+            return false
+        }
+        guard let textView = target.firstResponder as? NSTextView else { return true }
+        return (textView.delegate as? NSTextField)?.placeholderString == "Message Copilot"
+    }
+
+    private func focusSelectedSession(replacing previousSessionId: String?) {
+        guard let sessionId = globalSelectedSessionId, sessionId != previousSessionId else { return }
+        if let previousSessionId { sessionPromptComposers[previousSessionId]?.shouldFocusOnAppear = false }
+        if isTranscriptDrawerOpen(sessionId: sessionId) {
+            sessionPromptComposer(sessionId: sessionId).shouldFocusOnAppear = true
+        }
+        focusActiveTerminal()
+    }
+
     /// Make the visible session's terminal the first responder on activation or
     /// an explicit focus request. Hidden/unattached targets are focused on reveal.
     func focusActiveTerminal() {
@@ -3880,6 +3913,12 @@ final class AppModel: ObservableObject {
         }
         guard let view = activeController?.terminalView, !view.isHidden,
               let window = view.window, window.firstResponder !== view else { return }
+        if let sessionId = globalSelectedSessionId, isTranscriptDrawerOpen(sessionId: sessionId),
+           window.firstResponder is NSTextView
+               || (sessionWorkflow(sessionId: sessionId) != nil
+                   && sessionPromptComposers[sessionId]?.shouldFocusOnAppear == true) {
+            return
+        }
         window.makeFirstResponder(view)
     }
 
