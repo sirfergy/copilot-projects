@@ -8841,7 +8841,7 @@ final class AppLogicTests: XCTestCase {
         ))
         let wrappedTableUnit = "| A | B |\n| --- | --- |\n| \(String(repeating: "wrapped ", count: 250)) | y |"
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
-            Array(repeating: wrappedTableUnit, count: 10).joined(separator: "\n\n")
+            Array(repeating: wrappedTableUnit, count: 16).joined(separator: "\n\n")
         ))
         XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(
             "<details>\n<summary>Huge table</summary>\n\n\(wideHeader)\n\(wideDelimiter)\n\(sparseRows)\n</details>"
@@ -9202,11 +9202,11 @@ final class AppLogicTests: XCTestCase {
             "code  )\t\t\nnext    part\trole\tvalue"
         )
 
-        // Wide tables with heavily wrapped cells fall back to plain text once cumulative visual cells exceed the budget.
+        // Wide tables with heavily wrapped cells fall back to plain text once cumulative grid slots exceed the budget.
         let wideCols = 200
         let wideHeaderRow = Array(repeating: "h", count: wideCols).joined(separator: " | ")
         let wideDelimRow = Array(repeating: "---", count: wideCols).joined(separator: " | ")
-        let wideProse = String(repeating: "W", count: 128)
+        let wideProse = String(repeating: "W", count: 896)
         let wideBodyRow = ([wideProse] + Array(repeating: "x", count: wideCols - 1)).joined(separator: " | ")
         let wideMarkdown = "\(wideHeaderRow)\n\(wideDelimRow)\n\(wideBodyRow)"
         XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(wideMarkdown))
@@ -9530,9 +9530,9 @@ final class AppLogicTests: XCTestCase {
         codeBlockView.copy(nil)
         XCTAssertEqual(pasteboard.string(forType: .string), "let status = \"green\"")
 
-        // A multi-table report with 4 tables totaling >1,000 estimated visual cells (matching the
-        // 25 + 60 + 95 + 98 raw-cell / 1,205 visual-cell shape) renders every heading, divider,
-        // table, and fenced code block as formatted Markdown rather than raw text.
+        // A multi-table report with 4 tables (matching the 25 + 60 + 95 + 98 raw-cell /
+        // 514 per-cell visual-line shape) renders every heading, divider, table, and fenced code
+        // block as formatted Markdown rather than raw text.
         func makeSyntheticTable(rows: Int, cols: Int, lastCellLength: Int) -> String {
             let header = "| " + (1...cols).map { "Col \($0)" }.joined(separator: " | ") + " |"
             let delim = "| " + (["---"] + Array(repeating: "---:", count: cols - 1)).joined(separator: " | ") + " |"
@@ -9583,9 +9583,9 @@ final class AppLogicTests: XCTestCase {
         | summarize Total = sum(Count) by Integration
         ```
         """
-        XCTAssertFalse(
+        XCTAssertTrue(
             MarkdownParser.isWithinRenderingLimits(syntheticReport),
-            "Notification limits stay at 1,000 table cells while MarkdownText renders up to 4,000 document table cells"
+            "Per-cell visual line accounting keeps the 4-table report (514 visual cells) within the 1,000-cell limit"
         )
         let reportHost = NSHostingView(
             rootView: MarkdownText(text: syntheticReport)
@@ -9605,7 +9605,7 @@ final class AppLogicTests: XCTestCase {
             "Standalone thematic breaks must render as dividers rather than literal --- paragraphs"
         )
 
-        // An oversized block (e.g., a 50x26 table, a >2,000-marker paragraph, or a 5th table exceeding
+        // An oversized block (e.g., a 50x26 table, a >3,800-marker paragraph, or a 5th table exceeding
         // the document table budget) falls back only that block to plain text without flattening
         // neighboring headings, bold prose, or earlier tables, and without polluting inlineCache.
         let wideHeader50 = Array(repeating: "h", count: 50).joined(separator: " | ")
@@ -9617,7 +9617,7 @@ final class AppLogicTests: XCTestCase {
         let row1002 = Array(repeating: "v", count: 1_002).joined(separator: " | ")
         let parserRejectedTable = "\(header1002)\n\(delim1002)\n\(row1002)"
         let eligibleSmallTable = "| Key | Val |\n| --- | ---: |\n| ok_key | 42 |"
-        let oversizedInlinePara = Array(repeating: "**span** ", count: 600).joined()
+        let oversizedInlinePara = Array(repeating: "**span** ", count: 1_000).joined()
         let mixedMarkdown = """
         # Mixed Report
 
@@ -9630,7 +9630,7 @@ final class AppLogicTests: XCTestCase {
         \(oversizedInlinePara)
 
         <details open>
-        <summary>\(Array(repeating: "*s* ", count: 1_001).joined())</summary>
+        <summary>\(Array(repeating: "*s* ", count: 1_901).joined())</summary>
         Inner **formatted** detail.
         </details>
 
@@ -9674,12 +9674,16 @@ final class AppLogicTests: XCTestCase {
 
         // Growing an earlier table crosses the document budget without crossing its per-table limit.
         // Updating the same host must switch the unchanged trailing table to plain text and back.
-        let table960 = makeSyntheticTable(rows: 15, cols: 6, lastCellLength: 300)
+        let table906 = makeSyntheticTable(rows: 60, cols: 6, lastCellLength: 300)
         let smallerFirstTable = makeSyntheticTable(rows: 1, cols: 6, lastCellLength: 300)
         let withinBudgetMarkdown = (1...5).map {
-            "### Section \($0)\n\n\($0 == 1 ? smallerFirstTable : table960)"
+            "### Section \($0)\n\n\($0 == 1 ? smallerFirstTable : table906)"
         }.joined(separator: "\n\n")
-        let fiveTablesMarkdown = (1...5).map { "### Section \($0)\n\n\(table960)" }.joined(separator: "\n\n")
+        XCTAssertFalse(
+            MarkdownParser.isWithinRenderingLimits(withinBudgetMarkdown),
+            "Notification limits stay at 1,000 table cells while MarkdownText renders up to 4,000 document table cells"
+        )
+        let fiveTablesMarkdown = (1...5).map { "### Section \($0)\n\n\(table906)" }.joined(separator: "\n\n")
         let fiveTablesHost = NSHostingView(
             rootView: MarkdownText(text: withinBudgetMarkdown)
                 .frame(width: 380, alignment: .leading)
@@ -9700,10 +9704,10 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(findTextViews(in: fiveTablesHost).filter { $0.headerDividerY() != nil }.count, 5)
 
         let inlineBlocks5 = (1...5).map { idx -> String in
-            let p = "para_\(idx) " + Array(repeating: "**b** ", count: 450).joined()
+            let p = "para_\(idx) " + Array(repeating: "**b** ", count: 850).joined()
             return idx == 2 ? "<details open>\n<summary>Detail</summary>\n\n\(p)\n</details>" : p
         }
-        let fifthInlineBlock = "para_5 " + Array(repeating: "**b** ", count: 450).joined()
+        let fifthInlineBlock = "para_5 " + Array(repeating: "**b** ", count: 850).joined()
         MarkdownParser.clearCache()
         let inlineBudgetHost = NSHostingView(
             rootView: MarkdownText(text: inlineBlocks5.joined(separator: "\n\n"))
@@ -9820,6 +9824,56 @@ final class AppLogicTests: XCTestCase {
             [AppDeepLink(projectId: "proj-9", sessionId: "sess-9")]
         )
         XCTAssertFalse(deepLinkTextView.routeDeepLinkIfPossible("https://github.com"))
+
+        // A 6-column table with a few dozen rows, 5 short cells (including bold), and one 300-600 char
+        // last column with 10-20 inline code spans per cell stays within rendering limits and renders
+        // as a formatted table at drawer and full widths, while a truly huge table still falls back.
+        func makeLongLastColumnTable(rows: Int, codeSpansPerRow: Int = 20) -> String {
+            let header = "| Member | Total | Direct | Shared | Requests | Service Breakdown |"
+            let delim = "| :--- | ---: | ---: | ---: | ---: | :--- |"
+            let body = (1...rows).map { r in
+                let spans = (1...codeSpansPerRow).map { s in
+                    "`svc_route_api_\(s)` ($\(r * 10 + s))"
+                }.joined(separator: ", ")
+                return "| Member \(r) | **$\(r * 125).00** | $\(r * 95).00 | $\(r * 30).00 | \(r * 14) | \(spans) |"
+            }.joined(separator: "\n")
+            return "\(header)\n\(delim)\n\(body)"
+        }
+
+        let breakdownTable36 = makeLongLastColumnTable(rows: 36, codeSpansPerRow: 20)
+        if case .table(let parsedBreakdown)? = MarkdownParser.blocks(from: breakdownTable36).first {
+            XCTAssertEqual(parsedBreakdown.header.count, 6)
+            XCTAssertEqual(parsedBreakdown.rows.count, 36)
+            XCTAssertGreaterThanOrEqual(parsedBreakdown.rows[0][5].count, 500)
+        } else {
+            XCTFail("Expected 36-row breakdown table to parse as a MarkdownTable block")
+        }
+        XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(breakdownTable36))
+        for width: CGFloat in [380, 960] {
+            let breakdownHost = NSHostingView(
+                rootView: MarkdownText(text: "# Usage\n\n\(breakdownTable36)\n\nTrailing **summary**.")
+                    .frame(width: width, alignment: .leading)
+            )
+            breakdownHost.frame = NSRect(x: 0, y: 0, width: width, height: 4_000)
+            breakdownHost.layoutSubtreeIfNeeded()
+            let breakdownViews = findTextViews(in: breakdownHost)
+            let renderedBreakdown = try XCTUnwrap(breakdownViews.first { $0.headerDividerY() != nil })
+            XCTAssertFalse(renderedBreakdown.attributedText.string.contains("`svc_route_api_1`"))
+            XCTAssertFalse(renderedBreakdown.attributedText.string.contains("**$125.00**"))
+        }
+
+        let hugeBreakdownTable = makeLongLastColumnTable(rows: 50, codeSpansPerRow: 20)
+        XCTAssertFalse(MarkdownParser.isWithinRenderingLimits(hugeBreakdownTable))
+        let hugeHost = NSHostingView(
+            rootView: MarkdownText(text: "# Header\n\n\(hugeBreakdownTable)\n\nTrailing **ok**.")
+                .frame(width: 380, alignment: .leading)
+        )
+        hugeHost.frame = NSRect(x: 0, y: 0, width: 380, height: 4_000)
+        hugeHost.layoutSubtreeIfNeeded()
+        let hugeViews = findTextViews(in: hugeHost)
+        XCTAssertTrue(hugeViews.allSatisfy { $0.headerDividerY() == nil })
+        let hugeFallbackView = try XCTUnwrap(hugeViews.first { $0.attributedText.string.contains("Member 1\t**$125.00**") })
+        XCTAssertNil(hugeFallbackView.headerDividerY())
     }
 
     // MARK: - Remote web terminal image rendering

@@ -242,8 +242,8 @@ public enum MarkdownParser {
     private static let maximumRenderedLines = 500
     private static let maximumDocumentLines = 2_000
     private static let maximumRenderedPipes = 1_000
-    private static let maximumInlineMarkers = 2_000
-    fileprivate static let maximumDocumentInlineMarkers = 8_000
+    private static let maximumInlineMarkers = 3_800
+    fileprivate static let maximumDocumentInlineMarkers = 15_200
     public static let maximumRenderedTableCells = 1_000
     fileprivate static let maximumDocumentTableCells = 4_000
     public static let maximumDetailsNestingDepth = 4
@@ -341,9 +341,8 @@ public enum MarkdownParser {
         let columns = max(table.header.count, 1)
         var total = 0
         for row in [table.header] + table.rows {
-            let maxChars = row.prefix(columns).map(\.count).max() ?? 0
-            let visualLines = max(1, (maxChars + 31) / 32)
-            let (rowCells, overflow) = columns.multipliedReportingOverflow(by: visualLines)
+            let extraLines = row.prefix(columns).reduce(0) { $0 + max(0, $1.count - 1) / 32 }
+            let (rowCells, overflow) = columns.addingReportingOverflow(extraLines)
             let (nextTotal, sumOverflow) = total.addingReportingOverflow(rowCells)
             if overflow || sumOverflow { return nil }
             total = nextTotal
@@ -1505,6 +1504,7 @@ extension MarkdownText {
         )
         var firstBodyRowCharIndex: Int?
         var totalVisualCells = 0
+        var totalGridSlots = 0
 
         for (rowIndex, rowCells) in allRows.enumerated() {
             let isHeader = rowIndex == 0
@@ -1512,21 +1512,26 @@ extension MarkdownText {
             if rowIndex == 1 {
                 firstBodyRowCharIndex = result.length
             }
-            let remainingVisualLines = (MarkdownParser.maximumRenderedTableCells - totalVisualCells) / columns
-            let wrappedColumns: [[NSAttributedString]] = remainingVisualLines < 1 ? [] : (0..<columns).map { column in
+            let maxCellLines = min(
+                MarkdownParser.maximumRenderedTableCells - totalVisualCells - columns + 1,
+                (MarkdownParser.maximumDocumentTableCells * 2 - totalGridSlots) / columns
+            )
+            let wrappedColumns: [[NSAttributedString]] = maxCellLines < 1 ? [] : (0..<columns).map { column in
                 wrapCellIntoLines(
                     rowCells[column],
                     width: columnWidths[column],
                     row: rowIndex,
                     column: column,
-                    maxLines: remainingVisualLines
+                    maxLines: maxCellLines
                 )
             }
             let visualLineCount = max(1, wrappedColumns.map(\.count).max() ?? 1)
-            guard visualLineCount <= remainingVisualLines else {
+            totalVisualCells += maxCellLines < 1 ? columns : wrappedColumns.reduce(0) { $0 + $1.count }
+            totalGridSlots += columns * visualLineCount
+            guard visualLineCount <= maxCellLines,
+                  totalVisualCells <= MarkdownParser.maximumRenderedTableCells else {
                 return makePlainAttributedText(logicalAccessibilityText, styleContext: styleContext)
             }
-            totalVisualCells += columns * visualLineCount
 
             for lineIndex in 0..<visualLineCount {
                 let isLastVisualLine = lineIndex == visualLineCount - 1
