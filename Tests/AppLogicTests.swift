@@ -17006,25 +17006,12 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(model.sessionPromptComposer(sessionId: s3.id).isPromptFieldFocused)
 
         // 8. Closing the drawer while editing a question ("Answer in terminal") focuses the terminal,
-        //    a visible popover child window blocks focus movement, and reopening from a presented Session Finder sheet focuses the composer.
+        //    an attached sheet blocks focus movement until dismissed, and reopening from a presented Session Finder sheet focuses the composer.
         model.closeTranscriptDrawer(sessionId: s3.id)
         model.focusActiveTerminal()
         await pump(host)
         XCTAssertTrue(window.firstResponder === s3Terminal)
         XCTAssertTrue(AppModel.canMoveSelectionFocus(in: window))
-
-        let popoverWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 120, height: 80),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        popoverWindow.isReleasedWhenClosed = false
-        window.addChildWindow(popoverWindow, ordered: .above)
-        popoverWindow.orderFront(nil)
-        XCTAssertFalse(AppModel.canMoveSelectionFocus(in: window))
-        window.removeChildWindow(popoverWindow)
-        popoverWindow.close()
 
         let sheetWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
@@ -17034,9 +17021,11 @@ final class AppLogicTests: XCTestCase {
         )
         sheetWindow.isReleasedWhenClosed = false
         window.beginSheet(sheetWindow) { _ in }
+        XCTAssertFalse(AppModel.canMoveSelectionFocus(in: window))
         input.presentSessionFinder()
         input.openFromSessionFinder(s5.id)
         await pump(host)
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s5.id).shouldFocusOnAppear)
         window.endSheet(sheetWindow)
         sheetWindow.close()
         await pump(host)
@@ -17054,6 +17043,47 @@ final class AppLogicTests: XCTestCase {
         model.selectSession(projectId: project.id, sessionId: s1.id)
         await pump(host)
         XCTAssertTrue(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+
+        // Selecting sessions with an open NSPopover or a full-screen titlebar child window attached focuses composer/terminal,
+        // while actively editing a text field inside a popover blocks background focus theft.
+        let popoverField = NSTextField(frame: NSRect(x: 0, y: 0, width: 100, height: 22))
+        popoverField.isEditable = true
+        let popoverController = NSViewController()
+        let popoverView = NSView(frame: NSRect(x: 0, y: 0, width: 120, height: 60))
+        popoverView.addSubview(popoverField)
+        popoverController.view = popoverView
+        let popover = NSPopover()
+        popover.contentViewController = popoverController
+        popover.behavior = .transient
+        popover.show(relativeTo: NSRect(x: 10, y: 10, width: 20, height: 20), of: host, preferredEdge: .maxY)
+        let popoverWindow = try XCTUnwrap(window.childWindows?.first)
+        XCTAssertTrue(popoverWindow.makeFirstResponder(popoverField))
+        XCTAssertFalse(AppModel.canMoveSelectionFocus(in: window))
+        XCTAssertTrue(popoverWindow.makeFirstResponder(nil))
+        XCTAssertTrue(AppModel.canMoveSelectionFocus(in: window))
+
+        let fullScreenChild = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 28),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        fullScreenChild.isReleasedWhenClosed = false
+        window.addChildWindow(fullScreenChild, ordered: .above)
+        fullScreenChild.orderFront(nil)
+        model.selectSession(projectId: project.id, sessionId: s2.id)
+        await pump(host)
+        XCTAssertTrue(window.firstResponder === s2Terminal)
+        model.selectSession(projectId: project.id, sessionId: s1.id)
+        await pump(host)
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+        let s1ComposerWithPopover = try XCTUnwrap(
+            findEditableTextFields(in: host).last { $0.placeholderString == "Message Copilot" }
+        )
+        XCTAssertNotNil(s1ComposerWithPopover.currentEditor())
+        popover.close()
+        window.removeChildWindow(fullScreenChild)
+        fullScreenChild.close()
 
         // When composer is unfocused in side-drawer mode, an explicit focusActiveTerminal (e.g. hiding Projects) focuses the terminal.
         XCTAssertTrue(window.makeFirstResponder(nil))

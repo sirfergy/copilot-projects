@@ -3879,27 +3879,35 @@ final class AppModel: ObservableObject {
         if clearsMark { save() }
     }
 
-    static func canMoveSelectionFocus(in window: NSWindow? = nil) -> Bool {
+    static func canMoveSelectionFocus(
+        in window: NSWindow? = nil,
+        isPromptFieldFocused: Bool = false
+    ) -> Bool {
         guard let app = NSApp else { return true }
         guard app.modalWindow == nil else { return false }
         let candidate = window ?? app.keyWindow ?? app.windows.last {
             $0.isVisible && $0.parent == nil && $0.sheetParent == nil
         }
-        guard let target = candidate?.sheetParent ?? candidate?.parent ?? candidate else { return true }
-        guard target.childWindows?.contains(where: {
-            $0.isVisible && $0.sheetParent == nil && !$0.className.contains("FullScreen")
-        }) != true else {
+        guard let target = candidate?.sheetParent ?? candidate,
+              target.attachedSheet == nil,
+              target.childWindows?.contains(where: { $0.firstResponder is NSTextView }) != true else {
             return false
         }
-        guard let textView = target.firstResponder as? NSTextView else { return true }
-        return (textView.delegate as? NSTextField)?.placeholderString == "Message Copilot"
+        return !(target.firstResponder is NSTextView) || isPromptFieldFocused
     }
 
     private func focusSelectedSession(replacing previousSessionId: String?) {
         guard let sessionId = globalSelectedSessionId, sessionId != previousSessionId else { return }
+        let wasPromptFocused = previousSessionId.flatMap {
+            sessionPromptComposers[$0]?.isPromptFieldFocused
+        } == true
         if let previousSessionId { sessionPromptComposers[previousSessionId]?.shouldFocusOnAppear = false }
         if isTranscriptDrawerOpen(sessionId: sessionId) {
-            sessionPromptComposer(sessionId: sessionId).shouldFocusOnAppear = true
+            let composer = sessionPromptComposer(sessionId: sessionId)
+            if wasPromptFocused, sessionWorkflow(sessionId: sessionId) != nil {
+                composer.isPromptFieldFocused = true
+            }
+            composer.shouldFocusOnAppear = true
         }
         focusActiveTerminal()
     }
