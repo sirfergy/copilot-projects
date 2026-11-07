@@ -543,6 +543,26 @@ struct TranscriptDrawer: View {
                                     || currentWorkflow?.budgetRequest != nil
                             )
                         }
+                        ForEach(currentWorkflow?.pendingMessages ?? []) { pending in
+                            TranscriptTurnCard(
+                                turn: TranscriptTurn(
+                                    id: pending.messageId,
+                                    startedAt: Date(
+                                        timeIntervalSince1970: Double(currentWorkflow?.observedAtMilliseconds ?? 0) / 1_000
+                                    ),
+                                    endedAt: nil,
+                                    kind: "foreground",
+                                    userContent: pending.text,
+                                    assistantMessages: [],
+                                    tools: [],
+                                    isAborted: false
+                                ),
+                                imageCapture: nil,
+                                isPending: true,
+                                pendingMode: pending.mode,
+                                onPreview: onPreview
+                            )
+                        }
                         Color.clear
                             .frame(height: 1)
                             .id("transcript-bottom")
@@ -609,6 +629,10 @@ struct TranscriptDrawer: View {
                 }
                 .onChange(of: turns) { _, _ in
                     syncLazyTurnCount()
+                    guard isAtBottom else { return }
+                    scrollToBottom(proxy)
+                }
+                .onChange(of: currentWorkflow?.pendingMessages) { _, _ in
                     guard isAtBottom else { return }
                     scrollToBottom(proxy)
                 }

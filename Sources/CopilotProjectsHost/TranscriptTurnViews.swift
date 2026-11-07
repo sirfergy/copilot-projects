@@ -7,6 +7,8 @@ struct TranscriptTurnCard: View {
     let turn: TranscriptTurn
     let imageCapture: RemoteKittyImageCapture?
     var promptAttachments: [TranscriptPromptAttachments.Item] = []
+    var isPending = false
+    var pendingMode: RemotePromptMode? = nil
     let onPreview: (TranscriptImagePreviewItem) -> Void
 
     var body: some View {
@@ -16,6 +18,14 @@ struct TranscriptTurnCard: View {
                     turn.kind == "automated" ? "Automated" : "You")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(StudioStyle.secondaryText)
+                if isPending {
+                    Text(pendingMode == .enqueue ? "Queued" : "Pending")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(StudioStyle.secondaryText)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(StudioStyle.secondaryText.opacity(0.14)))
+                }
                 if turn.isAborted {
                     Text("Stopped")
                         .font(.caption2.weight(.semibold))
@@ -33,9 +43,11 @@ struct TranscriptTurnCard: View {
                         .background(Capsule().fill(.red.opacity(0.12)))
                 }
                 Spacer()
-                Text(turn.startedAt, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(StudioStyle.secondaryText)
+                if !isPending {
+                    Text(turn.startedAt, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(StudioStyle.secondaryText)
+                }
             }
 
             if !turn.userContent.isEmpty {
@@ -102,6 +114,7 @@ struct TranscriptTurnCard: View {
                 TranscriptTurnFailure(error: error)
             }
         }
+        .opacity(isPending ? 0.68 : 1)
         .padding(.vertical, 12)
         .overlay(alignment: .bottom) { Divider() }
     }
