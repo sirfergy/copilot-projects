@@ -270,12 +270,19 @@ struct TranscriptPromptComposerView: View {
             pasteScreenshots()
         }
         .onAppear {
-            composer.isPromptFieldFocused = promptFocused
             let currentOp = liveOperation
             composer.reconcileReceipts(currentOp.receipts, conversationEpoch: currentOp.conversationEpoch)
+            focusPromptIfNeeded()
+            composer.isPromptFieldFocused = promptFocused
         }
         .onDisappear {
             composer.isPromptFieldFocused = false
+        }
+        .onChange(of: composer.shouldFocusOnAppear) { _, _ in
+            focusPromptIfNeeded()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEndSheetNotification)) { _ in
+            focusPromptIfNeeded()
         }
         .onChange(of: promptFocused) { _, focused in
             composer.isPromptFieldFocused = focused
@@ -290,6 +297,17 @@ struct TranscriptPromptComposerView: View {
             let currentOp = liveOperation
             composer.reconcileReceipts(currentOp.receipts, conversationEpoch: currentOp.conversationEpoch)
         }
+    }
+
+    private func focusPromptIfNeeded() {
+        guard composer.shouldFocusOnAppear else { return }
+        if NSApp?.windows.contains(where: { $0.attachedSheet != nil }) == true { return }
+        composer.shouldFocusOnAppear = false
+        guard AppModel.canMoveSelectionFocus(isPromptFieldFocused: composer.isPromptFieldFocused) else {
+            return
+        }
+        promptFocused = true
+        composer.isPromptFieldFocused = true
     }
 
     private func pasteScreenshots() {

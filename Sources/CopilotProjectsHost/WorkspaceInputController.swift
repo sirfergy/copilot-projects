@@ -269,6 +269,9 @@ final class WorkspaceInputController: ObservableObject {
                 }
                 return event
             }
+            if event.window?.firstResponder === controller.terminalView {
+                controller.terminalView.onUserInteraction?()
+            }
             if controller.terminalView.sendRestoredModifiedReturnIfNeeded(
                 for: event,
                 restoredAgentLive: controller.reattachedToExistingShell

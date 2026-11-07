@@ -75,6 +75,17 @@ final class ProjectsTerminalView: ProcessTerminalView {
     private var restoredSelectionsAwaitingPlacement: [RemoteKittyRestoredSelection] = []
     private var restoredPlacementReplayGeneration = 0
     private var restoredPlacementBufferWasAlternate: Bool?
+    var onUserInteraction: (() -> Void)?
+
+    override func paste(_ sender: Any) {
+        onUserInteraction?()
+        super.paste(sender)
+    }
+
+    override func interpretKeyEvents(_ eventArray: [NSEvent]) {
+        onUserInteraction?()
+        super.interpretKeyEvents(eventArray)
+    }
 
     private struct PointerPressState {
         let point: NSPoint
@@ -775,6 +786,7 @@ final class ProjectsTerminalView: ProcessTerminalView {
             lines = event.scrollingDeltaY
         }
         guard lines != 0 else { return false }
+        onUserInteraction?()
 
         if (lines > 0) != (scrollAccum > 0) { scrollAccum = 0 }
         scrollAccum += lines
@@ -850,6 +862,7 @@ final class ProjectsTerminalView: ProcessTerminalView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        onUserInteraction?()
         let point = convert(event.locationInWindow, from: nil)
         let deepLink: AppDeepLink?
         if Self.isDeepLinkClickEvent(event), bounds.contains(point) {

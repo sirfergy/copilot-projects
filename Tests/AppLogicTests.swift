@@ -16741,6 +16741,384 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(window.firstResponder === s3Terminal)
     }
 
+    @MainActor
+    func testSelectingSessionFocusesComposerOrTerminalWithoutStealingFocus() async throws {
+        _ = NSApplication.shared
+        let suite = "focus-on-select-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let keys = ["SHELL", "COPILOT_PROJECTS_STATE_DIR", "COPILOT_PROJECTS_DTACH"]
+        let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, ProcessInfo.processInfo.environment[$0]) })
+        setenv("SHELL", "/bin/cat", 1)
+        setenv("COPILOT_PROJECTS_STATE_DIR", root.path, 1)
+        unsetenv("COPILOT_PROJECTS_DTACH")
+        defer {
+            for (key, value) in previous {
+                if let value { setenv(key, value, 1) } else { unsetenv(key) }
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1_000)
+        func makeActivity(
+            withWorkflow: Bool = true,
+            questionId: String? = nil
+        ) -> AgentActivitySnapshot {
+            AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: ISO8601DateFormatter().string(from: Date()),
+                foregroundTurnActive: false,
+                scheduledTurnActive: false,
+                activeSubagents: [],
+                schedules: [],
+                idleGeneration: 0,
+                lastIdleAborted: false,
+                lastIdleTurnKind: nil,
+                error: nil,
+                trackedUserInputs: questionId.map {
+                    [
+                        TrackedUserInput(
+                            requestId: $0,
+                            question: "Question \($0)?",
+                            choices: [],
+                            allowFreeform: true,
+                            requestedAt: ISO8601DateFormatter().string(from: Date()),
+                            agentId: nil
+                        ),
+                    ]
+                },
+                copilotSessionId: "copilot-session",
+                conversationEpoch: "epoch-1",
+                operationReceiptVersion: 1,
+                operationReceipts: [],
+                workflow: withWorkflow
+                    ? RemoteSessionWorkflow(
+                        observedAtMilliseconds: nowMs,
+                        capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+                        sendReady: true
+                    )
+                    : nil
+            )
+        }
+
+        let s1 = Session(id: "s-open", title: "Open Drawer", cwd: root.path)
+        let s2 = Session(id: "s-closed", title: "Closed Drawer", cwd: root.path)
+        let s3 = Session(id: "s-delayed", title: "Delayed Workflow", cwd: root.path)
+        let s4 = Session(id: "s-default-view", title: "Default View", cwd: root.path)
+        let s5 = Session(id: "s-other-project", title: "Other Project Open", cwd: root.path)
+        let project = Project(
+            id: "p-focus",
+            name: "Focus Project",
+            cwd: root.path,
+            sessions: [s1, s2, s3, s4],
+            selectedSessionId: s2.id
+        )
+        let project2 = Project(
+            id: "p-focus-2",
+            name: "Second Project",
+            cwd: root.path,
+            sessions: [s5],
+            selectedSessionId: s5.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project, project2], selectedProjectId: project.id))
+
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+            defaults: defaults
+        )
+        defer { model.detachAllClients() }
+
+        model.projects[0].sessions[0].agentActivity = makeActivity(withWorkflow: true, questionId: "q-1")
+        model.projects[0].sessions[1].agentActivity = makeActivity(withWorkflow: true)
+        model.projects[0].sessions[2].agentActivity = makeActivity(withWorkflow: false, questionId: "q-3")
+        model.projects[0].sessions[3].agentActivity = makeActivity(withWorkflow: true)
+        model.projects[1].sessions[0].agentActivity = makeActivity(withWorkflow: true)
+        model.openTranscriptDrawer(sessionId: s1.id)
+        model.openTranscriptDrawer(sessionId: s3.id)
+        model.openTranscriptDrawer(sessionId: s5.id)
+        model.bootstrapIfNeeded()
+
+        let window = NSWindow(
+            contentRect: NSRect(x: -16_000, y: -16_000, width: 900, height: 600),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(
+            rootView: DetailView(model: model, onPreview: { _ in })
+                .defaultAppStorage(defaults)
+                .environment(\.controlActiveState, .key)
+        )
+        host.sizingOptions = []
+        host.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+        window.contentView = host
+        window.orderBack(nil)
+        defer {
+            window.makeFirstResponder(nil)
+            window.orderOut(nil)
+            window.contentView = nil
+            window.close()
+        }
+
+        await pump(host)
+        XCTAssertFalse(window.isKeyWindow)
+        let s1Terminal = try XCTUnwrap(model.terminalView(for: s1.id))
+        let s2Terminal = try XCTUnwrap(model.terminalView(for: s2.id))
+        let s3Terminal = try XCTUnwrap(model.terminalView(for: s3.id))
+        XCTAssertTrue(window.firstResponder === s2Terminal)
+
+        // 1. Switching to s1 (transcript open in side drawer) focuses the message box.
+        model.selectSession(projectId: project.id, sessionId: s1.id)
+        await pump(host)
+        let s1Fields = findEditableTextFields(in: host)
+        XCTAssertEqual(s1Fields.count, 2)
+        let s1AnswerField = s1Fields[0]
+        let s1ComposerField = s1Fields[1]
+        XCTAssertNil(s1AnswerField.currentEditor())
+        XCTAssertNotNil(s1ComposerField.currentEditor())
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+        XCTAssertFalse(window.isKeyWindow)
+
+        // 2. Switching to s2 (transcript closed) focuses the terminal.
+        model.selectSessionByIndex(1)
+        await pump(host)
+        XCTAssertTrue(window.firstResponder === s2Terminal)
+
+        // 3. Switching to s3 (transcript open, workflow nil initially) focuses terminal in side-drawer mode,
+        //    and then focuses the composer as soon as workflow loads.
+        model.selectSessionByIndex(2)
+        await pump(host)
+        XCTAssertTrue(window.firstResponder === s3Terminal)
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s3.id).shouldFocusOnAppear)
+
+        model.projects[0].sessions[2].agentActivity = makeActivity(withWorkflow: true, questionId: "q-3")
+        await pump(host)
+        let s3ComposerField = try XCTUnwrap(
+            findEditableTextFields(in: host).first { $0.placeholderString == "Message Copilot" }
+        )
+        XCTAssertNotNil(s3ComposerField.currentEditor())
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s3.id).isPromptFieldFocused)
+        XCTAssertFalse(model.sessionPromptComposer(sessionId: s3.id).shouldFocusOnAppear)
+
+        // 4. Switching directly between two open-transcript sessions (s3 -> s1) via Back history focuses s1's composer,
+        //    and Forward history (s1 -> s2) focuses s2's terminal.
+        model.navigateSessionBack()
+        model.navigateSessionBack()
+        await pump(host)
+        XCTAssertEqual(model.globalSelectedSessionId, s1.id)
+        let s1ComposerAfterBack = try XCTUnwrap(
+            findEditableTextFields(in: host).last { $0.placeholderString == "Message Copilot" }
+        )
+        XCTAssertNotNil(s1ComposerAfterBack.currentEditor())
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+
+        model.navigateSessionForward()
+        await pump(host)
+        XCTAssertEqual(model.globalSelectedSessionId, s2.id)
+        XCTAssertTrue(window.firstResponder === s2Terminal)
+
+        // 5. Default-view setting (#307) opening the transcript on first visit (and full-width mode) focuses the composer.
+        defaults.set(
+            TranscriptDrawer.DefaultView.transcript.rawValue,
+            forKey: TranscriptDrawer.defaultViewKey
+        )
+        defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        let input = WorkspaceInputController(model: model)
+        input.openFromSessionFinder(s4.id)
+        await pump(host)
+        XCTAssertTrue(model.isTranscriptDrawerOpen(sessionId: s4.id))
+        let s4ComposerField = try XCTUnwrap(
+            findEditableTextFields(in: host).last { $0.placeholderString == "Message Copilot" }
+        )
+        XCTAssertNotNil(s4ComposerField.currentEditor())
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s4.id).isPromptFieldFocused)
+        defaults.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+
+        // 6. Moving focus to s1's terminal in side-drawer mode and receiving background updates or re-selecting s1 does not steal focus.
+        model.show(projectId: project.id, sessionId: s1.id)
+        await pump(host)
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+        XCTAssertTrue(window.makeFirstResponder(s1Terminal))
+        await pump(host)
+        XCTAssertFalse(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+        model.projects[0].sessions[0].agentActivity = makeActivity(withWorkflow: true, questionId: "q-1")
+        model.setStatus(sessionId: s2.id, status: .running, text: "Working", timestamp: 10, source: "test")
+        model.setStatus(sessionId: s2.id, status: .idle, text: nil, timestamp: 20, source: "test")
+        model.selectSession(projectId: project.id, sessionId: s1.id)
+        model.focusActiveTerminal()
+        await pump(host)
+        XCTAssertTrue(window.firstResponder === s1Terminal)
+
+        // 7. Typing/clicking in the terminal or typing in a pending question box is never interrupted by re-selection, focusActiveTerminal, or a delayed workflow load.
+        model.projects[0].sessions[2].agentActivity = makeActivity(withWorkflow: false, questionId: "q-3")
+        model.selectSession(projectId: project.id, sessionId: s3.id)
+        await pump(host)
+        XCTAssertTrue(window.firstResponder === s3Terminal)
+        let terminalKeyEvent = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: "l",
+                charactersIgnoringModifiers: "l",
+                isARepeat: false,
+                keyCode: 37
+            )
+        )
+        _ = input.handleKeyDown(terminalKeyEvent)
+        XCTAssertFalse(model.sessionPromptComposer(sessionId: s3.id).shouldFocusOnAppear)
+        model.selectSession(projectId: project.id, sessionId: s2.id)
+        model.selectSession(projectId: project.id, sessionId: s3.id)
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s3.id).shouldFocusOnAppear)
+        s3Terminal.paste(self)
+        XCTAssertFalse(model.sessionPromptComposer(sessionId: s3.id).shouldFocusOnAppear)
+        model.projects[0].sessions[2].agentActivity = makeActivity(withWorkflow: true, questionId: "q-3")
+        await pump(host)
+        XCTAssertTrue(window.firstResponder === s3Terminal)
+        XCTAssertFalse(model.sessionPromptComposer(sessionId: s3.id).isPromptFieldFocused)
+
+        model.projects[0].sessions[2].agentActivity = makeActivity(withWorkflow: false, questionId: "q-3")
+        model.selectSession(projectId: project.id, sessionId: s2.id)
+        model.selectSession(projectId: project.id, sessionId: s3.id)
+        await pump(host)
+        let s3QuestionField = try XCTUnwrap(
+            findEditableTextFields(in: host).first { $0.placeholderString != "Message Copilot" }
+        )
+        try await typeText("Typing in question box", into: s3QuestionField, in: window, host: host)
+        XCTAssertNotNil(s3QuestionField.currentEditor())
+        model.projects[0].sessions[2].agentActivity = makeActivity(withWorkflow: true, questionId: "q-3")
+        model.selectSession(projectId: project.id, sessionId: s3.id)
+        model.focusActiveTerminal()
+        await pump(host)
+        XCTAssertNotNil(s3QuestionField.currentEditor())
+        XCTAssertFalse(model.sessionPromptComposer(sessionId: s3.id).isPromptFieldFocused)
+
+        // 8. Closing the drawer while editing a question ("Answer in terminal") focuses the terminal,
+        //    an attached sheet blocks focus movement until dismissed, and reopening from a presented Session Finder sheet focuses the composer.
+        model.closeTranscriptDrawer(sessionId: s3.id)
+        model.focusActiveTerminal()
+        await pump(host)
+        XCTAssertTrue(window.firstResponder === s3Terminal)
+        XCTAssertTrue(AppModel.canMoveSelectionFocus(in: window))
+
+        let sheetWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        sheetWindow.isReleasedWhenClosed = false
+        window.beginSheet(sheetWindow) { _ in }
+        XCTAssertFalse(AppModel.canMoveSelectionFocus(in: window))
+        input.presentSessionFinder()
+        input.openFromSessionFinder(s5.id)
+        await pump(host)
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s5.id).shouldFocusOnAppear)
+        window.endSheet(sheetWindow)
+        sheetWindow.close()
+        await pump(host)
+        XCTAssertEqual(model.globalSelectedSessionId, s5.id)
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s5.id).isPromptFieldFocused)
+        let s5ComposerField = try XCTUnwrap(
+            findEditableTextFields(in: host).last { $0.placeholderString == "Message Copilot" }
+        )
+        XCTAssertNotNil(s5ComposerField.currentEditor())
+
+        model.selectProject(project.id)
+        await pump(host)
+        XCTAssertEqual(model.globalSelectedSessionId, s3.id)
+        XCTAssertTrue(window.firstResponder === s3Terminal)
+        model.selectSession(projectId: project.id, sessionId: s1.id)
+        await pump(host)
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+
+        // Selecting sessions with an open NSPopover or a full-screen titlebar child window attached focuses composer/terminal,
+        // while actively editing a text field inside a popover blocks background focus theft.
+        let popoverField = NSTextField(frame: NSRect(x: 0, y: 0, width: 100, height: 22))
+        popoverField.isEditable = true
+        let popoverController = NSViewController()
+        let popoverView = NSView(frame: NSRect(x: 0, y: 0, width: 120, height: 60))
+        popoverView.addSubview(popoverField)
+        popoverController.view = popoverView
+        let popover = NSPopover()
+        popover.contentViewController = popoverController
+        popover.behavior = .transient
+        popover.show(relativeTo: NSRect(x: 10, y: 10, width: 20, height: 20), of: host, preferredEdge: .maxY)
+        let popoverWindow = try XCTUnwrap(window.childWindows?.first)
+        XCTAssertTrue(popoverWindow.makeFirstResponder(popoverField))
+        XCTAssertFalse(AppModel.canMoveSelectionFocus(in: window))
+        XCTAssertTrue(popoverWindow.makeFirstResponder(nil))
+        XCTAssertTrue(AppModel.canMoveSelectionFocus(in: window))
+
+        let fullScreenChild = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 28),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        fullScreenChild.isReleasedWhenClosed = false
+        window.addChildWindow(fullScreenChild, ordered: .above)
+        fullScreenChild.orderFront(nil)
+        model.selectSession(projectId: project.id, sessionId: s2.id)
+        await pump(host)
+        XCTAssertTrue(window.firstResponder === s2Terminal)
+        model.selectSession(projectId: project.id, sessionId: s1.id)
+        await pump(host)
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+        let s1ComposerWithPopover = try XCTUnwrap(
+            findEditableTextFields(in: host).last { $0.placeholderString == "Message Copilot" }
+        )
+        XCTAssertNotNil(s1ComposerWithPopover.currentEditor())
+        popover.close()
+        window.removeChildWindow(fullScreenChild)
+        fullScreenChild.close()
+
+        // When composer is unfocused in side-drawer mode, an explicit focusActiveTerminal (e.g. hiding Projects) focuses the terminal.
+        XCTAssertTrue(window.makeFirstResponder(nil))
+        await pump(host)
+        XCTAssertFalse(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+        model.focusActiveTerminal()
+        await pump(host)
+        XCTAssertTrue(window.firstResponder === s1Terminal)
+
+        // Restoring on launch with defaultView == .transcript focuses the composer.
+        let relaunched = AppModel(
+            stateRepository: repository,
+            isAppActive: { false },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images-relaunch")),
+            defaults: defaults
+        )
+        defer { relaunched.detachAllClients() }
+        relaunched.projects[0].sessions[0].agentActivity = makeActivity(withWorkflow: true)
+        relaunched.bootstrapIfNeeded()
+        XCTAssertEqual(relaunched.globalSelectedSessionId, s1.id)
+        XCTAssertTrue(relaunched.isTranscriptDrawerOpen(sessionId: s1.id))
+        host.rootView = DetailView(model: relaunched, onPreview: { _ in })
+            .defaultAppStorage(defaults)
+            .environment(\.controlActiveState, .key)
+        await pump(host)
+        let relaunchedComposerField = try XCTUnwrap(
+            findEditableTextFields(in: host).last { $0.placeholderString == "Message Copilot" }
+        )
+        XCTAssertNotNil(relaunchedComposerField.currentEditor())
+        XCTAssertTrue(relaunched.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+        XCTAssertFalse(window.isKeyWindow)
+    }
+
     func testQuickReplyConfigurationDefaultsValidationAndCorruptFallback() throws {
         let suite = "quick-replies-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

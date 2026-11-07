@@ -410,6 +410,7 @@ final class DesktopSessionPromptComposer: ObservableObject {
     @Published var prompt: String = ""
     @Published var mode: RemotePromptMode = .immediate
     @Published var isPromptFieldFocused = false
+    @Published var shouldFocusOnAppear = false
     @Published private(set) var attachments: [StagedAttachment] = []
     @Published private(set) var attachedEpoch: String?
     @Published private(set) var statusMessage: String?
