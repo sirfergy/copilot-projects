@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import CopilotProjectsCore
+import CopilotProjectsProtocol
 @testable import CopilotProjectsHost
 
 final class ManualUnreadTests: XCTestCase {
@@ -160,6 +161,95 @@ final class ManualUnreadTests: XCTestCase {
     }
 
     @MainActor
+    func testLateMarkReadLeavesANewerFinishedTurnUnread() throws {
+        let f = try ManualUnreadFixture()
+        defer { f.clean() }
+        let target = f.project.sessions[1].id
+        let bridge: any SessionHost = RemoteModelBridge(model: f.model)
+        func snapshot() throws -> RemoteSessionSnapshot {
+            try XCTUnwrap(bridge.workspace()?.projects[0].sessions[1])
+        }
+        XCTAssertNil(try snapshot().unreadMarker, "A read session has nothing to acknowledge")
+
+        f.finishTurn(target, startingAt: 100)
+        let seen = try snapshot()
+        XCTAssertTrue(seen.unread && seen.ready, "The client saw the first turn finish")
+
+        f.finishTurn(target, startingAt: 300)
+        bridge.markRead(sessionId: target, unreadMarker: seen.unreadMarker)
+        var current = try snapshot()
+        XCTAssertTrue(current.unread, "The mark was for the first turn, not the one that finished since")
+        XCTAssertTrue(current.ready)
+        XCTAssertNotEqual(current.unreadMarker, seen.unreadMarker)
+
+        bridge.markRead(sessionId: target, unreadMarker: current.unreadMarker)
+        current = try snapshot()
+        XCTAssertFalse(current.unread || current.ready, "A mark for what is shown now applies")
+        XCTAssertNil(current.unreadMarker)
+
+        // An aborted turn lights only the finished dot, and a second one outdates the first.
+        f.model.setStatus(sessionId: target, status: .running, text: nil, timestamp: 500)
+        f.model.setStatus(sessionId: target, status: .idle, text: nil, timestamp: 550, source: "session-end")
+        let aborted = try snapshot()
+        XCTAssertTrue(aborted.ready && !aborted.unread)
+        f.model.setStatus(sessionId: target, status: .running, text: nil, timestamp: 600)
+        f.model.setStatus(sessionId: target, status: .idle, text: nil, timestamp: 650, source: "session-end")
+        bridge.markRead(sessionId: target, unreadMarker: aborted.unreadMarker)
+        current = try snapshot()
+        XCTAssertTrue(current.ready)
+        bridge.markRead(sessionId: target, unreadMarker: current.unreadMarker)
+        XCTAssertFalse(try snapshot().ready)
+
+        // A notification on a session that is already unread is something newer too.
+        f.model.postNotification(projectId: f.project.id, sessionId: target, title: "First", body: nil)
+        let notified = try snapshot()
+        XCTAssertTrue(notified.unread && !notified.ready)
+        f.model.postNotification(projectId: f.project.id, sessionId: target, title: "Second", body: nil)
+        bridge.markRead(sessionId: target, unreadMarker: notified.unreadMarker)
+        XCTAssertTrue(try snapshot().unread)
+
+        // A client that sends no marker clears whatever is unread, as it always has.
+        f.finishTurn(target, startingAt: 700)
+        f.finishTurn(target, startingAt: 900)
+        bridge.markRead(sessionId: target)
+        XCTAssertFalse(try snapshot().unread)
+    }
+
+    @MainActor
+    func testLateMarkReadLeavesANewerManualMarkUnread() throws {
+        let f = try ManualUnreadFixture()
+        defer { f.clean() }
+        let target = f.project.sessions[1].id
+        let bridge: any SessionHost = RemoteModelBridge(model: f.model)
+        func snapshot() throws -> RemoteSessionSnapshot {
+            try XCTUnwrap(bridge.workspace()?.projects[0].sessions[1])
+        }
+
+        f.finishTurn(target, startingAt: 100)
+        let seen = try snapshot()
+        f.model.markSessionRead(sessionId: target)
+        bridge.markUnread(sessionId: target)
+
+        bridge.markRead(sessionId: target, unreadMarker: seen.unreadMarker)
+        let marked = try snapshot()
+        XCTAssertEqual(marked.markedUnread, true, "The mark was set after the state this receipt is for")
+        XCTAssertEqual(try f.savedSessions()[target]?.markedUnread, true)
+
+        // The saved mark outlives a relaunch. Its marker doesn't, so a receipt from
+        // before the relaunch is stale and one for the new snapshot applies.
+        let relaunched = f.relaunch()
+        let restarted: any SessionHost = RemoteModelBridge(model: relaunched)
+        restarted.markRead(sessionId: target, unreadMarker: marked.unreadMarker)
+        let restored = try XCTUnwrap(restarted.workspace()?.projects[0].sessions[1])
+        XCTAssertEqual(restored.markedUnread, true)
+        XCTAssertNotEqual(restored.unreadMarker, marked.unreadMarker)
+
+        restarted.markRead(sessionId: target, unreadMarker: restored.unreadMarker)
+        XCTAssertFalse(try XCTUnwrap(restarted.workspace()?.projects[0].sessions[1]).unread)
+        XCTAssertEqual(try f.savedSessions()[target]?.markedUnread, false)
+    }
+
+    @MainActor
     func testMarkAsReadClearsTheManualMarkAndAllAttention() throws {
         let f = try ManualUnreadFixture()
         defer { f.clean() }
@@ -261,6 +351,16 @@ private final class ManualUnreadFixture {
     @MainActor
     func session(_ id: String) -> Session {
         model.projects.flatMap(\.sessions).first { $0.id == id }!
+    }
+
+    /// Runs a turn to completion, as the CLI's hooks report it.
+    @MainActor
+    func finishTurn(_ sessionId: String, startingAt start: Int64) {
+        model.setStatus(sessionId: sessionId, status: .running, text: nil, timestamp: start)
+        model.setStatus(
+            sessionId: sessionId, status: .idle, text: nil, timestamp: start + 100,
+            source: "session-idle", notification: .completed
+        )
     }
 
     func savedSessions() throws -> [String: Session] {

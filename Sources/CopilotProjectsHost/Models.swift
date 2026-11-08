@@ -27,7 +27,26 @@ struct Session: Identifiable, Codable, Equatable {
     /// app. Only navigating to the session or marking it read clears it.
     var markedUnread: Bool {
         get { manuallyMarkedUnread == true }
-        set { manuallyMarkedUnread = newValue ? true : nil }
+        set {
+            manuallyMarkedUnread = newValue ? true : nil
+            if newValue { unreadMarker = UUID().uuidString }
+        }
+    }
+
+    /// Identifies what last made this session unread: a notification, a finished
+    /// turn, or a manual mark gives it a new value. A remote client echoes the value
+    /// it saw with its read receipt, so a receipt that arrives after something newer
+    /// leaves that unread. Not persisted: sessions restored at launch share one value
+    /// no earlier launch used, so receipts from before a restart never match.
+    private(set) var unreadMarker = Session.launchUnreadMarker
+    private static let launchUnreadMarker = UUID().uuidString
+
+    /// Puts back the finished dot a permission wait hid. Nothing new happened, so
+    /// a read receipt for the marker clients already have still applies.
+    mutating func restoreFinishedUnseen(_ value: Bool) {
+        let marker = unreadMarker
+        finishedUnseen = value
+        unreadMarker = marker
     }
 
     /// Either an unseen notification or a manual mark. Drives the unread dot,
@@ -45,10 +64,14 @@ struct Session: Identifiable, Codable, Equatable {
     var runningStartedAtMilliseconds: Int64? = nil
     var runningStatusTimestampMilliseconds: Int64? = nil
     var runningRequestIdentity: String? = nil
-    var hasUnread: Bool = false
+    var hasUnread: Bool = false {
+        didSet { if hasUnread { unreadMarker = UUID().uuidString } }
+    }
     /// The agent went active → idle while you weren't looking at this session, so it
     /// has finished and is waiting for you to come back. Cleared when you view it.
-    var finishedUnseen: Bool = false
+    var finishedUnseen: Bool = false {
+        didSet { if finishedUnseen { unreadMarker = UUID().uuidString } }
+    }
     var turnCompleted: Bool = false
     /// copilot is waiting on its own background agents (it reports this via a
     /// "Copilot: Waiting for background agents" terminal title). Surfaced as a tab/

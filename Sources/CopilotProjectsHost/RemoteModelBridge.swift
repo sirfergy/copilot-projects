@@ -141,7 +141,11 @@ final class RemoteModelBridge: SessionHost {
     }
 
     func markRead(sessionId: String) {
-        model?.markSessionRead(sessionId: sessionId)
+        markRead(sessionId: sessionId, unreadMarker: nil)
+    }
+
+    func markRead(sessionId: String, unreadMarker: String?) {
+        model?.markSessionRead(sessionId: sessionId, unreadMarker: unreadMarker)
     }
 
     var supportsMarkUnread: Bool { model != nil }

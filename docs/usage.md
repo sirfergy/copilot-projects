@@ -581,6 +581,24 @@ existing `markRead` clears it. A marked session's snapshot carries `unread` and
 omits `mark-unread-v1`: a gateway advertises it only when it routes the
 `mark-unread` control to a host that declares it.
 
+A `mark-read` control is answered before the Mac applies it, so it can arrive after
+something newer made the session unread. To acknowledge only what the user saw, a
+client copies the session's `unreadMarker` from the snapshot it is showing into the
+control message's `unreadMarker`, and the gateway passes it to
+`SessionHost.markRead(sessionId:unreadMarker:)`. The host gives a session a new marker
+each time a notification, a finished turn, or a manual mark makes it unread, and
+publishes it only while the session is `unread` or `ready`. A mark whose marker is no
+longer the session's changes nothing and is not an error: the session stays unread
+under the marker its snapshots already carry. An ignored mark produces no new
+snapshot, so a client that keeps a visible session read sends a mark again when a
+snapshot still shows that session `unread` or `ready` with an `unreadMarker` other
+than the one it last sent, including once an earlier mark's request finishes. A mark
+without a marker always applies, so older clients, older gateways, and the Mac's own
+**Mark as Read** behave as before.
+Markers aren't saved. After the Mac restarts, a mark sent for an earlier snapshot is
+ignored and one for a new snapshot applies. No capability is advertised: a client
+echoes the field when a snapshot has it.
+
 #### Shared quick replies
 
 `SessionHost.quickReplies` and `SessionHost.updateQuickReplies` read and replace the

@@ -281,6 +281,13 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     /// includes it; this says why. Present only while set, so unmarked sessions
     /// and older hosts omit it.
     public let markedUnread: Bool?
+    /// Identifies what the session is unread or ready for. It changes whenever
+    /// something newer makes the session unread. A client sends the value from the
+    /// snapshot it is showing as `RemoteClientMessage.unreadMarker` with `mark-read`,
+    /// so a receipt that arrives late doesn't clear what the user hasn't seen.
+    /// Opaque: compare or echo it, nothing else. Present only while `unread` or
+    /// `ready` is set; older hosts omit it.
+    public let unreadMarker: String?
     /// Identifier of the remote host running this session (`nil` for local Mac sessions).
     public let hostId: String?
     /// Human-readable label for the remote host running this session (`nil` for local Mac sessions).
@@ -320,6 +327,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         workflow: RemoteSessionWorkflow? = nil,
         lastError: TranscriptTurnError? = nil,
         markedUnread: Bool? = nil,
+        unreadMarker: String? = nil,
         hostId: String? = nil,
         hostDisplayName: String? = nil,
         parentSessionId: String? = nil,
@@ -348,6 +356,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.workflow = workflow
         self.lastError = lastError
         self.markedUnread = markedUnread
+        self.unreadMarker = unreadMarker
         self.hostId = hostId
         self.hostDisplayName = hostDisplayName
         self.parentSessionId = parentSessionId
@@ -644,6 +653,10 @@ public struct RemoteClientMessage: Codable, Equatable, Sendable {
     public let delivery: RemoteControlDelivery?
     public let data: String?
     public let delta: Int?
+    /// With `mark-read`, the `RemoteSessionSnapshot.unreadMarker` of the session as
+    /// the client showed it. The host ignores the receipt once the session's marker
+    /// has changed. Without it, as older clients send, the receipt always applies.
+    public let unreadMarker: String?
 
     public init(
         type: String,
@@ -653,7 +666,8 @@ public struct RemoteClientMessage: Codable, Equatable, Sendable {
         data: String? = nil,
         delta: Int? = nil,
         conversationEpoch: String? = nil,
-        delivery: RemoteControlDelivery? = nil
+        delivery: RemoteControlDelivery? = nil,
+        unreadMarker: String? = nil
     ) {
         self.type = type
         self.clientId = clientId
@@ -663,6 +677,7 @@ public struct RemoteClientMessage: Codable, Equatable, Sendable {
         self.delivery = delivery
         self.data = data
         self.delta = delta
+        self.unreadMarker = unreadMarker
     }
 }
 
