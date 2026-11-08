@@ -787,6 +787,25 @@ final class AppLogicTests: XCTestCase {
             Set(TranscriptController.liveCLIProcesses(sessionId: sessionId, directory: root).map(\.pid)),
             [getpid()]
         )
+        // Only a marker that names this tab counts, in either letter case.
+        let cases: [(appSessionId: String?, processes: Set<pid_t>)] = [
+            (UUID().uuidString, []),
+            (nil, []),
+            (sessionId.lowercased(), [getpid(), getppid()]),
+        ]
+        for (appSessionId, processes) in cases {
+            var owner: [String: Any] = [
+                "copilotSessionId": UUID().uuidString,
+                "pid": ProcessInfo.processInfo.processIdentifier,
+                "parentPid": getppid(),
+            ]
+            owner["appSessionId"] = appSessionId
+            try JSONSerialization.data(withJSONObject: owner).write(to: ownerURL)
+            XCTAssertEqual(
+                Set(TranscriptController.liveCLIProcesses(sessionId: sessionId, directory: root).map(\.pid)),
+                processes
+            )
+        }
         XCTAssertTrue(TranscriptController.liveCLIProcesses(
             sessionId: UUID().uuidString,
             directory: root
@@ -5268,7 +5287,10 @@ final class AppLogicTests: XCTestCase {
                 schemaVersion: 3,
                 updatedAt: Date(),
                 copilotSessionId: copilotSessionId,
-                turns: []
+                turns: [TranscriptTurn(
+                    id: "t0", startedAt: Date(), endedAt: Date(), kind: "user",
+                    userContent: "hello", assistantMessages: [], tools: [], isAborted: false
+                )]
             )).write(
                 to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)),
                 options: .atomic
@@ -5286,7 +5308,12 @@ final class AppLogicTests: XCTestCase {
         }
 
         try writeTranscript(previousCopilotSessionId)
+        try writeOwner(previousCopilotSessionId)
+        XCTAssertEqual(TranscriptController.loadRemoteSnapshot(sessionId: sessionId).turns.count, 1)
+        // Only the marker moves, and the revision clients refetch on moves with it.
+        let revision = TranscriptController.remoteRevision(sessionId: sessionId)
         try writeOwner(nextCopilotSessionId)
+        XCTAssertNotEqual(TranscriptController.remoteRevision(sessionId: sessionId), revision)
         let remote = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
         XCTAssertEqual(remote.copilotSessionId, "")
         XCTAssertTrue(remote.turns.isEmpty)
@@ -5303,10 +5330,9 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(served.turns.isEmpty)
 
         try writeTranscript(nextCopilotSessionId)
-        XCTAssertEqual(
-            TranscriptController.loadRemoteSnapshot(sessionId: sessionId).copilotSessionId,
-            nextCopilotSessionId
-        )
+        let recovered = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
+        XCTAssertEqual(recovered.copilotSessionId, nextCopilotSessionId)
+        XCTAssertEqual(recovered.turns.map(\.userContent), ["hello"])
 
         // Going back to the earlier conversation (`/resume`) shows it again.
         try writeTranscript(previousCopilotSessionId)
@@ -5431,8 +5457,10 @@ final class AppLogicTests: XCTestCase {
     func testSessionArtifactCleanupRemovesRetiredFiles() throws {
         let sessionId = UUID().uuidString
         Paths.ensureStateDir()
-        let paths = ["status", "status-timestamp", "prompt-status-timestamp", "copilot-allow-all"]
-            .map { Paths.sessionsDir.appendingPathComponent("\(sessionId).\($0)").path }
+        let paths = [
+            "status", "status-timestamp", "prompt-status-timestamp", "copilot-allow-all",
+            "transcript-quarantine.json",
+        ].map { Paths.sessionsDir.appendingPathComponent("\(sessionId).\($0)").path }
         for path in paths {
             try Data("123".utf8).write(to: URL(fileURLWithPath: path))
             XCTAssertTrue(FileManager.default.fileExists(atPath: path))

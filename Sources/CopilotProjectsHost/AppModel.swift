@@ -1043,10 +1043,7 @@ final class AppModel: ObservableObject {
         // shell is created fresh after a reboot, the controller resumes this exact
         // agent session; on a normal relaunch dtach reattaches and ignores it.
         let recordedCopilot = resumeRecordedSession
-            ? (try? String(contentsOf:
-                resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session"),
-                encoding: .utf8))?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            ? resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session")
             : nil
         let c = TerminalController(
             sessionId: sessionId,
