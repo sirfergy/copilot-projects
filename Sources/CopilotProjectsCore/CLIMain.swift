@@ -154,7 +154,7 @@ public enum CLIMain {
             req.copilotSessionId = parsed.flags["copilot-session"]
             if let rawNotification = parsed.flags["notification"] {
                 guard let notification = StatusNotificationKind(rawValue: rawNotification) else {
-                    fail("--notification must be elicitation, permission, or completed")
+                    fail("--notification must be elicitation or permission")
                     return 1
                 }
                 req.notification = notification
@@ -693,7 +693,7 @@ public enum CLIMain {
           copilot-projects set-status <state>      Set status of the current session
                                               state: idle | running | waiting
               [--text "..."] [--timestamp MS] [--source NAME]
-              [--notification elicitation|permission|completed] [--session ID] [--project ID]
+              [--notification elicitation|permission] [--session ID] [--project ID]
           copilot-projects notify <title> [body]   Post a macOS notification
               [--title T] [--body B] [--session ID] [--project ID]
           copilot-projects list-projects           List projects and their status

@@ -156,13 +156,11 @@ public struct ActivityTracker: Sendable {
 
     public static func canPromoteIdleFromFooter(
         backgroundAgentsActive: Bool,
-        hasLiveAgent: Bool,
-        supportsSessionIdleHook: Bool
+        hasLiveAgent: Bool
     ) -> Bool {
         SessionSemantics.canPromoteIdleFromFooter(
             backgroundAgentsActive: backgroundAgentsActive,
-            hasLiveAgent: hasLiveAgent,
-            supportsSessionIdleHook: supportsSessionIdleHook
+            hasLiveAgent: hasLiveAgent
         )
     }
 }

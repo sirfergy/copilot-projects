@@ -270,9 +270,15 @@ enum SessionArtifacts {
         "status", "status-timestamp", "prompt-status-timestamp", "copilot-allow-all",
     ]
 
-    /// Turn markers only the hook script names (`CopilotHooks.script`). The hook
-    /// clears them on sessionEnd, which a close that has to kill the CLI never runs.
-    private static let hookMarkerSuffixes = ["active-turn", "agent-stop-completion", "remote-host"]
+    /// Files `removeFiles` has no `Paths` helper for. The hook (`CopilotHooks.script`)
+    /// clears `active-turn` on sessionEnd, which a close that has to kill the CLI
+    /// never runs; hooks before this one also left `agent-stop-completion`. The remote
+    /// launch wrapper never clears its `remote-*` files, and `remote-initial-args`
+    /// holds the session's whole starting prompt.
+    private static let hookMarkerSuffixes = [
+        "active-turn", "agent-stop-completion",
+        "remote-host", "remote-initial-args", "remote-request-id",
+    ]
 
     /// Files replaced by writing a pid-named sibling and renaming it over the
     /// original: `<name>.<pid>` by the hook, `<name>.<pid>.tmp` by the tracker. A
@@ -318,7 +324,6 @@ enum SessionArtifacts {
             Paths.dtachSocketPath(sessionId: sessionId),
             Paths.statusRecordPath(sessionId: sessionId),
             Paths.backgroundAgentsMarkerPath(sessionId: sessionId),
-            Paths.sessionIdleHookMarkerPath(sessionId: sessionId),
             Paths.copilotSessionMarkerPath(sessionId: sessionId),
             Paths.scheduledTurnMarkerPath(sessionId: sessionId),
             Paths.agentActivitySnapshotPath(sessionId: sessionId),
@@ -343,7 +348,7 @@ enum SessionArtifacts {
         removeTranscriptOwnerLock(sessionId: sessionId)
     }
 
-    /// Deletes the files `removeFiles` used to leave behind (hook turn markers and
+    /// Deletes the files `removeFiles` used to leave behind (`hookMarkerSuffixes` and
     /// abandoned temp files) for tabs that no longer exist. Only UUID-named tabs
     /// outside `keeping` with no dtach socket are considered, so a live session or
     /// a close still in progress is never touched; every other file is kept.

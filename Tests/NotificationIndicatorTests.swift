@@ -93,8 +93,9 @@ final class NotificationIndicatorTests: XCTestCase {
             model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 100)
             model.setStatus(
                 sessionId: session.id, status: .idle, text: nil, timestamp: 200,
-                source: "session-idle", notification: .completed
+                source: "agent-stop"
             )
+            model.postCompletionIfReady(sessionId: session.id)
         }
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
         XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
@@ -229,8 +230,9 @@ final class NotificationIndicatorTests: XCTestCase {
         )
         model.setStatus(
             sessionId: child.id, status: .idle, text: nil, timestamp: 200,
-            source: "session-idle", copilotSessionId: "conv", notification: .completed
+            source: "agent-stop", copilotSessionId: "conv"
         )
+        model.postCompletionIfReady(sessionId: child.id)
         XCTAssertTrue(spy.posted.isEmpty)
         XCTAssertFalse(model.projects[0].sessions[1].hasUnread)
         XCTAssertFalse(model.projects[0].sessions[1].finishedUnseen)
@@ -292,8 +294,9 @@ final class NotificationIndicatorTests: XCTestCase {
         )
         model.setStatus(
             sessionId: child.id, status: .idle, text: nil, timestamp: finishStart + 100,
-            source: "session-idle", copilotSessionId: "conv", notification: .completed
+            source: "agent-stop", copilotSessionId: "conv"
         )
+        model.postCompletionIfReady(sessionId: child.id)
         await fulfillment(of: [completed], timeout: 1.0)
         XCTAssertEqual(spy.posted.map(\.kind), [.completed])
         XCTAssertTrue(model.projects[0].sessions[1].hasUnread)

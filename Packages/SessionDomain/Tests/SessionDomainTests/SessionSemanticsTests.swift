@@ -274,7 +274,6 @@ final class SessionSemanticsTests: XCTestCase {
         XCTAssertFalse(SessionSemantics.isCompletionSignal(
             status: .idle,
             source: "disconnect",
-            notificationIsCompleted: false,
             scheduledTurnActive: false
         ))
     }
@@ -322,13 +321,11 @@ final class SessionSemanticsTests: XCTestCase {
         XCTAssertTrue(SessionSemantics.isCompletionSignal(
             status: .idle,
             source: "agent-stop",
-            notificationIsCompleted: false,
             scheduledTurnActive: false
         ))
         XCTAssertFalse(SessionSemantics.isCompletionSignal(
             status: .idle,
             source: "agent-stop",
-            notificationIsCompleted: false,
             scheduledTurnActive: true
         ))
         XCTAssertFalse(SessionSemantics.shouldClearPendingCompletion(

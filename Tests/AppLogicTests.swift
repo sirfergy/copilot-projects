@@ -1295,23 +1295,15 @@ final class AppLogicTests: XCTestCase {
     func testFooterDoesNotPromoteWhileBackgroundAgentsAreActive() {
         XCTAssertFalse(ActivityTracker.canPromoteIdleFromFooter(
             backgroundAgentsActive: true,
-            hasLiveAgent: true,
-            supportsSessionIdleHook: false
+            hasLiveAgent: true
         ))
         XCTAssertTrue(ActivityTracker.canPromoteIdleFromFooter(
             backgroundAgentsActive: false,
-            hasLiveAgent: true,
-            supportsSessionIdleHook: false
+            hasLiveAgent: true
         ))
         XCTAssertFalse(ActivityTracker.canPromoteIdleFromFooter(
             backgroundAgentsActive: false,
-            hasLiveAgent: false,
-            supportsSessionIdleHook: false
-        ))
-        XCTAssertFalse(ActivityTracker.canPromoteIdleFromFooter(
-            backgroundAgentsActive: false,
-            hasLiveAgent: true,
-            supportsSessionIdleHook: true
+            hasLiveAgent: false
         ))
     }
 
@@ -1818,10 +1810,6 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(notifications.calls.count, 1)
 
         model.reconcileAgentFooters()
-        model.setStatus(
-            sessionId: session.id, status: .idle, text: nil,
-            timestamp: 300, source: "session-idle", notification: .completed
-        )
         XCTAssertEqual(notifications.calls.count, 1)
     }
 
@@ -1859,9 +1847,9 @@ final class AppLogicTests: XCTestCase {
             status: .idle,
             text: nil,
             timestamp: 111,
-            source: "session-idle",
-            notification: .completed
+            source: "agent-stop"
         )
+        model.postCompletionIfReady(sessionId: target.id)
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
         XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
 
@@ -1879,99 +1867,7 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
-    func testCompletionSignalsSurviveEitherTimestampArrivalOrder() async throws {
-        _ = NSApplication.shared
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let agentStopFirst = Session(title: "agent-stop-first", cwd: "/tmp")
-        let sessionIdleFirst = Session(title: "session-idle-first", cwd: "/tmp")
-        let targetProject = Project(
-            name: "target",
-            cwd: "/tmp",
-            sessions: [agentStopFirst, sessionIdleFirst]
-        )
-        let selectedProject = Project(name: "selected", cwd: "/tmp")
-        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(
-            projects: [targetProject, selectedProject],
-            selectedProjectId: selectedProject.id
-        ))
-
-        let model = AppModel(
-            stateRepository: repository,
-            completionNotificationDelayNanoseconds: 10_000_000
-        )
-        let notifications = NotificationSpy()
-        model.attach(notifications: notifications)
-        model.setStatus(
-            sessionId: agentStopFirst.id,
-            status: .running,
-            text: nil,
-            timestamp: 100
-        )
-        model.setStatus(
-            sessionId: agentStopFirst.id,
-            status: .idle,
-            text: nil,
-            timestamp: 110,
-            source: "agent-stop"
-        )
-        model.setStatus(
-            sessionId: agentStopFirst.id,
-            status: .idle,
-            text: nil,
-            timestamp: 111,
-            source: "session-idle",
-            notification: .completed
-        )
-
-        model.setStatus(
-            sessionId: sessionIdleFirst.id,
-            status: .running,
-            text: nil,
-            timestamp: 200
-        )
-        model.setStatus(
-            sessionId: sessionIdleFirst.id,
-            status: .idle,
-            text: nil,
-            timestamp: 211,
-            source: "session-idle",
-            notification: .completed
-        )
-        model.setStatus(
-            sessionId: sessionIdleFirst.id,
-            status: .idle,
-            text: nil,
-            timestamp: 210,
-            source: "agent-stop"
-        )
-
-        XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
-        XCTAssertTrue(model.projects[0].sessions[1].hasUnread)
-        XCTAssertEqual(notifications.calls, [
-            NotificationSpy.Call(
-                title: StatusNotificationKind.completed.title,
-                subtitle: "target · agent-stop-first",
-                body: nil,
-                projectId: targetProject.id,
-                sessionId: agentStopFirst.id
-            ),
-            NotificationSpy.Call(
-                title: StatusNotificationKind.completed.title,
-                subtitle: "target · session-idle-first",
-                body: nil,
-                projectId: targetProject.id,
-                sessionId: sessionIdleFirst.id
-            )
-        ])
-    }
-
-    @MainActor
-    func testVisibleCompletionPostsNoNotificationAcrossAgentStopAndSessionIdle() async throws {
+    func testVisibleCompletionPostsNoNotification() throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1993,13 +1889,9 @@ final class AppLogicTests: XCTestCase {
 
         let model = AppModel(
             stateRepository: repository,
-            completionNotificationDelayNanoseconds: 10_000_000,
             isAppActive: { true }
         )
         let notifications = NotificationSpy()
-        let unexpectedCompletion = expectation(description: "visible completion remains suppressed")
-        unexpectedCompletion.isInverted = true
-        notifications.onPost = { _ in unexpectedCompletion.fulfill() }
         model.attach(notifications: notifications)
         model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 100)
         model.setStatus(
@@ -2009,22 +1901,11 @@ final class AppLogicTests: XCTestCase {
             timestamp: 110,
             source: "agent-stop"
         )
+        model.postCompletionIfReady(sessionId: session.id)
 
-        await fulfillment(of: [unexpectedCompletion], timeout: 0.1)
-        notifications.onPost = nil
         XCTAssertTrue(model.projects[0].sessions[0].turnCompleted)
         XCTAssertFalse(model.projects[0].sessions[0].hasUnread)
         XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
-        XCTAssertTrue(notifications.calls.isEmpty)
-
-        model.setStatus(
-            sessionId: session.id,
-            status: .idle,
-            text: nil,
-            timestamp: 111,
-            source: "session-idle",
-            notification: .completed
-        )
         XCTAssertTrue(notifications.calls.isEmpty)
     }
 
@@ -2505,7 +2386,7 @@ final class AppLogicTests: XCTestCase {
         ))
     }
 
-    func testCopilotHookHandlesSessionIdleAndCapabilityLifecycle() throws {
+    func testCopilotHookIgnoresNotificationsThatAreNotInputWaits() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let bin = root.appendingPathComponent("bin", isDirectory: true)
@@ -2526,33 +2407,32 @@ final class AppLogicTests: XCTestCase {
 
         let tabId = UUID().uuidString
         let sessions = root.appendingPathComponent("sessions", isDirectory: true)
-        let capability = sessions.appendingPathComponent("\(tabId).session-idle-hook")
         let backgroundAgents = sessions.appendingPathComponent("\(tabId).background-agents")
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         try Data().write(to: backgroundAgents)
 
-        try runHook(
-            hookURL: hookURL,
-            action: "notify",
-            payload: #"{"timestamp":200,"notification_type":"session_idle","aborted":true}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
+        // What cli-1.0.107 sends besides the two input waits, then the `session_idle`
+        // type the runtime never shipped.
+        for type in [
+            "agent_idle", "agent_completed", "shell_completed", "shell_detached_completed",
+            "new_inbox_message", "session_idle",
+        ] {
+            try runHook(
+                hookURL: hookURL,
+                action: "notify",
+                payload: #"{"timestamp":200,"notificationType":"\#(type)"}"#,
+                tabId: tabId,
+                root: root,
+                bin: bin,
+                capture: capture
+            )
+        }
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: sessions.path),
+            [backgroundAgents.lastPathComponent]
         )
-        XCTAssertTrue(FileManager.default.fileExists(atPath: capability.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: backgroundAgents.path))
-        let record = try hookStatusRecord(root: root, tabId: tabId)
-        XCTAssertEqual(record.status, .idle)
-        XCTAssertEqual(record.statusTimestamp, 200)
-        XCTAssertTrue(
-            try String(contentsOf: capture, encoding: .utf8)
-                .contains(
-                    "set-status idle --session \(tabId) --timestamp 200 --source session-idle"
-                )
-        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: capture.path))
 
-        try Data().write(to: backgroundAgents)
         try runHook(
             hookURL: hookURL,
             action: "start",
@@ -2562,7 +2442,6 @@ final class AppLogicTests: XCTestCase {
             bin: bin,
             capture: capture
         )
-        XCTAssertFalse(FileManager.default.fileExists(atPath: capability.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backgroundAgents.path))
     }
 
@@ -2805,7 +2684,7 @@ final class AppLogicTests: XCTestCase {
         for (action, extra) in [
             ("running", ""),
             ("idle", ""),
-            ("notify", ",\"notification_type\":\"session_idle\",\"aborted\":false"),
+            ("notify", ",\"notification_type\":\"elicitation_dialog\""),
         ] {
             try runHook(
                 hookURL: hookURL,
@@ -2819,7 +2698,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(calls[0].contains("--copilot-session"))
         XCTAssertTrue(calls.dropFirst().allSatisfy { $0.contains("--copilot-session \(conversationId)") })
         XCTAssertTrue(calls[1].contains("--source agent-stop"))
-        XCTAssertTrue(calls[2].contains("--notification completed"))
+        XCTAssertTrue(calls[2].contains("--notification elicitation"))
     }
 
     func testCopilotHookRoutesNativeNotificationsForWaitingAndCompletedTurns() throws {
@@ -2858,16 +2737,6 @@ final class AppLogicTests: XCTestCase {
         try runHook(
             hookURL: hookURL,
             action: "notify",
-            payload: #"{"timestamp":110,"notification_type":"session_idle","aborted":false}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-
-        try runHook(
-            hookURL: hookURL,
-            action: "notify",
             payload: #"{"timestamp":120,"notification_type":"elicitation_dialog"}"#,
             tabId: tabId,
             root: root,
@@ -2877,7 +2746,6 @@ final class AppLogicTests: XCTestCase {
         var cliCalls = try cliCallLines(in: capture)
         XCTAssertEqual(cliCalls, [
             "set-status idle --session \(tabId) --timestamp 100",
-            "set-status idle --session \(tabId) --timestamp 110 --source session-idle",
             "set-status waiting --session \(tabId) --timestamp 120 --notification elicitation",
         ])
 
@@ -2919,71 +2787,19 @@ final class AppLogicTests: XCTestCase {
             "set-status running --session \(tabId) --timestamp 130",
             "set-status idle --session \(tabId) --timestamp 135 --source agent-stop",
         ])
+        // A second stop finds no turn to claim, so it is not another completion.
         try runHook(
             hookURL: hookURL,
-            action: "notify",
-            payload: #"{"timestamp":140,"notification_type":"session_idle","aborted":false}"#,
+            action: "idle",
+            payload: #"{"timestamp":140}"#,
             tabId: tabId,
             root: root,
             bin: bin,
             capture: capture
         )
-        cliCalls = try cliCallLines(in: capture)
         XCTAssertEqual(
-            cliCalls.last,
-            "set-status idle --session \(tabId) --timestamp 140 --source session-idle --notification completed"
-        )
-        XCTAssertEqual(completionSignals(in: cliCalls), 2)
-
-        try runHook(
-            hookURL: hookURL,
-            action: "running",
-            payload: #"{"timestamp":150}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        try runHook(
-            hookURL: hookURL,
-            action: "notify",
-            payload: #"{"timestamp":160,"notification_type":"session_idle","aborted":false}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        cliCalls = try cliCallLines(in: capture)
-        XCTAssertEqual(
-            cliCalls.last,
-            "set-status idle --session \(tabId) --timestamp 160 --source session-idle --notification completed"
-        )
-        let completionSignalCount = completionSignals(in: cliCalls)
-        XCTAssertEqual(completionSignalCount, 3)
-
-        try runHook(
-            hookURL: hookURL,
-            action: "running",
-            payload: #"{"timestamp":170}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        try runHook(
-            hookURL: hookURL,
-            action: "notify",
-            payload: #"{"timestamp":180,"notification_type":"session_idle","unaborted":true,"aborted":true}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        cliCalls = try cliCallLines(in: capture)
-        XCTAssertEqual(completionSignals(in: cliCalls), completionSignalCount)
-        XCTAssertEqual(
-            cliCalls.last,
-            "set-status idle --session \(tabId) --timestamp 180 --source session-idle"
+            try cliCallLines(in: capture).last,
+            "set-status idle --session \(tabId) --timestamp 140"
         )
 
         try runHook(
@@ -3005,12 +2821,12 @@ final class AppLogicTests: XCTestCase {
             capture: capture
         )
         cliCalls = try cliCallLines(in: capture)
-        XCTAssertEqual(completionSignals(in: cliCalls), completionSignalCount)
+        XCTAssertEqual(cliCalls.filter { $0.contains("--source agent-stop") }.count, 1)
         XCTAssertEqual(cliCalls.suffix(2), [
             "set-status running --session \(tabId) --timestamp 190",
             "set-status idle --session \(tabId) --timestamp 195",
         ])
-        XCTAssertEqual(cliCalls.count, 13)
+        XCTAssertEqual(cliCalls.count, 8)
     }
 
     func testCopilotHookKeepsScheduledTurnsOutOfForegroundStatus() throws {
@@ -3064,15 +2880,6 @@ final class AppLogicTests: XCTestCase {
             bin: bin,
             capture: capture
         )
-        try runHook(
-            hookURL: hookURL,
-            action: "notify",
-            payload: #"{"timestamp":120,"notification_type":"session_idle","aborted":false}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
 
         let calls = try cliCallLines(in: capture)
         XCTAssertTrue(calls.contains(
@@ -3084,14 +2891,11 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(calls.contains(
             "set-status idle --session \(tabId) --timestamp 115 --source scheduled-idle"
         ))
-        XCTAssertTrue(calls.contains(
-            "set-status idle --session \(tabId) --timestamp 120 --source session-idle"
-        ))
         XCTAssertEqual(
             try hookStatusRecord(root: root, tabId: tabId).promptStatusTimestamp,
-            120
+            115
         )
-        XCTAssertFalse(calls.contains { $0.contains("--notification completed") })
+        XCTAssertFalse(calls.contains { $0.contains("--source agent-stop") })
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: root.appendingPathComponent("sessions/\(tabId).scheduled-turn").path
         ))
@@ -4969,76 +4773,6 @@ final class AppLogicTests: XCTestCase {
         )
     }
 
-    func testAgentStopAndSessionIdleAtomicallyClaimCompletion() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let bin = root.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let hookURL = root.appendingPathComponent("copilot-projects-hook.sh")
-        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookURL.path)
-
-        let capture = root.appendingPathComponent("cli-args.txt")
-        let fakeCLI = bin.appendingPathComponent("copilot-projects")
-        try """
-        #!/bin/sh
-        printf '%s\n' "$*" >> "$CAPTURE_FILE"
-        """.write(to: fakeCLI, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
-
-        let tabId = UUID().uuidString
-        try runHook(
-            hookURL: hookURL,
-            action: "running",
-            payload: #"{"timestamp":100}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-
-        let agentStop = try startHook(
-            hookURL: hookURL,
-            action: "idle",
-            payload: #"{"timestamp":110}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        let sessionIdle = try startHook(
-            hookURL: hookURL,
-            action: "notify",
-            payload: #"{"timestamp":111,"notification_type":"session_idle","aborted":false}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        agentStop.waitUntilExit()
-        sessionIdle.waitUntilExit()
-        XCTAssertEqual(agentStop.terminationStatus, 0)
-        XCTAssertEqual(sessionIdle.terminationStatus, 0)
-
-        let cliCalls = try cliCallLines(in: capture)
-        XCTAssertEqual(cliCalls.count, 3)
-        XCTAssertTrue(cliCalls.contains(
-            "set-status running --session \(tabId) --timestamp 100"
-        ))
-        XCTAssertEqual(cliCalls.filter { $0.contains("--timestamp 110") }.count, 1)
-        XCTAssertEqual(cliCalls.filter { $0.contains("--timestamp 111") }.count, 1)
-        XCTAssertTrue((1...2).contains(completionSignals(in: cliCalls)))
-        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
-        XCTAssertFalse(FileManager.default.fileExists(
-            atPath: sessions.appendingPathComponent("\(tabId).active-turn").path
-        ))
-        XCTAssertFalse(FileManager.default.fileExists(
-            atPath: sessions.appendingPathComponent("\(tabId).agent-stop-completion").path
-        ))
-    }
-
     func testStatusNotificationTitlesDescribeWhyCopilotNeedsAttention() {
         XCTAssertEqual(StatusNotificationKind.elicitation.title, "Copilot has a question")
         XCTAssertEqual(StatusNotificationKind.permission.title, "Copilot needs permission")
@@ -6213,6 +5947,7 @@ final class AppLogicTests: XCTestCase {
         let otherId = UUID().uuidString
         let removed = [
             "active-turn", "agent-stop-completion", "set-model-request.json",
+            "remote-host", "remote-initial-args", "remote-request-id",
             "status-record.json.4242", "copilot-session.17.tmp", "agent-activity.json.17.tmp",
             "transcript.json.17.tmp", "transcript-live.json.17.tmp",
             "transcript-owner.json.17.tmp",
@@ -6255,14 +5990,17 @@ final class AppLogicTests: XCTestCase {
         let attached = UUID().uuidString.lowercased()
         let removed = [
             "\(gone).active-turn", "\(gone).agent-stop-completion",
+            "\(gone).remote-host", "\(gone).remote-initial-args", "\(gone).remote-request-id",
             "\(gone).status-record.json.4242", "\(gone).transcript.json.17.tmp",
             "\(gone.lowercased()).agent-stop-completion",
         ]
         let kept = [
             "\(gone).status-record.json", "\(gone).transcript.json", "\(gone).copilot-session",
             "\(live.id).active-turn", "\(live.id).status-record.json.4242",
+            "\(live.id).remote-initial-args", "\(live.id).remote-request-id",
             "\(live.id.lowercased()).agent-stop-completion",
             "\(attached).sock", "\(attached).active-turn",
+            "\(attached).remote-initial-args", "\(attached).remote-request-id",
             "\(closing).agent-stop-completion",
             "session-1.active-turn",
         ]
@@ -10538,28 +10276,6 @@ final class AppLogicTests: XCTestCase {
         bin: URL,
         capture: URL
     ) throws {
-        let process = try startHook(
-            hookURL: hookURL,
-            action: action,
-            payload: payload,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        process.waitUntilExit()
-        XCTAssertEqual(process.terminationStatus, 0)
-    }
-
-    private func startHook(
-        hookURL: URL,
-        action: String,
-        payload: String,
-        tabId: String,
-        root: URL,
-        bin: URL,
-        capture: URL
-    ) throws -> Process {
         let resolverDirectory = root.appendingPathComponent(
             ".local/bin",
             isDirectory: true
@@ -10598,7 +10314,8 @@ final class AppLogicTests: XCTestCase {
         try process.run()
         input.fileHandleForWriting.write(Data(payload.utf8))
         try input.fileHandleForWriting.close()
-        return process
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
     }
 
     private func cliCallLines(in capture: URL) throws -> [String] {
@@ -10613,12 +10330,6 @@ final class AppLogicTests: XCTestCase {
             from: Data(contentsOf: root
                 .appendingPathComponent("sessions/\(tabId).status-record.json"))
         )
-    }
-
-    private func completionSignals(in calls: [String]) -> Int {
-        calls.filter {
-            $0.contains("--source agent-stop") || $0.contains("--notification completed")
-        }.count
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {

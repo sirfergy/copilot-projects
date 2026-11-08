@@ -651,9 +651,6 @@ extension AppModel {
                 }
                 guard let activity = remotePromptTarget?(sid)?.activity
                     ?? controllers[sid]?.agentActivity else { continue }
-                let supportsSessionIdleHook = FileManager.default.fileExists(
-                    atPath: Paths.sessionIdleHookMarkerPath(sessionId: sid)
-                )
                 // Self-recovery for the snapshot-driven demotion below: if the
                 // foreground turn has resumed (a fresh `assistant.turn_start` flipped
                 // `foregroundTurnActive` back to true), restore `.running`. This
@@ -722,8 +719,7 @@ extension AppModel {
                     sessionSemantics.activityTracker.resetDisconnectIdle(sessionId: sid)
                     guard ActivityTracker.canPromoteIdleFromFooter(
                         backgroundAgentsActive: projects[pi].sessions[si].hasBackgroundWork,
-                        hasLiveAgent: liveAgentSessions.contains(sid),
-                        supportsSessionIdleHook: supportsSessionIdleHook
+                        hasLiveAgent: liveAgentSessions.contains(sid)
                     ) else {
                         sessionSemantics.activityTracker.reset(sessionId: sid)
                         continue
@@ -778,8 +774,7 @@ extension AppModel {
                 }
                 // Stale "working" recovery: the foreground turn has ended, but
                 // scheduled, subagent, or CLI background-agent work keeps
-                // `session.idle` from firing, so the hook path below (guarded by
-                // `supportsSessionIdleHook`) never demotes the tab and it reads
+                // `session.idle` from firing, so no hook demotes the tab and it reads
                 // "working" while the terminal is actually idle and interactive.
                 // Scope this strictly to fresh background-only evidence so ordinary
                 // sessions keep falling through. Demote to idle
@@ -823,15 +818,11 @@ extension AppModel {
                             effectiveTime: snapshotMs
                         )
                         // Don't post completion here: background work is still active.
-                        // Its final stop/session-idle signal owns completion.
+                        // Its final stop signal owns completion.
                     }
                     continue
                 } else {
                     sessionSemantics.activityTracker.resetForegroundIdle(sessionId: sid)
-                }
-                if supportsSessionIdleHook {
-                    sessionSemantics.activityTracker.reset(sessionId: sid)
-                    continue
                 }
                 tracked.insert(sid)
                 if sessionSemantics.activityTracker.observeFooter(
@@ -1099,7 +1090,7 @@ extension AppModel {
         guard !isVisible(projectIndex: loc.p, sessionIndex: loc.s) else { return }
         // Light the finished-and-unseen dot here too. When a session was already
         // demoted to idle early (stale-working recovery, while background subagents
-        // were still running), the final agent-stop/session-idle arrives with
+        // were still running), the final agent-stop arrives with
         // `previous == .idle`, so the active→idle edge in `setStatus` won't set this.
         // Setting it at the completion chokepoint keeps the sidebar/tab dot in parity
         // for both the direct-finish and the pre-demoted paths.

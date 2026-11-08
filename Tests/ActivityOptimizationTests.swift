@@ -313,8 +313,7 @@ final class ActivityOptimizationTests: XCTestCase {
             status: .idle,
             text: nil,
             timestamp: baseMs + 20,
-            source: "agent-stop",
-            notification: .completed
+            source: "agent-stop"
         )
         XCTAssertFalse(model.projects[0].sessions[0].turnCompleted)
         XCTAssertEqual(model.projects[0].sessions[1].status, .running)

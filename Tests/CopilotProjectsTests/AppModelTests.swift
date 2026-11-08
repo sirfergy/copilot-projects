@@ -1026,8 +1026,7 @@ final class AppModelTests: XCTestCase {
                 sessionId: s1.id,
                 status: .idle,
                 text: nil,
-                timestamp: hookStartMs + 20_000,
-                source: "session-idle"
+                timestamp: hookStartMs + 20_000
             )
             XCTAssertNil(model.projects[0].sessions[0].runningStartedAtMilliseconds)
             XCTAssertNil(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds)

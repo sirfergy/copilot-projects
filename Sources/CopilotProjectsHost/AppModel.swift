@@ -3254,11 +3254,9 @@ final class AppModel: ObservableObject {
             // A scan read that began before this hook would undo it.
             agentActivityObservations[sessionId, default: 0] += 1
         }
-        let clearsBackgroundAgents = status == .idle && source == "session-idle"
         let hasCompletionSignal = SessionSemantics.isCompletionSignal(
             status: status,
             source: source,
-            notificationIsCompleted: notification == .completed,
             scheduledTurnActive: projects[loc.p].sessions[loc.s].scheduledTurnActive
         )
         let clearsFinishedUnseen = (status == .running || status == .waiting)
@@ -3267,7 +3265,6 @@ final class AppModel: ObservableObject {
             && backgroundAgentsSuppressed.contains(sessionId)
         guard previous != status
                 || projects[loc.p].sessions[loc.s].statusText != text
-                || clearsBackgroundAgents
                 || clearsFinishedUnseen
                 || resumesBackgroundTracking
                 || notification != nil
@@ -3345,9 +3342,6 @@ final class AppModel: ObservableObject {
             }
             completionPending.insert(sessionId)
         }
-        if status == .idle && source == "session-idle" && notification != .completed {
-            completionPending.remove(sessionId)
-        }
         if timestamp == nil {
             let now = SessionArtifacts.currentStatusTimestamp()
             let clocks = sessionSemantics.recordLocalStatusEvent(
@@ -3373,10 +3367,6 @@ final class AppModel: ObservableObject {
 
         if status == .idle {
             sessionSemantics.activityTracker.reset(sessionId: sessionId)
-            if source == "session-idle" {
-                setBackgroundAgentsActive(sessionId: sessionId, active: false)
-                backgroundAgentsSuppressed.insert(sessionId)
-            }
         }
         // Completion signals mark ready through postCompletionIfReady, after background
         // work drains. Idle events without one (aborts, session end) need attention now.
@@ -3387,15 +3377,11 @@ final class AppModel: ObservableObject {
             projects[loc.p].sessions[loc.s].finishedUnseen = true
         }
         if hasCompletionSignal {
-            if source == "agent-stop" {
-                let delay = completionNotificationDelayNanoseconds
-                Task { @MainActor [weak self] in
-                    // Allow one footer scan for the background-agent OSC title to arrive.
-                    try? await Task.sleep(nanoseconds: delay)
-                    self?.postCompletionIfReady(sessionId: sessionId)
-                }
-            } else {
-                postCompletionIfReady(sessionId: sessionId)
+            let delay = completionNotificationDelayNanoseconds
+            Task { @MainActor [weak self] in
+                // Allow one footer scan for the background-agent OSC title to arrive.
+                try? await Task.sleep(nanoseconds: delay)
+                self?.postCompletionIfReady(sessionId: sessionId)
             }
         } else if notification == .permission {
             if let permissionRestoreState {
@@ -4266,16 +4252,9 @@ final class AppModel: ObservableObject {
                 )
                 projects[pi].sessions[si].statusText = nil
                 projects[pi].sessions[si].hasUnread = false
-                let hasBackgroundAgents = FileManager.default.fileExists(
+                projects[pi].sessions[si].backgroundAgentsActive = FileManager.default.fileExists(
                     atPath: Paths.backgroundAgentsMarkerPath(sessionId: sid)
                 )
-                projects[pi].sessions[si].backgroundAgentsActive = hasBackgroundAgents
-                if !hasBackgroundAgents, projects[pi].sessions[si].status == .idle,
-                   FileManager.default.fileExists(
-                    atPath: Paths.sessionIdleHookMarkerPath(sessionId: sid)
-                ) {
-                    backgroundAgentsSuppressed.insert(sid)
-                }
             }
         }
         syncSessionNavigationHistory()

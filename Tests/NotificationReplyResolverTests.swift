@@ -1040,10 +1040,10 @@ final class NotificationReplyWiringTests: XCTestCase {
         )
         harness.model.setStatus(
             sessionId: harness.session.id, status: .idle, text: nil, timestamp: 4_500,
-            source: "session-idle",
-            copilotSessionId: summaryContext ? copilotSessionId : nil,
-            notification: .completed
+            source: "agent-stop",
+            copilotSessionId: summaryContext ? copilotSessionId : nil
         )
+        harness.model.postCompletionIfReady(sessionId: harness.session.id)
     }
 
     private func readyWorkflow(sendReady: Bool = true) -> RemoteSessionWorkflow {
