@@ -261,10 +261,4 @@ final class AnsweredQuestionNotificationTests: XCTestCase {
             posted("ask-1"), snapshot: snapshot(at: -5, userInputs: Array(others.dropLast()))
         ))
     }
-
-    func testQuestionLimitMatchesTheTracker() {
-        let limit = AnsweredQuestionNotifications.trackerQuestionLimit
-        XCTAssertTrue(CopilotExtension.script.contains("const MAX_USER_INPUTS = \(limit);"))
-        XCTAssertTrue(CopilotExtension.script.contains("const MAX_ELICITATIONS = \(limit);"))
-    }
 }

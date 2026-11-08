@@ -82,7 +82,8 @@ fs.createReadStream = (path, ...args) => {
 syncBuiltinESMExports();
 
 const fakeSDKURL = `data:text/javascript,${encodeURIComponent(`
-  export async function joinSession() {
+  export async function joinSession(...options) {
+    globalThis.__copilotProjectsTrackerJoinOptions = options;
     const join = globalThis.__copilotProjectsTrackerJoin;
     if (join) return join();
     return globalThis.__copilotProjectsTrackerSession;
@@ -553,6 +554,11 @@ test("a retried join that never settles is abandoned within the retry window", {
     assert.ok(delays[1] > 0 && delays[1] <= 20_000);
   }, { expireRetryWindow: true });
   assert.equal(attempts, 2);
+});
+
+test("tracker joins without registering tools or handlers", async (t) => {
+  await createRuntime(t);
+  assert.deepEqual(globalThis.__copilotProjectsTrackerJoinOptions, []);
 });
 
 test("tracker never reads permission mode", async (t) => {

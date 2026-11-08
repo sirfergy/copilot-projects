@@ -1,5 +1,6 @@
 import XCTest
 @testable import CopilotProjectsCore
+@testable import CopilotProjectsHost
 
 /// Guards for the two background-overhead optimizations in the packaged Copilot
 /// extension: the 5s poll's snapshot write rate, and the transcript byte-budget
@@ -147,6 +148,42 @@ final class ExtensionOptimizationTests: XCTestCase {
         XCTAssertEqual(summary["pendingModes"] as? [String], ["immediate", "enqueue"])
         XCTAssertEqual(summary["pendingTexts"] as? [String], ["Steer me", "Queued item"])
         XCTAssertEqual(summary["afterClear"] as? Int, 0)
+    }
+
+    // MARK: - Question limit
+
+    /// The host treats a full question list as possibly incomplete, so the
+    /// limit it assumes has to be the number the tracker really keeps.
+    func testTrackerKeepsTheQuestionLimitTheHostAssumes() throws {
+        try requireNodeForJavaScriptTests()
+        let limit = AnsweredQuestionNotifications.trackerQuestionLimit
+        let summary = try runExtensionHarness(
+            name: "question-limit",
+            prelude: Self.questionPrelude,
+            epilogue: Self.snapshotReaderHelpers + """
+
+            const ask = (type, index, data) => listeners.get(type)({
+                id: `${type}-${index}`, type, timestamp: new Date().toISOString(),
+                data: { requestId: `${type}-${index}`, ...data },
+            });
+            for (let index = 0; index <= \(limit); index += 1) {
+                ask("user_input.requested", index, { question: "Continue?", choices: [] });
+                ask("elicitation.requested", index, {
+                    message: "Pick", mode: "form", requestedSchema: { type: "object" },
+                });
+            }
+            await new Promise((resolve) => setImmediate(resolve));
+            const snapshot = readSnapshot();
+            console.log(JSON.stringify({
+                userInputs: snapshot.trackedUserInputs.length,
+                elicitations: snapshot.trackedElicitations.length,
+            }));
+            process.exit(0);
+
+            """
+        )
+        XCTAssertEqual(summary["userInputs"] as? Int, limit)
+        XCTAssertEqual(summary["elicitations"] as? Int, limit)
     }
 
     // MARK: - Harnesses
@@ -1146,4 +1183,24 @@ extension ExtensionOptimizationTests {
 
         """#
     }
+
+    fileprivate static let questionPrelude = #"""
+    const listeners = new Map();
+    const fakeSession = {
+        sessionId: "11111111-1111-4111-8111-111111111111",
+        rpc: {
+            schedule: { list: async () => ({ entries: [] }) },
+            model: { list: async () => ({ list: [] }) },
+            eventLog: {
+                registerInterest: async () => ({ success: true, handle: "h-1" }),
+                releaseInterest: async () => ({ success: true }),
+            },
+        },
+        on(type, listener) {
+            if (typeof type === "string") listeners.set(type, listener);
+        },
+        async getEvents() { return []; },
+    };
+
+    """#
 }
