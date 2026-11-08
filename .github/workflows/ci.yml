@@ -11,6 +11,8 @@ concurrency:
 jobs:
   test:
     runs-on: [self-hosted, macOS, ARM64]
+    # About twice the slowest healthy run, so a hung test frees the shared runner.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
       - name: Release entrypoint contracts

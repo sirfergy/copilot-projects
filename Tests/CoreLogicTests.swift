@@ -1,5 +1,6 @@
 import XCTest
 @testable import CopilotProjectsCore
+@testable import CopilotProjectsHost
 import CopilotProjectsProtocol
 #if canImport(Darwin)
 import Darwin
@@ -291,146 +292,40 @@ final class CoreLogicTests: XCTestCase {
 
     """#
 
-    func testCopilotExtensionTracksSchedulesAndSubagentsWithoutTools() throws {
-        XCTAssertTrue(CopilotExtension.script.contains("session.rpc.schedule.list()"))
-        XCTAssertTrue(CopilotExtension.script.contains(#"session.on("subagent.started""#))
-        XCTAssertTrue(CopilotExtension.script.contains(#"session.on("session.idle""#))
-        XCTAssertFalse(CopilotExtension.script.contains("session.rpc.permissions"))
-        XCTAssertFalse(CopilotExtension.script.contains("session.permissions_changed"))
-        XCTAssertTrue(CopilotExtension.script.contains("writeMarker(copilotSessionPath, copilotSessionId)"))
-        XCTAssertTrue(CopilotExtension.script.contains("await sdkHistoryWithTimeout()"))
-        XCTAssertTrue(CopilotExtension.script.contains("scheduleDurableReconcile(0)"))
-        XCTAssertTrue(CopilotExtension.script.contains(#"case "assistant.message":"#))
-        XCTAssertTrue(CopilotExtension.script.contains(#"case "tool.execution_complete":"#))
-        XCTAssertTrue(CopilotExtension.script.contains("isAborted"))
-        XCTAssertTrue(CopilotExtension.script.contains(".transcript.json"))
-        XCTAssertTrue(CopilotExtension.script.contains("classifyUserMessage"))
-        XCTAssertTrue(CopilotExtension.script.contains("ownsSharedFiles"))
-        XCTAssertTrue(CopilotExtension.script.contains("transcript-owner.json"))
-        XCTAssertTrue(CopilotExtension.script.contains("transcriptOwnerLockPath"))
-        XCTAssertTrue(CopilotExtension.script.contains("owner.pid === process.pid"))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "appSessionResolution.native ? {appSessionId} : {}"
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains("let copilotSessionId = typeof session.sessionId"))
-        XCTAssertTrue(CopilotExtension.script.contains(#""resolve-session", "--pid""#))
-        XCTAssertTrue(CopilotExtension.script.contains("COPILOT_EXTENSION_PARENT_PID"))
-        XCTAssertTrue(CopilotExtension.script.contains(#""session.getForeground""#))
-        XCTAssertTrue(CopilotExtension.script.contains("SEALED_TRANSCRIPT_SCHEMA_VERSION = 4"))
-        XCTAssertTrue(CopilotExtension.script.contains("LIVE_TRANSCRIPT_SCHEMA_VERSION = 1"))
-        XCTAssertTrue(CopilotExtension.script.contains(".transcript-live.json"))
-        XCTAssertTrue(CopilotExtension.script.contains("publishTranscript();"))
-        XCTAssertTrue(CopilotExtension.script.contains("removeFile(temporaryPath)"))
-        XCTAssertTrue(CopilotExtension.script.contains("setScheduledTurnMarker(false)"))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            #"session.on("user_input.requested""#
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            #"session.on("user_input.completed""#
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "session.rpc.ui.handlePendingUserInput"
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "trackedUserInputs: [...pendingUserInputs.values()]"
-        ))
-        // Elicitation support: gated events need registerInterest, and the
-        // extension must observe + expose + resolve elicitation.requested.
-        XCTAssertTrue(CopilotExtension.script.contains(
-            #"session.on("elicitation.requested""#
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            #"session.on("elicitation.completed""#
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "session.rpc.ui.handlePendingElicitation"
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "synthetic::durable-ask-user::"
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "requestId.startsWith(DURABLE_ASK_USER_PREFIX)"
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            #"mode === "terminal-default""#
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            #""x-copilot-projects-terminal-default""#
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "registerInterest({ eventType })"
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            #""user_input.requested", "elicitation.requested""#
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains("await releaseEventInterests()"))
-        XCTAssertTrue(CopilotExtension.script.contains("result?.success === true"))
-        XCTAssertTrue(CopilotExtension.script.contains(#"process.once("exit", cleanupSharedFiles)"#))
-        XCTAssertTrue(CopilotExtension.script.contains(".elicitation-response.json"))
-        XCTAssertTrue(CopilotExtension.script.contains(".user-input-response.json"))
-        XCTAssertTrue(CopilotExtension.script.contains("watch(sessionsDir"))
-        // The heartbeat now carries question text, so it must be written 0600.
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "JSON.stringify(snapshot), { mode: 0o600 }"
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "removeFile(userInputResponsePath)"
-        ))
-        // Model info: the heartbeat seeds the effective model from
-        // start/resume/model_change — for both live events and replayed history,
-        // so a session whose model was set before we joined is still captured.
-        XCTAssertTrue(CopilotExtension.script.contains(
-            #"session.on("session.model_change""#
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "model: currentModel"
-        ))
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "applyModelFromEvent(event)"
-        ))
-        let cleanupRange = try XCTUnwrap(CopilotExtension.script.range(
-            of: "Clear stale answer state before any new question can be published"
-        ))
-        let watcherRange = try XCTUnwrap(CopilotExtension.script.range(
-            of: "watch(sessionsDir"
-        ))
-        let listenerRange = try XCTUnwrap(CopilotExtension.script.range(
-            of: #"session.on("user_input.requested""#
-        ))
-        let registrationRange = try XCTUnwrap(CopilotExtension.script.range(
-            of: "await registerEventInterest(eventType)"
-        ))
-        let shutdownRange = try XCTUnwrap(CopilotExtension.script.range(
-            of: #"process.once("SIGTERM""#
-        ))
-        XCTAssertLessThan(cleanupRange.lowerBound, listenerRange.lowerBound)
-        XCTAssertLessThan(watcherRange.lowerBound, listenerRange.lowerBound)
-        XCTAssertLessThan(listenerRange.lowerBound, registrationRange.lowerBound)
-        XCTAssertLessThan(shutdownRange.lowerBound, registrationRange.lowerBound)
-        // The transcript turn must span a whole request, not stop at the first
-        // agentic-loop turn end, and must not key suppression off parentAgentTaskId
-        // (that field is present on genuine human input too).
-        XCTAssertFalse(CopilotExtension.script.contains("suppressedInteractionIds"))
-        XCTAssertFalse(CopilotExtension.script.contains("suppressedTurnIds"))
-        XCTAssertFalse(CopilotExtension.script.contains("scheduleTranscriptTurnEndFallback"))
-        XCTAssertFalse(CopilotExtension.script.contains("schemaVersion: 2"))
-        XCTAssertFalse(CopilotExtension.script.contains("joinSession({"))
-        XCTAssertFalse(CopilotExtension.script.contains("process.env.SESSION_ID"))
-        // The host's shared transcript snapshot is discarded in exactly one
-        // place — the named rotation helper — so no publish/cleanup path can
-        // ever delete a live conversation's drawer.
-        XCTAssertTrue(CopilotExtension.script.contains(
-            "function discardRotatedTranscript() {"
-        ))
-        XCTAssertEqual(
-            CopilotExtension.script.components(
-                separatedBy: "removeFile(transcriptPath)"
-            ).count - 1,
-            1
+    /// Source-text checks for the tracker invariants no behavior test fails on
+    /// yet; most need a fake clock, a failing rename, or a startup race to
+    /// observe. Behavior tests (JSTests and the Node harnesses here) cover the
+    /// rest of the tracker, so prefer extending those over adding lines here.
+    func testCopilotExtensionKeepsInvariantsNoBehaviorTestObserves() throws {
+        let script = CopilotExtension.script
+        XCTAssertTrue(script.contains("await sdkHistoryWithTimeout()"))
+        XCTAssertTrue(script.contains("removeFile(temporaryPath)"))
+        XCTAssertTrue(script.contains("setScheduledTurnMarker(false)"))
+        XCTAssertTrue(script.contains("removeFile(userInputResponsePath)"))
+        XCTAssertTrue(script.contains(#"session.on("session.model_change""#))
+        // Nothing can show by running it that the tracker never does these.
+        XCTAssertFalse(script.contains("session.rpc.permissions"))
+        XCTAssertFalse(script.contains("session.permissions_changed"))
+        XCTAssertFalse(script.contains("process.env.SESSION_ID"))
+        // Startup order: stale answers are cleared, and the watcher, question
+        // listener, and signal handlers installed, before interest is
+        // registered and a question can be delivered.
+        func position(of marker: String) throws -> String.Index {
+            try XCTUnwrap(script.range(of: marker), marker).lowerBound
+        }
+        let listener = try position(of: #"session.on("user_input.requested""#)
+        let registration = try position(of: "await registerEventInterest(eventType)")
+        XCTAssertLessThan(
+            try position(of: "Clear stale answer state before any new question can be published"),
+            listener
         )
-        // Copilot's durable per-session history is never deleted by rotation.
-        XCTAssertFalse(CopilotExtension.script.contains("removeFile(durableEventsPath"))
-        XCTAssertFalse(CopilotExtension.script.contains("rmSync(eventsPath"))
+        XCTAssertLessThan(try position(of: "watch(sessionsDir"), listener)
+        XCTAssertLessThan(listener, registration)
+        XCTAssertLessThan(try position(of: #"process.once("SIGTERM""#), registration)
+        // The host's shared transcript snapshot is discarded in exactly one
+        // place — the named rotation helper.
+        XCTAssertTrue(script.contains("function discardRotatedTranscript() {"))
+        XCTAssertEqual(script.components(separatedBy: "removeFile(transcriptPath)").count - 1, 1)
     }
 
     func testCopilotExtensionQueuesGracefulCloseAfterAbortBecomesIdle() throws {
@@ -705,7 +600,7 @@ final class CoreLogicTests: XCTestCase {
         // the first startup resolution attempt, followed by success on retry.
         try """
         #!/bin/sh
-        echo 1 >> '\(attemptsFile.path)'
+        echo "$1 $2" >> '\(attemptsFile.path)'
         COUNT=$(wc -l < '\(attemptsFile.path)' | tr -d ' ')
         if [ "$COUNT" -eq 1 ]; then
           kill -TERM $$
@@ -754,7 +649,7 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(result?["native"] as? Bool, true)
         let attempts = try String(contentsOf: attemptsFile, encoding: .utf8)
             .split(whereSeparator: \.isNewline)
-        XCTAssertEqual(attempts.count, 2)
+        XCTAssertEqual(attempts, ["resolve-session --pid", "resolve-session --pid"])
 
         // Definitive exit status 1 ("no tab") must fail closed on the first
         // attempt without retrying or falling back to COPILOT_PROJECTS_SESSION.
@@ -1174,6 +1069,17 @@ final class CoreLogicTests: XCTestCase {
         )
         let output = stdout.fileHandleForReading.readDataToEndOfFile()
         let summary = try JSONSerialization.jsonObject(with: output) as? [String: Any]
+        // Exiting removes the tracker's heartbeat and keeps the sealed
+        // transcript, so the drawer outlives the process.
+        let files = root.appendingPathComponent("sessions/12345678-1234-1234-1234-123456789abc").path
+        XCTAssertFalse(FileManager.default.fileExists(atPath: files + ".agent-activity.json"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: files + ".transcript.json"))
+        // Without the native resolver the owner marker must not claim a tab.
+        let owner = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: files + ".transcript-owner.json"))
+        ) as? [String: Any]
+        XCTAssertNotNil(owner?["copilotSessionId"])
+        XCTAssertNil(owner?["appSessionId"])
         XCTAssertEqual(summary?["schemaVersion"] as? Int, 4)
         XCTAssertEqual(summary?["ownerPidIsNumber"] as? Bool, true)
         // Retention caps the total but never evicts the human conversation.
@@ -2122,6 +2028,11 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["reresumedHasResumeSeparator"] as? Bool, false)
         XCTAssertEqual(summary["reresumedFenceLeaked"] as? Bool, false)
         XCTAssertEqual(summary["liveSessionIdentity"] as? String, sessionB)
+        // Exiting leaves each conversation's durable history in place too.
+        for id in [sessionA, sessionB] {
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: try durableDirectory(id).appendingPathComponent("events.jsonl").path), id)
+        }
     }
 
     /// `/new` creates a second SDK session and extension process while the
@@ -4203,6 +4114,9 @@ final class CoreLogicTests: XCTestCase {
         try requireNodeForJavaScriptTests()
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build/copilot-extension-userinput-\(UUID().uuidString)")
+        // The host treats a full question list as possibly incomplete, so the
+        // limit it assumes has to be the number the tracker really keeps.
+        let limit = AnsweredQuestionNotifications.trackerQuestionLimit
         let sessions = root.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -4333,6 +4247,23 @@ final class CoreLogicTests: XCTestCase {
         await new Promise((resolve) => setImmediate(resolve));
         const afterSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
 
+        // Ask one more question of each kind than the tracker keeps.
+        for (let index = 0; index <= \#(limit); index += 1) {
+          __fakeSession.emit({
+            id:`ui-${index}`,type:"user_input.requested",
+            timestamp:"2026-07-12T03:00:06.000Z",
+            data:{requestId:`ui-${index}`,question:"Continue?",choices:[]}
+          });
+          __fakeSession.emit({
+            id:`form-${index}`,type:"elicitation.requested",
+            timestamp:"2026-07-12T03:00:06.000Z",
+            data:{requestId:`form-${index}`,message:"Pick",mode:"form",
+              requestedSchema:{type:"object"}}
+          });
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+        const fullSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
+
         console.log(JSON.stringify({
           pendingBefore,
           rejectedBigChoice: pendingBefore.includes("req-big"),
@@ -4345,6 +4276,8 @@ final class CoreLogicTests: XCTestCase {
           staleStillPending,
           handledPayload: handledUserInputCalls[0],
           pendingAfter: afterSnapshot.trackedUserInputs.map((u) => u.requestId),
+          keptUserInputs: fullSnapshot.trackedUserInputs.length,
+          keptElicitations: fullSnapshot.trackedElicitations.length,
           responseRemoved: existsSync(responsePath) === false
         }));
         process.exit(0);
@@ -4400,6 +4333,8 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(handledResponse?["answer"] as? String, "Yes, deploy")
         XCTAssertEqual(handledResponse?["wasFreeform"] as? Bool, false)
         XCTAssertEqual(summary["pendingAfter"] as? [String], [])
+        XCTAssertEqual(summary["keptUserInputs"] as? Int, limit)
+        XCTAssertEqual(summary["keptElicitations"] as? Int, limit)
         XCTAssertEqual(summary["responseRemoved"] as? Bool, true)
     }
 

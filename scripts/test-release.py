@@ -1288,6 +1288,13 @@ class CiWorkflowTests(unittest.TestCase):
             WORKFLOW.read_text(),
         )
 
+    def test_every_job_has_a_timeout_so_a_hang_cannot_hold_the_shared_runner(self):
+        for workflow in (WORKFLOW, WORKFLOW.with_name("ci.yml")):
+            text = workflow.read_text()
+            jobs = text.count("\n    runs-on:")
+            self.assertTrue(jobs, workflow.name)
+            self.assertEqual(jobs, text.count("\n    timeout-minutes:"), workflow.name)
+
 
 if __name__ == "__main__":
     unittest.main()
