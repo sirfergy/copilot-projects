@@ -303,6 +303,9 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(script.contains("setScheduledTurnMarker(false)"))
         XCTAssertTrue(script.contains("removeFile(userInputResponsePath)"))
         XCTAssertTrue(script.contains(#"session.on("session.model_change""#))
+        // Nothing can show by running it that the tracker never does these.
+        XCTAssertFalse(script.contains("session.rpc.permissions"))
+        XCTAssertFalse(script.contains("session.permissions_changed"))
         XCTAssertFalse(script.contains("process.env.SESSION_ID"))
         // Startup order: stale answers are cleared, and the watcher, question
         // listener, and signal handlers installed, before interest is
