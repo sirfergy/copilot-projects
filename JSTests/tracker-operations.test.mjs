@@ -570,6 +570,7 @@ test("tracker never reads permission mode", async (t) => {
     };
   });
   await runtime.session.emit("session.permissions_changed", { mode: "allow-all" });
+  assert.equal(runtime.session.namedListeners.has("session.permissions_changed"), false);
   runtime.session.sessionId = uuid();
   await runtime.session.emit("session.start", { sessionId: runtime.session.sessionId });
   await new Promise((resolve) => setImmediate(resolve));

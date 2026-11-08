@@ -1,5 +1,6 @@
 import XCTest
 @testable import CopilotProjectsCore
+@testable import CopilotProjectsHost
 import CopilotProjectsProtocol
 #if canImport(Darwin)
 import Darwin
@@ -4105,6 +4106,9 @@ final class CoreLogicTests: XCTestCase {
         try requireNodeForJavaScriptTests()
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build/copilot-extension-userinput-\(UUID().uuidString)")
+        // The host treats a full question list as possibly incomplete, so the
+        // limit it assumes has to be the number the tracker really keeps.
+        let limit = AnsweredQuestionNotifications.trackerQuestionLimit
         let sessions = root.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -4235,6 +4239,23 @@ final class CoreLogicTests: XCTestCase {
         await new Promise((resolve) => setImmediate(resolve));
         const afterSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
 
+        // Ask one more question of each kind than the tracker keeps.
+        for (let index = 0; index <= \#(limit); index += 1) {
+          __fakeSession.emit({
+            id:`ui-${index}`,type:"user_input.requested",
+            timestamp:"2026-07-12T03:00:06.000Z",
+            data:{requestId:`ui-${index}`,question:"Continue?",choices:[]}
+          });
+          __fakeSession.emit({
+            id:`form-${index}`,type:"elicitation.requested",
+            timestamp:"2026-07-12T03:00:06.000Z",
+            data:{requestId:`form-${index}`,message:"Pick",mode:"form",
+              requestedSchema:{type:"object"}}
+          });
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+        const fullSnapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
+
         console.log(JSON.stringify({
           pendingBefore,
           rejectedBigChoice: pendingBefore.includes("req-big"),
@@ -4247,6 +4268,8 @@ final class CoreLogicTests: XCTestCase {
           staleStillPending,
           handledPayload: handledUserInputCalls[0],
           pendingAfter: afterSnapshot.trackedUserInputs.map((u) => u.requestId),
+          keptUserInputs: fullSnapshot.trackedUserInputs.length,
+          keptElicitations: fullSnapshot.trackedElicitations.length,
           responseRemoved: existsSync(responsePath) === false
         }));
         process.exit(0);
@@ -4302,6 +4325,8 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(handledResponse?["answer"] as? String, "Yes, deploy")
         XCTAssertEqual(handledResponse?["wasFreeform"] as? Bool, false)
         XCTAssertEqual(summary["pendingAfter"] as? [String], [])
+        XCTAssertEqual(summary["keptUserInputs"] as? Int, limit)
+        XCTAssertEqual(summary["keptElicitations"] as? Int, limit)
         XCTAssertEqual(summary["responseRemoved"] as? Bool, true)
     }
 
