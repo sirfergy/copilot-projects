@@ -975,7 +975,7 @@ if (validSessionId && socketPath) {
                 }
             }
             const result = await promiseWithTimeout(
-                session.rpc.commands.enqueue({command: "/exit print"}),
+                session.rpc.commands.enqueue({command: "/exit"}),
                 CLOSE_ENQUEUE_TIMEOUT_MS,
                 "exit command enqueue timed out"
             );
@@ -987,6 +987,15 @@ if (validSessionId && socketPath) {
             // (or after its bounded force-cleanup fallback). Keeping it here lets
             // a failed attempt retry from the periodic poll.
             closeSessionExitQueued = true;
+            // An idle runtime leaves a queued exit pending until its queue is
+            // processed. The call is internal to the runtime, so it is not on
+            // session.rpc. Best effort: the CLI usually exits before replying,
+            // and the app's forced teardown covers a missing or failed call.
+            Promise.resolve()
+                .then(() => session.connection.sendRequest(
+                    "session.queue.process", {sessionId: copilotSessionId}
+                ))
+                .catch(() => {});
         } catch (error) {
             console.error(
                 "[copilot-projects] failed to request graceful CLI exit:",
