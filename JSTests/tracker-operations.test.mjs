@@ -152,6 +152,8 @@ class FakeSession {
     this.activityHandler = async () => ({ abortable: this.processing, hasActiveWork: this.processing });
     this.abortHandler = async () => this.emit("session.idle", { aborted: true });
     this.enqueueHandler = async () => ({ queued: true });
+    this.queueProcessCalls = [];
+    this.queueProcessHandler = async () => null;
     this.extensionsReloadHandler = async () => null;
     this.commandListHandler = async () => ({ commands: [] });
     this.scheduleListHandler = async () => ({ entries: [] });
@@ -220,6 +222,10 @@ class FakeSession {
           return this.pendingItemsHandler
             ? this.pendingItemsHandler(params)
             : { items: [], steeringMessages: [], inFlightSteeringCount: 0 };
+        }
+        if (method === "session.queue.process") {
+          this.queueProcessCalls.push(params);
+          return this.queueProcessHandler(params);
         }
         this.runtimeCalls.push({ method, ...params });
         if (method === "session.metadata.snapshot") return this.metadataHandler(params);
@@ -4702,7 +4708,85 @@ test("historical scheduled turns do not contaminate live idle classification on 
   assert.equal(readSnapshot(runtime).lastIdleAborted, true);
   assert.equal(readSnapshot(runtime).lastIdleTurnKind, null);
   assert.equal(readSnapshot(runtime).scheduledTurnActive, false);
-  assert.equal(runtime.session.closeCalls[0].command, "/exit print");
+  assert.equal(runtime.session.closeCalls[0].command, "/exit");
+});
+
+test("close queues a plain exit, then processes that session's queue, after aborting any turn", {
+  concurrency: false,
+  timeout: 10_000,
+}, async (t) => {
+  for (const working of [false, true]) {
+    const calls = [];
+    let acceptExit;
+    let queuing;
+    const exitQueuing = new Promise((resolve) => { queuing = resolve; });
+    let processed;
+    const queueProcessed = new Promise((resolve) => { processed = resolve; });
+    const runtime = await createRuntime(t, (session) => {
+      session.abortHandler = async () => {
+        calls.push("abort");
+        await session.emit("session.idle", { aborted: true });
+      };
+      session.enqueueHandler = ({ command }) => {
+        calls.push(`enqueue:${command}`);
+        queuing();
+        return new Promise((resolve) => { acceptExit = resolve; });
+      };
+      session.queueProcessHandler = async ({ sessionId }) => {
+        calls.push(`process:${sessionId}`);
+        processed();
+      };
+    });
+    if (working) await runtime.session.emit("user.message", { content: "work", source: null });
+    requestClose(runtime);
+    await exitQueuing;
+    await new Promise(setImmediate);
+    assert.equal(runtime.session.queueProcessCalls.length, 0,
+      "processed before the exit was queued");
+    acceptExit({ queued: true });
+    await queueProcessed;
+    assert.deepEqual(calls, [
+      ...(working ? ["abort"] : []),
+      "enqueue:/exit",
+      `process:${runtime.copilotSessionId}`,
+    ]);
+  }
+});
+
+test("a close whose queue cannot be processed still queues its exit once and reports no error", {
+  concurrency: false,
+  timeout: 10_000,
+}, async (t) => {
+  const logged = [];
+  const savedError = console.error;
+  console.error = (...args) => { logged.push(String(args[0])); };
+  t.after(() => { console.error = savedError; });
+  // An older CLI rejects the unknown method; a closed connection throws. A
+  // rejection nothing handles fails this test through the runner.
+  for (const fail of [
+    () => Promise.reject(Object.assign(new Error("unsupported"), { code: -32601 })),
+    () => { throw new Error("connection is closed"); },
+  ]) {
+    const runtime = await createRuntime(t);
+    const send = runtime.session.connection.sendRequest;
+    let attempts = 0;
+    let attempted;
+    const queueAttempted = new Promise((resolve) => { attempted = resolve; });
+    runtime.session.connection.sendRequest = (method, params) => {
+      if (method !== "session.queue.process") return send(method, params);
+      attempts += 1;
+      attempted();
+      return fail();
+    };
+    requestClose(runtime);
+    await queueAttempted;
+    await new Promise(setImmediate);
+    requestClose(runtime);
+    await new Promise(setImmediate);
+    assert.equal(attempts, 1);
+    assert.equal(runtime.session.closeCalls.length, 1);
+  }
+  assert.deepEqual(logged.filter((message) => message.includes("graceful CLI exit")), []);
 });
 
 test("permanent close requeues after rotation discards the old session queue", {
@@ -4719,6 +4803,7 @@ test("permanent close requeues after rotation discards the old session queue", {
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.deepEqual(runtime.session.closeCalls.map((call) => call.sessionId),
     [runtime.copilotSessionId, next]);
+  assert.equal(runtime.session.queueProcessCalls.at(-1).sessionId, next);
 });
 
 test("late enqueue completion cannot suppress a rotated close or reset its in-flight guard", {

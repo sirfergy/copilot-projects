@@ -354,7 +354,7 @@ final class CoreLogicTests: XCTestCase {
 
         XCTAssertEqual(
             summary?["calls"] as? [String],
-            ["abort", "enqueue:/exit print"]
+            ["abort", "enqueue:/exit"]
         )
         XCTAssertEqual(summary?["requestExists"] as? Bool, true)
     }
@@ -386,7 +386,7 @@ final class CoreLogicTests: XCTestCase {
 
         XCTAssertEqual(
             summary?["calls"] as? [String],
-            ["history:start", "history:end", "abort", "enqueue:/exit print"]
+            ["history:start", "history:end", "abort", "enqueue:/exit"]
         )
         XCTAssertEqual(summary?["requestExists"] as? Bool, true)
     }
@@ -402,7 +402,7 @@ final class CoreLogicTests: XCTestCase {
 
         XCTAssertEqual(
             summary?["calls"] as? [String],
-            ["history:start", "abort", "enqueue:/exit print", "history:end"]
+            ["history:start", "abort", "enqueue:/exit", "history:end"]
         )
         XCTAssertEqual(summary?["requestExists"] as? Bool, true)
     }
@@ -438,7 +438,7 @@ final class CoreLogicTests: XCTestCase {
 
         XCTAssertEqual(
             summary?["calls"] as? [String],
-            ["enqueue:/exit print"]
+            ["enqueue:/exit"]
         )
         XCTAssertEqual(summary?["requestExists"] as? Bool, true)
     }
