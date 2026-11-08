@@ -5198,8 +5198,10 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(remote, loaded)
     }
 
+    /// The drawer shows nothing while the tab's owner marker names a different
+    /// conversation than the transcript on disk, and shows it again once they agree.
     @MainActor
-    func testTranscriptControllerClearsWhenOwnerBecomesForeign() async throws {
+    func testTranscriptControllerShowsNothingWhileTheOwnerNamesAnotherConversation() async throws {
         let sessionId = UUID().uuidString
         defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
         Paths.ensureStateDir()
@@ -5216,505 +5218,103 @@ final class AppLogicTests: XCTestCase {
             to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)),
             options: .atomic
         )
+        func writeOwner(naming copilotSessionId: String) throws {
+            try JSONSerialization.data(withJSONObject: [
+                "appSessionId": sessionId,
+                "copilotSessionId": copilotSessionId,
+                "pid": Int(getpid()),
+            ]).write(
+                to: URL(fileURLWithPath: Paths.transcriptOwnerPath(sessionId: sessionId)),
+                options: .atomic
+            )
+        }
 
         let controller = TranscriptController(sessionId: sessionId)
+        func awaitSnapshot(shown: Bool) async {
+            let reached = expectation(description: shown ? "transcript shown" : "transcript hidden")
+            let watching = controller.$snapshot
+                .first { ($0 != nil) == shown }
+                .sink { _ in reached.fulfill() }
+            await fulfillment(of: [reached], timeout: 10)
+            watching.cancel()
+        }
         controller.start()
-        for _ in 0 ..< 50 {
-            if controller.snapshot != nil { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        XCTAssertNotNil(controller.snapshot)
+        await awaitSnapshot(shown: true)
 
-        try JSONSerialization.data(withJSONObject: [
-            "appSessionId": UUID().uuidString,
-            "copilotSessionId": snapshot.copilotSessionId,
-            "pid": Int(getpid()),
-        ]).write(
-            to: URL(fileURLWithPath: Paths.transcriptOwnerPath(sessionId: sessionId)),
-            options: .atomic
-        )
-        for _ in 0 ..< 50 {
-            if controller.snapshot == nil { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
+        try writeOwner(naming: UUID().uuidString)
+        await awaitSnapshot(shown: false)
         XCTAssertNil(controller.snapshot)
+
+        try writeOwner(naming: snapshot.copilotSessionId)
+        await awaitSnapshot(shown: true)
+        XCTAssertEqual(controller.snapshot?.copilotSessionId, snapshot.copilotSessionId)
     }
 
-    func testTranscriptOwnerQuarantinesForeignDtachSession() {
-        let owningSession = "D7A1C176-B80F-4E6A-B0B5-378A70ACE162"
-        let selectedSession = "6780CCA3-92AF-4506-95F2-F018A195A1A1"
-        let sessions = URL(fileURLWithPath: "/tmp/state/sessions", isDirectory: true)
-        var snapshot = ProcessTree.Snapshot()
-        snapshot.parentOf = [10: 20, 20: 30, 30: 1]
-        snapshot.nameOf = [10: "copilot", 20: "zsh", 30: "dtach"]
-        let dtach = [
-            ProcessTree.DtachProcess(
-                pid: 30,
-                parentPID: 1,
-                socketPath: sessions
-                    .appendingPathComponent("\(owningSession).sock").path,
-                isMaster: true
-            ),
-        ]
-        let environment = ["COPILOT_PROJECTS_SESSION": selectedSession]
-
-        XCTAssertEqual(
-            TranscriptController.transcriptOwnerMatchesSession(
-                sessionId: selectedSession,
-                ownerPID: 10,
-                snapshot: snapshot,
-                environment: environment,
-                dtachProcesses: dtach,
-                sessionsDirectory: sessions
-            ),
-            false
-        )
-        XCTAssertEqual(
-            TranscriptController.transcriptOwnerMatchesSession(
-                sessionId: owningSession,
-                ownerPID: 10,
-                snapshot: snapshot,
-                environment: environment,
-                dtachProcesses: dtach,
-                sessionsDirectory: sessions
-            ),
-            true
-        )
-    }
-
-    @MainActor
-    func testControllerBlocksResumeForForeignOwnerBeforeAnyQuarantineIsRecorded() throws {
-        _ = NSApplication.shared
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let session = Session(title: "background", cwd: "/tmp")
-        let project = Project(name: "target", cwd: "/tmp", sessions: [session])
-        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
-
-        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
-        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
-
-        // A foreign owner (a different appSessionId) left this transcript-owner
-        // marker behind. Nothing has ever read the transcript for this session —
-        // it's a background tab, so bootstrap never starts a TranscriptController
-        // for it — so no quarantine file exists yet.
-        let foreignCopilotSession = UUID().uuidString
-        try JSONSerialization.data(withJSONObject: [
-            "appSessionId": UUID().uuidString,
-            "copilotSessionId": foreignCopilotSession,
-            "pid": Int(getpid()),
-        ]).write(
-            to: sessions.appendingPathComponent("\(session.id).transcript-owner.json")
-        )
-        try Data(foreignCopilotSession.utf8).write(
-            to: sessions.appendingPathComponent("\(session.id).copilot-session")
-        )
-        let quarantinePath = sessions
-            .appendingPathComponent("\(session.id).transcript-quarantine.json").path
-        XCTAssertFalse(FileManager.default.fileExists(atPath: quarantinePath))
-
-        let model = AppModel(
-            stateRepository: repository,
-            resumeMarkerDirectory: sessions
-        )
-        // Creating the controller (as bootstrapIfNeeded does for every session in
-        // the selected project, well before any TranscriptController exists) must
-        // validate the owner marker itself instead of relying on a quarantine file
-        // that only a not-yet-started TranscriptController would otherwise populate.
-        _ = model.controller(for: session.id)
-
-        XCTAssertTrue(TranscriptController.isCopilotSessionQuarantined(
-            sessionId: session.id,
-            copilotSessionId: foreignCopilotSession,
-            directory: sessions
-        ))
-    }
-
-    func testRemoteTranscriptPersistentlyQuarantinesForeignOwnerSnapshot() throws {
-        let sessionId = UUID().uuidString
-        let foreignSessionId = UUID().uuidString
-        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
-        Paths.ensureStateDir()
-
-        let snapshot = TranscriptSnapshot(
-            schemaVersion: 3,
-            updatedAt: Date(),
-            copilotSessionId: UUID().uuidString,
-            turns: []
-        )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let snapshotURL = URL(
-            fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
-        )
-        try encoder.encode(snapshot).write(to: snapshotURL, options: .atomic)
-        let revisionBeforeOwner = TranscriptController.remoteRevision(
-            sessionId: sessionId
-        )
-        try JSONSerialization.data(withJSONObject: [
-            "appSessionId": foreignSessionId,
-            "copilotSessionId": snapshot.copilotSessionId,
-            "pid": Int(getpid()),
-        ]).write(
-            to: URL(fileURLWithPath: Paths.transcriptOwnerPath(sessionId: sessionId)),
-            options: .atomic
-        )
-        XCTAssertNotEqual(
-            TranscriptController.remoteRevision(sessionId: sessionId),
-            revisionBeforeOwner
-        )
-
-        let remote = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
-        XCTAssertTrue(remote.turns.isEmpty)
-        XCTAssertTrue(FileManager.default.fileExists(
-            atPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
-        ))
-        XCTAssertTrue(FileManager.default.fileExists(
-            atPath: Paths.transcriptQuarantinePath(sessionId: sessionId)
-        ))
-        XCTAssertTrue(TranscriptController.isCopilotSessionQuarantined(
-            sessionId: sessionId,
-            copilotSessionId: snapshot.copilotSessionId
-        ))
-
-        try JSONSerialization.data(withJSONObject: [
-            "appSessionId": UUID().uuidString,
-            "copilotSessionId": UUID().uuidString,
-            "pid": Int(getpid()),
-        ]).write(
-            to: URL(fileURLWithPath: Paths.transcriptOwnerPath(sessionId: sessionId)),
-            options: .atomic
-        )
-        XCTAssertTrue(
-            TranscriptController.loadRemoteSnapshot(sessionId: sessionId).turns.isEmpty
-        )
-        try FileManager.default.removeItem(
-            atPath: Paths.transcriptOwnerPath(sessionId: sessionId)
-        )
-        try encoder.encode(snapshot).write(to: snapshotURL, options: .atomic)
-        let afterOwnerExit = TranscriptController.loadRemoteSnapshot(
-            sessionId: sessionId
-        )
-        XCTAssertTrue(afterOwnerExit.turns.isEmpty)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: snapshotURL.path))
-
-        let replacement = TranscriptSnapshot(
-            schemaVersion: 3,
-            updatedAt: Date(),
-            copilotSessionId: UUID().uuidString,
-            turns: []
-        )
-        try encoder.encode(replacement).write(to: snapshotURL, options: .atomic)
-        let recovered = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
-        XCTAssertEqual(recovered.copilotSessionId, replacement.copilotSessionId)
-        XCTAssertFalse(TranscriptController.isCopilotSessionQuarantined(
-            sessionId: sessionId,
-            copilotSessionId: replacement.copilotSessionId
-        ))
-        XCTAssertFalse(FileManager.default.fileExists(
-            atPath: Paths.transcriptQuarantinePath(sessionId: sessionId)
-        ))
-    }
-
-    func testRemoteSnapshotRejectsStaleTranscriptDuringOwnerReclamation() throws {
-        let sessionId = UUID().uuidString
-        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
-        Paths.ensureStateDir()
-
-        // Simulate the tail end of dead-owner reclamation: the extension has
-        // already atomically replaced transcript-owner.json with a new,
-        // legitimate owner (matching appSessionId, new copilotSessionId), but
-        // that new owner's async publishTranscript() hasn't overwritten
-        // transcript.json yet — so the bytes on disk are still the *previous*
-        // (possibly foreign) owner's stale content.
-        let staleSnapshot = TranscriptSnapshot(
-            schemaVersion: 3,
-            updatedAt: Date(),
-            copilotSessionId: UUID().uuidString,
-            turns: []
-        )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let snapshotURL = URL(
-            fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
-        )
-        try encoder.encode(staleSnapshot).write(to: snapshotURL, options: .atomic)
-
-        let newOwnerCopilotSessionId = UUID().uuidString
-        XCTAssertNotEqual(newOwnerCopilotSessionId, staleSnapshot.copilotSessionId)
-        try JSONSerialization.data(withJSONObject: [
-            "appSessionId": sessionId,
-            "copilotSessionId": newOwnerCopilotSessionId,
-            "pid": Int(getpid()),
-        ]).write(
-            to: URL(fileURLWithPath: Paths.transcriptOwnerPath(sessionId: sessionId)),
-            options: .atomic
-        )
-
-        // The owner marker's appSessionId matches this session, so
-        // transcriptOwnerAllowsRead alone would pass — the stale-transcript
-        // cross-check must be what rejects the read.
-        let remote = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
-        XCTAssertTrue(remote.turns.isEmpty)
-        XCTAssertNotEqual(remote.copilotSessionId, staleSnapshot.copilotSessionId)
-        XCTAssertTrue(TranscriptController.isCopilotSessionQuarantined(
-            sessionId: sessionId,
-            copilotSessionId: staleSnapshot.copilotSessionId
-        ))
-
-        // Once the new owner's publishTranscript() catches up and overwrites
-        // transcript.json with matching content, reads should succeed again.
-        let freshSnapshot = TranscriptSnapshot(
-            schemaVersion: 3,
-            updatedAt: Date(),
-            copilotSessionId: newOwnerCopilotSessionId,
-            turns: []
-        )
-        try encoder.encode(freshSnapshot).write(to: snapshotURL, options: .atomic)
-        let recovered = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
-        XCTAssertEqual(recovered.copilotSessionId, newOwnerCopilotSessionId)
-    }
-
-    /// A Copilot `/new` / `/resume` rotation replaces this tab's *own* owner
-    /// marker (same pid, same appSessionId) and rewrites `transcript.json`. A
-    /// read that sampled the previous conversation's bytes and only validated
-    /// afterwards would see a legitimate, confirmed-this-tab owner naming a
-    /// different Copilot session — and, before this fix, permanently quarantine
-    /// the previous conversation, so `/resume` could never surface it again.
-    /// A signature that moved underneath the read must reject without recording.
-    func testSnapshotOwnerCrossCheckDoesNotQuarantineAcrossOwnerRotation() throws {
+    /// What remote clients are served while the tab's owner marker names a
+    /// different conversation than the transcript on disk: nothing, until the two
+    /// agree. The tracker replaces the marker before the new conversation's
+    /// transcript lands, so the file still holds the conversation the tab left.
+    func testRemoteSnapshotShowsNothingUntilTheTranscriptMatchesItsOwner() throws {
         let sessionId = UUID().uuidString
         defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
         Paths.ensureStateDir()
 
         let previousCopilotSessionId = UUID().uuidString
-        let rotatedCopilotSessionId = UUID().uuidString
-        let snapshotURL = URL(
-            fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)
-        )
-        let ownerURL = URL(
-            fileURLWithPath: Paths.transcriptOwnerPath(sessionId: sessionId)
-        )
+        let nextCopilotSessionId = UUID().uuidString
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        func writeTranscript(_ copilotSessionId: String) throws {
+            try encoder.encode(TranscriptSnapshot(
+                schemaVersion: 3,
+                updatedAt: Date(),
+                copilotSessionId: copilotSessionId,
+                turns: []
+            )).write(
+                to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)),
+                options: .atomic
+            )
+        }
         func writeOwner(_ copilotSessionId: String) throws {
             try JSONSerialization.data(withJSONObject: [
                 "appSessionId": sessionId,
                 "copilotSessionId": copilotSessionId,
                 "pid": Int(getpid()),
-            ]).write(to: ownerURL, options: .atomic)
+            ]).write(
+                to: URL(fileURLWithPath: Paths.transcriptOwnerPath(sessionId: sessionId)),
+                options: .atomic
+            )
         }
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(TranscriptSnapshot(
-            schemaVersion: 3,
-            updatedAt: Date(),
-            copilotSessionId: previousCopilotSessionId,
-            turns: []
-        )).write(to: snapshotURL, options: .atomic)
-        try writeOwner(previousCopilotSessionId)
 
-        let allowed = TranscriptController.snapshotPassesOwnerCrossCheck(
-            sessionId: sessionId,
-            copilotSessionId: previousCopilotSessionId,
-            duringRead: {
-                // The extension rotates: owner marker forward, shared transcript
-                // removed inside the same critical section.
-                try? FileManager.default.removeItem(at: snapshotURL)
-                try? writeOwner(rotatedCopilotSessionId)
-            }
+        try writeTranscript(previousCopilotSessionId)
+        try writeOwner(nextCopilotSessionId)
+        let remote = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
+        XCTAssertEqual(remote.copilotSessionId, "")
+        XCTAssertTrue(remote.turns.isEmpty)
+        // The same answer through the `/transcript` endpoint the bridge serves.
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let served = try decoder.decode(
+            TranscriptSnapshot.self,
+            from: try XCTUnwrap(TranscriptResponse.encodedResponse(
+                sessionId: sessionId, images: [], limit: nil, after: nil
+            ))
         )
-        XCTAssertFalse(allowed)
-        XCTAssertFalse(FileManager.default.fileExists(
-            atPath: Paths.transcriptQuarantinePath(sessionId: sessionId)
-        ))
-        XCTAssertFalse(TranscriptController.isCopilotSessionQuarantined(
-            sessionId: sessionId,
-            copilotSessionId: previousCopilotSessionId
-        ))
+        XCTAssertEqual(served.copilotSessionId, "")
+        XCTAssertTrue(served.turns.isEmpty)
 
-        // Once the rotated conversation publishes its own transcript, reads
-        // succeed again under the new identity.
-        try encoder.encode(TranscriptSnapshot(
-            schemaVersion: 3,
-            updatedAt: Date(),
-            copilotSessionId: rotatedCopilotSessionId,
-            turns: []
-        )).write(to: snapshotURL, options: .atomic)
+        try writeTranscript(nextCopilotSessionId)
         XCTAssertEqual(
-            TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
-                .copilotSessionId,
-            rotatedCopilotSessionId
+            TranscriptController.loadRemoteSnapshot(sessionId: sessionId).copilotSessionId,
+            nextCopilotSessionId
         )
 
-        // Rotating back (`/resume`) must find nothing quarantined.
-        try encoder.encode(TranscriptSnapshot(
-            schemaVersion: 3,
-            updatedAt: Date(),
-            copilotSessionId: previousCopilotSessionId,
-            turns: []
-        )).write(to: snapshotURL, options: .atomic)
+        // Going back to the earlier conversation (`/resume`) shows it again.
+        try writeTranscript(previousCopilotSessionId)
         try writeOwner(previousCopilotSessionId)
         XCTAssertEqual(
-            TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
-                .copilotSessionId,
+            TranscriptController.loadRemoteSnapshot(sessionId: sessionId).copilotSessionId,
             previousCopilotSessionId
         )
-    }
-
-    // An alive but foreign/orphaned owner (a legacy marker with no appSessionId
-    // whose pid does not resolve to this tab) must not permanently quarantine
-    // this tab's own transcript. The read is rejected (nothing surfaced under an
-    // untrusted owner) but no quarantine is persisted, so once the real session
-    // reclaims ownership the transcript can appear again.
-    func testRemoteSnapshotHidesButDoesNotQuarantineAliveUnresolvableOwner() throws {
-        let sessionId = UUID().uuidString
-        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
-        Paths.ensureStateDir()
-
-        let ownTranscriptSession = UUID().uuidString
-        let foreignOwnerSession = UUID().uuidString
-        let snapshot = TranscriptSnapshot(
-            schemaVersion: 3,
-            updatedAt: Date(),
-            copilotSessionId: ownTranscriptSession,
-            turns: []
-        )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(snapshot).write(
-            to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)),
-            options: .atomic
-        )
-        // Legacy marker: no appSessionId, live pid (launchd, pid 1, always alive)
-        // that the process tree cannot resolve to any tab -> `.aliveElsewhere`.
-        try JSONSerialization.data(withJSONObject: [
-            "copilotSessionId": foreignOwnerSession,
-            "pid": 1,
-        ]).write(
-            to: URL(fileURLWithPath: Paths.transcriptOwnerPath(sessionId: sessionId)),
-            options: .atomic
-        )
-
-        let remote = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
-        XCTAssertTrue(remote.turns.isEmpty)
-        XCTAssertNotEqual(remote.copilotSessionId, ownTranscriptSession)
-        XCTAssertFalse(FileManager.default.fileExists(
-            atPath: Paths.transcriptQuarantinePath(sessionId: sessionId)
-        ))
-        XCTAssertFalse(TranscriptController.isCopilotSessionQuarantined(
-            sessionId: sessionId,
-            copilotSessionId: ownTranscriptSession
-        ))
-    }
-
-    // Once the confirmed current owner of a tab (a marker declaring this tab's
-    // appSessionId) is exactly the transcript's Copilot session, a stale
-    // quarantine entry for that session must self-heal so the real conversation
-    // reappears.
-    func testRemoteSnapshotSelfHealsQuarantineForConfirmedOwner() throws {
-        let sessionId = UUID().uuidString
-        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
-        Paths.ensureStateDir()
-
-        let copilotSession = UUID().uuidString
-        let snapshot = TranscriptSnapshot(
-            schemaVersion: 3,
-            updatedAt: Date(),
-            copilotSessionId: copilotSession,
-            turns: [
-                TranscriptTurn(
-                    id: "t0",
-                    startedAt: Date(),
-                    endedAt: Date(),
-                    kind: "user",
-                    userContent: "hello",
-                    assistantMessages: [],
-                    tools: [],
-                    isAborted: false
-                )
-            ]
-        )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(snapshot).write(
-            to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)),
-            options: .atomic
-        )
-        // A previously-recorded (now stale) quarantine for this tab's own session.
-        try JSONSerialization.data(withJSONObject: [
-            "schemaVersion": 1,
-            "foreignCopilotSessionIds": [copilotSession],
-        ]).write(
-            to: URL(fileURLWithPath: Paths.transcriptQuarantinePath(sessionId: sessionId)),
-            options: .atomic
-        )
-        // The confirmed current owner is exactly this session (declares this tab).
-        try JSONSerialization.data(withJSONObject: [
-            "appSessionId": sessionId,
-            "copilotSessionId": copilotSession,
-            "pid": Int(getpid()),
-        ]).write(
-            to: URL(fileURLWithPath: Paths.transcriptOwnerPath(sessionId: sessionId)),
-            options: .atomic
-        )
-
-        let remote = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
-        XCTAssertEqual(remote.copilotSessionId, copilotSession)
-        XCTAssertEqual(remote.turns.count, 1)
-        XCTAssertFalse(TranscriptController.isCopilotSessionQuarantined(
-            sessionId: sessionId,
-            copilotSessionId: copilotSession
-        ))
-    }
-
-    // Self-heal must require POSITIVE same-tab provenance: an unconfirmed
-    // (alive-but-unresolvable) owner recording this session must NOT clear a
-    // persisted quarantine, or genuinely foreign content could be un-hidden.
-    func testRemoteSnapshotDoesNotSelfHealQuarantineForUnconfirmedOwner() throws {
-        let sessionId = UUID().uuidString
-        defer { SessionArtifacts.removeFiles(sessionId: sessionId) }
-        Paths.ensureStateDir()
-
-        let copilotSession = UUID().uuidString
-        let snapshot = TranscriptSnapshot(
-            schemaVersion: 3,
-            updatedAt: Date(),
-            copilotSessionId: copilotSession,
-            turns: []
-        )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(snapshot).write(
-            to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)),
-            options: .atomic
-        )
-        try JSONSerialization.data(withJSONObject: [
-            "schemaVersion": 1,
-            "foreignCopilotSessionIds": [copilotSession],
-        ]).write(
-            to: URL(fileURLWithPath: Paths.transcriptQuarantinePath(sessionId: sessionId)),
-            options: .atomic
-        )
-        // Owner records this session but carries no appSessionId and its pid
-        // (launchd) does not resolve to this tab -> unconfirmed. Must not self-heal.
-        try JSONSerialization.data(withJSONObject: [
-            "copilotSessionId": copilotSession,
-            "pid": 1,
-        ]).write(
-            to: URL(fileURLWithPath: Paths.transcriptOwnerPath(sessionId: sessionId)),
-            options: .atomic
-        )
-
-        let remote = TranscriptController.loadRemoteSnapshot(sessionId: sessionId)
-        XCTAssertTrue(remote.turns.isEmpty)
-        XCTAssertNotEqual(remote.copilotSessionId, copilotSession)
-        XCTAssertTrue(TranscriptController.isCopilotSessionQuarantined(
-            sessionId: sessionId,
-            copilotSessionId: copilotSession
-        ))
     }
 
     @MainActor

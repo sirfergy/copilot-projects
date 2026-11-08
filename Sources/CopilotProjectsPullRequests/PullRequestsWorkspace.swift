@@ -208,7 +208,6 @@ struct WorkspaceDirectorySignature: Equatable, Sendable {
         ".transcript-live.json",
         ".transcript-owner.json",
         ".transcript-owner.json.flock",
-        ".transcript-quarantine.json",
     ]
 
     static func isTrackedSessionEntry(_ name: String) -> Bool {

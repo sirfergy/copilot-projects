@@ -381,19 +381,8 @@ struct CLIOperationAdapter {
         now: Date
     ) -> BoundSnapshotResult {
         guard !snapshot.reportsTerminalDisconnect,
-              TranscriptController.transcriptOwnerAllowsRead(
-                sessionId: sessionId,
-                directory: resumeMarkerDirectory
-              ),
               let copilotSessionId = readCopilotSessionId(sessionId: sessionId) else {
             return .invalid
-        }
-        guard !TranscriptController.isCopilotSessionQuarantined(
-            sessionId: sessionId,
-            copilotSessionId: copilotSessionId,
-            directory: resumeMarkerDirectory
-        ) else {
-            return .conflict
         }
 
         let projection = snapshot.remoteOperationProjection(at: now)

@@ -1042,28 +1042,12 @@ final class AppModel: ObservableObject {
         // Last Copilot session id seen in this tab (written by the hook). If the
         // shell is created fresh after a reboot, the controller resumes this exact
         // agent session; on a normal relaunch dtach reattaches and ignores it.
-        let rawRecordedCopilot = (try? String(contentsOf:
-            resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session"),
-            encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        // isCopilotSessionQuarantined only sees a foreign owner that some
-        // TranscriptController has already read and recorded — but background
-        // tabs never get a TranscriptController, and at bootstrap the selected
-        // tab's hasn't started yet. Validate the owner marker directly here too
-        // (this also records the quarantine as a side effect) so a foreign
-        // owner can't be resumed before anything else has observed it.
-        let ownerAllowsResume = TranscriptController.transcriptOwnerAllowsRead(
-            sessionId: sessionId,
-            directory: resumeMarkerDirectory
-        )
-        let recordedCopilot = rawRecordedCopilot.flatMap { candidate -> String? in
-            guard resumeRecordedSession, ownerAllowsResume else { return nil }
-            return TranscriptController.isCopilotSessionQuarantined(
-                sessionId: sessionId,
-                copilotSessionId: candidate,
-                directory: resumeMarkerDirectory
-            ) ? nil : candidate
-        }
+        let recordedCopilot = resumeRecordedSession
+            ? (try? String(contentsOf:
+                resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session"),
+                encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
         let c = TerminalController(
             sessionId: sessionId,
             cwd: session.cwd,
@@ -1649,22 +1633,11 @@ final class AppModel: ObservableObject {
         sessionId: String,
         snapshot: AgentActivitySnapshot?
     ) -> Bool {
-        guard snapshot != nil,
-              TranscriptController.transcriptOwnerAllowsRead(
-                  sessionId: sessionId,
-                  directory: resumeMarkerDirectory
-              ) else {
-            return false
-        }
+        guard snapshot != nil else { return false }
         if let rawActivityId = snapshot?.copilotSessionId?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !rawActivityId.isEmpty {
-            guard TerminalController.isSafeSessionId(rawActivityId),
-                  !TranscriptController.isCopilotSessionQuarantined(
-                      sessionId: sessionId,
-                      copilotSessionId: rawActivityId,
-                      directory: resumeMarkerDirectory
-                  ) else {
+            guard TerminalController.isSafeSessionId(rawActivityId) else {
                 return false
             }
             let validatedMarker = validatedCopilotSessionMarker(for: sessionId)
@@ -1743,7 +1716,6 @@ final class AppModel: ObservableObject {
             "transcript.json",
             "transcript-live.json",
             "transcript-owner.json",
-            "transcript-quarantine.json",
         ]
         let customRevision = suffixes.map { suffix -> String in
             let path = agentActivityDirectory.appendingPathComponent("\(sessionId).\(suffix)").path
@@ -1769,12 +1741,6 @@ final class AppModel: ObservableObject {
         guard agentActivityDirectory.standardizedFileURL != Paths.sessionsDir.standardizedFileURL else {
             return (nil, true)
         }
-        guard TranscriptController.transcriptOwnerAllowsRead(
-            sessionId: sessionId,
-            directory: agentActivityDirectory
-        ) else {
-            return (nil, true)
-        }
         let sealedURL = agentActivityDirectory.appendingPathComponent("\(sessionId).transcript.json")
         let liveURL = agentActivityDirectory.appendingPathComponent("\(sessionId).transcript-live.json")
         let liveData = try? Data(contentsOf: liveURL)
@@ -1784,12 +1750,7 @@ final class AppModel: ObservableObject {
                   live: liveData,
                   decoder: Self.transcriptStartingPromptDecoder()
               ),
-              !snapshot.copilotSessionId.isEmpty,
-              !TranscriptController.isCopilotSessionQuarantined(
-                  sessionId: sessionId,
-                  copilotSessionId: snapshot.copilotSessionId,
-                  directory: agentActivityDirectory
-              ) else {
+              !snapshot.copilotSessionId.isEmpty else {
             return (nil, true)
         }
         return (snapshot, true)
@@ -2203,25 +2164,16 @@ final class AppModel: ObservableObject {
     }
 
     func validatedCopilotSessionMarker(for sessionId: String) -> String? {
-        guard TranscriptController.transcriptOwnerAllowsRead(sessionId: sessionId, directory: resumeMarkerDirectory),
-              let marker = resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session"),
-              !TranscriptController.isCopilotSessionQuarantined(
-                  sessionId: sessionId, copilotSessionId: marker, directory: resumeMarkerDirectory
-              ),
+        guard let marker = resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session"),
               TerminalController.isSafeSessionId(marker) else { return nil }
         return marker
     }
 
     private func resolvedCopilotSessionId(for session: Session) -> String? {
         let sid = session.id
-        let ownerAllows = TranscriptController.transcriptOwnerAllowsRead(sessionId: sid, directory: resumeMarkerDirectory)
         let validatedMarker = validatedCopilotSessionMarker(for: sid)
-        if ownerAllows,
-           let rawActivityId = session.agentActivity?.copilotSessionId?
+        if let rawActivityId = session.agentActivity?.copilotSessionId?
             .trimmingCharacters(in: .whitespacesAndNewlines),
-           !TranscriptController.isCopilotSessionQuarantined(
-               sessionId: sid, copilotSessionId: rawActivityId, directory: resumeMarkerDirectory
-           ),
            TerminalController.isSafeSessionId(rawActivityId),
            validatedMarker == nil || validatedMarker?.caseInsensitiveCompare(rawActivityId) == .orderedSame {
             return rawActivityId

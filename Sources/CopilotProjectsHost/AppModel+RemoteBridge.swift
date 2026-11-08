@@ -2573,14 +2573,8 @@ extension AppModel {
     /// longer has it.
     private func tabHoldingCopilotSession(_ copilotId: String, now: Date) -> String? {
         let sessions = projects.flatMap(\.sessions).map(\.id)
-        // Only a marker the tab's own Copilot wrote, as a relaunch requires before resuming it.
-        if let marked = sessions.first(where: { sessionId in
-            guard let marker = resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session"),
-                  marker.lowercased() == copilotId else { return false }
-            return TranscriptController.transcriptOwnerAllowsRead(sessionId: sessionId, directory: resumeMarkerDirectory)
-                && !TranscriptController.isCopilotSessionQuarantined(
-                    sessionId: sessionId, copilotSessionId: marker, directory: resumeMarkerDirectory
-                )
+        if let marked = sessions.first(where: {
+            resumeMarkerValue(sessionId: $0, suffix: "copilot-session")?.lowercased() == copilotId
         }) {
             return marked
         }
@@ -2613,7 +2607,7 @@ extension AppModel {
         return ids
     }
 
-    /// Reads and validates resume markers for `sessionIds` off the main actor.
+    /// Reads the resume markers for `sessionIds` off the main actor.
     nonisolated static func validatedMarkerCopilotSessionIds(
         sessionIds: [String], directory: URL
     ) -> Set<String> {
@@ -2624,13 +2618,7 @@ extension AppModel {
                 encoding: .utf8
             ) else { continue }
             let marker = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !marker.isEmpty else { continue }
-            if TranscriptController.transcriptOwnerAllowsRead(sessionId: sessionId, directory: directory),
-               !TranscriptController.isCopilotSessionQuarantined(
-                   sessionId: sessionId, copilotSessionId: marker, directory: directory
-               ) {
-                ids.insert(marker.lowercased())
-            }
+            if !marker.isEmpty { ids.insert(marker.lowercased()) }
         }
         return ids
     }
