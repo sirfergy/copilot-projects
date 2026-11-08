@@ -964,17 +964,25 @@ class ReleaseTests(unittest.TestCase):
     def test_workflow_skips_its_tests_only_for_a_tree_a_green_pull_request_run_tested(self):
         root = self.release_checkout("tested", ("v0.9.121",))
         tree = self.git(root, "rev-parse", "HEAD^{tree}")
-        for run_tree, behind_by, tested in (
-            # A lookup that fails prints neither a tree nor a count.
-            ("", "", None),
-            ("1" * 40, "0", None),
+        pr_head, parent = "f" * 40, self.git(root, "rev-parse", "HEAD^")
+        runs = ("repos/example/integration/actions/workflows/ci.yml/runs"
+                f"?event=pull_request&status=success&head_sha={pr_head}")
+        compare = f"repos/example/integration/compare/{parent}...{pr_head}"
+        for run_tree, behind_by, failing, tested in (
+            # Either lookup exiting non-zero leaves the tests to run, whatever the other one answers.
+            (tree, "0", runs, None),
+            (tree, "0", compare, None),
+            ("1" * 40, "0", "", None),
             # The pull request head lacked this commit's parent, so its run merged another base.
-            (tree, "1", None),
-            (tree, "0", "true"),
+            (tree, "1", "", None),
+            (tree, "0", "", "true"),
         ):
-            with self.subTest(run_tree=run_tree, behind_by=behind_by):
+            with self.subTest(run_tree=run_tree, behind_by=behind_by, failing=failing):
                 self.log.unlink(missing_ok=True)
-                self.env.update(MOCK_GREEN_RUN_TREE=run_tree, MOCK_BEHIND_BY=behind_by)
+                self.env.update(
+                    MOCK_GREEN_RUN_TREE=run_tree, MOCK_BEHIND_BY=behind_by,
+                    FAIL_COMMAND=f"gh api {failing}" if failing else "",
+                )
                 result, outputs = self.run_release_validation(root, "2026 10 08 PDT", latest="v0.9.121")
                 self.assertEqual(result.returncode, 0, result.stdout)
                 self.assertEqual(outputs.get("should_release"), "true", result.stdout)
@@ -982,11 +990,8 @@ class ReleaseTests(unittest.TestCase):
         # The last, successful case asked about the pull request's head and whether it held the parent.
         requests = [args[1] for _, command, args in map(json.loads, self.log.read_text().splitlines())
                     if command == "gh" and args[0] == "api"]
-        pr_head, parent = "f" * 40, self.git(root, "rev-parse", "HEAD^")
-        self.assertIn(
-            "repos/example/integration/actions/workflows/ci.yml/runs"
-            f"?event=pull_request&status=success&head_sha={pr_head}", requests)
-        self.assertIn(f"repos/example/integration/compare/{parent}...{pr_head}", requests)
+        self.assertIn(runs, requests)
+        self.assertIn(compare, requests)
 
     def test_ci_skips_script_tests_only_when_a_pull_request_leaves_their_inputs_alone(self):
         script = self.root / "find-script-changes.sh"
