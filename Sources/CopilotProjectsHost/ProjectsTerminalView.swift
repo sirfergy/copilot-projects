@@ -37,7 +37,7 @@ final class ProjectsTerminalView: ProcessTerminalView {
     /// True from the moment a remote prompt's paste is written until its submit
     /// Enter fires, so an overlapping remote prompt can't interleave its paste
     /// bytes into a half-submitted one. Main-actor only.
-    private var isSubmittingRemotePrompt = false
+    private(set) var isSubmittingRemotePrompt = false
     /// The DECSET 1004 report SwiftTerm last wrote to the PTY, if any. SwiftTerm
     /// updates `hasFocus` before its report reaches the PTY (a main-queue hop),
     /// so while reporting is on, remote input scopes its own focus-in/out from

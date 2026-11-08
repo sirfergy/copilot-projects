@@ -97,6 +97,21 @@ public struct CopilotSessionStore: Sendable {
         return false
     }
 
+    /// Whether any of `pids` holds a session other than `own`. One file check
+    /// per session folder and process; an unreadable store counts as yes.
+    public func holdsOtherSession(pids: [pid_t], than own: String) -> Bool {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: sessionStateDirectory) else {
+            return true
+        }
+        for name in names where name.caseInsensitiveCompare(own) != .orderedSame {
+            let folder = (sessionStateDirectory as NSString).appendingPathComponent(name)
+            for pid in pids where FileManager.default.fileExists(atPath: "\(folder)/inuse.\(pid).lock") {
+                return true
+            }
+        }
+        return false
+    }
+
     private static func isAlive(_ pid: pid_t) -> Bool {
         kill(pid, 0) == 0 || errno == EPERM
     }

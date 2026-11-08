@@ -371,6 +371,21 @@ and plain-terminal creation. New projects
 created with `⌘N` also start with Copilot. Copilot Projects never adds `--allow-all`;
 tool approvals follow your normal Copilot CLI permission settings.
 
+### Park idle sessions
+
+An idle session's Copilot keeps its memory. Parking quits Copilot in an idle session
+and keeps the session in your list with its transcript. Copilot starts again in the
+same row, with the same conversation, when you open the session. That takes a few
+seconds.
+
+Parking is off by default. Turn it on with **Copilot Projects ▸ Park Idle Sessions ▸
+Only When I Choose**. The Session menu then has **Park Session**, **Park All Idle
+Sessions…**, and **Resume Session**.
+
+A session is parked only after Copilot confirms it is idle. Sessions that are working,
+waiting for you, scheduled, running background work, unread, or open in the web or iOS
+app are left alone. Text typed in a session's terminal but not sent is not kept.
+
 ### Remote SSH hosts
 
 Copilot Projects discovers remote execution hosts automatically from `~/.ssh/config`

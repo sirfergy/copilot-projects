@@ -91,6 +91,9 @@ final class AppModel: ObservableObject {
     var requestMainWindow: (() -> Void)?
 
     var controllers: [String: TerminalController] = [:]
+    var parkingRuntime = ParkingRuntime()
+    /// When the gateway last asked about each session a remote client has open.
+    var remoteOpenSessions: [String: (first: Date, last: Date)] = [:]
     var sessionPromptComposers: [String: DesktopSessionPromptComposer] = [:]
     var sessionWorkingModels: [String: TranscriptWorkingModel] = [:]
     var localQuestionOperations: [String: (operation: CLIOperationRequest, fingerprint: String?)] = [:]
@@ -728,6 +731,7 @@ final class AppModel: ObservableObject {
         }
         // Start the whole selected project's sessions on launch (matches the prior
         // per-project eager start), not just the visible tab.
+        reconcileParkedSessionsAtLaunch()
         ensureSelectedProjectControllers()
         refreshSelectedTranscriptController()
         // Manual unread marks persist, so restore their Dock count on launch.
@@ -1038,6 +1042,8 @@ final class AppModel: ObservableObject {
         guard let loc = locateIndex(sessionId) else { return nil }
         let project = projects[loc.p]
         let session = project.sessions[loc.s]
+        // A parked session has no terminal: creating one would start Copilot.
+        if let parked = session.parked, parked.state != .resuming { return nil }
         Paths.ensureStateDir()
         let dtach = Paths.dtachExecutable
         let socket = dtach != nil ? Paths.dtachSocketPath(sessionId: sessionId) : nil
@@ -1082,7 +1088,11 @@ final class AppModel: ObservableObject {
         )
         c.onTitle = { [weak self] title in self?.updateTitle(sessionId: sessionId, title: title) }
         c.onDirectory = { [weak self] dir in self?.updateCwd(sessionId: sessionId, dir: dir) }
-        c.onExit = { [weak self] _ in self?.handleExit(sessionId: sessionId) }
+        // Only the tab's current terminal ends it: a replaced one exits late.
+        c.onExit = { [weak self, weak c] _ in
+            guard let self, let c, self.controllers[sessionId] === c else { return }
+            self.handleExit(sessionId: sessionId)
+        }
         c.onDeepLink = { [weak self] deepLink in
             self?.focus(projectId: deepLink.projectId, sessionId: deepLink.sessionId)
         }
@@ -1093,7 +1103,9 @@ final class AppModel: ObservableObject {
         }
         c.shouldRetryLaunch = { [weak self, weak c] in
             guard let self, let c else { return false }
+            // A resume that has failed starts again only when asked.
             return !self.isTerminating && self.controllers[sessionId] === c
+                && self.parkedState(sessionId) != .failed
         }
         controllers[sessionId] = c
         return c
@@ -1191,6 +1203,7 @@ final class AppModel: ObservableObject {
         }
         next.canNavigateSessionBack = canNavigateSessionBack
         next.canNavigateSessionForward = canNavigateSessionForward
+        next.selectedSessionParked = currentSelectedSessionId.flatMap(parkedState)
         next.recentlyClosedSessionItems = recentlyClosedSessions.isEmpty ? [] : recentlyClosedSessionItems
         menuState.update(next)
     }
@@ -1958,11 +1971,15 @@ final class AppModel: ObservableObject {
         updated.save(to: defaults)
     }
 
-    private func presentAlert(title: String, message: String) {
+    func presentAlert(title: String, message: String) {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        _ = alertPresenter(alert)
+        _ = runAlert(alert)
+    }
+
+    func runAlert(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        alertPresenter(alert)
     }
 
     /// Where a new session should start: inherit the active pane's directory
@@ -2033,6 +2050,7 @@ final class AppModel: ObservableObject {
         permissionStatusRestores[sid] = nil
         inputWaits[sid] = nil
         remotePromptFences[sid] = nil
+        remoteOpenSessions[sid] = nil
         runtimeTrackedOwners[sid] = nil
         verifiedCopilotOwners[sid] = nil
         scheduledSnapshotsSuppressed.remove(sid)
@@ -2189,7 +2207,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func validatedCopilotSessionMarker(for sessionId: String) -> String? {
+    func validatedCopilotSessionMarker(for sessionId: String) -> String? {
         guard TranscriptController.transcriptOwnerAllowsRead(sessionId: sessionId, directory: resumeMarkerDirectory),
               let marker = resumeMarkerValue(sessionId: sessionId, suffix: "copilot-session"),
               !TranscriptController.isCopilotSessionQuarantined(
@@ -3173,8 +3191,10 @@ final class AppModel: ObservableObject {
             inputWaits[sessionId] = nil
         }
         // sessionEnd is also emitted during graceful macOS shutdown. Only a live,
-        // non-terminating app can treat it as an explicit user exit.
+        // non-terminating app can treat it as an explicit user exit. A park stops
+        // the CLI too, and its marker is what the session resumes from.
         if source == "session-end", !isTerminating, !isPoweringOff,
+           projects[loc.p].sessions[loc.s].parked == nil,
            shouldClearResumeMarkers(sessionId: sessionId, copilotSessionId: copilotSessionId) {
             try? FileManager.default.removeItem(
                 at: resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session")
@@ -4021,7 +4041,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func handleExit(sessionId: String) {
+    func handleExit(sessionId: String) {
         controllers[sessionId] = nil
         guard !Self.shouldPreserveSessionAfterTerminalExit(
             isTerminating: isTerminating,
@@ -4037,6 +4057,8 @@ final class AppModel: ObservableObject {
         }
 
         guard let loc = locateIndex(sessionId),
+              // Parking ends the dtach master on purpose; the row stays.
+              projects[loc.p].sessions[loc.s].parked == nil,
               acceptSessionCloses(sessionIds: [sessionId]) else { return }
         projects[loc.p].sessions[loc.s].backgroundAgentsActive = false
         backgroundAgentsSuppressed.remove(sessionId)
@@ -4124,7 +4146,7 @@ final class AppModel: ObservableObject {
         var lines: [String] = []
         for p in projects {
             for s in p.sessions {
-                let extra = s.statusText.map { " — \($0)" } ?? ""
+                let extra = (s.parked?.label ?? s.statusText).map { " — \($0)" } ?? ""
                 let unread = s.isUnread ? " [unread]" : ""
                 lines.append("\(p.name)/\(s.title)  \(s.displayStatus.rawValue)\(unread)\(extra)  \(s.id)")
             }

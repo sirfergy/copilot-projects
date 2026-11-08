@@ -12,6 +12,7 @@ struct CopilotProjectsApp: App {
     @AppStorage(TranscriptPromptComposerView.showQuickReplyChipsKey) private var showQuickReplyChips = true
     @AppStorage(TranscriptDrawer.defaultViewKey) private var defaultView: TranscriptDrawer.DefaultView = .terminal
     @AppStorage(TranscriptDrawer.fullWidthTranscriptKey) private var fullWidthTranscript = false
+    @AppStorage(SessionParking.settingKey) private var parkIdleSessions = SessionParking.off
     @State private var showsProjects = true
     @State private var showsQuickRepliesSettings = false
 
@@ -37,6 +38,7 @@ struct CopilotProjectsApp: App {
                               showsQuickRepliesSettings: $showsQuickRepliesSettings,
                               defaultView: $defaultView,
                               fullWidthTranscript: $fullWidthTranscript,
+                              parkIdleSessions: $parkIdleSessions,
                               showsProjects: $showsProjects)
         }
         MenuBarExtra("Copilot Projects", systemImage: "terminal", isInserted: $keepRunning) {
@@ -62,6 +64,8 @@ final class WorkspaceMenuState: ObservableObject {
         var hasAttentionSessions = false
         var canNavigateSessionBack = false
         var canNavigateSessionForward = false
+        /// Set when the selected session is parked, or being parked or resumed.
+        var selectedSessionParked: ParkedSession.State?
         var recentlyClosedSessionItems: [RemoteRecentlyClosedSession] = []
         var autoDiscoverSSHHosts = true
         var manualSSHHosts: [RemoteHostInfo] = []
@@ -125,6 +129,7 @@ private struct WorkspaceCommands: Commands {
     @Binding var showsQuickRepliesSettings: Bool
     @Binding var defaultView: TranscriptDrawer.DefaultView
     @Binding var fullWidthTranscript: Bool
+    @Binding var parkIdleSessions: String
     @Binding var showsProjects: Bool
 
     private var hasSheet: Bool {
@@ -153,6 +158,17 @@ private struct WorkspaceCommands: Commands {
                 Text("Transcript").tag(TranscriptDrawer.DefaultView.transcript)
             }
             Toggle("Full-Width Transcript View", isOn: $fullWidthTranscript)
+            Picker("Park Idle Sessions", selection: Binding(
+                get: { parkIdleSessions },
+                set: { choice in
+                    // Leaving Off explains parking once, and can be cancelled.
+                    guard choice == SessionParking.off || model.confirmParkingOptIn() else { return }
+                    parkIdleSessions = choice
+                }
+            )) {
+                Text("Off").tag(SessionParking.off)
+                Text("Only When I Choose").tag(SessionParking.manual)
+            }
             Divider()
             SSHHostsSettingsMenu(model: model, isSheetPresented: hasSheet)
             Button("Pull Request Review Prompt…") {
@@ -205,6 +221,18 @@ private struct WorkspaceCommands: Commands {
                     }
                 }
                 .disabled(!menu.canReopenClosedSession)
+                // Parking is opt-in. Resume stays while a parked session exists,
+                // so turning the setting off never strands one.
+                if parkIdleSessions != SessionParking.off {
+                    Button("Park Session") { model.parkSelectedSession() }
+                        .disabled(menu.snapshot.selectedSessionParked != nil)
+                    Button("Park All Idle Sessions…") { model.parkAllIdleSessions() }
+                }
+                if let parked = menu.snapshot.selectedSessionParked, parked == .parked || parked == .failed {
+                    Button("Resume Session") {
+                        model.globalSelectedSessionId.map(model.resumeParkedSession)
+                    }
+                }
                 Divider()
                 Button("Find Session…") { input.presentSessionFinder() }
                     .keyboardShortcut("k", modifiers: .command)

@@ -810,9 +810,13 @@ struct SessionStateIndicator: View, Equatable {
             && lhs.session.hasBackgroundWork == rhs.session.hasBackgroundWork
             && lhs.session.isUnread == rhs.session.isUnread
             && lhs.session.markedUnread == rhs.session.markedUnread
+            && lhs.session.parked?.state == rhs.session.parked?.state
     }
 
     static func symbolName(for session: Session) -> String {
+        if let parked = session.parked {
+            return parked.state == .failed ? "exclamationmark.triangle.fill" : "moon.zzz.fill"
+        }
         switch session.displayStatus {
         case .running:
             return "waveform"
@@ -872,6 +876,7 @@ struct SessionStateIndicator: View, Equatable {
     }
 
     private var help: String {
+        if let parked = session.parked { return parked.label.lowercased() }
         switch session.displayStatus {
         case .running: return "running"
         case .waiting: return "waiting for input"
@@ -1002,6 +1007,10 @@ struct DetailView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(TranscriptDrawer.fullWidthTranscriptKey) private var isFullWidth = false
 
+    private var parked: ParkedSession? {
+        model.selectedProject?.sessions.first { $0.id == model.globalSelectedSessionId }?.parked
+    }
+
     var body: some View {
         // One persistent AppKit container hosts every session's terminal across all
         // projects (see TerminalsContainerView). It's created once and never
@@ -1016,9 +1025,14 @@ struct DetailView: View {
                 model: model,
                 activeSessionId: model.globalSelectedSessionId,
                 hostedIds: model.hostedTerminals.map(\.id),
-                showsTerminal: !model.isActiveTerminalCoveredByTranscriptDrawer(isFullWidth: isFullWidth)
+                showsTerminal: parked == nil
+                    && !model.isActiveTerminalCoveredByTranscriptDrawer(isFullWidth: isFullWidth)
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if let sessionId = model.globalSelectedSessionId, let parked {
+                ParkedSessionPlaceholder(model: model, sessionId: sessionId, state: parked.state)
+            }
 
             if let sessionId = model.globalSelectedSessionId,
                let transcript = model.activeTranscriptController {
@@ -1062,6 +1076,53 @@ struct DetailView: View {
                 .id(sessionId)
             }
         }
+        // Opening a parked session resumes it once it has stayed on screen for 2 s.
+        // Parking the session on screen doesn't change the id, so it stays parked.
+        .task(id: model.globalSelectedSessionId) {
+            guard let sessionId = model.globalSelectedSessionId,
+                  model.parkedState(sessionId) == .parked else { return }
+            try? await ContinuousClock().sleep(until: .now.advanced(by: .seconds(2)))
+            if !Task.isCancelled { model.resumeParkedSession(sessionId) }
+        }
+    }
+}
+
+/// Stands in for the terminal of a session whose Copilot is parked.
+private struct ParkedSessionPlaceholder: View {
+    let model: AppModel
+    let sessionId: String
+    let state: ParkedSession.State
+
+    private var text: (title: String, detail: String) {
+        switch state {
+        case .parking: ("Parking…", "Copilot is quitting in this session.")
+        case .parked: ("Parked to free memory.", "Copilot starts again when you resume this session.")
+        case .resuming: ("Resuming…", "Copilot is starting again. This takes a few seconds.")
+        case .failed: ("Couldn't resume", "Copilot didn't start in this session. Nothing was lost.")
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Text(text.title).font(.title3.weight(.semibold))
+            Text(text.detail).foregroundStyle(StudioStyle.secondaryText)
+            HStack(spacing: 10) {
+                switch state {
+                case .parked:
+                    Button("Resume") { model.resumeParkedSession(sessionId) }
+                case .failed:
+                    Button("Try Again") { model.resumeParkedSession(sessionId) }
+                    Button("Open Terminal") { model.openParkedTerminal(sessionId) }
+                case .parking, .resuming:
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(StudioStyle.raised)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("parked-session-placeholder")
     }
 }
 
@@ -1693,6 +1754,7 @@ struct SessionRow: View, Equatable {
             && lhs.session.title == rhs.session.title
             && lhs.session.hostId == rhs.session.hostId
             && lhs.session.memoryUsageBytes == rhs.session.memoryUsageBytes
+            && lhs.session.parked == rhs.session.parked
             && lhs.session.statusText == rhs.session.statusText
             && lhs.session.displayStatus == rhs.session.displayStatus
             && lhs.session.effectiveRunningStartedAtMilliseconds == rhs.session.effectiveRunningStartedAtMilliseconds

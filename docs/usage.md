@@ -771,6 +771,9 @@ the only emulator.
 - **End Project:** ends its sessions and removes the group, not project files.
   Multiple sessions require confirmation even when idle. Cancel changes nothing;
   sessions added while a confirmation is open are not silently included.
+- **Park a session (opt-in):** stops its dtach master, Copilot and tracker, and keeps the
+  row, the transcript and the resume marker. Opening the session runs
+  `copilot --resume` in the same row. See "Park idle sessions" in the README.
 - **Reconnect from another host:**
   ```bash
   ssh you@mac

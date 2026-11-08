@@ -33,6 +33,7 @@ public enum RemoteControlResult: Equatable, Sendable {
         case .sent: self = .sent
         case .missing: self = .missing
         case .invalid: self = .invalid
+        case .busy: self = .busy
         }
     }
 

@@ -23,6 +23,8 @@ public enum RemoteTerminalInputResult: Equatable, Sendable {
     case sent
     case missing
     case invalid
+    /// The session is parked, or being parked or resumed.
+    case busy
 }
 
 struct RemoteCommandRequestLedger {
@@ -725,7 +727,8 @@ extension AppModel {
                         let foreground = runtimeForegroundActivity(
                             for: session, now: promptNow
                         )
-                        let status = projectedStatus(
+                        // A parked session has no Copilot: it reads as idle and takes no input.
+                        let status = session.parked != nil ? .idle : projectedStatus(
                             for: session, foreground: foreground, now: promptNow
                         )
                         let remoteHost = resolvedRemoteHost(for: session, in: hosts)
@@ -760,7 +763,7 @@ extension AppModel {
                             ready: session.finishedUnseen,
                             background: session.hasBackgroundWork,
                             scheduled: !session.schedules.isEmpty,
-                            promptable: Self.remotePromptEligibility(
+                            promptable: session.parked == nil && Self.remotePromptEligibility(
                                 status: status,
                                 scheduledTurnActive: session.scheduledTurnActive,
                                 hasPendingQuestions: session.hasPendingInput,
@@ -789,8 +792,8 @@ extension AppModel {
                                 .remoteAvailableModels(),
                             conversationEpoch: operation.conversationEpoch,
                             operationSupport: operation.support,
-                            operationReceipts: operation.receipts,
-                            workflow: session.agentActivity?.workflow,
+                            operationReceipts: operation.receipts?.filter { $0.kind != SessionParking.checkKind },
+                            workflow: Self.wireWorkflow(session),
                             lastError: status == .idle
                                 ? session.agentActivity?.remoteLastError()
                                 : nil,
@@ -805,7 +808,12 @@ extension AppModel {
                             startingPrompt: resolvedStartingPrompt,
                             runningStartedAtMilliseconds: runningStartedAt,
                             pullRequestKeys: effectivePRKeys.isEmpty ? nil : effectivePRKeys,
-                            trackerWarning: session.trackerWarning
+                            trackerWarning: session.trackerWarning,
+                            parked: session.parked.map {
+                                RemoteParkedSession(
+                                    state: $0.state.rawValue, sinceMilliseconds: $0.sinceMilliseconds
+                                )
+                            }
                         )
                     }
                 )
@@ -817,6 +825,14 @@ extension AppModel {
             recentlyClosedSessions: closedItems.isEmpty ? nil : closedItems,
             quickRepliesDigest: remoteQuickRepliesDigest()
         )
+    }
+
+    /// The workflow as clients see it: without the host's own park question,
+    /// and absent while the session's input is closed for parking.
+    static func wireWorkflow(_ session: Session) -> RemoteSessionWorkflow? {
+        guard session.parked == nil, var workflow = session.agentActivity?.workflow else { return nil }
+        workflow.capabilities.removeAll { $0 == SessionParking.checkKind }
+        return workflow
     }
 
     func remoteQuickRepliesDigest() -> String? {
@@ -940,6 +956,7 @@ extension AppModel {
     @discardableResult
     func sendRemoteInput(sessionId: String, value: String) -> RemoteTerminalInputResult {
         guard value.utf8.count <= 8_192 else { return .invalid }
+        if parkingBlocksInput(sessionId) { return .busy }
         guard let view = remoteInputTerminal(sessionId: sessionId) else { return .missing }
         view.sendRemoteInput(value)
         return .sent
@@ -949,6 +966,7 @@ extension AppModel {
     func sendRemoteKey(sessionId: String, key: String) -> RemoteTerminalInputResult {
         guard ["enter", "escape", "backspace", "tab", "up", "down", "left", "right"]
             .contains(key) else { return .invalid }
+        if parkingBlocksInput(sessionId) { return .busy }
         guard let view = remoteInputTerminal(sessionId: sessionId) else { return .missing }
         return view.sendRemoteKey(
             key,
@@ -979,6 +997,7 @@ extension AppModel {
         guard ProjectsTerminalView.remoteCommandTextBytes(value) != nil else {
             return .invalid
         }
+        if parkingBlocksInput(sessionId) { return .busy }
         guard let view = remoteInputTerminal(sessionId: sessionId) else { return .missing }
         guard view.sendRemoteCommand(
             value,
@@ -1003,7 +1022,7 @@ extension AppModel {
     }
 
     func sendRemoteScroll(sessionId: String, delta: Int) {
-        guard (-20...20).contains(delta) else { return }
+        guard (-20...20).contains(delta), parkedState(sessionId) == nil else { return }
         controller(for: sessionId)?.terminalView.sendRemoteScroll(
             delta: delta,
             agentLive: liveAgentSessions.contains(sessionId)
@@ -1013,6 +1032,7 @@ extension AppModel {
     func sendRemotePrompt(sessionId: String, value: String) -> RemotePromptResult {
         guard ProjectsTerminalView.remotePromptPasteBytes(value) != nil,
               let location = locateIndex(sessionId) else { return .invalid }
+        if parkingBlocksInput(sessionId) { return .busy }
         let session = projects[location.p].sessions[location.s]
         let adapter = CLIOperationAdapter(
             activityDirectory: agentActivityDirectory,
@@ -1179,6 +1199,7 @@ extension AppModel {
     ) -> RemoteUserInputResult {
         let clock = advancingClock(from: now)
         guard locateIndex(sessionId) != nil else { return .invalid }
+        if parkingBlocksInput(sessionId) { return .conflict }
         guard !answer.requestId.isEmpty,
               answer.requestId.utf8.count <= 200,
               answer.answer.utf8.count <= 8_192 else {
@@ -1233,6 +1254,7 @@ extension AppModel {
     ) -> RemoteUserInputResult {
         let clock = advancingClock(from: now)
         guard let location = locateIndex(sessionId) else { return .invalid }
+        if parkingBlocksInput(sessionId) { return .conflict }
         let adapter = CLIOperationAdapter(
             activityDirectory: agentActivityDirectory,
             resumeMarkerDirectory: resumeMarkerDirectory
@@ -1439,6 +1461,7 @@ extension AppModel {
     ) -> RemoteUserInputResult {
         let clock = advancingClock(from: now)
         guard locateIndex(sessionId) != nil else { return .invalid }
+        if parkingBlocksInput(sessionId) { return .conflict }
         guard !selection.modelId.isEmpty,
               selection.modelId.utf8.count <= 200,
               (selection.reasoningEffort?.utf8.count ?? 0) <= 64,
@@ -1507,6 +1530,7 @@ extension AppModel {
               let kind = CLISDKOperationKind(rawValue: action.kind.rawValue) else {
             return .invalid
         }
+        if parkingBlocksInput(sessionId) { return .conflict }
         let adapter = CLIOperationAdapter(
             activityDirectory: agentActivityDirectory,
             resumeMarkerDirectory: resumeMarkerDirectory
@@ -1545,19 +1569,9 @@ extension AppModel {
                 case .abort:
                     return true
                 case .bounce:
-                    guard let location = self.locateIndex(sessionId) else { return false }
-                    let session = self.projects[location.p].sessions[location.s]
-                    let foreground = self.runtimeForegroundActivity(for: session, now: clock())
-                    return workflow.sendReady && !snapshot.hasPendingInput
-                        && !session.hasBackgroundWork && self.remoteSessionHasLiveAgent(sessionId)
-                        && self.projectedStatus(for: session, foreground: foreground, now: clock()) == .idle
-                        && self.remotePromptFences[sessionId] == nil
-                        && !snapshot.foregroundTurnActive && !snapshot.scheduledTurnActive
-                        && snapshot.activeSubagents.isEmpty && snapshot.schedules.isEmpty
-                        && snapshot.runtimeForegroundActivity(
-                            expectedSessionId: snapshot.copilotSessionId,
-                            now: clock(), minimumObservationMilliseconds: nil
-                        ) == .idle
+                    return self.sessionIsSettledIdle(
+                        sessionId: sessionId, snapshot: snapshot, workflow: workflow, now: clock()
+                    )
                 case .setBudget:
                     return workflow.limitsKnown && workflow.budgetRequest == nil
                 case .answerBudget:
@@ -1576,6 +1590,29 @@ extension AppModel {
                 )
             }
         )
+    }
+
+    /// A live Copilot with nothing running, waiting, scheduled or in the
+    /// background: the state in which a bounce or a park may stop the CLI.
+    func sessionIsSettledIdle(
+        sessionId: String,
+        snapshot: AgentActivitySnapshot,
+        workflow: RemoteSessionWorkflow,
+        now: Date
+    ) -> Bool {
+        guard let location = locateIndex(sessionId) else { return false }
+        let session = projects[location.p].sessions[location.s]
+        let foreground = runtimeForegroundActivity(for: session, now: now)
+        return workflow.sendReady && !snapshot.hasPendingInput
+            && !session.hasBackgroundWork && remoteSessionHasLiveAgent(sessionId)
+            && projectedStatus(for: session, foreground: foreground, now: now) == .idle
+            && remotePromptFences[sessionId] == nil
+            && !snapshot.foregroundTurnActive && !snapshot.scheduledTurnActive
+            && snapshot.activeSubagents.isEmpty && snapshot.schedules.isEmpty
+            && snapshot.runtimeForegroundActivity(
+                expectedSessionId: snapshot.copilotSessionId,
+                now: now, minimumObservationMilliseconds: nil
+            ) == .idle
     }
 
     private struct SessionActionHandoff: Encodable {
@@ -1608,7 +1645,7 @@ extension AppModel {
 
     func sessionWorkflow(sessionId: String) -> RemoteSessionWorkflow? {
         guard let location = locateIndex(sessionId) else { return nil }
-        return projects[location.p].sessions[location.s].agentActivity?.workflow
+        return Self.wireWorkflow(projects[location.p].sessions[location.s])
     }
 
     func sessionPendingUserInputs(sessionId: String) -> [RemoteUserInputRequest] {
@@ -1658,6 +1695,7 @@ extension AppModel {
     ) -> TranscriptWorkingIndicator? {
         guard let location = locateIndex(sessionId) else { return nil }
         let session = projects[location.p].sessions[location.s]
+        guard session.parked == nil else { return nil }
         let snapshot = session.agentActivity
         let latestSnapshot = snapshot ?? agentActivitySnapshotCache[session.id]?.snapshot
         let owner = verifiedCopilotOwners[session.id]
@@ -1739,28 +1777,46 @@ extension AppModel {
         guard performSessionAction(sessionId: sessionId, action: action, operation: operation) == .accepted else {
             return RemoteWorkflowActionResult(state: .rejected, message: "The session action was not accepted.")
         }
-        for _ in 0..<40 {
-            do { try await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(500))) }
-            catch { break }
-            guard let fresh = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
-                  fresh.conversationEpoch == epoch else { break }
-            if let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
-                $0.operationId == operation.operationId && $0.kind == action.kind.rawValue
-            }), receipt.state.isTerminal {
-                return RemoteWorkflowActionResult(
-                    state: receipt.state,
-                    message: receipt.state == .applied ? nil : receipt.state == .rejected
-                        ? "Copilot did not apply this action."
-                        : "Outcome unknown. Inspect the terminal before trying again.",
-                    operationId: operation.operationId
-                )
-            }
+        guard let state = await terminalReceiptState(
+            sessionId: sessionId, operation: operation, kind: action.kind.rawValue,
+            pollInterval: .milliseconds(500), adapter: adapter
+        ) else {
+            return RemoteWorkflowActionResult(
+                state: .indeterminate,
+                message: "Couldn't confirm the outcome. Inspect the terminal before trying again.",
+                operationId: operation.operationId
+            )
         }
         return RemoteWorkflowActionResult(
-            state: .indeterminate,
-            message: "Couldn't confirm the outcome. Inspect the terminal before trying again.",
+            state: state,
+            message: state == .applied ? nil : state == .rejected
+                ? "Copilot did not apply this action."
+                : "Outcome unknown. Inspect the terminal before trying again.",
             operationId: operation.operationId
         )
+    }
+
+    /// The tracker's final receipt for one submitted operation, or nil when
+    /// none arrives in 20 s or the conversation changes first.
+    func terminalReceiptState(
+        sessionId: String,
+        operation: CLIOperationRequest,
+        kind: String,
+        pollInterval: Duration,
+        adapter: CLIOperationAdapter
+    ) async -> RemoteOperationState? {
+        for _ in 0..<Int(Duration.seconds(20) / pollInterval) {
+            do { try await ContinuousClock().sleep(until: .now.advanced(by: pollInterval)) }
+            catch { break }
+            guard let fresh = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
+                  fresh.conversationEpoch == operation.conversationEpoch else { break }
+            if let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
+                $0.operationId == operation.operationId && $0.kind == kind
+            }), receipt.state.isTerminal {
+                return receipt.state
+            }
+        }
+        return nil
     }
 
     func performLocalUserInputAnswer(
@@ -2912,6 +2968,9 @@ extension AppModel {
         }
         if let projectId, projects[loc.p].id != projectId {
             return .failure("The session moved to another project.", code: "conflict")
+        }
+        if parkingBlocksInput(sessionId) {
+            return .failure("The session is parked and is resuming. Try again in a few seconds.", code: "busy")
         }
 
         let freshSnapshot = adapter.loadFreshSnapshot(sessionId: sessionId, now: clock)

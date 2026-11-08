@@ -547,6 +547,7 @@ extension AppModel {
             trackerMissingSince = trackerMissingSince.filter { seenSessionIds.contains($0.key) }
             budgetNotificationKeys = budgetNotificationKeys.filter { seenSessionIds.contains($0.key) }
             reconcileRuntimeActivity(now: readTime())
+            reconcileParkedSessions(now: readTime())
             for target in budgetNotifications {
                 postNotification(
                     projectId: target.projectId, sessionId: target.sessionId, kind: .permission,
@@ -902,6 +903,7 @@ extension AppModel {
     ) -> String? {
         let hasHealthyActivity = session.agentActivity.map { !$0.reportsTerminalDisconnect } ?? false
         guard session.hostId == nil,
+              session.parked == nil,
               liveCopilotSessions.contains(session.id),
               !hasHealthyActivity else {
             trackerMissingSince[session.id] = nil

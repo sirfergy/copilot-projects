@@ -119,22 +119,26 @@ enum SessionArtifacts {
     }
 
     static func forceDestroy(sessionIds: [String]) {
-        guard !sessionIds.isEmpty else { return }
-        if Paths.dtachExecutable != nil {
-            let processes = ProcessTree.snapshot()
-            let sockets = Set(sessionIds.map {
-                Paths.dtachSocketPath(sessionId: $0)
-            })
-            // Kill both the attached client and master. This also closes the tiny
-            // creation race where only the client is visible before it forks the
-            // master; killing just a selected master could miss that case.
-            for process in ProcessTree.dtachProcesses(in: processes)
-                where process.socketPath.map(sockets.contains) == true {
-                kill(process.pid, SIGTERM)
-            }
-        }
+        terminateDtach(sessionIds: sessionIds)
         for sessionId in sessionIds {
             removeFiles(sessionId: sessionId)
+        }
+    }
+
+    /// The stop that close and park share: SIGTERM every dtach process on the
+    /// sessions' sockets. The CLI under each master is hung up and exits itself.
+    static func terminateDtach(sessionIds: [String]) {
+        guard !sessionIds.isEmpty, Paths.dtachExecutable != nil else { return }
+        let processes = ProcessTree.snapshot()
+        let sockets = Set(sessionIds.map {
+            Paths.dtachSocketPath(sessionId: $0)
+        })
+        // Kill both the attached client and master. This also closes the tiny
+        // creation race where only the client is visible before it forks the
+        // master; killing just a selected master could miss that case.
+        for process in ProcessTree.dtachProcesses(in: processes)
+            where process.socketPath.map(sockets.contains) == true {
+            kill(process.pid, SIGTERM)
         }
     }
 
@@ -322,6 +326,7 @@ enum SessionArtifacts {
             Paths.elicitationResponsePath(sessionId: sessionId),
             Paths.setModelRequestPath(sessionId: sessionId),
             Paths.closeSessionRequestPath(sessionId: sessionId),
+            Paths.sessionsDir.appendingPathComponent("\(sessionId).session-park-check.json").path,
             Paths.transcriptSnapshotPath(sessionId: sessionId),
             Paths.transcriptLivePath(sessionId: sessionId),
             Paths.transcriptOwnerPath(sessionId: sessionId),

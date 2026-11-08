@@ -796,6 +796,54 @@ test("bounce enqueues the registered command for its owner once without sending 
   assert.equal(runtime.session.workflowCalls.length, 1);
 });
 
+test("the park check answers idle or busy and never sends anything to the runtime", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  const capabilities = (await workflowReady(runtime)).capabilities;
+  assert.ok(capabilities.includes("session-park-check"));
+  const ask = async () => {
+    const request = workflowHandoff(runtime, "session-park-check", {});
+    await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, request.operationId)?.state),
+      "park check was not answered");
+    return receipt(runtime, request.operationId).state;
+  };
+  assert.equal(await ask(), "applied");
+
+  const idleActivity = runtime.session.activityHandler;
+  runtime.session.activityHandler = async () => ({ abortable: false, hasActiveWork: true });
+  assert.equal(await ask(), "rejected");
+  runtime.session.activityHandler = idleActivity;
+  runtime.session.scheduleListHandler = async () => ({ entries: [{ id: 1 }] });
+  assert.equal(await ask(), "rejected");
+  runtime.session.scheduleListHandler = async () => ({ entries: [] });
+  // A turn that came and went while the question was being answered.
+  runtime.session.activityHandler = async (params) => {
+    await runtime.session.emit("session.idle", {});
+    return idleActivity(params);
+  };
+  assert.equal(await ask(), "rejected");
+  runtime.session.activityHandler = idleActivity;
+  await runtime.session.emit("elicitation.requested", pendingURLQuestion("open"));
+  assert.equal(await ask(), "rejected");
+  await runtime.session.emit("elicitation.completed", { requestId: "open" });
+  // A queued item the published list leaves out, and a queue that can't be read.
+  runtime.session.pendingItemsHandler = async () => ({
+    items: [{ kind: "command", id: "queued" }], steeringMessages: [], inFlightSteeringCount: 0,
+  });
+  assert.equal(await ask(), "rejected");
+  runtime.session.pendingItemsHandler = async () => { throw new Error("unavailable"); };
+  assert.equal(await ask(), "rejected");
+  runtime.session.pendingItemsHandler = null;
+  assert.equal(await ask(), "applied");
+
+  // Asking never aborts, queues or changes the session.
+  assert.deepEqual(runtime.session.workflowCalls, []);
+  assert.deepEqual(runtime.session.closeCalls, []);
+  assert.deepEqual(readSnapshot(runtime).workflow.capabilities, capabilities);
+  assert.equal(readSnapshot(runtime).workflow.bounceRequested, false);
+});
+
 test("bounce discovery fails closed without disabling existing native workflows", {
   concurrency: false,
 }, async (t) => {

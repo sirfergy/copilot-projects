@@ -184,6 +184,8 @@ final class RemoteModelBridge: SessionHost {
     /// differs from the one their transcript reflects, images may have changed
     /// on any turn, so they fetch everything rather than only newer turns.
     func transcriptRevision(sessionId: String) -> RemoteTranscriptRevision {
+        // The gateway asks this for each connected client's open session.
+        model?.noteRemoteClientHasOpen(sessionId)
         let base = TranscriptController.remoteRevision(sessionId: sessionId)
         guard let view = model?.controller(for: sessionId)?.terminalView else {
             return base
