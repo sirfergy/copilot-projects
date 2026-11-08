@@ -11,6 +11,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
   pull-requests: read
 
@@ -69,6 +70,18 @@ jobs:
               echo "Skipped: $GITHUB_SHA was not created by a PR merge to main." \
                 >> "$GITHUB_STEP_SUMMARY"
               exit 0
+            fi
+            # A green PR run already tested this tree when the PR head contained this commit's
+            # parent: the run's merge commit, the head and this commit then share one tree.
+            # Any other answer, or a lookup that fails, leaves the tests below to run.
+            pr_head="$(jq -r --arg sha "$GITHUB_SHA" \
+              '.[] | select(.merge_commit_sha == $sha) | .head.sha' <<< "$triggering_pull_requests")"
+            green_runs="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&status=success"
+            if [[ "$(gh api "$green_runs&head_sha=$pr_head" --jq '.workflow_runs[0].head_commit.tree_id')" \
+                == "$(git rev-parse "$GITHUB_SHA^{tree}")" ]] \
+              && [[ "$(gh api "repos/$GITHUB_REPOSITORY/compare/$(git rev-parse "$GITHUB_SHA^")...$pr_head" \
+                --jq .behind_by)" == 0 ]]; then
+              echo "tested=true" >> "$GITHUB_OUTPUT"
             fi
             git fetch origin main --quiet
             if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
@@ -151,7 +164,7 @@ jobs:
           echo "Release version: v$version" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Test
-        if: steps.release.outputs.should_release == 'true'
+        if: steps.release.outputs.should_release == 'true' && steps.release.outputs.tested != 'true'
         run: |
           python3 scripts/test-release.py
           python3 scripts/test-release-notes.py
