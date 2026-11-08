@@ -19,6 +19,9 @@ struct Session: Identifiable, Codable, Equatable {
     var pendingLedgerPullRequestKeys: [String]?
     var parentSessionId: String?
     var startingPrompt: String? = nil
+    /// Set while Copilot is stopped to free memory, or is being stopped or started
+    /// again. Persisted only while set, so other sessions keep their saved shape.
+    var parked: ParkedSession?
     /// Persisted only while set, so unmarked sessions keep their saved shape.
     private var manuallyMarkedUnread: Bool?
 
@@ -291,6 +294,7 @@ struct Session: Identifiable, Codable, Equatable {
 
     /// The attention state shown beside a session's name.
     var attentionLabel: String {
+        if let parked { return parked.label }
         switch displayStatus {
         case .running: return "Running"
         case .waiting: return "Waiting for input"
@@ -310,7 +314,7 @@ struct Session: Identifiable, Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, verifiedPullRequestKeys
-        case pendingLedgerPullRequestKeys, parentSessionId, startingPrompt
+        case pendingLedgerPullRequestKeys, parentSessionId, startingPrompt, parked
         case runningStartedAtMilliseconds, runningStatusTimestampMilliseconds, runningRequestIdentity
         case manuallyMarkedUnread = "markedUnread"
     }
@@ -368,6 +372,8 @@ struct Session: Identifiable, Codable, Equatable {
             self.startingPrompt = nil
         }
         self.manuallyMarkedUnread = try container.decodeIfPresent(Bool.self, forKey: .manuallyMarkedUnread)
+        // An unreadable record leaves an ordinary tab, which resumes when shown.
+        self.parked = try? container.decodeIfPresent(ParkedSession.self, forKey: .parked)
         self.runningStartedAtMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .runningStartedAtMilliseconds)
         self.runningStatusTimestampMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .runningStatusTimestampMilliseconds)
         self.runningRequestIdentity = try container.decodeIfPresent(String.self, forKey: .runningRequestIdentity)
@@ -389,9 +395,33 @@ struct Session: Identifiable, Codable, Equatable {
             try container.encode(encoded, forKey: .startingPrompt)
         }
         try container.encodeIfPresent(manuallyMarkedUnread, forKey: .manuallyMarkedUnread)
+        try container.encodeIfPresent(parked, forKey: .parked)
         try container.encodeIfPresent(runningStartedAtMilliseconds, forKey: .runningStartedAtMilliseconds)
         try container.encodeIfPresent(runningStatusTimestampMilliseconds, forKey: .runningStatusTimestampMilliseconds)
         try container.encodeIfPresent(runningRequestIdentity, forKey: .runningRequestIdentity)
+    }
+}
+
+/// Copilot stopped to free memory. The session keeps its row, transcript and
+/// resume marker, and Copilot starts again in the same row.
+struct ParkedSession: Codable, Equatable {
+    enum State: String, Codable {
+        case parking, parked, resuming, failed
+    }
+
+    var state: State
+    /// When this state began. Also identifies one park or resume attempt.
+    var sinceMilliseconds: Int64
+    /// The CLI and tracker a park stopped, kept until they are seen gone.
+    var processes: [TranscriptController.CloseProcessIdentity] = []
+
+    var label: String {
+        switch state {
+        case .parking: "Parking…"
+        case .parked: "Parked"
+        case .resuming: "Resuming…"
+        case .failed: "Couldn't resume"
+        }
     }
 }
 

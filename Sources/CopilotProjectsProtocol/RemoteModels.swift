@@ -306,6 +306,9 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     public let pullRequestKeys: [String]?
     /// Short warning when a live local Copilot session's tracker is not running (`nil` when healthy).
     public let trackerWarning: String?
+    /// Set while Copilot is stopped to free memory, or is being stopped or
+    /// started again. Omitted otherwise, and by older hosts.
+    public let parked: RemoteParkedSession?
 
     public init(
         id: String,
@@ -335,7 +338,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         startingPrompt: String? = nil,
         runningStartedAtMilliseconds: Int64? = nil,
         pullRequestKeys: [String]? = nil,
-        trackerWarning: String? = nil
+        trackerWarning: String? = nil,
+        parked: RemoteParkedSession? = nil
     ) {
         self.id = id
         self.title = title
@@ -365,6 +369,20 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.runningStartedAtMilliseconds = runningStartedAtMilliseconds
         self.pullRequestKeys = pullRequestKeys
         self.trackerWarning = trackerWarning
+        self.parked = parked
+    }
+}
+
+/// A session whose Copilot is stopped to free memory. The session keeps its row
+/// and transcript, and Copilot starts again when the session is opened.
+public struct RemoteParkedSession: Codable, Equatable, Sendable {
+    /// `parking`, `parked`, `resuming`, or `failed` (the last resume did not start).
+    public let state: String
+    public let sinceMilliseconds: Int64
+
+    public init(state: String, sinceMilliseconds: Int64) {
+        self.state = state
+        self.sinceMilliseconds = sinceMilliseconds
     }
 }
 

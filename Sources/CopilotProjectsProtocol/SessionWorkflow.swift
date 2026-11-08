@@ -130,7 +130,7 @@ public struct RemoteWorkflowAgent: Codable, Equatable, Sendable, Identifiable {
 public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
     public let version: Int
     public var observedAtMilliseconds: Int64
-    public let capabilities: [String]
+    public var capabilities: [String]
     public let sendReady: Bool
     public let legacyPromptFallback: Bool?
     /// Older trackers omit this field; only an explicit false admits a bounce.

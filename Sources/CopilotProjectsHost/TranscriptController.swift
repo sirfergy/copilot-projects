@@ -584,7 +584,7 @@ final class TranscriptController: ObservableObject {
         return Int(digits)
     }
 
-    struct CloseProcessIdentity: Hashable, Sendable {
+    struct CloseProcessIdentity: Hashable, Sendable, Codable {
         let pid: pid_t
         let startSeconds: UInt64
         let startMicroseconds: UInt64

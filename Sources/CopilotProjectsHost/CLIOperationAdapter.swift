@@ -12,6 +12,8 @@ enum CLISDKOperationKind: String, Codable {
     case sessionBounce = "session-bounce"
     case setSessionBudget = "set-session-budget"
     case answerSessionBudget = "answer-session-budget"
+    /// Asked by the host before parking; never offered to remote clients.
+    case sessionParkCheck = "session-park-check"
 }
 
 public struct CLIOperationRequest: Equatable, Sendable {
@@ -82,7 +84,17 @@ struct CLIOperationAdapter {
         "session-bounce.json",
         "set-session-budget.json",
         "answer-session-budget.json",
+        "session-park-check.json",
     ]
+
+    /// Whether a host request is still waiting for the tracker to take it.
+    func hasPendingHandoff(sessionId: String) -> Bool {
+        Self.handoffSuffixes.contains { suffix in
+            FileManager.default.fileExists(atPath: SessionArtifacts.cliOperationHandoffURL(
+                sessionId: sessionId, suffix: suffix, sessionsDirectory: activityDirectory
+            ).path)
+        }
+    }
 
     private struct FingerprintEnvelope<Payload: Encodable>: Encodable {
         let kind: String

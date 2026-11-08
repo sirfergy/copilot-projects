@@ -308,8 +308,11 @@ if (validSessionId && socketPath) {
         sessionsDir, `${appSessionId}.set-model-request.json`
     );
     const setModelRequestName = `${appSessionId}.set-model-request.json`;
+    // "session-park-check" is a question, not an action: it answers whether the
+    // session is idle right now and never aborts, queues or changes anything.
     const workflowKinds = [
         "session-send", "session-abort", "session-bounce", "set-session-budget", "answer-session-budget",
+        "session-park-check",
     ];
     const workflowPaths = new Map(workflowKinds.map((kind) => [
         kind, join(sessionsDir, `${appSessionId}.${kind}.json`),
@@ -2326,6 +2329,7 @@ if (validSessionId && socketPath) {
                 capabilities: [
                     "session-send", "session-abort", "answer-session-budget",
                     "image-attachments-v1", "file-attachments-v1", "pending-messages-v1",
+                    "session-park-check",
                     ...(effectiveLimitsKnown ? ["set-session-budget"] : []),
                     ...(bounceAvailable ? ["session-bounce"] : []),
                 ],
@@ -2394,6 +2398,7 @@ if (validSessionId && socketPath) {
                 && absent("maxAiCredits", "requestId", "additionalAiCredits");
         case "session-abort":
         case "session-bounce":
+        case "session-park-check":
             return absent("prompt", "mode", "maxAiCredits", "requestId", "additionalAiCredits");
         case "set-session-budget":
             return absent("prompt", "mode", "requestId", "additionalAiCredits")
@@ -2654,10 +2659,15 @@ if (validSessionId && socketPath) {
         const context = operation.context;
         if (activeOperationKeys.has(operationExecutionKey(context.conversationEpoch, context.operationId))) return;
         const workflow = workflowSnapshot();
+        // Parking stops the CLI as a bounce does, so it asks the same question,
+        // minus the `bounce` command and plus an empty message queue.
+        const parkCheck = kind === "session-park-check";
+        const needsIdle = kind === "session-bounce" || parkCheck;
         const valid = request.schemaVersion === 1 && validWorkflowAction(action, kind)
             && workflow.capabilities.includes(kind)
             && (kind !== "session-send" || workflow.sendReady)
-            && (kind !== "session-bounce" || (bounceIsIdle() && activeOperationKeys.size === 0))
+            && (!needsIdle || (bounceIsIdle() && activeOperationKeys.size === 0))
+            && (!parkCheck || pendingMessages.length === 0)
             && (kind !== "set-session-budget" || pendingBudgetRequest === null)
             && (kind !== "answer-session-budget"
                 || pendingBudgetRequest?.requestId === action.requestId);
@@ -2665,28 +2675,44 @@ if (validSessionId && socketPath) {
             publishRejectedPreflight(context, "target-unavailable", path, encoded);
             return;
         }
-        if (kind === "session-bounce") {
+        if (needsIdle) {
             // A send RPC can finish before its turn-start notification arrives.
             const sendRevision = nativeSendRevision;
+            const activityRevision = runtimeActivityRevision;
             const preparingKey = operationExecutionKey(context.conversationEpoch, context.operationId);
             activeOperationKeys.add(preparingKey);
             let ready = false;
             try {
-                const available = await hasBounceCommand(context);
+                const available = parkCheck || await hasBounceCommand(context);
                 const scheduled = await workflowRead("session.schedule.list", {}, context);
                 const processing = await workflowRead("session.metadata.isProcessing", {}, context);
                 const activity = await workflowRead("session.metadata.activity", {}, context);
+                // The published list leaves out what it can't show, so read the queue itself.
+                const queue = parkCheck ? await workflowRead("session.queue.pendingItems", {}, context) : null;
                 await recoverQuestionsForBounce();
                 ready = available && Array.isArray(scheduled?.entries) && scheduled.entries.length === 0
-                    && processing?.processing === false && activity?.hasActiveWork === false;
+                    && processing?.processing === false && activity?.hasActiveWork === false
+                    && (!parkCheck || (Array.isArray(queue?.items) && queue.items.length === 0
+                        && Array.isArray(queue.steeringMessages) && queue.steeringMessages.length === 0
+                        && queue.inFlightSteeringCount === 0));
             } catch (error) {
                 console.error("[copilot-projects] bounce preflight failed:", error);
             } finally {
                 activeOperationKeys.delete(preparingKey);
             }
             if (!ready || !operationAuthorityCurrent(context) || !bounceIsIdle()
-                    || nativeSendRevision !== sendRevision || activeOperationKeys.size !== 0) {
+                    || nativeSendRevision !== sendRevision || activeOperationKeys.size !== 0
+                    // A turn that came and went during the reads may have left work behind.
+                    || (parkCheck && (pendingMessages.length !== 0
+                        || runtimeActivityRevision !== activityRevision))) {
                 publishRejectedPreflight(context, "target-unavailable", path, encoded);
+                return;
+            }
+            if (parkCheck) {
+                // The answer is the whole operation: nothing is sent to the runtime.
+                if (publishAcceptedReceipt(context) && publishTerminalReceipt(context, "applied")) {
+                    removeCapturedHandoff(path, encoded, context);
+                }
                 return;
             }
         }
