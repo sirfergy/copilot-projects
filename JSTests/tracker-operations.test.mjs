@@ -6,7 +6,7 @@ import { registerHooks, syncBuiltinESMExports } from "node:module";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
@@ -53,10 +53,10 @@ fs.writeFileSync = (path, ...args) => {
 };
 fs.readFileSync = (path, ...args) => {
   const result = realReadFileSync(path, ...args);
-  const runtime = [...runtimes].find((entry) =>
-    String(path).startsWith(entry.root)
-  );
-  runtime?.afterRead?.(String(path));
+  // The tracker reads its own file through a URL.
+  const name = path instanceof URL ? fileURLToPath(path) : String(path);
+  const runtime = [...runtimes].find((entry) => name.startsWith(entry.root));
+  runtime?.afterRead?.(name);
   return result;
 };
 fs.openSync = (path, ...args) => {
@@ -1382,6 +1382,20 @@ test("a tracker replaced on disk reloads the session's extensions once, after tw
   await heartbeat(runtime);
   assert.equal(reloadCalls(runtime).length, 1);
   assert.equal(activityReads(runtime).length, 1);
+});
+
+test("the tracker reads its own file again only after the file is replaced", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, () => {}, { ownTracker: true });
+  await workflowReady(runtime);
+  let reads = 0;
+  runtime.afterRead = (path) => { if (path === runtime.trackerPath) reads += 1; };
+  for (let tick = 0; tick < 3; tick += 1) await heartbeat(runtime);
+  assert.equal(reads, 0, "an unchanged tracker must not be read on every heartbeat");
+  installTracker(runtime, "\n// next release\n");
+  for (let tick = 0; tick < 3; tick += 1) await heartbeat(runtime);
+  assert.equal(reads, 1, "a replaced tracker is hashed once");
 });
 
 test("a failed or unsupported tracker reload is logged once and waits for the next release", {

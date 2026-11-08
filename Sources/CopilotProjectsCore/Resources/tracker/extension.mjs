@@ -10,11 +10,21 @@ import {
 } from "node:fs";
 import { joinSession } from "@github/copilot-sdk/extension";
 
-// Digest of this tracker's file on disk. The value at load identifies the
-// source this process is running.
+// Digest of this tracker's file on disk, rehashed only when the file's size or
+// modification time changes. The value at load identifies the source this
+// process is running.
+const trackerURL = new URL(import.meta.url);
+let trackerFileStamp = null;
+let trackerFileDigest = null;
 function trackerDigestOnDisk() {
     try {
-        return createHash("sha256").update(readFileSync(new URL(import.meta.url))).digest("hex");
+        const { size, mtimeNs } = lstatSync(trackerURL, { bigint: true });
+        const stamp = `${size}:${mtimeNs}`;
+        if (stamp !== trackerFileStamp) {
+            trackerFileDigest = createHash("sha256").update(readFileSync(trackerURL)).digest("hex");
+            trackerFileStamp = stamp;
+        }
+        return trackerFileDigest;
     } catch {
         return null;
     }
