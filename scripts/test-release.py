@@ -133,9 +133,9 @@ esac
 """
 
 
-def workflow_step_script(step_id):
-    """Return the run block of the Release workflow step with this id."""
-    lines = WORKFLOW.read_text().splitlines()
+def workflow_step_script(step_id, workflow=WORKFLOW):
+    """Return the run block of the workflow step with this id."""
+    lines = workflow.read_text().splitlines()
     run = lines.index("        run: |", lines.index("        id: " + step_id))
     body = []
     for line in lines[run + 1:]:
@@ -955,6 +955,39 @@ class ReleaseTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertIn(message, result.stdout)
                     self.assertEqual(outputs, {})
+
+    def test_ci_skips_script_tests_only_when_a_pull_request_leaves_their_inputs_alone(self):
+        script = self.root / "find-script-changes.sh"
+        script.write_text(workflow_step_script("scripts", WORKFLOW.with_name("ci.yml")))
+        output = self.root / "github-output"
+
+        def outputs(root):
+            output.write_text("")
+            subprocess.run(
+                ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)], cwd=root,
+                env={**self.env, "GITHUB_OUTPUT": str(output)}, check=True, capture_output=True,
+            )
+            return output.read_text()
+
+        root = self.project("ci-guard", "https://github.com/sirfergy/copilot-projects.git")
+        base = self.git(root, "rev-parse", "HEAD")
+        # A checkout with no parent cannot be compared, so the script tests run.
+        self.assertEqual(outputs(root), "")
+        for path, expected in (
+            ("Sources/App.swift", "unchanged=true\n"),
+            ("scripts/release.sh", ""),
+            (".github/workflows/ci.yml", ""),
+            ("vendor/dtach/main.c", ""),
+        ):
+            with self.subTest(path=path):
+                self.git(root, "checkout", "-q", "-B", "topic", base)
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text("changed\n")
+                self.git(root, "add", ".")
+                self.git(root, "commit", "-qm", "pull request")
+                self.git(root, "checkout", "-q", "--detach", base)
+                self.git(root, "merge", "-q", "--no-ff", "-m", "merge commit", "topic")
+                self.assertEqual(outputs(root), expected)
 
 
 class ReleaseVersionTests(unittest.TestCase):

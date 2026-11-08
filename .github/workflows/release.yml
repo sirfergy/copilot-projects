@@ -155,6 +155,7 @@ jobs:
         run: |
           python3 scripts/test-release.py
           python3 scripts/test-release-notes.py
+          python3 scripts/test-dtach.py
           swift test
 
   release:
