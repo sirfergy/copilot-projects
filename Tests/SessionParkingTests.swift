@@ -279,7 +279,15 @@ final class SessionParkingTests: XCTestCase {
         XCTAssertNil(f.model.parkBlocker(for: f.id, unattended: true))
         let other = f.copilotHome.appendingPathComponent("session-state/\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
-        try Data().write(to: other.appendingPathComponent("inuse.4242.lock"))
+        // Its Copilot takes up another session while it is being asked: the park stands down.
+        async let late = f.model.parkSession(f.id, unattended: true)
+        try await f.answerParkCheck(.applied, beforeAnswering: {
+            try Data().write(to: other.appendingPathComponent("inuse.4242.lock"))
+        })
+        let lateRefusal = await late
+        XCTAssertNotNil(lateRefusal)
+        XCTAssertEqual(f.processes.stops, [])
+        // Holding it from the start, Copilot isn't asked at all.
         let refusal = await f.model.parkSession(f.id, unattended: true)
         XCTAssertNotNil(refusal)
         XCTAssertNil(f.model.parkedState(f.id))

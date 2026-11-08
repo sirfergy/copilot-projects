@@ -135,7 +135,8 @@ extension AppModel {
             return "Copilot in this session started before parking was available. Run /restart in it first."
         }
         guard attempt != nil || !parkingAdapter.hasPendingHandoff(sessionId: sessionId),
-              snapshot.operationReceipts?.contains(where: { $0.state == .accepted }) != true else {
+              snapshot.operationReceipts?.contains(where: { $0.state == .accepted }) != true,
+              controllers[sessionId]?.terminalView.isSubmittingRemotePrompt != true else {
             return "A request to Copilot is still in progress."
         }
         guard let copilotId = snapshot.copilotSessionId,
@@ -189,7 +190,11 @@ extension AppModel {
             return standDown(sessionId, attempt, "The workspace could not be saved.")
         }
         let idle = await trackerConfirmsIdle(sessionId)
-        // From the answer to the stop is one main-actor turn.
+        // Its Copilot may have taken up another session while it was being asked.
+        if unattended, await hostsAnotherSession(sessionId) {
+            return standDown(sessionId, attempt, "Its Copilot may be running another session too.")
+        }
+        // From here to the stop is one main-actor turn.
         let processes = parkingRuntime.liveProcesses(sessionId)
         guard isAttempt(sessionId, .parking, attempt) else { return "The session changed." }
         // The whole rule again: the session may have been opened, grouped or attached to,
@@ -297,6 +302,7 @@ extension AppModel {
             guard let self, self.isAttempt(sessionId, .parked, attempt) else { return }
             if self.parkingRuntime.hasMaster(sessionId) {
                 self.setParked(sessionId, .failed)
+                self.save()
             } else {
                 self.resumeParkedSession(sessionId)
             }
