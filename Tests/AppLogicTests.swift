@@ -8802,20 +8802,6 @@ final class AppLogicTests: XCTestCase {
         return found
     }
 
-    private func makeSyntheticTable(rows: Int, cols: Int, lastCellLength: Int) -> String {
-        let header = "| " + (1...cols).map { "Col \($0)" }.joined(separator: " | ") + " |"
-        let delim = "| " + (["---"] + Array(repeating: "---:", count: cols - 1)).joined(separator: " | ") + " |"
-        let phrase = "batch pipeline sync ($14.2k), webhook worker ($8.5k), scheduled rollup ($4.1k), "
-        let body = (1...rows).map { r in
-            let prefix = (1..<cols).map { c in c == 1 ? "`service-\(r)`" : "**$\(r * 100).00**" }
-            let padCount = max(1, lastCellLength - 16)
-            let repeated = String(repeating: phrase, count: (padCount / phrase.count) + 2)
-            let tail = "`metric_\(r)` " + String(repeated.prefix(padCount))
-            return "| " + (prefix + [tail]).joined(separator: " | ") + " |"
-        }.joined(separator: "\n")
-        return "\(header)\n\(delim)\n\(body)"
-    }
-
     @MainActor
     func testMarkdownProseSharesOneTextViewAndKeepsSelectionWhileStreaming() throws {
         let markdown = """
@@ -9496,6 +9482,19 @@ final class AppLogicTests: XCTestCase {
         // A multi-table report with 4 tables (matching the 25 + 60 + 95 + 98 raw-cell /
         // 514 per-cell visual-line shape) renders every heading, divider, table, and fenced code
         // block as formatted Markdown rather than raw text.
+        func makeSyntheticTable(rows: Int, cols: Int, lastCellLength: Int) -> String {
+            let header = "| " + (1...cols).map { "Col \($0)" }.joined(separator: " | ") + " |"
+            let delim = "| " + (["---"] + Array(repeating: "---:", count: cols - 1)).joined(separator: " | ") + " |"
+            let phrase = "batch pipeline sync ($14.2k), webhook worker ($8.5k), scheduled rollup ($4.1k), "
+            let body = (1...rows).map { r in
+                let prefix = (1..<cols).map { c in c == 1 ? "`service-\(r)`" : "**$\(r * 100).00**" }
+                let padCount = max(1, lastCellLength - 16)
+                let repeated = String(repeating: phrase, count: (padCount / phrase.count) + 2)
+                let tail = "`metric_\(r)` " + String(repeated.prefix(padCount))
+                return "| " + (prefix + [tail]).joined(separator: " | ") + " |"
+            }.joined(separator: "\n")
+            return "\(header)\n\(delim)\n\(body)"
+        }
         let syntheticReport = """
         Overview paragraph with **bold** summary and `inline_metric`.
 
@@ -9627,16 +9626,22 @@ final class AppLogicTests: XCTestCase {
     // Updating the same host must switch the unchanged trailing table to plain text and back.
     @MainActor
     func testMarkdownTableCellBudgetSwitchesTrailingTableToPlainTextAndBack() throws {
-        let table906 = makeSyntheticTable(rows: 60, cols: 6, lastCellLength: 300)
-        let smallerFirstTable = makeSyntheticTable(rows: 1, cols: 6, lastCellLength: 300)
+        // Every row counts 30 cells against the budget, and only its first cell has text to lay out.
+        func sparseTable(rows: Int) -> String {
+            let emptyCells = String(repeating: "  |", count: 29)
+            return "| Key |\(emptyCells)\n|\(String(repeating: " --- |", count: 30))\n"
+                + (1...rows).map { "| row_\($0) |\(emptyCells)" }.joined(separator: "\n")
+        }
+        let table900 = sparseTable(rows: 29)
+        let smallerFirstTable = sparseTable(rows: 1)
         let withinBudgetMarkdown = (1...5).map {
-            "### Section \($0)\n\n\($0 == 1 ? smallerFirstTable : table906)"
+            "### Section \($0)\n\n\($0 == 1 ? smallerFirstTable : table900)"
         }.joined(separator: "\n\n")
         XCTAssertFalse(
             MarkdownParser.isWithinRenderingLimits(withinBudgetMarkdown),
             "Notification limits stay at 1,000 table cells while MarkdownText renders up to 4,000 document table cells"
         )
-        let fiveTablesMarkdown = (1...5).map { "### Section \($0)\n\n\(table906)" }.joined(separator: "\n\n")
+        let fiveTablesMarkdown = (1...5).map { "### Section \($0)\n\n\(table900)" }.joined(separator: "\n\n")
         let fiveTablesHost = NSHostingView(
             rootView: MarkdownText(text: withinBudgetMarkdown)
                 .frame(width: 380, alignment: .leading)
@@ -9790,8 +9795,9 @@ final class AppLogicTests: XCTestCase {
     }
 
     // A 6-column table with a few dozen rows, 5 short cells (including bold), and one 300-600 char
-    // last column with 10-20 inline code spans per cell stays within rendering limits and renders
-    // as a formatted table at drawer and full widths, while a truly huge table still falls back.
+    // last column with 10-20 inline code spans per cell stays within rendering limits, and its
+    // shape renders as a formatted table at drawer and full widths, while a truly huge table
+    // still falls back.
     @MainActor
     func testMarkdownLongLastColumnTableRendersUntilItExceedsTheCellLimit() throws {
         func makeLongLastColumnTable(rows: Int, codeSpansPerRow: Int = 20) -> String {
@@ -9815,9 +9821,13 @@ final class AppLogicTests: XCTestCase {
             XCTFail("Expected 36-row breakdown table to parse as a MarkdownTable block")
         }
         XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(breakdownTable36))
+        // The 36-row limit is checked on the parser above, and two rows of the same shape are
+        // rendered. On the macOS 26 CI runner, measuring a table's width took about 7 ms per
+        // line of the table, which was 7.5 s for the 36 rows.
+        let renderedRows = makeLongLastColumnTable(rows: 2)
         for width: CGFloat in [380, 960] {
             let breakdownHost = NSHostingView(
-                rootView: MarkdownText(text: "# Usage\n\n\(breakdownTable36)\n\nTrailing **summary**.")
+                rootView: MarkdownText(text: "# Usage\n\n\(renderedRows)\n\nTrailing **summary**.")
                     .frame(width: width, alignment: .leading)
             )
             breakdownHost.frame = NSRect(x: 0, y: 0, width: width, height: 4_000)
