@@ -50,5 +50,3 @@ jobs:
         run: swift test
       - name: Release session-close and notifications tests
         run: swift test -c release --filter 'SessionCloseIntegrationTests|NotificationsTests'
-      - name: Release build
-        run: swift build -c release
