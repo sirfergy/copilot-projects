@@ -378,6 +378,32 @@ final class ProtocolContractTests: XCTestCase {
         }
     }
 
+    func testUnreadMarkerIsOptionalOnTheSnapshotAndTheMarkReadControl() throws {
+        let read = RemoteSessionSnapshot(
+            id: "s", title: "t", status: "idle", statusText: nil,
+            unread: false, ready: false, background: false, scheduled: false
+        )
+        XCTAssertFalse(try jsonObject(read).keys.contains("unreadMarker"))
+        let unread = RemoteSessionSnapshot(
+            id: "s", title: "t", status: "idle", statusText: nil,
+            unread: true, ready: false, background: false, scheduled: false, unreadMarker: "marker"
+        )
+        XCTAssertEqual(try jsonObject(unread)["unreadMarker"] as? String, "marker")
+        for fixture in ["served-workspace", "legacy-workspace"] {
+            XCTAssertNil(try workspace(fixture).projects.first?.sessions.first?.unreadMarker, fixture)
+        }
+
+        let older = Data(#"{"type":"mark-read","clientId":"c","sessionId":"s"}"#.utf8)
+        let legacy = try JSONDecoder().decode(RemoteClientMessage.self, from: older)
+        XCTAssertNil(legacy.unreadMarker)
+        XCTAssertFalse(try jsonObject(legacy).keys.contains("unreadMarker"))
+        let newer = Data(#"{"type":"mark-read","clientId":"c","sessionId":"s","unreadMarker":"marker"}"#.utf8)
+        XCTAssertEqual(
+            try JSONDecoder().decode(RemoteClientMessage.self, from: newer),
+            RemoteClientMessage(type: "mark-read", clientId: "c", sessionId: "s", unreadMarker: "marker")
+        )
+    }
+
     func testRemoteSessionSnapshotOmitsNilParentSessionIdAndRoundTripsWhenPresent() throws {
         let topLevel = RemoteSessionSnapshot(
             id: "root", title: "Root", status: "idle", statusText: nil,

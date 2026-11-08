@@ -3743,7 +3743,7 @@ final class AppModel: ObservableObject {
             session.runningRequestIdentity = nil
         }
         session.scheduledTurnActive = restore.scheduledTurnActive
-        session.finishedUnseen = restore.finishedUnseen
+        session.restoreFinishedUnseen(restore.finishedUnseen)
         session.turnCompleted = restore.turnCompleted
         projects[location.p].sessions[location.s] = session
 
@@ -3865,7 +3865,14 @@ final class AppModel: ObservableObject {
     /// Unlike `focus`, it does NOT change the Mac's selection or activate the app: a
     /// phone read must not yank the desktop UI. Only `markedUnread` is persisted, so
     /// that's the only change that needs a `save()`.
-    func markSessionRead(sessionId: String) {
+    /// A remote client passes the `unreadMarker` of the snapshot it was showing. If
+    /// something has made the session unread since, the read is for an earlier
+    /// state and changes nothing. The Mac's own commands pass none and always apply.
+    func markSessionRead(sessionId: String, unreadMarker: String? = nil) {
+        if let unreadMarker, let loc = locateIndex(sessionId),
+           projects[loc.p].sessions[loc.s].unreadMarker != unreadMarker {
+            return
+        }
         clearUnread(sessionId: sessionId, includingManualMark: true)
     }
 

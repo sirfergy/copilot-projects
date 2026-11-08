@@ -795,6 +795,7 @@ extension AppModel {
                                 ? session.agentActivity?.remoteLastError()
                                 : nil,
                             markedUnread: session.markedUnread ? true : nil,
+                            unreadMarker: session.offersMarkAsRead ? session.unreadMarker : nil,
                             hostId: remoteHost?.id,
                             hostDisplayName: remoteHost?.displayName,
                             parentSessionId: effectiveParents[session.id],

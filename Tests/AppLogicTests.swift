@@ -2199,6 +2199,49 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testAutoApprovedPermissionWaitKeepsTheFinishedTurnsUnreadMarker() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let shown = Session(title: "shown", cwd: "/tmp")
+        let session = Session(title: "finished", cwd: "/tmp")
+        let project = Project(
+            name: "selected", cwd: "/tmp", sessions: [shown, session], selectedSessionId: shown.id
+        )
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        try writePermissionSnapshot(sessionId: session.id, pendingIds: [], directory: root)
+        let restored = expectation(description: "the auto-approved wait is undone")
+        let model = AppModel(
+            stateRepository: repository,
+            permissionNotificationDelayNanoseconds: 0,
+            persistPermissionStatus: { _, _, _, _ in restored.fulfill() },
+            agentActivityDirectory: root,
+            resumeMarkerDirectory: root
+        )
+        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 100)
+        model.setStatus(sessionId: session.id, status: .idle, text: nil, timestamp: 200, source: "session-end")
+        let seen = model.remoteWorkspaceSnapshot().projects[0].sessions[1]
+        XCTAssertTrue(seen.ready)
+
+        model.setStatus(
+            sessionId: session.id, status: .waiting, text: nil, timestamp: 300, notification: .permission
+        )
+        XCTAssertFalse(model.projects[0].sessions[1].finishedUnseen, "The wait hides the finished dot")
+        await fulfillment(of: [restored], timeout: 5)
+        XCTAssertTrue(model.projects[0].sessions[1].finishedUnseen)
+
+        model.markSessionRead(sessionId: session.id, unreadMarker: seen.unreadMarker)
+        XCTAssertFalse(
+            model.projects[0].sessions[1].finishedUnseen,
+            "Nothing newer happened, so the receipt for the finished turn applies"
+        )
+    }
+
+    @MainActor
     func testPendingPermissionPostsOnceAndLaterStatusCancels() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory
@@ -8446,7 +8489,8 @@ final class AppLogicTests: XCTestCase {
                             background: false,
                             scheduled: false,
                             promptable: false,
-                            operationSupport: .unavailable
+                            operationSupport: .unavailable,
+                            unreadMarker: model.projects[0].sessions[1].unreadMarker
                         ),
                     ]
                 ),

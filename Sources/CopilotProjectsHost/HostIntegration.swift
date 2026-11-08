@@ -69,6 +69,10 @@ public protocol SessionHost: AnyObject, Sendable {
     func sendCommand(sessionId: String, requestId: String, value: String) -> RemoteCommandResult
     func sendScroll(sessionId: String, delta: Int)
     func markRead(sessionId: String)
+    /// A read receipt for the session as the client showed it: `unreadMarker` is the
+    /// `RemoteSessionSnapshot.unreadMarker` the client had, or `nil` from a client
+    /// that sends none. A host ignores a receipt whose marker is no longer current.
+    func markRead(sessionId: String, unreadMarker: String?)
     /// Whether `markUnread` is implemented. A gateway routes
     /// `RemoteMarkUnreadContract.controlType` and advertises its capability only when true.
     var supportsMarkUnread: Bool { get }
@@ -125,6 +129,11 @@ public extension SessionHost {
     var supportsMarkUnread: Bool { false }
 
     func markUnread(sessionId: String) {}
+
+    /// Conformers without markers apply every receipt, as before markers existed.
+    func markRead(sessionId: String, unreadMarker: String?) {
+        markRead(sessionId: sessionId)
+    }
 
     var supportsReopenClosedSession: Bool { false }
 
