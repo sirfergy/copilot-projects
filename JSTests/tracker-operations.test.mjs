@@ -569,10 +569,9 @@ test("tracker joins without registering tools or handlers", async (t) => {
 test("tracker never reads permission mode", async (t) => {
   let reads = 0;
   const runtime = await createRuntime(t, (session) => {
-    session.rpc.permissions = {
-      getMode: async () => { reads += 1; return { mode: "allow-all" }; },
-      getAllowAll: async () => { reads += 1; return { enabled: true }; },
-    };
+    Object.defineProperty(session.rpc, "permissions", {
+      get() { reads += 1; return {}; },
+    });
   });
   await runtime.session.emit("session.permissions_changed", { mode: "allow-all" });
   runtime.session.sessionId = uuid();

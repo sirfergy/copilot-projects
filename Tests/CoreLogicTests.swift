@@ -2025,9 +2025,11 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["reresumedHasResumeSeparator"] as? Bool, false)
         XCTAssertEqual(summary["reresumedFenceLeaked"] as? Bool, false)
         XCTAssertEqual(summary["liveSessionIdentity"] as? String, sessionB)
-        // Exiting leaves the live conversation's durable history in place too.
-        XCTAssertTrue(FileManager.default.fileExists(
-            atPath: try durableDirectory(sessionB).appendingPathComponent("events.jsonl").path))
+        // Exiting leaves each conversation's durable history in place too.
+        for id in [sessionA, sessionB] {
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: try durableDirectory(id).appendingPathComponent("events.jsonl").path), id)
+        }
     }
 
     /// `/new` creates a second SDK session and extension process while the
