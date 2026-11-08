@@ -9626,22 +9626,25 @@ final class AppLogicTests: XCTestCase {
     // Updating the same host must switch the unchanged trailing table to plain text and back.
     @MainActor
     func testMarkdownTableCellBudgetSwitchesTrailingTableToPlainTextAndBack() throws {
-        // Every row counts 30 cells against the budget, and only its first cell has text to lay out.
+        // Every row counts 30 cells against the budget, and a body row counts one more because its
+        // key is long enough to wrap. Without the wrapped keys all five large tables would fit.
+        // Only the key has text to lay out.
         func sparseTable(rows: Int) -> String {
             let emptyCells = String(repeating: "  |", count: 29)
+            let rowLines = (1...rows).map { "| row_\($0)_with_a_key_longer_than_one_table_line |\(emptyCells)" }
             return "| Key |\(emptyCells)\n|\(String(repeating: " --- |", count: 30))\n"
-                + (1...rows).map { "| row_\($0) |\(emptyCells)" }.joined(separator: "\n")
+                + rowLines.joined(separator: "\n")
         }
-        let table900 = sparseTable(rows: 29)
+        let table805 = sparseTable(rows: 25)
         let smallerFirstTable = sparseTable(rows: 1)
         let withinBudgetMarkdown = (1...5).map {
-            "### Section \($0)\n\n\($0 == 1 ? smallerFirstTable : table900)"
+            "### Section \($0)\n\n\($0 == 1 ? smallerFirstTable : table805)"
         }.joined(separator: "\n\n")
         XCTAssertFalse(
             MarkdownParser.isWithinRenderingLimits(withinBudgetMarkdown),
             "Notification limits stay at 1,000 table cells while MarkdownText renders up to 4,000 document table cells"
         )
-        let fiveTablesMarkdown = (1...5).map { "### Section \($0)\n\n\(table900)" }.joined(separator: "\n\n")
+        let fiveTablesMarkdown = (1...5).map { "### Section \($0)\n\n\(table805)" }.joined(separator: "\n\n")
         let fiveTablesHost = NSHostingView(
             rootView: MarkdownText(text: withinBudgetMarkdown)
                 .frame(width: 380, alignment: .leading)
