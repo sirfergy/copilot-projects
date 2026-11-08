@@ -187,13 +187,26 @@ final class ManualUnreadTests: XCTestCase {
         XCTAssertFalse(current.unread || current.ready, "A mark for what is shown now applies")
         XCTAssertNil(current.unreadMarker)
 
-        // An aborted turn lights only the finished dot, which is acknowledged the same way.
+        // An aborted turn lights only the finished dot, and a second one outdates the first.
         f.model.setStatus(sessionId: target, status: .running, text: nil, timestamp: 500)
-        f.model.setStatus(sessionId: target, status: .idle, text: nil, timestamp: 600, source: "session-end")
+        f.model.setStatus(sessionId: target, status: .idle, text: nil, timestamp: 550, source: "session-end")
+        let aborted = try snapshot()
+        XCTAssertTrue(aborted.ready && !aborted.unread)
+        f.model.setStatus(sessionId: target, status: .running, text: nil, timestamp: 600)
+        f.model.setStatus(sessionId: target, status: .idle, text: nil, timestamp: 650, source: "session-end")
+        bridge.markRead(sessionId: target, unreadMarker: aborted.unreadMarker)
         current = try snapshot()
-        XCTAssertTrue(current.ready && !current.unread)
+        XCTAssertTrue(current.ready)
         bridge.markRead(sessionId: target, unreadMarker: current.unreadMarker)
         XCTAssertFalse(try snapshot().ready)
+
+        // A notification on a session that is already unread is something newer too.
+        f.model.postNotification(projectId: f.project.id, sessionId: target, title: "First", body: nil)
+        let notified = try snapshot()
+        XCTAssertTrue(notified.unread && !notified.ready)
+        f.model.postNotification(projectId: f.project.id, sessionId: target, title: "Second", body: nil)
+        bridge.markRead(sessionId: target, unreadMarker: notified.unreadMarker)
+        XCTAssertTrue(try snapshot().unread)
 
         // A client that sends no marker clears whatever is unread, as it always has.
         f.finishTurn(target, startingAt: 700)

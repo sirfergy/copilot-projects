@@ -590,10 +590,11 @@ each time a notification, a finished turn, or a manual mark makes it unread, and
 publishes it only while the session is `unread` or `ready`. A mark whose marker is no
 longer the session's changes nothing and is not an error: the session stays unread
 under the marker its snapshots already carry. An ignored mark produces no new
-snapshot, so a client that keeps a visible session read sends a mark again whenever
-that session's `unreadMarker` differs from the one it last sent, including once an
-earlier mark's request finishes. A mark without a marker always applies, so
-older clients, older gateways, and the Mac's own **Mark as Read** behave as before.
+snapshot, so a client that keeps a visible session read sends a mark again when a
+snapshot still shows that session `unread` or `ready` with an `unreadMarker` other
+than the one it last sent, including once an earlier mark's request finishes. A mark
+without a marker always applies, so older clients, older gateways, and the Mac's own
+**Mark as Read** behave as before.
 Markers aren't saved. After the Mac restarts, a mark sent for an earlier snapshot is
 ignored and one for a new snapshot applies. No capability is advertised: a client
 echoes the field when a snapshot has it.

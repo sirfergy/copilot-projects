@@ -2199,8 +2199,16 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
-    func testAutoApprovedPermissionWaitKeepsTheFinishedTurnsUnreadMarker() async throws {
+    func testReadReceiptHoldsAcrossAnAutoApprovedPermissionWait() async throws {
         _ = NSApplication.shared
+        let originalDockBadge = NSApp.dockTile.badgeLabel
+        defer { NSApp.dockTile.badgeLabel = originalDockBadge }
+        try await assertReadReceiptHolds(sentDuringPermissionWait: true)
+        try await assertReadReceiptHolds(sentDuringPermissionWait: false)
+    }
+
+    @MainActor
+    private func assertReadReceiptHolds(sentDuringPermissionWait: Bool) async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -2224,20 +2232,28 @@ final class AppLogicTests: XCTestCase {
         )
         model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 100)
         model.setStatus(sessionId: session.id, status: .idle, text: nil, timestamp: 200, source: "session-end")
+        model.postNotification(projectId: project.id, sessionId: session.id, title: "Update", body: nil)
         let seen = model.remoteWorkspaceSnapshot().projects[0].sessions[1]
-        XCTAssertTrue(seen.ready)
+        XCTAssertTrue(seen.unread && seen.ready)
+        let marker = try XCTUnwrap(seen.unreadMarker)
 
         model.setStatus(
             sessionId: session.id, status: .waiting, text: nil, timestamp: 300, notification: .permission
         )
         XCTAssertFalse(model.projects[0].sessions[1].finishedUnseen, "The wait hides the finished dot")
+        if sentDuringPermissionWait {
+            model.markSessionRead(sessionId: session.id, unreadMarker: marker)
+        }
         await fulfillment(of: [restored], timeout: 5)
-        XCTAssertTrue(model.projects[0].sessions[1].finishedUnseen)
+        if !sentDuringPermissionWait {
+            XCTAssertTrue(model.projects[0].sessions[1].finishedUnseen, "The dot is back once the wait ends")
+            model.markSessionRead(sessionId: session.id, unreadMarker: marker)
+        }
 
-        model.markSessionRead(sessionId: session.id, unreadMarker: seen.unreadMarker)
+        let current = model.remoteWorkspaceSnapshot().projects[0].sessions[1]
         XCTAssertFalse(
-            model.projects[0].sessions[1].finishedUnseen,
-            "Nothing newer happened, so the receipt for the finished turn applies"
+            current.unread || current.ready,
+            "Nothing newer happened, so the receipt applies (sent during the wait: \(sentDuringPermissionWait))"
         )
     }
 

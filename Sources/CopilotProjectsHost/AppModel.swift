@@ -469,7 +469,7 @@ final class AppModel: ObservableObject {
         let status: SessionStatus
         let statusText: String?
         let scheduledTurnActive: Bool
-        let finishedUnseen: Bool
+        var finishedUnseen: Bool
         let turnCompleted: Bool
         let backgroundAgentsSuppressed: Bool
         let completionPending: Bool
@@ -3869,9 +3869,11 @@ final class AppModel: ObservableObject {
     /// something has made the session unread since, the read is for an earlier
     /// state and changes nothing. The Mac's own commands pass none and always apply.
     func markSessionRead(sessionId: String, unreadMarker: String? = nil) {
-        if let unreadMarker, let loc = locateIndex(sessionId),
-           projects[loc.p].sessions[loc.s].unreadMarker != unreadMarker {
-            return
+        if let unreadMarker {
+            guard let loc = locateIndex(sessionId),
+                  projects[loc.p].sessions[loc.s].unreadMarker == unreadMarker else { return }
+            // A permission wait may be hiding the finished dot this read covers.
+            permissionStatusRestores[sessionId]?.finishedUnseen = false
         }
         clearUnread(sessionId: sessionId, includingManualMark: true)
     }
