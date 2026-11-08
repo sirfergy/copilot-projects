@@ -213,10 +213,9 @@ public enum SessionSemantics {
 
     public static func canPromoteIdleFromFooter(
         backgroundAgentsActive: Bool,
-        hasLiveAgent: Bool,
-        supportsSessionIdleHook: Bool
+        hasLiveAgent: Bool
     ) -> Bool {
-        !backgroundAgentsActive && hasLiveAgent && !supportsSessionIdleHook
+        !backgroundAgentsActive && hasLiveAgent
     }
 
     public static func advancesPromptSafetyClock(source: String?) -> Bool {
@@ -238,12 +237,9 @@ public enum SessionSemantics {
     public static func isCompletionSignal(
         status: SessionStatus,
         source: String?,
-        notificationIsCompleted: Bool,
         scheduledTurnActive: Bool
     ) -> Bool {
-        status == .idle
-            && (source == "agent-stop" || notificationIsCompleted)
-            && !scheduledTurnActive
+        status == .idle && source == "agent-stop" && !scheduledTurnActive
     }
 
     public static func canPostCompletion(

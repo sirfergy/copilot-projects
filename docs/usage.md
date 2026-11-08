@@ -642,7 +642,6 @@ agent lifecycle to status:
 | `preToolUse` / `postToolUse` | Known non-owner: ignored. Owner or unknown identity: `running` (scheduled activity: `idle`). |
 | `notification` (`elicitation_dialog` / `permission_prompt`) | `waiting`, including prompts from children; accepts current `notificationType` and legacy `notification_type`. |
 | `agentStop` / `sessionEnd` | Owner or unknown identity: `idle`. Known non-owner: ignored. |
-| Legacy `notification` (`session_idle`) | Owner-only `idle` after background work drains. |
 
 The hook no-ops outside a copilot-projects terminal (it checks `COPILOT_PROJECTS_SESSION`), so it
 coexists with other integrations (e.g. cmux) and is safe to leave installed globally. Manage

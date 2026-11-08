@@ -326,10 +326,6 @@ final class NotificationSummaryTests: XCTestCase {
         model.attach(notifications: spy)
         complete(model, session: session)
         await fulfillment(of: [entered], timeout: 3)
-        // Duplicate completion must not launch a second reader.
-        model.setStatus(sessionId: session.id, status: .idle, text: nil,
-                        timestamp: 4_500, source: "session-idle",
-                        copilotSessionId: copilotSessionId, notification: .completed)
         model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 5_000)
         gate.signal()
         await fulfillment(of: [posted], timeout: 3)
@@ -366,27 +362,6 @@ final class NotificationSummaryTests: XCTestCase {
     }
 
     @MainActor
-    func testAgentStopThenSessionIdlePreservesOriginalActiveBoundary() async throws {
-        let session = Session(title: "Two signals", cwd: "/tmp")
-        let source = SnapshotSource([snapshot([turn()])])
-        let model = try model(session: session, loader: { source.load($0) })
-        let spy = NotificationSpy()
-        let posted = expectation(description: "one summarized completion")
-        spy.onPost = { posted.fulfill() }
-        model.attach(notifications: spy)
-        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 2_000)
-        model.setStatus(sessionId: session.id, status: .idle, text: nil,
-                        timestamp: 4_000, source: "agent-stop", copilotSessionId: copilotSessionId)
-        model.setStatus(sessionId: session.id, status: .idle, text: nil,
-                        timestamp: 4_500, source: "session-idle",
-                        copilotSessionId: copilotSessionId, notification: .completed)
-        await fulfillment(of: [posted], timeout: 3)
-        XCTAssertEqual(spy.events.count, 1)
-        XCTAssertEqual(spy.events[0].body, "Fixed notification previews. All done.")
-        XCTAssertEqual(source.count, 1)
-    }
-
-    @MainActor
     private func model(
         session: Session,
         loader: @escaping @Sendable (String) -> TranscriptSnapshot = {
@@ -412,8 +387,9 @@ final class NotificationSummaryTests: XCTestCase {
     private func complete(_ model: AppModel, session: Session) {
         model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 2_000)
         model.setStatus(sessionId: session.id, status: .idle, text: nil,
-                        timestamp: 4_500, source: "session-idle",
-                        copilotSessionId: copilotSessionId, notification: .completed)
+                        timestamp: 4_500, source: "agent-stop",
+                        copilotSessionId: copilotSessionId)
+        model.postCompletionIfReady(sessionId: session.id)
     }
 
     @MainActor

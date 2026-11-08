@@ -130,18 +130,10 @@ public enum CopilotHooks {
     }
     mark_turn_active() {
       mkdir -p "$state_dir/sessions" 2>/dev/null || true
-      rm -f "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null || true
       : > "$state_dir/sessions/$session_id.active-turn"
     }
     consume_active_turn() {
       rm "$state_dir/sessions/$session_id.active-turn" 2>/dev/null
-    }
-    claim_active_turn_for_agent_stop() {
-      mv "$state_dir/sessions/$session_id.active-turn" \
-        "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null
-    }
-    consume_agent_stop_completion() {
-      rm "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null
     }
     payload_timestamp() {
       local value kind
@@ -174,9 +166,6 @@ public enum CopilotHooks {
         elicitation_dialog) printf 'elicitation' ;;
         permission_prompt) printf 'permission' ;;
       esac
-    }
-    is_session_idle() {
-      [ "$(payload_notification_type "$1")" = "session_idle" ]
     }
     is_aborted() {
       printf '%s' "$1" | grep -qE '"aborted"[[:space:]]*:[[:space:]]*true'
@@ -294,10 +283,8 @@ public enum CopilotHooks {
     case "${1:-}" in
       start)
         payload="$(cat 2>/dev/null || true)"
-        rm -f "$state_dir/sessions/$session_id.session-idle-hook" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
-        rm -f "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null || true
         rm -f "$scheduled_turn" 2>/dev/null || true
         status idle "$(payload_timestamp "$payload")"
         ;;
@@ -309,7 +296,6 @@ public enum CopilotHooks {
           mkdir -p "$state_dir/sessions" 2>/dev/null || true
           : > "$scheduled_turn"
           rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
-          rm -f "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null || true
           status idle "$(payload_timestamp "$payload")" scheduled-start
         else
           rm -f "$scheduled_turn" 2>/dev/null || true
@@ -328,12 +314,8 @@ public enum CopilotHooks {
           exit 0
         fi
         source=""
-        if claim_active_turn_for_agent_stop; then
-          if is_aborted "$payload"; then
-            consume_agent_stop_completion || true
-          else
-            source="agent-stop"
-          fi
+        if consume_active_turn && ! is_aborted "$payload"; then
+          source="agent-stop"
         fi
         status idle "$(payload_timestamp "$payload")" "$source" "" "$(payload_session_id "$payload")"
         ;;
@@ -352,39 +334,13 @@ public enum CopilotHooks {
       notify)
         payload="$(cat 2>/dev/null || true)"
         timestamp="$(payload_timestamp "$payload")"
-        if is_session_idle "$payload"; then
-          if hook_has_other_owner "$payload"; then emit; exit 0; fi
-          if [ -f "$scheduled_turn" ]; then
-            rm -f "$scheduled_turn" 2>/dev/null || true
-            consume_active_turn || true
-            consume_agent_stop_completion || true
-            status idle "$timestamp" scheduled-idle
-            emit
-            exit 0
-          fi
-          mkdir -p "$state_dir/sessions" 2>/dev/null || true
-          : > "$state_dir/sessions/$session_id.session-idle-hook"
-          rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
-          had_active_turn=0
-          if consume_active_turn; then
-            had_active_turn=1
-          elif consume_agent_stop_completion; then
-            had_active_turn=1
-          fi
-          notification=""
-          if [ "$had_active_turn" -eq 1 ] && ! is_aborted "$payload"; then
-            notification="completed"
-          fi
-          status idle "$timestamp" session-idle "$notification" "$(payload_session_id "$payload")"
+        notification="$(input_notification_kind "$payload")"
+        [ -n "$notification" ] || { emit; exit 0; }
+        previous_status="$(current_status)"
+        if [ "$previous_status" = "waiting" ]; then
+          status waiting "$timestamp" "" "" "$(payload_session_id "$payload")"
         else
-          notification="$(input_notification_kind "$payload")"
-          [ -n "$notification" ] || { emit; exit 0; }
-          previous_status="$(current_status)"
-          if [ "$previous_status" = "waiting" ]; then
-            status waiting "$timestamp" "" "" "$(payload_session_id "$payload")"
-          else
-            status waiting "$timestamp" "" "$notification" "$(payload_session_id "$payload")"
-          fi
+          status waiting "$timestamp" "" "$notification" "$(payload_session_id "$payload")"
         fi
         ;;
       end)
@@ -394,10 +350,8 @@ public enum CopilotHooks {
         # sessionEnd(reason=user_exit). Let the live app clear the resume marker only
         # when it is not terminating; if the app is shutting down or unreachable, the
         # marker survives for post-reboot resume.
-        rm -f "$state_dir/sessions/$session_id.session-idle-hook" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
         rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
-        rm -f "$state_dir/sessions/$session_id.agent-stop-completion" 2>/dev/null || true
         rm -f "$scheduled_turn" 2>/dev/null || true
         status idle "$(payload_timestamp "$payload")" session-end "" "$(payload_session_id "$payload")"
         ;;

@@ -359,8 +359,9 @@ private final class ManualUnreadFixture {
         model.setStatus(sessionId: sessionId, status: .running, text: nil, timestamp: start)
         model.setStatus(
             sessionId: sessionId, status: .idle, text: nil, timestamp: start + 100,
-            source: "session-idle", notification: .completed
+            source: "agent-stop"
         )
+        model.postCompletionIfReady(sessionId: sessionId)
     }
 
     func savedSessions() throws -> [String: Session] {

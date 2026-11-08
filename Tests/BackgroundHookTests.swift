@@ -240,8 +240,7 @@ final class BackgroundHookTests: XCTestCase {
     func testChildActivityHooksLeaveScheduledAndCompletionMarkersUntouched() throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        for suffix in ["scheduled-turn", "background-agents", "session-idle-hook",
-                       "active-turn", "agent-stop-completion"] {
+        for suffix in ["scheduled-turn", "background-agents", "active-turn"] {
             try Data("preserve".utf8).write(to: fixture.file(suffix))
         }
         let before = try fixture.markerContents()
@@ -277,8 +276,8 @@ final class BackgroundHookTests: XCTestCase {
         try fixture.run("post", payload:
             #"{"sessionId":"\#(fixture.ownerId)","timestamp":500}"#)
         XCTAssertEqual(try fixture.statusRecord().status, .running)
-        try fixture.run("notify", payload:
-            #"{"sessionId":"\#(fixture.ownerId)","timestamp":600,"notification_type":"session_idle"}"#)
+        try fixture.run("idle", payload:
+            #"{"sessionId":"\#(fixture.ownerId)","timestamp":600}"#)
         XCTAssertEqual(try fixture.statusRecord().status, .idle)
     }
 
@@ -358,8 +357,8 @@ final class BackgroundHookTests: XCTestCase {
             SessionStatusRecord.self,
             from: Data(contentsOf: fixture.file("status-record.json"))), poisoned)
 
-        try fixture.run("notify", payload:
-            #"{"sessionId":"\#(fixture.ownerId)","timestamp":500,"notification_type":"session_idle"}"#)
+        try fixture.run("idle", payload:
+            #"{"sessionId":"\#(fixture.ownerId)","timestamp":500}"#)
         let settled = try JSONDecoder().decode(
             SessionStatusRecord.self,
             from: Data(contentsOf: fixture.file("status-record.json")))
@@ -379,15 +378,14 @@ final class BackgroundHookTests: XCTestCase {
                 status: try XCTUnwrap(SessionStatus(rawValue: status)),
                 statusTimestamp: 100, promptStatusTimestamp: 90)
             try JSONEncoder().encode(record).write(to: fixture.file("status-record.json"))
-            for suffix in ["background-agents", "session-idle-hook",
-                           "active-turn", "agent-stop-completion", "scheduled-turn"] {
+            for suffix in ["background-agents", "active-turn", "scheduled-turn"] {
                 try Data("preserve".utf8).write(to: fixture.file(suffix))
             }
             let before = try fixture.markerContents()
             let calls = try Data(contentsOf: fixture.capture)
-            for action in ["idle", "end", "notify"] {
+            for action in ["idle", "end"] {
                 try fixture.run(action, payload:
-                    #"{"sessionId":"\#(fixture.childId)","timestamp":300,"notification_type":"session_idle"}"#)
+                    #"{"sessionId":"\#(fixture.childId)","timestamp":300}"#)
                 XCTAssertEqual(try fixture.markerContents(), before, "\(status), \(action)")
                 XCTAssertEqual(try Data(contentsOf: fixture.capture), calls)
             }
@@ -512,10 +510,6 @@ final class BackgroundHookTests: XCTestCase {
         try fixture.run("running", payload:
             #"{"sessionId":"\#(fixture.ownerId)","timestamp":100}"#)
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.file("active-turn").path))
-        try fixture.run("idle", payload:
-            #"{"sessionId":"\#(fixture.ownerId)","timestamp":200}"#)
-        XCTAssertTrue(FileManager.default.fileExists(
-            atPath: fixture.file("agent-stop-completion").path))
         // A hook killed between writing its record and renaming it into place.
         try Data("{}".utf8).write(to: fixture.file("status-record.json.4242"))
         let other = fixture.sessions.appendingPathComponent("\(UUID().uuidString).active-turn")

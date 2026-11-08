@@ -105,13 +105,6 @@ public enum Paths {
         sessionsDir.appendingPathComponent("\(sessionId).background-agents").path
     }
 
-    /// Created after the CLI emits its first root session_idle notification. The
-    /// footer scraper remains enabled until this proves the running CLI supports the
-    /// authoritative idle signal; sessionStart removes it for a fresh CLI process.
-    public static func sessionIdleHookMarkerPath(sessionId: String) -> String {
-        sessionsDir.appendingPathComponent("\(sessionId).session-idle-hook").path
-    }
-
     /// Per-session marker holding the last Copilot CLI session id seen in this tab
     /// (written by the hook from tool/notification payloads, which carry `sessionId`).
     /// Lets the app auto-resume the exact agent session after a reboot recreates the
