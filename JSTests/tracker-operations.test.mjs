@@ -6,7 +6,7 @@ import { registerHooks, syncBuiltinESMExports } from "node:module";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
@@ -53,10 +53,10 @@ fs.writeFileSync = (path, ...args) => {
 };
 fs.readFileSync = (path, ...args) => {
   const result = realReadFileSync(path, ...args);
-  const runtime = [...runtimes].find((entry) =>
-    String(path).startsWith(entry.root)
-  );
-  runtime?.afterRead?.(String(path));
+  // The tracker reads its own file through a URL.
+  const name = path instanceof URL ? fileURLToPath(path) : String(path);
+  const runtime = [...runtimes].find((entry) => name.startsWith(entry.root));
+  runtime?.afterRead?.(name);
   return result;
 };
 fs.openSync = (path, ...args) => {
@@ -151,6 +151,7 @@ class FakeSession {
     this.activityHandler = async () => ({ abortable: this.processing, hasActiveWork: this.processing });
     this.abortHandler = async () => this.emit("session.idle", { aborted: true });
     this.enqueueHandler = async () => ({ queued: true });
+    this.extensionsReloadHandler = async () => null;
     this.commandListHandler = async () => ({ commands: [] });
     this.scheduleListHandler = async () => ({ entries: [] });
     this.userInputHandler = async () => ({ success: true });
@@ -231,6 +232,7 @@ class FakeSession {
         if (method === "session.schedule.list") return this.scheduleListHandler(params);
         this.workflowCalls.push({ method, ...params });
         if (method === "session.commands.enqueue") return this.enqueueHandler(params);
+        if (method === "session.extensions.reload") return this.extensionsReloadHandler(params);
         if (method === "session.send") return this.sendHandler(params);
         if (method === "session.abort") {
           await this.abortHandler();
@@ -328,13 +330,15 @@ async function waitFor(predicate, message, timeoutMs = 2_000) {
   assert.fail(message);
 }
 
-async function createRuntime(t, configure = () => {}, { ready = true } = {}) {
+async function createRuntime(t, configure = () => {}, { ready = true, ownTracker = false } = {}) {
   const root = join(runtimeParent, uuid());
   const sessions = join(root, "sessions");
   realMkdirSync(sessions, { recursive: true });
   const runtime = {
     root,
     sessions,
+    // A private copy lets a test replace the tracker's own file, as an app update does.
+    trackerPath: ownTracker ? join(root, "extension.mjs") : extensionPath,
     appSessionId: uuid(),
     copilotSessionId: uuid(),
     watchCallback: null,
@@ -381,7 +385,8 @@ async function createRuntime(t, configure = () => {}, { ready = true } = {}) {
   runtime.modelPath = join(sessions, `${runtime.appSessionId}.set-model-request.json`);
   runtime.ownerPath = join(sessions, `${runtime.appSessionId}.transcript-owner.json`);
   try {
-    await import(`${pathToFileURL(extensionPath).href}?runtime=${uuid()}`);
+    if (ownTracker) fs.copyFileSync(extensionPath, runtime.trackerPath);
+    await import(`${pathToFileURL(runtime.trackerPath).href}?runtime=${uuid()}`);
     if (!ready) {
       await waitFor(() => runtime.intervalCallback, "tracker did not finish starting");
     } else {
@@ -1323,6 +1328,160 @@ test("bounce fences new model switches, including legacy, but preserves exact re
   trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
   await waitFor(() => !realExistsSync(runtime.modelPath), "legacy switch was not refused");
   assert.equal(runtime.session.modelSwitchCalls.length, 1);
+});
+
+// Replaces the runtime's private tracker the way an app update does: one
+// atomic rename of a complete file. A suffix makes it a different release.
+function installTracker(runtime, suffix = "") {
+  const staged = `${runtime.trackerPath}.staged`;
+  realWriteFileSync(staged, realReadFileSync(extensionPath, "utf8") + suffix);
+  fs.renameSync(staged, runtime.trackerPath);
+}
+
+// Against this fake session the tracker's refreshes, question recovery, and
+// reload check are promise-only, so one macrotask turn drains them.
+const settled = () => new Promise((resolve) => setImmediate(resolve));
+
+async function heartbeat(runtime) {
+  runtime.intervalCallback();
+  await settled();
+}
+
+function reloadCalls(runtime) {
+  return runtime.session.workflowCalls.filter((call) => call.method === "session.extensions.reload");
+}
+
+function activityReads(runtime) {
+  return runtime.session.runtimeCalls.filter((call) => call.method === "session.metadata.activity");
+}
+
+test("a tracker replaced on disk reloads the session's extensions once, after two idle heartbeats", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, (session) => {
+    session.scheduleListHandler = async () => ({ entries: [{ id: "scheduled-work" }] });
+  }, { ownTracker: true });
+  await workflowReady(runtime);
+  await heartbeat(runtime);
+  installTracker(runtime);
+  await heartbeat(runtime);
+  await heartbeat(runtime);
+  assert.deepEqual(activityReads(runtime), [], "an identical rewrite must not be treated as an update");
+
+  installTracker(runtime, "\n// next release\n");
+  await heartbeat(runtime);
+  assert.deepEqual(activityReads(runtime), [], "one idle heartbeat must not be enough");
+  await heartbeat(runtime);
+  // A waiting schedule blocks a bounce, which would drop it, but not a reload.
+  assert.deepEqual(readSnapshot(runtime).workflow.schedules, ["scheduled-work"]);
+  assert.deepEqual(reloadCalls(runtime), [{
+    method: "session.extensions.reload", sessionId: runtime.copilotSessionId,
+  }]);
+  // The fake runtime leaves this process running, like a reload that did not replace it.
+  await heartbeat(runtime);
+  await heartbeat(runtime);
+  assert.equal(reloadCalls(runtime).length, 1);
+  assert.equal(activityReads(runtime).length, 1);
+});
+
+test("the tracker reads its own file again only after the file is replaced", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, () => {}, { ownTracker: true });
+  await workflowReady(runtime);
+  let reads = 0;
+  runtime.afterRead = (path) => { if (path === runtime.trackerPath) reads += 1; };
+  for (let tick = 0; tick < 3; tick += 1) await heartbeat(runtime);
+  assert.equal(reads, 0, "an unchanged tracker must not be read on every heartbeat");
+  installTracker(runtime, "\n// next release\n");
+  for (let tick = 0; tick < 3; tick += 1) await heartbeat(runtime);
+  assert.equal(reads, 1, "a replaced tracker is hashed once");
+});
+
+test("a failed or unsupported tracker reload is logged once and waits for the next release", {
+  concurrency: false,
+}, async (t) => {
+  const logged = [];
+  const savedError = console.error;
+  console.error = (...args) => { logged.push(args[0]); };
+  t.after(() => { console.error = savedError; });
+  const unsupported = async () => {
+    throw Object.assign(new Error("Unhandled method"), { code: -32601 });
+  };
+  for (const missing of ["activityHandler", "extensionsReloadHandler"]) {
+    const runtime = await createRuntime(t, () => {}, { ownTracker: true });
+    await workflowReady(runtime);
+    runtime.session[missing] = unsupported;
+    logged.length = 0;
+    installTracker(runtime, "\n// next release\n");
+    for (let tick = 0; tick < 4; tick += 1) await heartbeat(runtime);
+    assert.equal(activityReads(runtime).length, 1);
+    assert.equal(reloadCalls(runtime).length, missing === "activityHandler" ? 0 : 1);
+    assert.equal(logged.filter((message) => message === "[copilot-projects] tracker reload failed:").length, 1);
+    await workflowReady(runtime);
+    installTracker(runtime, "\n// the release after that\n");
+    await heartbeat(runtime);
+    await heartbeat(runtime);
+    assert.equal(activityReads(runtime).length, 2);
+  }
+});
+
+test("a replaced tracker waits out a turn and background work the runtime still reports", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, () => {}, { ownTracker: true });
+  await workflowReady(runtime);
+  installTracker(runtime, "\n// next release\n");
+  await heartbeat(runtime);
+  await runtime.session.emit("assistant.turn_start", { turnId: "0" });
+  await heartbeat(runtime);
+  await runtime.session.emit("session.idle");
+  await settled();
+  await heartbeat(runtime);
+  // A whole turn between two heartbeats, leaving child work this tracker never saw start.
+  await runtime.session.emit("assistant.turn_start", { turnId: "1" });
+  runtime.session.activityHandler = async () => ({ abortable: false, hasActiveWork: true });
+  await runtime.session.emit("session.idle");
+  await settled();
+  await heartbeat(runtime);
+  assert.deepEqual(activityReads(runtime), [], "a turn must restart the idle wait");
+  await heartbeat(runtime);
+  assert.equal(activityReads(runtime).length, 1);
+  runtime.session.activityHandler = async () => ({});
+  await heartbeat(runtime);
+  assert.equal(activityReads(runtime).length, 2);
+  assert.deepEqual(reloadCalls(runtime), [], "busy or unknown activity is not idle");
+  runtime.session.activityHandler = async () => ({ abortable: false, hasActiveWork: false });
+  await heartbeat(runtime);
+  assert.equal(reloadCalls(runtime).length, 1);
+});
+
+test("work that arrives during the reload's activity read cancels that reload", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, () => {}, { ownTracker: true });
+  await workflowReady(runtime);
+  const idle = { abortable: false, hasActiveWork: false };
+  let finishActivity;
+  runtime.session.activityHandler = () => new Promise((resolve) => { finishActivity = resolve; });
+  t.after(() => finishActivity?.(idle));
+  installTracker(runtime, "\n// next release\n");
+  await heartbeat(runtime);
+  await heartbeat(runtime);
+  assert.equal(activityReads(runtime).length, 1, "the reload must be reading activity");
+  const send = workflowHandoff(runtime, "session-send", { prompt: "new work", mode: "enqueue" });
+  await waitFor(() => receipt(runtime, send.operationId)?.state === "applied", "native send did not complete");
+  await settled();
+  assert.equal(runtime.session.processing, false, "The turn-start notification must still be delayed");
+  finishActivity(idle);
+  await settled();
+  assert.deepEqual(reloadCalls(runtime), []);
+  await heartbeat(runtime);
+  assert.equal(activityReads(runtime).length, 2, "the cancelled reload must be reconsidered");
+  await runtime.session.emit("assistant.turn_start", { turnId: "0" });
+  finishActivity(idle);
+  await settled();
+  assert.deepEqual(reloadCalls(runtime), []);
 });
 
 test("native send uses explicit owner and mode, and exact replay cannot submit twice", {

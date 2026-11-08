@@ -10,6 +10,27 @@ import {
 } from "node:fs";
 import { joinSession } from "@github/copilot-sdk/extension";
 
+// Digest of this tracker's file on disk, rehashed only when the file's size or
+// modification time changes. The value at load identifies the source this
+// process is running.
+const trackerURL = new URL(import.meta.url);
+let trackerFileStamp = null;
+let trackerFileDigest = null;
+function trackerDigestOnDisk() {
+    try {
+        const { size, mtimeNs } = lstatSync(trackerURL, { bigint: true });
+        const stamp = `${size}:${mtimeNs}`;
+        if (stamp !== trackerFileStamp) {
+            trackerFileDigest = createHash("sha256").update(readFileSync(trackerURL)).digest("hex");
+            trackerFileStamp = stamp;
+        }
+        return trackerFileDigest;
+    } catch {
+        return null;
+    }
+}
+const loadedTrackerDigest = trackerDigestOnDisk();
+
 const environmentAppSessionId = process.env.COPILOT_PROJECTS_SESSION;
 const socketPath = process.env.COPILOT_PROJECTS_SOCKET;
 const sessionIdPattern = /^[0-9A-Fa-f-]{36}$/;
@@ -2008,13 +2029,53 @@ if (validSessionId && socketPath) {
             || pendingBudgetIds.size > 0;
     }
 
-    function bounceIsIdle() {
+    function sessionIsIdle() {
         return questionEventStream?.sessionId === copilotSessionId && questionEventStream.caughtUp === true
             && !bounceRequested && runtimeActivity?.processing === false
             && !foregroundTurnActive && !scheduledTurnActive
-            && activeSubagents.size === 0 && schedules.length === 0
+            && activeSubagents.size === 0
             && pendingQuestionRequestIds.size === 0
             && !workflowHasPendingInput();
+    }
+
+    // A bounce restarts the CLI, which would drop its schedules.
+    function bounceIsIdle() {
+        return sessionIsIdle() && schedules.length === 0;
+    }
+
+    // Hot reload: once the app has installed a different tracker and the
+    // session is idle on two consecutive heartbeats with no turn between them,
+    // ask the runtime to reload this session's extensions, which replaces this
+    // process. A source is requested at most once, so an identical rewrite
+    // cannot trigger a reload and a failed, unsupported, or ineffective one is
+    // never repeated. The wait lets a personal extension that reloads sooner
+    // go first.
+    let trackerReloadRequested = null;
+    let trackerReloadArmedAtIdle = null;
+    async function reloadNewerTracker() {
+        const armedAtIdle = trackerReloadArmedAtIdle;
+        const digest = trackerDigestOnDisk();
+        trackerReloadArmedAtIdle = sessionIsIdle() && activeOperationKeys.size === 0
+            && digest !== null && loadedTrackerDigest !== null
+            && digest !== loadedTrackerDigest && digest !== trackerReloadRequested
+            ? idleGeneration : null;
+        if (trackerReloadArmedAtIdle === null || armedAtIdle !== idleGeneration) return;
+        trackerReloadRequested = digest;
+        const context = workflowContextToken();
+        // A send RPC can finish before its turn-start notification arrives.
+        const sendRevision = nativeSendRevision;
+        try {
+            const activity = await workflowRead("session.metadata.activity", {}, context);
+            if (shuttingDown || activity?.hasActiveWork !== false || activeOperationKeys.size !== 0
+                    || nativeSendRevision !== sendRevision
+                    || !operationContextCurrent(context) || !sessionIsIdle()) {
+                trackerReloadRequested = null;
+                return;
+            }
+            await workflowRPC("session.extensions.reload", {}, context);
+        } catch (error) {
+            console.error("[copilot-projects] tracker reload failed:", error);
+        }
     }
 
     async function hasBounceCommand(context) {
@@ -6314,10 +6375,13 @@ if (validSessionId && socketPath) {
         processElicitationResponse();
         processSetModelRequest();
         processCloseSessionRequest();
-        // Replay receipts immediately, but let recovery settle before a new bounce.
+        // Replay receipts immediately, but let recovery settle before a new bounce
+        // or a tracker reload.
         for (const kind of workflowKinds) processWorkflowAction(kind, kind !== "session-bounce");
         questionRecovery.then(() => {
-            if (!shuttingDown && generation === conversationGeneration) processWorkflowAction("session-bounce");
+            if (shuttingDown || generation !== conversationGeneration) return;
+            processWorkflowAction("session-bounce");
+            reloadNewerTracker();
         });
         scheduleDurableReconcile(0);
     }, DURABLE_RECONCILE_POLL_MS);
