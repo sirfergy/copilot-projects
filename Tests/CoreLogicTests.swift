@@ -303,21 +303,21 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertTrue(script.contains("removeFile(userInputResponsePath)"))
         XCTAssertTrue(script.contains(#"session.on("session.model_change""#))
         XCTAssertFalse(script.contains("process.env.SESSION_ID"))
-        // Startup order: stale answers are cleared, and the watcher and signal
-        // handlers installed, before a question can be delivered.
+        // Startup order: stale answers are cleared, and the watcher, question
+        // listener, and signal handlers installed, before interest is
+        // registered and a question can be delivered.
         func position(of marker: String) throws -> String.Index {
             try XCTUnwrap(script.range(of: marker), marker).lowerBound
         }
         let listener = try position(of: #"session.on("user_input.requested""#)
+        let registration = try position(of: "await registerEventInterest(eventType)")
         XCTAssertLessThan(
             try position(of: "Clear stale answer state before any new question can be published"),
             listener
         )
         XCTAssertLessThan(try position(of: "watch(sessionsDir"), listener)
-        XCTAssertLessThan(
-            try position(of: #"process.once("SIGTERM""#),
-            try position(of: "await registerEventInterest(eventType)")
-        )
+        XCTAssertLessThan(listener, registration)
+        XCTAssertLessThan(try position(of: #"process.once("SIGTERM""#), registration)
         // The host's shared transcript snapshot is discarded in exactly one
         // place — the named rotation helper.
         XCTAssertTrue(script.contains("function discardRotatedTranscript() {"))
@@ -1070,6 +1070,12 @@ final class CoreLogicTests: XCTestCase {
         let files = root.appendingPathComponent("sessions/12345678-1234-1234-1234-123456789abc").path
         XCTAssertFalse(FileManager.default.fileExists(atPath: files + ".agent-activity.json"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: files + ".transcript.json"))
+        // Without the native resolver the owner marker must not claim a tab.
+        let owner = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: files + ".transcript-owner.json"))
+        ) as? [String: Any]
+        XCTAssertNotNil(owner?["copilotSessionId"])
+        XCTAssertNil(owner?["appSessionId"])
         XCTAssertEqual(summary?["schemaVersion"] as? Int, 4)
         XCTAssertEqual(summary?["ownerPidIsNumber"] as? Bool, true)
         // Retention caps the total but never evicts the human conversation.
