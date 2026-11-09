@@ -16785,8 +16785,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(terminal.isHidden)
         XCTAssertTrue(window.firstResponder === terminal)
 
-        // Collapsing from full-width with an active question editor reveals and focuses the terminal,
-        // and closing the drawer from full-width also unhides and focuses the terminal.
+        // Collapsing from full-width with an active question editor preserves editor focus,
+        // while closing the drawer from full-width unhides and focuses the terminal.
         model.projects[0].sessions[0].agentActivity = AgentActivitySnapshot(
             schemaVersion: 1,
             updatedAt: ISO8601DateFormatter().string(from: Date()),
@@ -16818,13 +16818,12 @@ final class AppLogicTests: XCTestCase {
         defaults.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
         await pump(detailHost)
         XCTAssertFalse(terminal.isHidden)
-        XCTAssertNil(answerField.currentEditor())
-        XCTAssertTrue(window.firstResponder === terminal)
+        XCTAssertNotNil(answerField.currentEditor())
+        XCTAssertFalse(window.firstResponder === terminal)
 
         defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
         await pump(detailHost)
         XCTAssertTrue(terminal.isHidden)
-        XCTAssertTrue(window.makeFirstResponder(answerField))
         XCTAssertNotNil(answerField.currentEditor())
 
         model.closeTranscriptDrawer(sessionId: session.id)
@@ -17210,7 +17209,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === s2Terminal)
 
         // 5. Default-view setting (#307) opening the transcript on first visit (and full-width mode) focuses the composer,
-        //    and collapsing full-width to side-drawer reveals and focuses the terminal.
+        //    and collapsing full-width to side-drawer preserves the focused composer while unhiding the terminal.
         defaults.set(
             TranscriptDrawer.DefaultView.transcript.rawValue,
             forKey: TranscriptDrawer.defaultViewKey
@@ -17230,9 +17229,9 @@ final class AppLogicTests: XCTestCase {
         defaults.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
         await pump(host)
         XCTAssertFalse(s4Terminal.isHidden)
-        XCTAssertNil(s4ComposerField.currentEditor())
-        XCTAssertFalse(model.sessionPromptComposer(sessionId: s4.id).isPromptFieldFocused)
-        XCTAssertTrue(window.firstResponder === s4Terminal)
+        XCTAssertNotNil(s4ComposerField.currentEditor())
+        XCTAssertTrue(model.sessionPromptComposer(sessionId: s4.id).isPromptFieldFocused)
+        XCTAssertFalse(window.firstResponder === s4Terminal)
 
         // 6. With the side drawer open and its composer or transcript text holding focus, clicking s1's terminal
         //    focuses it, typing reaches its shell, and background updates or re-selecting s1 do not move focus back.
