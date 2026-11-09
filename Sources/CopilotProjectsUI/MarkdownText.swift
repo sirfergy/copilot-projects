@@ -1153,8 +1153,13 @@ private struct MarkdownCodeBlockView: View {
             .fixedSize(horizontal: false, vertical: true)
             .padding(.leading, 10)
             .padding(.vertical, 10)
+            #if canImport(UIKit)
+            .padding(.trailing, 54)
+            .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+            #else
             .padding(.trailing, 34)
             .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+            #endif
             .overlay(alignment: .topTrailing) {
                 Button {
                     MarkdownText.copyToPasteboard(code)
@@ -1169,7 +1174,11 @@ private struct MarkdownCodeBlockView: View {
                     Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(didCopy ? Color.green : .secondary)
+                        #if canImport(UIKit)
+                        .frame(width: 44, height: 44)
+                        #else
                         .frame(width: 24, height: 24)
+                        #endif
                         .background(
                             RoundedRectangle(cornerRadius: 5, style: .continuous)
                                 .fill(Color.primary.opacity(isHoveringButton ? 0.08 : 0))

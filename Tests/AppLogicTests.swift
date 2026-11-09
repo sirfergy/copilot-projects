@@ -8898,6 +8898,13 @@ final class AppLogicTests: XCTestCase {
         }
 
         let pasteboard = NSPasteboard.general
+        let savedPasteboard = pasteboard.string(forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let savedPasteboard {
+                pasteboard.setString(savedPasteboard, forType: .string)
+            }
+        }
         pasteboard.clearContents()
 
         try clickCopyButton(near: codeTextViews[0])
