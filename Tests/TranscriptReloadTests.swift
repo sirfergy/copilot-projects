@@ -279,6 +279,8 @@ final class TranscriptReloadTests: XCTestCase {
         final class SwitchHarness: ObservableObject {
             @Published var sessionId: String
             @Published var turns: [TranscriptTurn]
+            @Published var questions: [RemoteUserInputRequest] = []
+            @Published var copilotSessionId = "conversation-1"
 
             init(sessionId: String, turns: [TranscriptTurn]) {
                 self.sessionId = sessionId
@@ -297,8 +299,10 @@ final class TranscriptReloadTests: XCTestCase {
                         turns: harness.turns,
                         imageCapture: nil,
                         sessionId: harness.sessionId,
+                        copilotSessionId: harness.copilotSessionId,
                         workflow: workflow,
                         operation: AgentOperationProjection(conversationEpoch: "e1", support: .receipts, receipts: []),
+                        pendingUserInputs: harness.questions,
                         workflowProvider: nil,
                         operationProvider: nil,
                         promptComposer: nil,
@@ -339,10 +343,40 @@ final class TranscriptReloadTests: XCTestCase {
             window.contentView?.layoutSubtreeIfNeeded()
         }
 
+        /// Runs display cycles until the transcript stops moving. A short newest page fills in
+        /// earlier turns over several passes.
+        func settleTranscript(_ window: NSWindow) async {
+            var last: [CGFloat] = []
+            for _ in 0..<20 {
+                await settleDisplayCycle(window)
+                guard let root = window.contentView, let scrollView = findTranscriptScrollView(in: root) else { continue }
+                let now = [scrollView.documentView?.frame.height ?? 0, scrollView.documentVisibleRect.minY]
+                if now == last { return }
+                last = now
+            }
+        }
+
+        func scroll(_ scrollView: NSScrollView, toY y: CGFloat, in window: NSWindow) {
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
+            stepMainRunLoopBeforeWaiting()
+            window.contentView?.layoutSubtreeIfNeeded()
+        }
+
+        let question = RemoteUserInputRequest(
+            requestId: "question-1",
+            question: "Which branch should the fix target? Pick one, or type another.",
+            choices: ["main", "release", "Both"],
+            allowFreeform: true,
+            requestedAt: Date(timeIntervalSince1970: 1_788_700_000)
+        )
+
         let workflow = RemoteSessionWorkflow(
             observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1000),
             capabilities: ["session-send"],
-            sendReady: true
+            sendReady: true,
+            pendingMessages: [RemotePendingMessage(messageId: "pending-1", text: "Queued follow-up for later")]
         )
 
         let sequence = [0, 1, 2, 3, 4, 5, 1, 3, 5, 2]
@@ -376,7 +410,7 @@ final class TranscriptReloadTests: XCTestCase {
                     if asyncSnapshotArrival {
                         harness.turns = target.turns
                     }
-                    await settleDisplayCycle(window)
+                    await settleTranscript(window)
 
                     let root = try XCTUnwrap(window.contentView)
                     let sv = try XCTUnwrap(findTranscriptScrollView(in: root))
@@ -410,36 +444,71 @@ final class TranscriptReloadTests: XCTestCase {
                 // appending 8 turns while scrolled up keeps the scroll offset and visible content put,
                 // and scrolling back to the bottom re-engages stick-to-bottom.
                 harness.turns.append(makeShortTurn(index: 990, variant: 9))
-                await settleDisplayCycle(window)
+                await settleTranscript(window)
                 let root = try XCTUnwrap(window.contentView)
                 let sv = try XCTUnwrap(findTranscriptScrollView(in: root))
                 let doc = try XCTUnwrap(sv.documentView)
                 sv.contentView.postsBoundsChangedNotifications = true
+                var bottomY: CGFloat { max(0, doc.bounds.height - sv.documentVisibleRect.height) }
                 for _ in 0..<3 {
                     for stepOffset in 1...40 {
-                        let bottomY = max(0, doc.bounds.height - sv.documentVisibleRect.height)
-                        let nextY = max(0, bottomY - CGFloat(stepOffset))
-                        sv.contentView.scroll(to: NSPoint(x: 0, y: nextY))
-                        sv.reflectScrolledClipView(sv.contentView)
-                        NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: sv.contentView)
-                        stepMainRunLoopBeforeWaiting()
-                        window.contentView?.layoutSubtreeIfNeeded()
+                        scroll(sv, toY: max(0, bottomY - CGFloat(stepOffset)), in: window)
                     }
                     await settleDisplayCycle(window)
-                    let nudgeY = max(0, sv.documentVisibleRect.origin.y - 10)
-                    sv.contentView.scroll(to: NSPoint(x: 0, y: nudgeY))
-                    sv.reflectScrolledClipView(sv.contentView)
-                    NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: sv.contentView)
-                    stepMainRunLoopBeforeWaiting()
-                    window.contentView?.layoutSubtreeIfNeeded()
+                    scroll(sv, toY: max(0, sv.documentVisibleRect.origin.y - 10), in: window)
                     await settleDisplayCycle(window)
-                    if sv.documentVisibleRect.origin.y < doc.bounds.height - sv.documentVisibleRect.height - 30 {
+                    if sv.documentVisibleRect.origin.y < bottomY - 30 {
                         break
                     }
                 }
                 let settledScrolledUpY = sv.documentVisibleRect.origin.y
-                XCTAssertLessThan(settledScrolledUpY, doc.bounds.height - sv.documentVisibleRect.height - 25)
+                XCTAssertLessThan(settledScrolledUpY, bottomY - 25)
 
+                /// Where each turn's text in the viewport sits, measured from the top of the viewport.
+                /// The question card and the queued message stay under the newest turn, so they move
+                /// when a turn arrives and are left out.
+                func textTops() -> [NSTextView: CGFloat] {
+                    let visible = sv.documentVisibleRect
+                    return Dictionary(
+                        findVisibleTextViews(in: doc, visibleRect: visible)
+                            .filter { !$0.string.contains("Queued follow-up") && !$0.string.contains("Which branch") }
+                            .map { ($0, doc.convert($0.bounds, from: $0).minY - visible.minY) },
+                        uniquingKeysWith: { first, _ in first }
+                    )
+                }
+                /// Fails unless text that was on screen is still there, `distance` points lower: a
+                /// blank viewport, rebuilt cards and a jump all fail.
+                func assertTextMoved(
+                    _ distance: CGFloat, from before: [NSTextView: CGFloat], _ what: String, line: UInt = #line
+                ) {
+                    // Measure every view that was on screen, including one that has since left it.
+                    let visibleTop = sv.documentVisibleRect.minY
+                    let errors = before.map { view, top -> CGFloat in
+                        guard view.window != nil else { return .infinity }
+                        return abs(doc.convert(view.bounds, from: view).minY - visibleTop - top - distance)
+                    }
+                    XCTAssertFalse(textTops().isEmpty, "\(what) should not leave a blank viewport", line: line)
+                    XCTAssertLessThanOrEqual(
+                        errors.max() ?? .infinity,
+                        2,
+                        "\(what) should leave the text on screen where it was (fullWidth=\(fullWidth) async=\(asyncSnapshotArrival))",
+                        line: line
+                    )
+                }
+                func allText() -> [NSTextView] { findVisibleTextViews(in: doc, visibleRect: doc.bounds) }
+                /// Text laid out on top of the text below it.
+                func overlappingText() -> [String] {
+                    let texts = allText()
+                        .map { (rect: doc.convert($0.bounds, from: $0), start: String($0.string.prefix(30))) }
+                        .sorted { $0.rect.minY < $1.rect.minY }
+                    return zip(texts, texts.dropFirst()).compactMap { upper, lower in
+                        upper.rect.maxY - lower.rect.minY > 1.5 && upper.rect.intersects(lower.rect)
+                            ? "\(upper.start) over \(lower.start)"
+                            : nil
+                    }
+                }
+
+                var before = textTops()
                 for appendIdx in 991..<999 {
                     harness.turns.append(makeShortTurn(index: appendIdx, variant: 9))
                     await settleDisplayCycle(window)
@@ -450,61 +519,110 @@ final class TranscriptReloadTests: XCTestCase {
                     accuracy: 2,
                     "Scrolling up should prevent new turns from yanking the scroll position to the bottom"
                 )
-                XCTAssertFalse(
-                    findVisibleTextViews(in: doc, visibleRect: sv.documentVisibleRect).isEmpty,
-                    "Appending 8 turns while scrolled up (crossing the 8-turn eager boundary) should keep visible turn content rendered"
-                )
+                assertTextMoved(0, from: before, "Appending 8 turns while scrolled up")
                 XCTAssertLessThan(
                     sv.documentVisibleRect.maxY,
                     doc.bounds.height - 200,
                     "Appending 8 turns while scrolled up should leave the viewport above the new bottom"
                 )
 
-                // Simulate a capped-window eviction (removing the oldest turn while appending a new one)
-                // while scrolled up and verify the first eager turn (turn 78) stays in the eager section
-                // without moving into the older LazyVStack or losing its stateful view instance/selection.
-                let cappedScrollY = max(0, sv.documentVisibleRect.origin.y - 4000)
-                sv.contentView.scroll(to: NSPoint(x: 0, y: cappedScrollY))
-                sv.reflectScrolledClipView(sv.contentView)
-                NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: sv.contentView)
-                stepMainRunLoopBeforeWaiting()
-                window.contentView?.layoutSubtreeIfNeeded()
+                // A question card arriving while scrolled up goes under the newest turn, above the
+                // queued message, and moves nothing on screen.
+                before = textTops()
+                harness.questions = [question]
                 await settleDisplayCycle(window)
-                let turn78PromptView = try XCTUnwrap(
-                    findVisibleTextViews(in: doc, visibleRect: doc.bounds).first {
-                        $0.string.contains("User prompt for turn 78:")
-                    }
+                assertTextMoved(0, from: before, "A question card arriving while scrolled up")
+                func documentRect(ofTextContaining text: String) throws -> NSRect {
+                    let view = try XCTUnwrap(allText().first { $0.string.contains(text) }, "No text view contains '\(text)'")
+                    return doc.convert(view.bounds, from: view)
+                }
+                let questionRect = try documentRect(ofTextContaining: "Which branch should the fix target")
+                XCTAssertGreaterThan(questionRect.minY, try documentRect(ofTextContaining: "Short reply 998").maxY)
+                XCTAssertLessThan(questionRect.maxY, try documentRect(ofTextContaining: "Queued follow-up").minY)
+
+                // State inside a rendered card (a selection here, an open thinking or tools section in
+                // the app) has to survive the paging and turn updates below, which it does only while
+                // the card is not rebuilt.
+                let turn78Prompt = try XCTUnwrap(allText().first { $0.string.contains("User prompt for turn 78:") })
+                turn78Prompt.setSelectedRange(NSRange(location: 0, length: 11))
+
+                // Scroll up through earlier history with the card showing, far enough to page in
+                // earlier turns three times. Each step may move the text on screen only by the
+                // distance scrolled and must leave turn text in the viewport: no jump and no blank
+                // viewport, including while a page is laid out above.
+                func renderedTurnCount() -> Int {
+                    allText().filter {
+                        $0.string.contains("User prompt for turn") || $0.string.contains("Short prompt")
+                    }.count
+                }
+                // The newest turn streams meanwhile. Its change is queued ahead of the page request
+                // the scroll triggers, so it grows or shrinks below the viewport in the same pass
+                // that lays a page out above. Measuring the page by the content height moved the
+                // text by that growth.
+                let renderedBeforePaging = renderedTurnCount()
+                let streaming = harness.turns.count - 1
+                var steps = 0
+                while renderedTurnCount() < renderedBeforePaging + 12, steps < 200 {
+                    steps += 1
+                    let offset = sv.documentVisibleRect.origin.y
+                    let target = max(0, offset - 300)
+                    before = textTops()
+                    let streamed = steps % 2 == 1
+                        ? makeHugeTurn(index: 998, variant: 9)
+                        : makeShortTurn(index: 998, variant: 9)
+                    DispatchQueue.main.async { harness.turns[streaming] = streamed }
+                    scroll(sv, toY: target, in: window)
+                    await settleDisplayCycle(window)
+                    assertTextMoved(offset - target, from: before, "Scrolling up through history (step \(steps))")
+                }
+                harness.turns[streaming] = makeShortTurn(index: 998, variant: 9)
+                await settleDisplayCycle(window)
+                XCTAssertGreaterThanOrEqual(
+                    renderedTurnCount(),
+                    renderedBeforePaging + 12,
+                    "Scrolling up should page in earlier turns"
                 )
-                let turn78PromptId = ObjectIdentifier(turn78PromptView)
-                turn78PromptView.setSelectedRange(NSRange(location: 0, length: 11))
+
+                // The tracker's cap drops the oldest turn as a new one arrives. Scrolled up, the text
+                // on screen stays put.
+                before = textTops()
                 var cappedTurns = harness.turns
                 cappedTurns.removeFirst()
                 cappedTurns.append(makeShortTurn(index: 9990, variant: 9))
                 harness.turns = cappedTurns
                 await settleDisplayCycle(window)
-                let turn78PromptAfter = try XCTUnwrap(
-                    findVisibleTextViews(in: doc, visibleRect: doc.bounds).first {
-                        $0.string.contains("User prompt for turn 78:")
+                assertTextMoved(0, from: before, "Evicting the oldest turn while scrolled up")
+                XCTAssertNotNil(turn78Prompt.window, "Paging and turn updates should not rebuild a rendered card")
+                XCTAssertEqual(
+                    turn78Prompt.selectedRange(),
+                    NSRange(location: 0, length: 11),
+                    "Paging and turn updates should preserve state inside a rendered card"
+                )
+
+                // The cap can also drop the oldest rendered turn, the one rendering starts from.
+                // The turns after it stay rendered, rather than only the newest page.
+                let renderedBeforeEviction = renderedTurnCount()
+                let oldestRendered = try XCTUnwrap(
+                    harness.turns.first { turn in
+                        let prompt = turn.userContent.trimmingCharacters(in: .whitespaces)
+                        return allText().contains { $0.string.hasPrefix(prompt) }
                     }
                 )
-                XCTAssertEqual(
-                    ObjectIdentifier(turn78PromptAfter),
-                    turn78PromptId,
-                    "Capped eviction while scrolled up should keep turn 78 in the eager section without recreating its card"
+                harness.turns.removeAll { $0.id == oldestRendered.id }
+                await settleDisplayCycle(window)
+                XCTAssertGreaterThanOrEqual(
+                    renderedTurnCount(),
+                    renderedBeforeEviction - 1,
+                    "Evicting the oldest rendered turn should keep the turns after it rendered"
                 )
-                XCTAssertEqual(
-                    turn78PromptAfter.selectedRange(),
-                    NSRange(location: 0, length: 11),
-                    "Capped eviction while scrolled up should preserve stateful subviews on the pinned eager turn"
+                XCTAssertLessThan(
+                    renderedTurnCount(),
+                    harness.turns.count,
+                    "Evicting the oldest rendered turn should not render the whole transcript"
                 )
 
                 for _ in 0..<3 {
-                    let bottomY = max(0, doc.bounds.height - sv.documentVisibleRect.height)
-                    sv.contentView.scroll(to: NSPoint(x: 0, y: bottomY))
-                    sv.reflectScrolledClipView(sv.contentView)
-                    NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: sv.contentView)
-                    stepMainRunLoopBeforeWaiting()
-                    window.contentView?.layoutSubtreeIfNeeded()
+                    scroll(sv, toY: bottomY, in: window)
                 }
                 await settleDisplayCycle(window)
 
@@ -516,14 +634,32 @@ final class TranscriptReloadTests: XCTestCase {
                     "Returning to the bottom should stick to newly appended turns"
                 )
 
+                // With a question card up, scrolling up from the bottom used to bounce back: every
+                // few points of scroll re-estimated the height of the turns above and left the view
+                // at the bottom again. Scroll up 400 pt in wheel-sized steps while the session
+                // re-renders, then let a turn arrive.
+                let restingDistance = bottomY - sv.documentVisibleRect.origin.y
+                for _ in 0..<20 {
+                    scroll(sv, toY: sv.documentVisibleRect.origin.y - 20, in: window)
+                    harness.objectWillChange.send()
+                }
+                await settleDisplayCycle(window)
+                XCTAssertEqual(
+                    bottomY - sv.documentVisibleRect.origin.y - restingDistance,
+                    400,
+                    accuracy: 2,
+                    "Scrolling up with a question card showing should move the transcript and hold"
+                )
+                before = textTops()
+                let readingY = sv.documentVisibleRect.origin.y
+                harness.turns.append(makeShortTurn(index: 9991, variant: 9))
+                await settleDisplayCycle(window)
+                assertTextMoved(0, from: before, "A turn arriving while reading above a question card")
+                XCTAssertEqual(sv.documentVisibleRect.origin.y, readingY, accuracy: 2)
+
                 // Scrolling up slightly and enlarging the container height until the bottom is visible
                 // re-engages bottom following for subsequent turn updates.
-                let slightlyAboveBottomY = max(0, doc.bounds.height - sv.documentVisibleRect.height - 80)
-                sv.contentView.scroll(to: NSPoint(x: 0, y: slightlyAboveBottomY))
-                sv.reflectScrolledClipView(sv.contentView)
-                NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: sv.contentView)
-                stepMainRunLoopBeforeWaiting()
-                window.contentView?.layoutSubtreeIfNeeded()
+                scroll(sv, toY: max(0, bottomY - 80), in: window)
                 await settleDisplayCycle(window)
                 window.setContentSize(NSSize(width: 1100, height: 900))
                 window.contentView?.layoutSubtreeIfNeeded()
@@ -536,7 +672,9 @@ final class TranscriptReloadTests: XCTestCase {
                     "Enlarging container height so the bottom enters view should re-engage bottom following"
                 )
 
-                // Toggling full-width while pinned at the bottom keeps the bottom turn visible.
+                // Toggling full-width while pinned at the bottom keeps the bottom turn visible, and
+                // measures every message at the new width: narrowing the drawer used to leave each
+                // message its full-width height, so it drew over the text below.
                 UserDefaults.standard.set(!fullWidth, forKey: TranscriptDrawer.fullWidthTranscriptKey)
                 await settleDisplayCycle(window)
                 let toggledVisibleTVs = findVisibleTextViews(in: doc, visibleRect: sv.documentVisibleRect)
@@ -544,8 +682,53 @@ final class TranscriptReloadTests: XCTestCase {
                     toggledVisibleTVs.contains { $0.string.contains("Short reply 1000") },
                     "Toggling full-width while at the bottom should keep the bottom turn visible"
                 )
+                XCTAssertEqual(overlappingText(), [], "Toggling full-width (to \(!fullWidth)) should not overlap text")
                 UserDefaults.standard.set(fullWidth, forKey: TranscriptDrawer.fullWidthTranscriptKey)
                 await settleDisplayCycle(window)
+                XCTAssertEqual(overlappingText(), [], "Toggling full-width back (to \(fullWidth)) should not overlap text")
+
+                // `/new` and `/resume` put another conversation in the same drawer. Every turn of a
+                // newer conversation starts after the turn the reader was pinned to in the old one,
+                // so all of them used to render at once.
+                harness.copilotSessionId = "conversation-2"
+                harness.turns = (2_000..<2_080).map { makeShortTurn(index: $0, variant: 7) }
+                await settleTranscript(window)
+                let renderedInNewConversation = renderedTurnCount()
+                XCTAssertLessThan(renderedInNewConversation, 40, "A new conversation should render only its newest turns")
+                XCTAssertTrue(
+                    findVisibleTextViews(in: doc, visibleRect: sv.documentVisibleRect)
+                        .contains { $0.string.contains("Short reply 2079") },
+                    "A new conversation should open at the bottom"
+                )
+
+                // Short turns leave the next page less than a viewport above the bottom. Scrolling
+                // up through it in wheel-sized steps moves the text by each step and nothing else.
+                for step in 1...60 {
+                    before = textTops()
+                    scroll(sv, toY: sv.documentVisibleRect.origin.y - 20, in: window)
+                    await settleDisplayCycle(window)
+                    assertTextMoved(20, from: before, "Scrolling up from the bottom of short turns (step \(step))")
+                }
+                XCTAssertGreaterThan(
+                    renderedTurnCount(),
+                    renderedInNewConversation,
+                    "Scrolling up from the bottom of short turns should page in earlier turns"
+                )
+
+                // Going to another conversation and back starts from the newest turns again, not
+                // from where the reader had paged to before.
+                let conversation2 = harness.turns
+                harness.copilotSessionId = "conversation-3"
+                harness.turns = (3_000..<3_003).map { makeShortTurn(index: $0, variant: 8) }
+                await settleTranscript(window)
+                harness.copilotSessionId = "conversation-2"
+                harness.turns = conversation2
+                await settleTranscript(window)
+                XCTAssertLessThanOrEqual(
+                    renderedTurnCount(),
+                    renderedInNewConversation,
+                    "Returning to a conversation should render only its newest turns"
+                )
             }
         }
     }
