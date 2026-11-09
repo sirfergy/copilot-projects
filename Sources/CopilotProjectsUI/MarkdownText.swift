@@ -1131,7 +1131,7 @@ public struct MarkdownText: View, Equatable {
         }
     }
 
-    public static func copyToPasteboard(_ string: String) {
+    fileprivate static func copyToPasteboard(_ string: String) {
         #if canImport(UIKit) && !os(watchOS)
         UIPasteboard.general.string = string
         #elseif canImport(AppKit)
