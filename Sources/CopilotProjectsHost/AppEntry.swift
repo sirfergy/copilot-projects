@@ -224,7 +224,7 @@ private struct WorkspaceCommands: Commands {
                 // Parking is opt-in. Resume stays while a parked session exists,
                 // so turning the setting off never strands one.
                 if parkIdleSessions != SessionParking.off {
-                    Button("Park Session") { _ = model.globalSelectedSessionId.map(model.requestParkSession) }
+                    Button("Park Session") { _ = model.globalSelectedSession.map(model.requestParkSession) }
                         .disabled(menu.snapshot.selectedSessionParked != nil)
                     Button("Park All Idle Sessions…") { model.parkAllIdleSessions() }
                 }

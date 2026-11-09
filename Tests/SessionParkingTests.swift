@@ -13,7 +13,7 @@ final class SessionParkingTests: XCTestCase {
         var stops: [[String]] = []
         var started: [String] = []
         var masterChecks = 0
-        /// What each alert the model raised said.
+        /// The title of each alert the model raised.
         var alerts: [String] = []
     }
 
@@ -61,7 +61,7 @@ final class SessionParkingTests: XCTestCase {
                 remoteSessionBackendAvailable: { true },
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
                 alertPresenter: {
-                    processes.alerts.append($0.informativeText)
+                    processes.alerts.append($0.messageText)
                     return .alertFirstButtonReturn
                 },
                 defaults: defaults
@@ -414,8 +414,8 @@ final class SessionParkingTests: XCTestCase {
 
         // The parkable session is on screen and the other row is clicked.
         f.model.show(projectId: project, sessionId: f.id)
-        await f.model.requestParkSession(other.id).value
-        XCTAssertEqual(f.processes.alerts.count, 1, "the refusal is shown")
+        await f.model.requestParkSession(other).value
+        XCTAssertEqual(f.processes.alerts, ["Couldn't Park \"Other\""], "the refusal names the row clicked")
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.question.path), "the session on screen was not asked")
         XCTAssertEqual(f.processes.stops, [])
         XCTAssertTrue(f.processes.alive)
@@ -424,7 +424,7 @@ final class SessionParkingTests: XCTestCase {
 
         // The other session is on screen and the parkable row is clicked.
         f.model.show(projectId: project, sessionId: other.id)
-        let park = f.model.requestParkSession(f.id)
+        let park = f.model.requestParkSession(f.session)
         try await f.answerParkCheck(.applied)
         await park.value
         XCTAssertEqual(f.processes.stops, [[f.id]])
@@ -458,14 +458,18 @@ final class SessionParkingTests: XCTestCase {
         XCTAssertEqual(f.processes.stops, [[f.id]])
         var sessions = f.model.remoteWorkspaceSnapshot().projects[0].sessions
         XCTAssertEqual(sessions.map(\.parked?.state), ["parked", nil])
-        XCTAssertEqual(sessions.map(\.parkable), [nil, true])
+        XCTAssertEqual(try sessions.map(parkableOnTheWire), [nil, true])
 
         // With the setting off, no session offers it.
         f.defaults.set(SessionParking.off, forKey: SessionParking.settingKey)
         sessions = f.model.remoteWorkspaceSnapshot().projects[0].sessions
-        XCTAssertEqual(sessions.map(\.parkable), [nil, nil])
-        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(sessions[1])) as? [String: Any]
-        XCTAssertNil(json?["parkable"])
+        XCTAssertEqual(try sessions.map(parkableOnTheWire), [nil, nil])
+    }
+
+    /// `parkable` as a client reads it from the encoded snapshot.
+    private func parkableOnTheWire(_ session: RemoteSessionSnapshot) throws -> Bool? {
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(session)) as? [String: Any]
+        return json?["parkable"] as? Bool
     }
 
     func testTheWireSnapshotCarriesNoParkedStateUntilASessionIsParked() throws {

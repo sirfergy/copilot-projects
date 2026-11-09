@@ -1285,7 +1285,7 @@ private struct SessionList: View {
                             Divider()
                             // The Session menu's item, for this row rather than the selected one.
                             if parkIdleSessions != SessionParking.off {
-                                Button("Park Session") { model.requestParkSession(session.id) }
+                                Button("Park Session") { model.requestParkSession(session) }
                                     .disabled(session.parked != nil)
                             }
                             Button("End Session", role: .destructive) {
