@@ -39,7 +39,7 @@ struct StatusShadow {
         var live: Bool?
         var footer: String?
         /// Today's reading of the tracker on a poll that read the footer: `unknown`
-        /// when ownership holds it back, `none` when there is none.
+        /// when prompt state or ownership holds it back, `none` when there is none.
         var gate: String?
 
         // What decided `tracker`.
