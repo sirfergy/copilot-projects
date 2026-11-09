@@ -12,7 +12,6 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
         requestId: String? = "request",
         sequence: Int64 = 1,
         data: String? = "hello",
-        conversationEpoch: String? = nil,
         epoch: String? = nil
     ) -> RemoteClientMessage {
         RemoteClientMessage(
@@ -21,7 +20,6 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
             sessionId: sessionId,
             requestId: requestId,
             data: data,
-            conversationEpoch: conversationEpoch,
             delivery: RemoteControlDelivery(epoch: epoch ?? ledger.epoch, sequence: sequence)
         )
     }
@@ -91,16 +89,14 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
     }
 
     @MainActor
-    func testSameSequenceBindsRequestKindPayloadAndOptionalConversationEpoch() {
+    func testSameSequenceBindsRequestKindAndPayload() {
         let ledger = RemoteControlDeliveryLedger()
-        let original = message(ledger, conversationEpoch: "conversation")
+        let original = message(ledger)
         XCTAssertEqual(ledger.perform(original, sessionExists: true) { .sent }, .sent)
         let conflicts = [
-            message(ledger, requestId: "different", conversationEpoch: "conversation"),
-            message(ledger, kind: "command", conversationEpoch: "conversation"),
-            message(ledger, data: "different", conversationEpoch: "conversation"),
-            message(ledger, conversationEpoch: "different"),
-            message(ledger),
+            message(ledger, requestId: "different"),
+            message(ledger, kind: "command"),
+            message(ledger, data: "different"),
         ]
         for conflict in conflicts {
             XCTAssertEqual(ledger.perform(conflict, sessionExists: true) {
@@ -112,16 +108,13 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
     }
 
     @MainActor
-    func testFingerprintFramesFieldsAndDistinguishesAbsentEpoch() {
+    func testFingerprintFramesFields() {
         let ledger = RemoteControlDeliveryLedger()
         XCTAssertEqual(ledger.perform(
             message(ledger, requestId: "ab", data: "c"), sessionExists: true
         ) { .sent }, .sent)
         XCTAssertEqual(ledger.perform(
             message(ledger, requestId: "a", data: "bc"), sessionExists: true
-        ) { .sent }, .fingerprintConflict)
-        XCTAssertEqual(ledger.perform(
-            message(ledger, requestId: "ab", data: "c", conversationEpoch: ""), sessionExists: true
         ) { .sent }, .fingerprintConflict)
     }
 

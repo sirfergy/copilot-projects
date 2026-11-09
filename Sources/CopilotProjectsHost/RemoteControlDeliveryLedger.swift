@@ -90,12 +90,7 @@ final class RemoteControlDeliveryLedger {
         guard sessionExists else { return .missing }
 
         let scope = Scope(clientId: clientId, sessionId: sessionId)
-        let fingerprint = Self.fingerprint(
-            requestId: requestId,
-            kind: kind,
-            payload: payload,
-            conversationEpoch: message.conversationEpoch
-        )
+        let fingerprint = Self.fingerprint(requestId: requestId, kind: kind, payload: payload)
         if let previous = accepted[scope] {
             if delivery.sequence < previous.sequence { return .superseded }
             if delivery.sequence == previous.sequence {
@@ -120,16 +115,10 @@ final class RemoteControlDeliveryLedger {
     private static func fingerprint(
         requestId: String,
         kind: RemoteControlKind,
-        payload: String,
-        conversationEpoch: String?
+        payload: String
     ) -> SHA256.Digest {
         var hash = SHA256()
-        for field in [requestId, kind.rawValue, payload, conversationEpoch] {
-            guard let field else {
-                hash.update(data: Data([0]))
-                continue
-            }
-            hash.update(data: Data([1]))
+        for field in [requestId, kind.rawValue, payload] {
             let bytes = Data(field.utf8)
             var length = UInt64(bytes.count).bigEndian
             withUnsafeBytes(of: &length) { hash.update(data: Data($0)) }

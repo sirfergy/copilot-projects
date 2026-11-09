@@ -1513,14 +1513,7 @@ if (validSessionId && socketPath) {
     }
 
     function parseOperationMetadata(response, expectedKind) {
-        const fields = [
-            response.operationId,
-            response.conversationEpoch,
-            response.kind,
-            response.payloadFingerprint,
-        ];
-        if (fields.some((value) => value === undefined)
-                || !validOperationToken(response.operationId, 128)
+        if (!validOperationToken(response.operationId, 128)
                 || !validOperationToken(response.conversationEpoch, 512)
                 || !OPERATION_KINDS.has(response.kind)
                 || !/^[0-9a-f]{64}$/.test(response.payloadFingerprint)) {
