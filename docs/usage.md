@@ -751,7 +751,7 @@ completion evidence after the wait, with no other input pending. Suppressed perm
 notifications use the same sender-scoped completion check before restoring status.
 Terminal footer checks still protect modal UI,
 including when a draft or autopilot changes the visible shortcut hints; unknown and modal
-footers do not become permission to inject text.
+footers do not make a session promptable.
 
 Confirmed input-wait resolution is persisted at the existing ordering clocks before runtime
 reconciliation clears the live wait. Notification debounce controls banner timing, not whether a

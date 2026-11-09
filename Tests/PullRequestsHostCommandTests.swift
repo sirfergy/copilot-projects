@@ -704,14 +704,28 @@ final class PullRequestsHostCommandTests: XCTestCase {
             )
             try JSONEncoder().encode(snapshot).write(to: snapshotURL)
             XCTAssertEqual(send(UUID().uuidString).code, "busy")
+
+            // A live tracker that offers no native send used to get the prompt pasted into
+            // its terminal. It is refused now, and the request id stays free to send later.
+            let nativeReqId = UUID().uuidString
+            let handoffURL = host.root.appendingPathComponent("a1.session-send.json")
+            snapshot.workflow = RemoteSessionWorkflow(
+                observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+                capabilities: [], sendReady: true
+            )
+            try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+            XCTAssertEqual(
+                send(nativeReqId, project: nil, session: "a1", prompt: "Queue via SDK").code,
+                "unavailable"
+            )
+            XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL.path))
+
             snapshot.workflow = readyWorkflow
             try JSONEncoder().encode(snapshot).write(to: snapshotURL)
-            let nativeReqId = UUID().uuidString
             let queued = send(nativeReqId, project: nil, session: "a1", prompt: "Queue via SDK")
             XCTAssertTrue(queued.ok, queued.error ?? "")
             XCTAssertEqual(queued.code, "queued")
             XCTAssertEqual(queued.text, "a1")
-            let handoffURL = host.root.appendingPathComponent("a1.session-send.json")
             XCTAssertTrue(FileManager.default.fileExists(atPath: handoffURL.path))
             let replayQueued = send(nativeReqId, project: nil, session: "a1", prompt: "Queue via SDK")
             XCTAssertTrue(replayQueued.ok)

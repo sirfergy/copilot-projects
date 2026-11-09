@@ -2951,7 +2951,7 @@ extension AppModel {
             }
         }
         return .failure(
-            "Copilot isn’t ready for a prompt in that session. Check that it is running in the terminal.",
+            "That session can’t take a prompt from here right now. Check that Copilot is running in its terminal, or type the prompt there.",
             code: "unavailable"
         )
     }
