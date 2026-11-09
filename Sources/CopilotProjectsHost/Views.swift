@@ -194,6 +194,9 @@ private struct WorkspaceHeading: View {
                     isOpen: model.isTranscriptDrawerOpen(sessionId: sessionId),
                     workflow: model.sessionWorkflow(sessionId: sessionId),
                     workflowProvider: { model.sessionWorkflow(sessionId: sessionId) },
+                    modelInfo: model.sessionModelInfo(sessionId: sessionId),
+                    availableModels: model.sessionAvailableModels(sessionId: sessionId),
+                    operation: operation,
                     receipts: operation.receipts ?? [],
                     conversationEpoch: operation.conversationEpoch,
                     hasPendingQuestions: !model.sessionPendingUserInputs(sessionId: sessionId).isEmpty
@@ -208,6 +211,13 @@ private struct WorkspaceHeading: View {
                         await model.performLocalSessionAction(
                             sessionId: sessionId,
                             action: action,
+                            expectedConversationEpoch: operation.conversationEpoch
+                        )
+                    },
+                    onSwitchModel: { selection in
+                        await model.performLocalModelSwitch(
+                            sessionId: sessionId,
+                            selection: selection,
                             expectedConversationEpoch: operation.conversationEpoch
                         )
                     }
