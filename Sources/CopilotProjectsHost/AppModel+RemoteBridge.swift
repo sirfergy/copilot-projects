@@ -712,6 +712,7 @@ extension AppModel {
         let resolvedHostHealth = hostHealthProvider?() ?? hostHealth
         let closedItems = recentlyClosedSessionItems
         let providedSessionMemory = sessionMemoryProvider?()
+        let parkingEnabled = self.parkingEnabled
         return RemoteWorkspaceSnapshot(
             projects: projects.map { project in
                 let effectiveParents = project.effectiveParentSessionIdsBySessionId()
@@ -813,7 +814,9 @@ extension AppModel {
                                 RemoteParkedSession(
                                     state: $0.state.rawValue, sinceMilliseconds: $0.sinceMilliseconds
                                 )
-                            }
+                            },
+                            // Offered wherever the Mac's own Park Session is enabled.
+                            parkable: parkingEnabled && session.parked == nil ? true : nil
                         )
                     }
                 )

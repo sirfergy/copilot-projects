@@ -380,7 +380,8 @@ seconds.
 
 Parking is off by default. Turn it on with **Copilot Projects ▸ Park Idle Sessions ▸
 Only When I Choose**. The Session menu then has **Park Session**, **Park All Idle
-Sessions…**, and **Resume Session**.
+Sessions…**, and **Resume Session**, and right-clicking any session offers **Park
+Session** for that session.
 
 A session is parked only after Copilot confirms it is idle. Sessions that are working,
 waiting for you, scheduled, running background work, unread, or open in the web or iOS

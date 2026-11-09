@@ -1148,6 +1148,10 @@ final class AppModel: ObservableObject {
         return projects[pi].selectedSessionId ?? projects[pi].sessions.first?.id
     }
 
+    var globalSelectedSession: Session? {
+        globalSelectedSessionId.flatMap(locateIndex).map { projects[$0.p].sessions[$0.s] }
+    }
+
     var activeTranscriptController: TranscriptController? {
         guard let sessionId = globalSelectedSessionId else { return nil }
         guard selectedTranscriptController?.sessionId == sessionId else { return nil }

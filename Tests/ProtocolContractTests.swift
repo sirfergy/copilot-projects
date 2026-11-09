@@ -378,6 +378,17 @@ final class ProtocolContractTests: XCTestCase {
         }
     }
 
+    func testParkSessionContractIsNotAdvertisedByTheHostProtocol() throws {
+        // Web and iOS mirror these strings.
+        XCTAssertEqual(RemoteSessionParkContract.capability, "park-session-v1")
+        XCTAssertEqual(RemoteSessionParkContract.controlType, "park-session")
+        // Only a gateway that routes the control advertises it.
+        XCTAssertFalse(RemoteProtocolInfo.current.supports(RemoteSessionParkContract.capability))
+        for fixture in ["served-workspace", "legacy-workspace"] {
+            XCTAssertNil(try workspace(fixture).projects.first?.sessions.first?.parkable, fixture)
+        }
+    }
+
     func testUnreadMarkerIsOptionalOnTheSnapshotAndTheMarkReadControl() throws {
         let read = RemoteSessionSnapshot(
             id: "s", title: "t", status: "idle", statusText: nil,

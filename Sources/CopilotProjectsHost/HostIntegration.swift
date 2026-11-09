@@ -78,6 +78,13 @@ public protocol SessionHost: AnyObject, Sendable {
     var supportsMarkUnread: Bool { get }
     func markUnread(sessionId: String)
     func closeSession(sessionId: String) -> RemoteSessionCloseResult
+    /// Whether `parkSession` is implemented. A gateway routes
+    /// `RemoteSessionParkContract.controlType` and advertises its capability only when true.
+    var supportsSessionParking: Bool { get }
+    /// Parks one session as the Mac's own Park Session does, with the same
+    /// rules. Returns `.refused` when the session was left running, or `.parked`
+    /// once Copilot has exited or 20 seconds after it was told to stop.
+    func parkSession(sessionId: String) async -> RemoteSessionParkResult
     var supportsReopenClosedSession: Bool { get }
     func reopenClosedSession(id: String?) -> RemoteReopenSessionResult
     func moveSession(sessionId: String, toProjectId: String) -> RemoteSessionMoveResult
@@ -129,6 +136,12 @@ public extension SessionHost {
     var supportsMarkUnread: Bool { false }
 
     func markUnread(sessionId: String) {}
+
+    var supportsSessionParking: Bool { false }
+
+    func parkSession(sessionId: String) async -> RemoteSessionParkResult {
+        .refused("Parking is not available on this Mac.")
+    }
 
     /// Conformers without markers apply every receipt, as before markers existed.
     func markRead(sessionId: String, unreadMarker: String?) {

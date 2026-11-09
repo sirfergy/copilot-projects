@@ -158,6 +158,13 @@ final class RemoteModelBridge: SessionHost {
         model?.closeRemoteSession(sessionId: sessionId) ?? .failed
     }
 
+    var supportsSessionParking: Bool { model != nil }
+
+    func parkSession(sessionId: String) async -> RemoteSessionParkResult {
+        guard let model else { return .refused("Copilot Projects is closing.") }
+        return await model.parkSession(sessionId).map(RemoteSessionParkResult.refused) ?? .parked
+    }
+
     var supportsReopenClosedSession: Bool { model != nil }
 
     func reopenClosedSession(id: String?) -> RemoteReopenSessionResult {

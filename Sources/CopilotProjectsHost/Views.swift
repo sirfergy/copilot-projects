@@ -1181,6 +1181,7 @@ private struct SessionList: View {
     let project: Project
     let showTabNumbers: Bool
     let expandedParentIds: Set<String>
+    @AppStorage(SessionParking.settingKey) private var parkIdleSessions = SessionParking.off
     @State private var draggedSession: Session?
     @State private var dropTarget: SessionDropTarget?
 
@@ -1282,6 +1283,11 @@ private struct SessionList: View {
                                 Button("Mark as Unread") { model.markSessionUnread(sessionId: session.id) }
                             }
                             Divider()
+                            // The Session menu's item, for this row rather than the selected one.
+                            if parkIdleSessions != SessionParking.off {
+                                Button("Park Session") { model.requestParkSession(session) }
+                                    .disabled(session.parked != nil)
+                            }
                             Button("End Session", role: .destructive) {
                                 model.requestCloseSession(projectId: project.id, sessionId: session.id)
                             }
