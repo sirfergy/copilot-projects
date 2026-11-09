@@ -68,10 +68,10 @@ enum CLISubmittedOperationOutcome: Equatable {
 
 struct CLIOperationHandoffMetadata {
     let copilotSessionId: String
-    let operationId: String?
-    let conversationEpoch: String?
-    let kind: String?
-    let payloadFingerprint: String?
+    let operationId: String
+    let conversationEpoch: String
+    let kind: String
+    let payloadFingerprint: String
 }
 
 struct CLIOperationAdapter {
@@ -128,18 +128,6 @@ struct CLIOperationAdapter {
     let activityDirectory: URL
     let resumeMarkerDirectory: URL
 
-    func bounceBlocksAutomaticPrompts(
-        sessionId: String,
-        cachedSnapshot: AgentActivitySnapshot?,
-        now: () -> Date
-    ) -> Bool {
-        // The tracker publishes the snapshot fence before removing the handoff.
-        cachedSnapshot?.workflow?.bounceRequested == true
-            || FileManager.default.fileExists(atPath: activityDirectory
-                .appendingPathComponent("\(sessionId).session-bounce.json").path)
-            || loadFreshSnapshot(sessionId: sessionId, now: now)?.workflow?.bounceRequested == true
-    }
-
     /// The snapshot if it is fresh when read. `now` is consulted only after the
     /// read, so a snapshot published after the caller first took the time
     /// isn't judged future-dated.
@@ -181,6 +169,8 @@ struct CLIOperationAdapter {
         validate: (AgentActivitySnapshot) -> Bool,
         makeHandoff: (CLIOperationHandoffMetadata) -> Handoff
     ) -> RemoteUserInputResult {
+        // Every handoff carries an operation identity so the tracker can publish its receipt.
+        guard let operation else { return .invalid }
         let bound: BoundSnapshot
         switch loadBoundSnapshot(
             sessionId: sessionId,
@@ -195,28 +185,19 @@ struct CLIOperationAdapter {
             return .conflict
         }
 
-        let fingerprint: String?
-        if operation != nil {
-            guard let value = Self.payloadFingerprint(
-                kind: kind,
-                payload: fingerprintPayload
-            ) else {
-                return .invalid
-            }
-            fingerprint = value
-        } else {
-            fingerprint = nil
+        guard let fingerprint = Self.payloadFingerprint(
+            kind: kind,
+            payload: fingerprintPayload
+        ) else {
+            return .invalid
         }
-
-        if let operation, let fingerprint {
-            if let replay = replayResult(
-                snapshot: bound.snapshot,
-                operation: operation,
-                kind: kind,
-                payloadFingerprint: fingerprint
-            ) {
-                return replay
-            }
+        if let replay = replayResult(
+            snapshot: bound.snapshot,
+            operation: operation,
+            kind: kind,
+            payloadFingerprint: fingerprint
+        ) {
+            return replay
         }
 
         let handoffURL = SessionArtifacts.cliOperationHandoffURL(
@@ -224,27 +205,23 @@ struct CLIOperationAdapter {
             suffix: handoffSuffix,
             sessionsDirectory: activityDirectory
         )
-        if let operation, let fingerprint {
-            if let existing = existingHandoffResult(
-                sessionId: sessionId,
-                targetURL: handoffURL,
-                operation: operation,
-                kind: kind,
-                payloadFingerprint: fingerprint
-            ) {
-                return existing
-            }
-        } else if FileManager.default.fileExists(atPath: handoffURL.path) {
-            return .conflict
+        if let existing = existingHandoffResult(
+            sessionId: sessionId,
+            targetURL: handoffURL,
+            operation: operation,
+            kind: kind,
+            payloadFingerprint: fingerprint
+        ) {
+            return existing
         }
 
         guard validate(bound.snapshot) else { return .invalid }
 
         let metadata = CLIOperationHandoffMetadata(
             copilotSessionId: bound.copilotSessionId,
-            operationId: operation?.operationId,
-            conversationEpoch: operation?.conversationEpoch,
-            kind: operation == nil ? nil : kind.rawValue,
+            operationId: operation.operationId,
+            conversationEpoch: operation.conversationEpoch,
+            kind: kind.rawValue,
             payloadFingerprint: fingerprint
         )
         guard let encoded = try? JSONEncoder().encode(makeHandoff(metadata)) else {
@@ -383,7 +360,7 @@ struct CLIOperationAdapter {
 
     private func loadBoundSnapshot(
         sessionId: String,
-        operation: CLIOperationRequest?,
+        operation: CLIOperationRequest,
         now: () -> Date
     ) -> BoundSnapshotResult {
         guard let loaded = loadFresh(sessionId: sessionId, now: now) else {
@@ -392,7 +369,7 @@ struct CLIOperationAdapter {
         return bind(
             loaded.snapshot,
             sessionId: sessionId,
-            correlatedEpoch: operation?.conversationEpoch,
+            correlatedEpoch: operation.conversationEpoch,
             now: loaded.readAt
         )
     }

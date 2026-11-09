@@ -260,7 +260,7 @@ final class RemoteOperationContractTests: XCTestCase {
     }
 
     @MainActor
-    func testAllSDKOperationsKeepLegacyHandoffsAndAddCorrelatedMetadata() throws {
+    func testSDKOperationsRefuseAMissingIdentityAndWriteCorrelatedMetadata() throws {
         let harness = try makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.root) }
         let now = Date()
@@ -324,20 +324,12 @@ final class RemoteOperationContractTests: XCTestCase {
             suffix: String,
             operationId: String,
             kind: CLISDKOperationKind,
-            legacy: @MainActor () -> RemoteUserInputResult,
-            correlated: @MainActor (CLIOperationRequest) -> RemoteUserInputResult
+            submit: @MainActor (CLIOperationRequest?) -> RemoteUserInputResult
         )] = [
             (
                 "user-input-response.json",
                 "operation-user",
                 .answerUserInput,
-                {
-                    harness.model.answerUserInput(
-                        sessionId: harness.session.id,
-                        answer: userAnswer,
-                        now: now
-                    )
-                },
                 { operation in
                     harness.model.answerUserInput(
                         sessionId: harness.session.id,
@@ -351,13 +343,6 @@ final class RemoteOperationContractTests: XCTestCase {
                 "elicitation-response.json",
                 "operation-elicitation",
                 .answerElicitation,
-                {
-                    harness.model.answerElicitation(
-                        sessionId: harness.session.id,
-                        answer: elicitationAnswer,
-                        now: now
-                    )
-                },
                 { operation in
                     harness.model.answerElicitation(
                         sessionId: harness.session.id,
@@ -371,13 +356,6 @@ final class RemoteOperationContractTests: XCTestCase {
                 "set-model-request.json",
                 "operation-model",
                 .setModel,
-                {
-                    harness.model.setModel(
-                        sessionId: harness.session.id,
-                        selection: modelSelection,
-                        now: now
-                    )
-                },
                 { operation in
                     harness.model.setModel(
                         sessionId: harness.session.id,
@@ -390,23 +368,18 @@ final class RemoteOperationContractTests: XCTestCase {
         ]
 
         for operationCase in cases {
-            XCTAssertEqual(operationCase.legacy(), .accepted)
-            let legacy = try handoff(suffix: operationCase.suffix, in: harness)
-            XCTAssertNil(legacy["operationId"])
-            XCTAssertNil(legacy["conversationEpoch"])
-            XCTAssertNil(legacy["kind"])
-            XCTAssertNil(legacy["payloadFingerprint"])
-            try FileManager.default.removeItem(
-                at: harness.sessions.appendingPathComponent(
-                    "\(harness.session.id).\(operationCase.suffix)"
-                )
-            )
+            let handoffPath = harness.sessions.appendingPathComponent(
+                "\(harness.session.id).\(operationCase.suffix)"
+            ).path
+            // Without an operation identity the tracker could not publish a receipt.
+            XCTAssertEqual(operationCase.submit(nil), .invalid)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: handoffPath))
 
             let operation = CLIOperationRequest(
                 operationId: operationCase.operationId,
                 conversationEpoch: "epoch-1"
             )
-            XCTAssertEqual(operationCase.correlated(operation), .accepted)
+            XCTAssertEqual(operationCase.submit(operation), .accepted)
             let correlated = try handoff(suffix: operationCase.suffix, in: harness)
             XCTAssertEqual(correlated["operationId"] as? String, operation.operationId)
             XCTAssertEqual(correlated["conversationEpoch"] as? String, "epoch-1")
@@ -415,11 +388,7 @@ final class RemoteOperationContractTests: XCTestCase {
                 operationCase.kind.rawValue
             )
             XCTAssertEqual((correlated["payloadFingerprint"] as? String)?.count, 64)
-            try FileManager.default.removeItem(
-                at: harness.sessions.appendingPathComponent(
-                    "\(harness.session.id).\(operationCase.suffix)"
-                )
-            )
+            try FileManager.default.removeItem(atPath: handoffPath)
         }
     }
 
@@ -509,14 +478,6 @@ final class RemoteOperationContractTests: XCTestCase {
                 sessionId: harness.session.id,
                 answer: answer,
                 operation: operation,
-                now: now
-            ),
-            .invalid
-        )
-        XCTAssertEqual(
-            harness.model.answerUserInput(
-                sessionId: harness.session.id,
-                answer: answer,
                 now: now
             ),
             .invalid
@@ -684,6 +645,7 @@ final class RemoteOperationContractTests: XCTestCase {
             harness.model.answerElicitation(
                 sessionId: sessionId,
                 answer: answer,
+                operation: nil,
                 now: now
             ),
             .accepted

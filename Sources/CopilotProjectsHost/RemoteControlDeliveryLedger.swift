@@ -3,17 +3,9 @@ import CryptoKit
 import CopilotProjectsProtocol
 
 public enum RemoteControlKind: String, CaseIterable, Sendable {
-    case prompt
     case input
     case key
     case command
-
-    enum Lane: Hashable {
-        case prompt
-        case terminal
-    }
-
-    var lane: Lane { self == .prompt ? .prompt : .terminal }
 }
 
 public enum RemoteControlResult: Equatable, Sendable {
@@ -22,7 +14,6 @@ public enum RemoteControlResult: Equatable, Sendable {
     case invalid
     case busy
     case forbidden
-    case noLiveCopilot
     case epochMismatch
     case superseded
     case fingerprintConflict
@@ -45,19 +36,9 @@ public enum RemoteControlResult: Equatable, Sendable {
         case .invalid: self = .invalid
         }
     }
-
-    public init(_ result: RemotePromptResult) {
-        switch result {
-        case .sent: self = .sent
-        case .forbidden: self = .forbidden
-        case .invalid: self = .invalid
-        case .busy: self = .busy
-        case .noLiveCopilot: self = .noLiveCopilot
-        }
-    }
 }
 
-/// Keeps one accepted watermark per client/session/lane for this host lifetime.
+/// Keeps one accepted watermark per client and session for this host lifetime.
 /// A restart changes the epoch rather than risking replay after losing memory.
 /// Live watermarks are never evicted: capacity exhaustion rejects new scopes.
 @MainActor
@@ -67,7 +48,6 @@ final class RemoteControlDeliveryLedger {
     private struct Scope: Hashable {
         let clientId: String
         let sessionId: String
-        let lane: RemoteControlKind.Lane
     }
 
     private struct Accepted {
@@ -109,7 +89,7 @@ final class RemoteControlDeliveryLedger {
         }
         guard sessionExists else { return .missing }
 
-        let scope = Scope(clientId: clientId, sessionId: sessionId, lane: kind.lane)
+        let scope = Scope(clientId: clientId, sessionId: sessionId)
         let fingerprint = Self.fingerprint(
             requestId: requestId,
             kind: kind,

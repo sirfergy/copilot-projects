@@ -968,7 +968,6 @@ private final class MinimalSessionHost: SessionHost {
     func markRead(sessionId: String) {}
     func closeSession(sessionId: String) -> RemoteSessionCloseResult { .failed }
     func moveSession(sessionId: String, toProjectId: String) -> RemoteSessionMoveResult { .missing }
-    func sendPrompt(sessionId: String, value: String) -> RemotePromptResult { .invalid }
     func answerUserInput(
         sessionId: String, answer: RemoteUserInputAnswer, operation: CLIOperationRequest?
     ) -> RemoteUserInputResult { .invalid }

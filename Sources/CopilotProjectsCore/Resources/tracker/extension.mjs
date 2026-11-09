@@ -1519,9 +1519,6 @@ if (validSessionId && socketPath) {
             response.kind,
             response.payloadFingerprint,
         ];
-        if (fields.every((value) => value === undefined)) {
-            return { mode: "legacy" };
-        }
         if (fields.some((value) => value === undefined)
                 || !validOperationToken(response.operationId, 128)
                 || !validOperationToken(response.conversationEpoch, 512)
@@ -2172,11 +2169,6 @@ if (validSessionId && socketPath) {
                 (model) => model.id === currentModel?.name
             )?.imageAttachments ?? null : null,
             ...(activePendingMessages.length > 0 ? { pendingMessages: activePendingMessages } : {}),
-            legacyPromptFallback: !bounceRequested && (workflowRuntime === false || runtimeActivityUnsupported
-                || runtimeMetadataError === "remote"
-                || runtimeActivity?.error === "remote"
-                || observation?.legacyPromptFallback === true
-                || unavailableWorkflowActions.has("session-send")),
             totalAiCredits: observation?.totalAiCredits ?? null,
             contextTokens: workflowContext?.currentTokens ?? null,
             contextTokenLimit: workflowContext?.tokenLimit ?? null,
@@ -2237,7 +2229,6 @@ if (validSessionId && socketPath) {
                         && (outcome.status === "remote" || outcome.status === "invalid")) {
                         workflowObservation = {
                             observedAtMilliseconds, capabilities: [], limitsKnown: false,
-                            legacyPromptFallback: outcome.status === "remote",
                             error: "Native workflows require a supported local Copilot runtime",
                         };
                         publish();
@@ -2250,7 +2241,6 @@ if (validSessionId && socketPath) {
                     } else if (workflowMetadataSettled && error?.code === -32601 && !runtimeActivityUnsupported) {
                         workflowObservation = {
                             observedAtMilliseconds, capabilities: [], limitsKnown: false,
-                            legacyPromptFallback: true,
                             error: "Native workflows require a supported local Copilot runtime",
                         };
                         publish();
@@ -2285,7 +2275,7 @@ if (validSessionId && socketPath) {
                 throw new Error("unsupported-session");
             }
             if (metadata.isRemote) {
-                throw Object.assign(new Error("remote-session"), { legacyPromptFallback: true });
+                throw new Error("remote-session");
             }
             const limitsKnown = Object.hasOwn(metadata, "sessionLimits")
                 && (metadata.sessionLimits === null
@@ -2346,7 +2336,7 @@ if (validSessionId && socketPath) {
             if (!operationAuthorityCurrent(context)) return;
             const unsupported = error?.message === "unsupported-runtime"
                 || error?.message === "unsupported-session"
-                || error?.legacyPromptFallback === true
+                || error?.message === "remote-session"
                 || error?.code === -32601;
             if (!unsupported) {
                 workflowRefreshAt = 0;
@@ -2354,13 +2344,12 @@ if (validSessionId && socketPath) {
                 if (isTerminalDisconnect(error)) publish(error);
                 return;
             }
-            if ((error?.message === "unsupported-session" || error?.legacyPromptFallback === true)
+            if ((error?.message === "unsupported-session" || error?.message === "remote-session")
                 && runtimeMetadataError === null && error?.code !== -32601) {
                 return;
             }
             workflowObservation = {
                 observedAtMilliseconds, capabilities: [], limitsKnown: false,
-                legacyPromptFallback: error?.legacyPromptFallback === true || error?.code === -32601,
                 error: "Native workflows require a supported local Copilot runtime",
             };
             console.error("[copilot-projects] workflow metadata query failed:", error);
@@ -2738,7 +2727,7 @@ if (validSessionId && socketPath) {
             }
         }
         // Publish the mutation fence atomically with acceptance, before the
-        // command can run or another host path can fall back to the terminal.
+        // command can run.
         if (kind === "session-bounce") bounceRequested = true;
         if (!publishAcceptedReceipt(context)) {
             if (kind === "session-bounce") bounceRequested = false;
@@ -2978,10 +2967,10 @@ if (validSessionId && socketPath) {
         }
     }
 
-    // Answer a pending question from the host-written response file. Legacy
-    // invalid/stale responses only remove the file; correlated validation
-    // failures publish a rejected receipt. Preflight failures and indeterminate
-    // RPC outcomes retain the pending question. Explicit boolean RPC results or
+    // Answer a pending question from the host-written response file. Invalid
+    // or stale responses only remove the file; validation failures publish a
+    // rejected receipt. Preflight failures and indeterminate RPC outcomes
+    // retain the pending question. Explicit boolean RPC results or
     // completion events retire it: success:false means the ID is no longer
     // pending, while the losing answer's receipt remains rejected.
     async function processUserInputResponse() {
@@ -3058,58 +3047,34 @@ if (validSessionId && socketPath) {
                 ? pending.allowFreeform
                 : pending.choices.includes(answer));
         if (!valid) {
-            if (operation.mode === "legacy") {
-                removeCapturedHandoff(userInputResponsePath, encoded);
-            } else {
+            publishRejectedPreflight(
+                operation.context,
+                "invalid-request",
+                userInputResponsePath,
+                encoded
+            );
+            return;
+        }
+        if (!publishAcceptedReceipt(operation.context)) return;
+
+        const requestExecutionKey = `${operation.context.generation}\u0000${requestId}`;
+        const operationKey = operationExecutionKey(
+            operation.context.conversationEpoch,
+            operation.context.operationId
+        );
+        if (inFlightUserInputResponses.has(requestExecutionKey)) return;
+        inFlightUserInputResponses.add(requestExecutionKey);
+        activeOperationKeys.add(operationKey);
+        let invoked = false;
+        try {
+            if (!operationAuthorityCurrent(operation.context)
+                    || pendingUserInputs.get(requestId) !== pending) {
                 publishRejectedPreflight(
                     operation.context,
-                    "invalid-request",
+                    "target-unavailable",
                     userInputResponsePath,
                     encoded
                 );
-            }
-            return;
-        }
-        if (operation.mode === "new"
-                && !publishAcceptedReceipt(operation.context)) {
-            return;
-        }
-
-        const executionContext = operation.mode === "legacy"
-            ? {
-                generation: conversationGeneration,
-                copilotSessionId,
-                conversationEpoch,
-            }
-            : operation.context;
-        const requestExecutionKey = `${executionContext.generation}\u0000${requestId}`;
-        const operationKey = operation.mode === "legacy"
-            ? null
-            : operationExecutionKey(
-                operation.context.conversationEpoch,
-                operation.context.operationId
-            );
-        if (inFlightUserInputResponses.has(requestExecutionKey)) return;
-        inFlightUserInputResponses.add(requestExecutionKey);
-        if (operationKey) activeOperationKeys.add(operationKey);
-        let invoked = false;
-        try {
-            if (!operationAuthorityCurrent(executionContext)
-                    || pendingUserInputs.get(requestId) !== pending) {
-                if (operation.mode === "legacy") {
-                    removeCapturedHandoff(
-                        userInputResponsePath,
-                        encoded,
-                        executionContext
-                    );
-                } else {
-                    publishRejectedPreflight(
-                        operation.context,
-                        "target-unavailable",
-                        userInputResponsePath,
-                        encoded
-                    );
-                }
                 return;
             }
             invoked = true;
@@ -3117,40 +3082,29 @@ if (validSessionId && socketPath) {
                 requestId,
                 response: { answer, wasFreeform },
             });
-            if (!operationAuthorityCurrent(executionContext)) return;
+            if (!operationAuthorityCurrent(operation.context)) return;
             // False means the request is no longer pending, not that our answer succeeded.
             const resolved = typeof result?.success === "boolean";
             if (resolved) {
                 noteQuestionCompleted(requestId);
                 pendingUserInputs.delete(requestId);
             }
-            if (operation.mode === "legacy") {
-                removeCapturedHandoff(userInputResponsePath, encoded, executionContext);
-                if (resolved) publish();
-            } else {
-                const outcome = rpcReceiptOutcome(result);
-                const published = publishTerminalReceipt(
-                    operation.context,
-                    outcome.state,
-                    outcome.errorCode
-                );
-                if (published) {
-                    removeCapturedHandoff(
-                        userInputResponsePath,
-                        encoded,
-                        operation.context
-                    );
-                }
-            }
-        } catch {
-            if (!operationAuthorityCurrent(executionContext)) return;
-            if (operation.mode === "legacy") {
+            const outcome = rpcReceiptOutcome(result);
+            const published = publishTerminalReceipt(
+                operation.context,
+                outcome.state,
+                outcome.errorCode
+            );
+            if (published) {
                 removeCapturedHandoff(
                     userInputResponsePath,
                     encoded,
-                    executionContext
+                    operation.context
                 );
-            } else if (invoked) {
+            }
+        } catch {
+            if (!operationAuthorityCurrent(operation.context)) return;
+            if (invoked) {
                 const published = publishTerminalReceipt(
                     operation.context,
                     "indeterminate",
@@ -3166,7 +3120,7 @@ if (validSessionId && socketPath) {
             }
         } finally {
             inFlightUserInputResponses.delete(requestExecutionKey);
-            if (operationKey) activeOperationKeys.delete(operationKey);
+            activeOperationKeys.delete(operationKey);
         }
     }
 
@@ -3715,58 +3669,34 @@ if (validSessionId && socketPath) {
             valid = false;
         }
         if (!valid) {
-            if (operation.mode === "legacy") {
-                removeCapturedHandoff(elicitationResponsePath, encoded);
-            } else {
+            publishRejectedPreflight(
+                operation.context,
+                "invalid-request",
+                elicitationResponsePath,
+                encoded
+            );
+            return;
+        }
+        if (!publishAcceptedReceipt(operation.context)) return;
+
+        const requestExecutionKey = `${operation.context.generation}\u0000${requestId}`;
+        const operationKey = operationExecutionKey(
+            operation.context.conversationEpoch,
+            operation.context.operationId
+        );
+        if (inFlightElicitationResponses.has(requestExecutionKey)) return;
+        inFlightElicitationResponses.add(requestExecutionKey);
+        activeOperationKeys.add(operationKey);
+        let invoked = false;
+        try {
+            if (!operationAuthorityCurrent(operation.context)
+                    || pendingElicitations.get(requestId) !== pending) {
                 publishRejectedPreflight(
                     operation.context,
-                    "invalid-request",
+                    "target-unavailable",
                     elicitationResponsePath,
                     encoded
                 );
-            }
-            return;
-        }
-        if (operation.mode === "new"
-                && !publishAcceptedReceipt(operation.context)) {
-            return;
-        }
-
-        const executionContext = operation.mode === "legacy"
-            ? {
-                generation: conversationGeneration,
-                copilotSessionId,
-                conversationEpoch,
-            }
-            : operation.context;
-        const requestExecutionKey = `${executionContext.generation}\u0000${requestId}`;
-        const operationKey = operation.mode === "legacy"
-            ? null
-            : operationExecutionKey(
-                operation.context.conversationEpoch,
-                operation.context.operationId
-            );
-        if (inFlightElicitationResponses.has(requestExecutionKey)) return;
-        inFlightElicitationResponses.add(requestExecutionKey);
-        if (operationKey) activeOperationKeys.add(operationKey);
-        let invoked = false;
-        try {
-            if (!operationAuthorityCurrent(executionContext)
-                    || pendingElicitations.get(requestId) !== pending) {
-                if (operation.mode === "legacy") {
-                    removeCapturedHandoff(
-                        elicitationResponsePath,
-                        encoded,
-                        executionContext
-                    );
-                } else {
-                    publishRejectedPreflight(
-                        operation.context,
-                        "target-unavailable",
-                        elicitationResponsePath,
-                        encoded
-                    );
-                }
                 return;
             }
             invoked = true;
@@ -3774,40 +3704,29 @@ if (validSessionId && socketPath) {
                 requestId,
                 result,
             });
-            if (!operationAuthorityCurrent(executionContext)) return;
+            if (!operationAuthorityCurrent(operation.context)) return;
             // False means the request is no longer pending, not that our answer succeeded.
             const resolved = typeof rpcResult?.success === "boolean";
             if (resolved) {
                 noteQuestionCompleted(requestId);
                 pendingElicitations.delete(requestId);
             }
-            if (operation.mode === "legacy") {
-                removeCapturedHandoff(elicitationResponsePath, encoded, executionContext);
-                if (resolved) publish();
-            } else {
-                const outcome = rpcReceiptOutcome(rpcResult);
-                const published = publishTerminalReceipt(
-                    operation.context,
-                    outcome.state,
-                    outcome.errorCode
-                );
-                if (published) {
-                    removeCapturedHandoff(
-                        elicitationResponsePath,
-                        encoded,
-                        operation.context
-                    );
-                }
-            }
-        } catch {
-            if (!operationAuthorityCurrent(executionContext)) return;
-            if (operation.mode === "legacy") {
+            const outcome = rpcReceiptOutcome(rpcResult);
+            const published = publishTerminalReceipt(
+                operation.context,
+                outcome.state,
+                outcome.errorCode
+            );
+            if (published) {
                 removeCapturedHandoff(
                     elicitationResponsePath,
                     encoded,
-                    executionContext
+                    operation.context
                 );
-            } else if (invoked) {
+            }
+        } catch {
+            if (!operationAuthorityCurrent(operation.context)) return;
+            if (invoked) {
                 const published = publishTerminalReceipt(
                     operation.context,
                     "indeterminate",
@@ -3823,7 +3742,7 @@ if (validSessionId && socketPath) {
             }
         } finally {
             inFlightElicitationResponses.delete(requestExecutionKey);
-            if (operationKey) activeOperationKeys.delete(operationKey);
+            activeOperationKeys.delete(operationKey);
         }
     }
 
@@ -5811,7 +5730,7 @@ if (validSessionId && socketPath) {
         }
     }
 
-    function validatedModelSwitch(request, requireAdvertisedTarget) {
+    function validatedModelSwitch(request) {
         if (bounceRequested) return null;
         if (typeof request.modelId !== "string"
                 || request.modelId.length === 0
@@ -5825,22 +5744,20 @@ if (validSessionId && socketPath) {
                     && request.contextTier !== "long_context")) {
             return null;
         }
-        if (requireAdvertisedTarget) {
-            const target = availableModels?.find(
-                (model) => model.id === request.modelId
-            );
-            if (!target || target.disabled === true) return null;
-            if (request.reasoningEffort !== undefined
-                    && (!Array.isArray(target.supportedReasoningEfforts)
-                        || !target.supportedReasoningEfforts.includes(
-                            request.reasoningEffort
-                        ))) {
-                return null;
-            }
-            if (request.contextTier === "long_context"
-                    && target.longContextAvailable !== true) {
-                return null;
-            }
+        const target = availableModels?.find(
+            (model) => model.id === request.modelId
+        );
+        if (!target || target.disabled === true) return null;
+        if (request.reasoningEffort !== undefined
+                && (!Array.isArray(target.supportedReasoningEfforts)
+                    || !target.supportedReasoningEfforts.includes(
+                        request.reasoningEffort
+                    ))) {
+            return null;
+        }
+        if (request.contextTier === "long_context"
+                && target.longContextAvailable !== true) {
+            return null;
         }
         return {
             modelId: request.modelId,
@@ -5853,9 +5770,8 @@ if (validSessionId && socketPath) {
         };
     }
 
-    // Consume a host-written model switch request. Correlated requests publish
-    // an accepted receipt before the first RPC and a terminal receipt before
-    // refreshing the catalog; legacy requests retain their old no-receipt path.
+    // Consume a host-written model switch request: publish an accepted receipt
+    // before the first RPC and a terminal receipt before refreshing the catalog.
     async function processSetModelRequest() {
         const generation = conversationGeneration;
         if (!ownsSharedFiles()
@@ -5915,99 +5831,56 @@ if (validSessionId && socketPath) {
             }
             return;
         }
-        const params = validatedModelSwitch(
-            request,
-            operation.mode !== "legacy"
-        );
+        const params = validatedModelSwitch(request);
         if (!params) {
-            if (operation.mode === "legacy") {
-                removeCapturedHandoff(setModelRequestPath, encoded);
-            } else {
+            publishRejectedPreflight(
+                operation.context,
+                bounceRequested ? "target-unavailable" : "invalid-request",
+                setModelRequestPath,
+                encoded
+            );
+            return;
+        }
+        if (!publishAcceptedReceipt(operation.context)) return;
+
+        const operationKey = operationExecutionKey(
+            operation.context.conversationEpoch,
+            operation.context.operationId
+        );
+        setModelRequestGeneration = generation;
+        activeOperationKeys.add(operationKey);
+        let invoked = false;
+        try {
+            if (!operationAuthorityCurrent(operation.context)
+                    || !validatedModelSwitch(request)) {
                 publishRejectedPreflight(
                     operation.context,
-                    bounceRequested ? "target-unavailable" : "invalid-request",
+                    "target-unavailable",
                     setModelRequestPath,
                     encoded
                 );
-            }
-            return;
-        }
-        if (operation.mode === "new"
-                && !publishAcceptedReceipt(operation.context)) {
-            return;
-        }
-
-        const executionContext = operation.mode === "legacy"
-            ? {
-                generation,
-                copilotSessionId,
-                conversationEpoch,
-            }
-            : operation.context;
-        const operationKey = operation.mode === "legacy"
-            ? null
-            : operationExecutionKey(
-                operation.context.conversationEpoch,
-                operation.context.operationId
-            );
-        setModelRequestGeneration = generation;
-        if (operationKey) activeOperationKeys.add(operationKey);
-        let invoked = false;
-        try {
-            if (!operationAuthorityCurrent(executionContext)
-                    || (operation.mode !== "legacy"
-                        && !validatedModelSwitch(request, true))) {
-                if (operation.mode === "legacy") {
-                    removeCapturedHandoff(
-                        setModelRequestPath,
-                        encoded,
-                        executionContext
-                    );
-                } else {
-                    publishRejectedPreflight(
-                        operation.context,
-                        "target-unavailable",
-                        setModelRequestPath,
-                        encoded
-                    );
-                }
                 return;
             }
             invoked = true;
             const result = await session.rpc.model.switchTo(params);
-            if (!operationAuthorityCurrent(executionContext)) return;
-            if (operation.mode === "legacy") {
+            if (!operationAuthorityCurrent(operation.context)) return;
+            const outcome = modelSwitchReceiptOutcome(result, params.modelId);
+            const published = publishTerminalReceipt(
+                operation.context,
+                outcome.state,
+                outcome.errorCode
+            );
+            if (published) {
                 removeCapturedHandoff(
                     setModelRequestPath,
                     encoded,
-                    executionContext
+                    operation.context
                 );
-                refreshModels();
-            } else {
-                const outcome = modelSwitchReceiptOutcome(result, params.modelId);
-                const published = publishTerminalReceipt(
-                    operation.context,
-                    outcome.state,
-                    outcome.errorCode
-                );
-                if (published) {
-                    removeCapturedHandoff(
-                        setModelRequestPath,
-                        encoded,
-                        operation.context
-                    );
-                }
-                if (outcome.state === "applied") refreshModels();
             }
+            if (outcome.state === "applied") refreshModels();
         } catch {
-            if (!operationAuthorityCurrent(executionContext)) return;
-            if (operation.mode === "legacy") {
-                removeCapturedHandoff(
-                    setModelRequestPath,
-                    encoded,
-                    executionContext
-                );
-            } else if (invoked) {
+            if (!operationAuthorityCurrent(operation.context)) return;
+            if (invoked) {
                 const published = publishTerminalReceipt(
                     operation.context,
                     "indeterminate",
@@ -6022,7 +5895,7 @@ if (validSessionId && socketPath) {
                 }
             }
         } finally {
-            if (operationKey) activeOperationKeys.delete(operationKey);
+            activeOperationKeys.delete(operationKey);
             if (setModelRequestGeneration === generation) {
                 setModelRequestGeneration = null;
             }

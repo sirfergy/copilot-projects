@@ -92,7 +92,7 @@ final class StatusShadowTests: XCTestCase {
             remotePromptLiveSessions: { _ in [sid] },
             remotePromptTarget: { _ in
                 footerReads += 1
-                return RemotePromptTarget(activity: .idle, send: { _ in true })
+                return RemotePromptTarget(activity: .idle)
             }
         )
         func lines(_ what: String) throws -> [[String: Any]] {

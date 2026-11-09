@@ -315,14 +315,10 @@ final class AppModel: ObservableObject {
     /// the command that resumes it, nothing else shows that it is coming back.
     var pullRequestsResumeLaunches: [String: (sessionId: String, launchedAt: Date)] = [:]
     static let pullRequestsResumeStartupGrace: TimeInterval = 5
-    enum PullRequestsPromptRoute: Equatable {
-        case terminal
-        case native(conversationEpoch: String)
-    }
     struct SentPullRequestsPrompt {
         let sessionId: String
         let payloadFingerprint: String
-        let route: PullRequestsPromptRoute
+        let conversationEpoch: String
         var state: PullRequestsPromptRecord.DeliveryState
         let createdAt: Date
     }
@@ -457,13 +453,7 @@ final class AppModel: ObservableObject {
         let rootSessionId: String
         let conversationEpoch: String
     }
-    struct RemotePromptFence: Equatable {
-        let submittedAt: Int64
-        let rootSessionId: String
-        let conversationEpoch: String
-    }
     var inputWaits: [String: InputWaitState] = [:]
-    var remotePromptFences: [String: RemotePromptFence] = [:]
     var runtimeTrackedOwners: [String: String] = [:]
     var verifiedCopilotOwners: [String: String] = [:]
     var trackerMissingSince: [String: Date] = [:]
@@ -2055,7 +2045,6 @@ final class AppModel: ObservableObject {
         elicitationNotificationTokens[sid] = nil
         permissionStatusRestores[sid] = nil
         inputWaits[sid] = nil
-        remotePromptFences[sid] = nil
         remoteOpenSessions[sid] = nil
         runtimeTrackedOwners[sid] = nil
         verifiedCopilotOwners[sid] = nil

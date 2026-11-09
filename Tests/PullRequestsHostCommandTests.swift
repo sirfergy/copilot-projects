@@ -22,8 +22,6 @@ final class PullRequestsHostCommandTests: XCTestCase {
 
     private final class Resuming {
         var tabs: [String: Set<String>] = [:]
-        var livePromptSessions: Set<String> = []
-        var deliveredPrompts: [(sessionId: String, prompt: String)] = []
     }
 
     private func withHost(
@@ -59,14 +57,9 @@ final class PullRequestsHostCommandTests: XCTestCase {
             let model = AppModel(
                 stateRepository: repository, isAppActive: { false },
                 agentActivityDirectory: root, resumeMarkerDirectory: root,
-                remotePromptLiveSessions: { _ in resuming.livePromptSessions },
+                remotePromptLiveSessions: { _ in [] },
                 copilotResumeSessions: { resuming.tabs[$0] ?? [] },
-                remotePromptTarget: { sessionId in
-                    RemotePromptTarget(activity: .idle) { prompt in
-                        resuming.deliveredPrompts.append((sessionId, prompt))
-                        return true
-                    }
-                },
+                remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) },
                 remoteCopilotExecutable: { "/opt/copilot/bin/copilot" },
                 remoteReposDirectory: { root.path },
                 remoteSessionBackendAvailable: { true },
@@ -616,10 +609,9 @@ final class PullRequestsHostCommandTests: XCTestCase {
         }
     }
 
-    func testSendSessionPromptDeliversOncePerRequestIdAndRefusesWaitingOrMissingSessions() throws {
+    func testSendSessionPromptQueuesOncePerRequestIdAndRefusesWaitingOrMissingSessions() throws {
         try withHost(projects: twoProjects) { host in
             let model = host.model
-            host.resuming.livePromptSessions = ["a1", "b1"]
 
             let requestId = UUID().uuidString
             @MainActor func send(
@@ -633,76 +625,35 @@ final class PullRequestsHostCommandTests: XCTestCase {
                 ))
             }
 
-            let first = send()
-            XCTAssertTrue(first.ok, first.error ?? "")
-            XCTAssertEqual(first.code, "sent")
-            XCTAssertEqual(first.text, "a1")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, 1)
-            XCTAssertEqual(host.resuming.deliveredPrompts[0].sessionId, "a1")
-            XCTAssertEqual(host.resuming.deliveredPrompts[0].prompt, "Fix the failing checks\non this PR")
+            // A session whose tracker reports no native sending refuses the prompt.
+            let refused = send()
+            XCTAssertFalse(refused.ok)
+            XCTAssertEqual(refused.code, "unavailable")
 
-            // Replaying the same requestId returns `existing` without delivering again.
-            let replay = send()
-            XCTAssertTrue(replay.ok)
-            XCTAssertEqual(replay.code, "existing")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, 1)
-
-            // Reusing the requestId for a different prompt or session is a conflict.
-            XCTAssertEqual(send(prompt: "different").code, "conflict")
-            XCTAssertEqual(send(project: "B", session: "b1").code, "conflict")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, 1)
-
-            // Retrying an older terminal request after more than 128 later dispatches
-            // or after a host restart still returns `existing` instead of resending.
-            for index in 0..<130 {
-                let extra = send(UUID().uuidString, prompt: "Follow-up \(index)")
-                XCTAssertEqual(extra.code, "sent")
-            }
-            let expectedDeliveredCount = host.resuming.deliveredPrompts.count
-            XCTAssertEqual(expectedDeliveredCount, 131)
-            let replayAfterManyDispatches = send()
-            XCTAssertTrue(replayAfterManyDispatches.ok)
-            XCTAssertEqual(replayAfterManyDispatches.code, "existing")
-            XCTAssertEqual(send(prompt: "different").code, "conflict")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
-
-            let restarted = host.restart()
-            let replayAfterRestart = restarted.handle(request(
-                "send-session-prompt", project: "A", session: "a1", requestId: requestId,
-                prompt: "Fix the failing checks\r\non this PR"
-            ))
-            XCTAssertTrue(replayAfterRestart.ok)
-            XCTAssertEqual(replayAfterRestart.code, "existing")
-            XCTAssertEqual(restarted.handle(request(
-                "send-session-prompt", project: "A", session: "a1", requestId: requestId, prompt: "different"
-            )).code, "conflict")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
-
-            // An interrupted `.pending` terminal intent on disk recovers as `indeterminate`
-            // after restart rather than resending the prompt.
-            let interruptedId = UUID()
-            let interruptedAction = RemoteSessionAction(kind: .send, prompt: "Interrupted send", mode: .enqueue)
-            let interruptedFingerprint = try XCTUnwrap(CLIOperationAdapter.payloadFingerprint(
+            // A prompt an earlier version typed into the terminal is still in the ledger
+            // after an upgrade. It loads, and replaying it never sends the prompt again.
+            let terminalId = UUID()
+            let terminalAction = RemoteSessionAction(kind: .send, prompt: "Typed earlier", mode: .enqueue)
+            let terminalFingerprint = try XCTUnwrap(CLIOperationAdapter.payloadFingerprint(
                 kind: .sessionSend,
-                payload: interruptedAction
+                payload: terminalAction
             ))
             let ledger = SessionCreationLedger(url: host.root.appendingPathComponent("ledger.json"))
             try ledger.rememberPrompt(PullRequestsPromptRecord(
-                requestId: interruptedId.uuidString,
+                requestId: terminalId.uuidString,
                 sessionId: "a1",
-                payloadFingerprint: interruptedFingerprint,
+                payloadFingerprint: terminalFingerprint,
                 route: .terminal,
                 conversationEpoch: nil,
-                state: .pending,
+                state: .delivered,
                 createdAt: Date()
             ))
-            let interruptedReplay = host.restart().handle(request(
-                "send-session-prompt", project: "A", session: "a1", requestId: interruptedId.uuidString,
-                prompt: "Interrupted send"
+            let terminalReplay = host.restart().handle(request(
+                "send-session-prompt", project: "A", session: "a1", requestId: terminalId.uuidString,
+                prompt: "Typed earlier"
             ))
-            XCTAssertFalse(interruptedReplay.ok)
-            XCTAssertEqual(interruptedReplay.code, "indeterminate")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
+            XCTAssertFalse(terminalReplay.ok)
+            XCTAssertEqual(terminalReplay.code, "indeterminate")
 
             // Mismatched project, ended session, or waiting session are refused.
             XCTAssertEqual(send(UUID().uuidString, project: "B", session: "a1").code, "conflict")
@@ -711,7 +662,6 @@ final class PullRequestsHostCommandTests: XCTestCase {
             waiting.status = "waiting"
             XCTAssertTrue(model.handle(waiting).ok)
             XCTAssertEqual(send(UUID().uuidString, project: "B", session: "b1").code, "busy")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
 
             // A fresh on-disk pending-input snapshot blocks sending even when the in-memory
             // session status is still `.idle`.
@@ -744,10 +694,8 @@ final class PullRequestsHostCommandTests: XCTestCase {
             )
             try JSONEncoder().encode(snapshot).write(to: snapshotURL)
             XCTAssertEqual(send(UUID().uuidString, project: "A", session: "a1").code, "busy")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
 
-            // Native workflow `.send` writes `session-send.json` and returns `queued` without
-            // falling back to terminal injection.
+            // Native workflow `.send` writes `session-send.json` and returns `queued`.
             snapshot.pendingPermissionRequestIds = []
             let readyWorkflow = snapshot.workflow
             snapshot.workflow = RemoteSessionWorkflow(
@@ -755,27 +703,27 @@ final class PullRequestsHostCommandTests: XCTestCase {
                 capabilities: [], sendReady: false, bounceRequested: true
             )
             try JSONEncoder().encode(snapshot).write(to: snapshotURL)
-            let bouncedPromptId = UUID().uuidString
-            XCTAssertEqual(send(bouncedPromptId).code, "busy")
-            XCTAssertEqual(model.sendRemotePrompt(sessionId: "a1", value: "No terminal fallback"), .busy)
-            XCTAssertEqual(send().code, "existing", "historical terminal replay remains idempotent")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
+            XCTAssertEqual(send(UUID().uuidString).code, "busy")
             snapshot.workflow = readyWorkflow
             try JSONEncoder().encode(snapshot).write(to: snapshotURL)
             let nativeReqId = UUID().uuidString
             let queued = send(nativeReqId, project: nil, session: "a1", prompt: "Queue via SDK")
             XCTAssertTrue(queued.ok, queued.error ?? "")
             XCTAssertEqual(queued.code, "queued")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount, "native path does not use terminal fallback")
+            XCTAssertEqual(queued.text, "a1")
             let handoffURL = host.root.appendingPathComponent("a1.session-send.json")
             XCTAssertTrue(FileManager.default.fileExists(atPath: handoffURL.path))
             let replayQueued = send(nativeReqId, project: nil, session: "a1", prompt: "Queue via SDK")
             XCTAssertTrue(replayQueued.ok)
             XCTAssertEqual(replayQueued.code, "queued")
 
+            // Reusing the requestId for a different prompt or session is a conflict.
+            XCTAssertEqual(send(nativeReqId, project: nil, session: "a1", prompt: "different").code, "conflict")
+            XCTAssertEqual(send(nativeReqId, project: "B", session: "b1", prompt: "Queue via SDK").code, "conflict")
+
             // If workflow freshness expires or the epoch changes before a receipt confirms
             // delivery, replaying the native request returns `indeterminate` and never
-            // reroutes to terminal injection or a new epoch.
+            // reroutes to a new epoch.
             let expiredReplay = model.sendPullRequestsSessionPrompt(
                 requestId: try XCTUnwrap(UUID(uuidString: nativeReqId)),
                 projectId: nil,
@@ -785,7 +733,6 @@ final class PullRequestsHostCommandTests: XCTestCase {
             )
             XCTAssertFalse(expiredReplay.ok)
             XCTAssertEqual(expiredReplay.code, "indeterminate")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
 
             try FileManager.default.removeItem(at: handoffURL)
             let action = RemoteSessionAction(kind: .send, prompt: "Queue via SDK", mode: .enqueue)
@@ -817,7 +764,6 @@ final class PullRequestsHostCommandTests: XCTestCase {
             let appliedReplay = send(nativeReqId, project: nil, session: "a1", prompt: "Queue via SDK")
             XCTAssertTrue(appliedReplay.ok)
             XCTAssertEqual(appliedReplay.code, "applied")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
 
             // Once `applied` has been confirmed and persisted, replaying after a conversation
             // epoch reset and host restart still returns `applied` from the ledger.
@@ -829,7 +775,6 @@ final class PullRequestsHostCommandTests: XCTestCase {
             ))
             XCTAssertTrue(appliedAfterEpochResetAndRestart.ok)
             XCTAssertEqual(appliedAfterEpochResetAndRestart.code, "applied")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
             snapshot.conversationEpoch = "epoch-1"
 
             // Rejected and indeterminate receipts surface their outcomes on replay.
@@ -850,7 +795,6 @@ final class PullRequestsHostCommandTests: XCTestCase {
             let rejected = send(rejectedReqId.uuidString, project: nil, session: "a1", prompt: "Queue via SDK")
             XCTAssertFalse(rejected.ok)
             XCTAssertEqual(rejected.code, "rejected")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
 
             let indeterminateReqId = UUID()
             snapshot.operationReceipts = [
@@ -868,17 +812,15 @@ final class PullRequestsHostCommandTests: XCTestCase {
             let indeterminate = send(indeterminateReqId.uuidString, project: nil, session: "a1", prompt: "Queue via SDK")
             XCTAssertFalse(indeterminate.ok)
             XCTAssertEqual(indeterminate.code, "indeterminate")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
 
             // Native validation failure (e.g. sendReady == false or missing marker) refuses
-            // the attempt instead of falling back to terminal injection.
+            // the attempt.
             snapshot.operationReceipts = []
             snapshot.workflow = makeWorkflow(sendReady: false)
             try JSONEncoder().encode(snapshot).write(to: snapshotURL)
             let notReady = send(UUID().uuidString, project: nil, session: "a1", prompt: "Queue via SDK")
             XCTAssertFalse(notReady.ok)
             XCTAssertEqual(notReady.code, "busy")
-            XCTAssertEqual(host.resuming.deliveredPrompts.count, expectedDeliveredCount)
         }
     }
 }

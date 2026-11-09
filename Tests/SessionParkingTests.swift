@@ -173,7 +173,6 @@ final class SessionParkingTests: XCTestCase {
             XCTAssertEqual(f.model.sendRemoteKey(sessionId: id, key: "enter"), .busy)
             XCTAssertEqual(f.model.sendRemoteInput(sessionId: id, value: "x"), .busy)
             XCTAssertEqual(f.model.sendRemoteCommand(sessionId: id, requestId: "r", value: "/help"), .busy)
-            XCTAssertEqual(f.model.sendRemotePrompt(sessionId: id, value: "hello"), .busy)
             XCTAssertEqual(f.model.performSessionAction(
                 sessionId: id, action: self.send,
                 operation: CLIOperationRequest(operationId: "send", conversationEpoch: "epoch-1")
@@ -336,7 +335,7 @@ final class SessionParkingTests: XCTestCase {
         f.processes.master = false
         f.model.setLiveAgentSessionsForTesting([])
         // Input addressed to a parked session starts the resume and answers busy.
-        XCTAssertEqual(f.model.sendRemotePrompt(sessionId: f.id, value: "hello"), .busy)
+        XCTAssertEqual(f.model.sendRemoteInput(sessionId: f.id, value: "hello"), .busy)
         XCTAssertEqual(f.model.parkedState(f.id), .resuming)
         XCTAssertEqual(f.processes.started, [f.id])
         XCTAssertEqual(f.model.sendRemoteKey(sessionId: f.id, key: "enter"), .busy)
@@ -350,7 +349,7 @@ final class SessionParkingTests: XCTestCase {
         XCTAssertEqual(try f.savedParked()?.state, .failed)
         f.model.refreshAgentActivitySnapshots()
         XCTAssertEqual(f.model.parkedState(f.id), .failed, "the old snapshot doesn't make it live")
-        XCTAssertEqual(f.model.sendRemotePrompt(sessionId: f.id, value: "hello"), .busy)
+        XCTAssertEqual(f.model.sendRemoteInput(sessionId: f.id, value: "hello"), .busy)
         XCTAssertEqual(f.processes.started, [f.id], "a failed resume is retried only when asked")
 
         // Try Again first stops the shell the failed resume left under a live

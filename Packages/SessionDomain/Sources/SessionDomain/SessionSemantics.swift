@@ -84,18 +84,6 @@ public struct BackgroundEvidence: Equatable, Sendable {
 }
 
 public enum SessionSemantics {
-    public static func acknowledgesSubmittedPrompt(
-        foreground: ForegroundActivity?,
-        observedAt: Int64?,
-        idleAt: Int64?,
-        submittedAt: Int64
-    ) -> Bool {
-        guard let observedAt, observedAt > submittedAt else { return false }
-        if foreground == .working { return true }
-        guard foreground == .idle, let idleAt else { return false }
-        return idleAt > submittedAt && idleAt <= observedAt
-    }
-
     public static func promptEligibility(_ input: PromptabilityInput) -> PromptEligibility {
         guard input.hasLiveAgent else { return .noLiveAgent }
         guard !input.hasPendingQuestions, input.status != .waiting else {

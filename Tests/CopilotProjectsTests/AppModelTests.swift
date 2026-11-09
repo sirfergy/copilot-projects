@@ -604,15 +604,14 @@ final class AppModelTests: XCTestCase {
         }
     }
 
-    func testStartingPromptRecoversFromActivityFirstRemotePromptAndTranscriptFallback() throws {
+    func testStartingPromptRecoversFromActivityAndTranscriptFallback() throws {
         try withTempStateDirectory { root in
             let sActivity = Session(title: "FromActivity", cwd: root.path)
-            let sRemote = Session(title: "FromRemoteSend", cwd: root.path)
             let sTranscript = Session(title: "FromTranscript", cwd: root.path)
             let project = Project(
                 name: "Recovery",
                 cwd: root.path,
-                sessions: [sActivity, sRemote, sTranscript],
+                sessions: [sActivity, sTranscript],
                 selectedSessionId: sActivity.id
             )
             let repository = StateRepository(path: root.appendingPathComponent("state.json"))
@@ -627,23 +626,11 @@ final class AppModelTests: XCTestCase {
             """.utf8)
             XCTAssertEqual(try JSONDecoder().decode(Session.self, from: plainJSON).startingPrompt, "Plain JSON prompt")
 
-            var sentRemotePrompts: [String] = []
             let model = AppModel(
                 stateRepository: repository,
                 isAppActive: { false },
                 agentActivityDirectory: root,
                 resumeMarkerDirectory: root,
-                remotePromptLiveSessions: { _ in [sRemote.id] },
-                remotePromptTarget: { id in
-                    guard id == sRemote.id else { return nil }
-                    return RemotePromptTarget(
-                        activity: .idle,
-                        send: { text in
-                            sentRemotePrompts.append(text)
-                            return true
-                        }
-                    )
-                },
                 remoteCopilotExecutable: { "/usr/local/bin/copilot" },
                 remoteSessionBackendAvailable: { true },
                 remoteSessionLauncher: { _, _, _ in },
@@ -679,13 +666,7 @@ final class AppModelTests: XCTestCase {
                 "  Typed directly in terminal\n    indented line"
             )
 
-            // 3. First remote prompt records startingPrompt, and later prompts do not overwrite it.
-            XCTAssertEqual(model.sendRemotePrompt(sessionId: sRemote.id, value: "First remote prompt"), .sent)
-            XCTAssertEqual(model.sendRemotePrompt(sessionId: sRemote.id, value: "Second follow-up prompt"), .sent)
-            XCTAssertEqual(sentRemotePrompts, ["First remote prompt", "Second follow-up prompt"])
-            XCTAssertEqual(model.startingPrompt(for: sRemote.id), "First remote prompt")
-
-            // 4. Transcript fallback ignores truncated transcripts (with droppedTurns), retries when
+            // 3. Transcript fallback ignores truncated transcripts (with droppedTurns), retries when
             // transcript-live.json or sealed transcript updates, and ignores non-foreground turns.
             let truncatedTranscriptJSON = """
             {
@@ -761,7 +742,7 @@ final class AppModelTests: XCTestCase {
             )
             XCTAssertEqual(model.startingPrompt(for: sTranscript.id), "Recovered from transcript turn 1")
 
-            // Verify all three recovered prompts are persisted in state.json.
+            // Verify both recovered prompts are persisted in state.json.
             guard case .loaded(let persisted) = repository.load() else {
                 return XCTFail("Expected persisted state to load")
             }
@@ -772,7 +753,6 @@ final class AppModelTests: XCTestCase {
                 persistedPrompts[sActivity.id] ?? nil,
                 "  Typed directly in terminal\n    indented line"
             )
-            XCTAssertEqual(persistedPrompts[sRemote.id] ?? nil, "First remote prompt")
             XCTAssertEqual(persistedPrompts[sTranscript.id] ?? nil, "Recovered from transcript turn 1")
         }
     }

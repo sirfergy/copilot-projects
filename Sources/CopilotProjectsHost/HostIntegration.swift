@@ -3,7 +3,7 @@ import CopilotProjectsCore
 import CopilotProjectsProtocol
 
 public enum SessionInputValidation {
-    /// Remote prompt pastes and review-prompt templates share this UTF-8 budget.
+    /// Session prompts and review-prompt templates share this UTF-8 budget.
     public static let maximumPromptBytes = 8_192
 
     public static func isValidPrompt(_ value: String) -> Bool {
@@ -88,7 +88,6 @@ public protocol SessionHost: AnyObject, Sendable {
     var supportsReopenClosedSession: Bool { get }
     func reopenClosedSession(id: String?) -> RemoteReopenSessionResult
     func moveSession(sessionId: String, toProjectId: String) -> RemoteSessionMoveResult
-    func sendPrompt(sessionId: String, value: String) -> RemotePromptResult
     func answerUserInput(sessionId: String, answer: RemoteUserInputAnswer, operation: CLIOperationRequest?) -> RemoteUserInputResult
     func answerElicitation(sessionId: String, answer: RemoteElicitationAnswer, operation: CLIOperationRequest?) -> RemoteUserInputResult
     func setModel(sessionId: String, selection: RemoteModelSelection, operation: CLIOperationRequest?) -> RemoteUserInputResult

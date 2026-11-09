@@ -1356,7 +1356,7 @@ test("failed acceptance publication rolls back the bounce fence without invoking
   assert.ok(readSnapshot(runtime).availableModels.length > 0);
 });
 
-test("bounce fences new model switches, including legacy, but preserves exact replay", {
+test("bounce fences new model switches but preserves exact replay", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t, (session) => {
@@ -1382,11 +1382,6 @@ test("bounce fences new model switches, including legacy, but preserves exact re
   trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
   await waitFor(() => receipt(runtime, next.operationId)?.state === "rejected", "new model switch escaped fence");
   assert.equal(receipt(runtime, next.operationId).errorCode, "target-unavailable");
-  writeHandoff(runtime, runtime.modelPath, {
-    schemaVersion: 1, copilotSessionId: runtime.copilotSessionId, modelId: "gpt-5.6-sol",
-  });
-  trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
-  await waitFor(() => !realExistsSync(runtime.modelPath), "legacy switch was not refused");
   assert.equal(runtime.session.modelSwitchCalls.length, 1);
 });
 
@@ -1835,7 +1830,6 @@ test("old runtime and missing budget metadata never advertise unsupported contro
   });
   await waitFor(() => readSnapshot(old).workflow?.error, "missing unsupported state");
   assert.deepEqual(readSnapshot(old).workflow.capabilities, []);
-  assert.equal(readSnapshot(old).workflow.legacyPromptFallback, true);
   const current = await createRuntime(t, (session) => {
     session.metadataHandler = async ({ sessionId }) => ({ sessionId, isRemote: false });
   });
@@ -4342,13 +4336,11 @@ test("turn transitions and transient RPC errors keep fresh workflow capabilities
   runtime.intervalCallback();
   await waitForActivity(runtime, (activity) => activity?.error === "remote");
   assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
-  assert.equal(readSnapshot(runtime).workflow.legacyPromptFallback, true);
   let releaseRemoteTurn;
   runtime.session.processingHandler = () => new Promise((resolve) => { releaseRemoteTurn = resolve; });
   await runtime.session.emit("user.message", { content: "still remote" });
   assert.equal(readSnapshot(runtime).runtimeActivity.error, "remote");
   assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
-  assert.equal(readSnapshot(runtime).workflow.legacyPromptFallback, true);
   releaseRemoteTurn?.({ processing: false });
   await new Promise((resolve) => setImmediate(resolve));
   runtime.session.processingHandler = async () => ({ processing: false });
@@ -4367,7 +4359,6 @@ test("turn transitions and transient RPC errors keep fresh workflow capabilities
   await new Promise((resolve) => setTimeout(resolve, 2_100));
   assert.equal(readSnapshot(runtime).runtimeActivity.error, "remote");
   assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
-  assert.equal(readSnapshot(runtime).workflow.legacyPromptFallback, true);
 
   // 7. Invalid runtime session metadata also stays sticky across transient failures until valid local metadata returns.
   runtime.session.metadataHandler = async () => ({ sessionId: uuid(), isRemote: false });
@@ -4515,7 +4506,6 @@ test("late -32601 after runtime activity timeout latches unsupported", {
   rejectProcessing(Object.assign(new Error("method not found"), { code: -32601 }));
   await waitForActivity(runtime, (activity) => activity?.error === "unsupported");
   assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
-  assert.equal(readSnapshot(runtime).workflow.legacyPromptFallback, true);
 });
 
 test("late workflow metadata reply after 3s timeout withdraws and recovers capabilities", {
@@ -4534,8 +4524,7 @@ test("late workflow metadata reply after 3s timeout withdraws and recovers capab
   assert.ok(readSnapshot(runtime).workflow.capabilities.includes("session-send"));
   resolveWorkflowMetadata({ sessionId: runtime.copilotSessionId, isRemote: true });
   await waitFor(
-    () => readSnapshot(runtime).workflow.capabilities.length === 0
-      && readSnapshot(runtime).workflow.legacyPromptFallback === true,
+    () => readSnapshot(runtime).workflow.capabilities.length === 0,
     "late remote workflow metadata did not withdraw capabilities"
   );
   runtime.session.metadataHandler = async ({ sessionId }) => ({
@@ -4920,7 +4909,7 @@ async function emitElicitation(runtime, requestId) {
   });
 }
 
-test("all SDK controls preserve legacy behavior and publish correlated receipts", {
+test("all SDK controls drop a handoff without an operation and publish correlated receipts", {
   concurrency: false,
 }, async (t) => {
   const cases = [
@@ -4980,20 +4969,18 @@ test("all SDK controls preserve legacy behavior and publish correlated receipts"
   for (const entry of cases) {
     await t.test(entry.name, async (t) => {
       const runtime = await createRuntime(t);
-      let requestId = `request-${uuid()}`;
+      const requestId = `request-${uuid()}`;
       await entry.prepare(runtime, requestId);
-      const legacy = entry.payload(runtime, requestId);
-      writeHandoff(runtime, entry.path(runtime), legacy);
+      // No operation means no receipt could report the outcome, so nothing is applied.
+      writeHandoff(runtime, entry.path(runtime), entry.payload(runtime, requestId));
       trigger(runtime, `${runtime.appSessionId}.${entry.suffix}`);
       await waitFor(
-        () => entry.calls(runtime).length === 1
-          && !realExistsSync(entry.path(runtime)),
-        `${entry.name} legacy handoff did not complete`
+        () => !realExistsSync(entry.path(runtime)),
+        `${entry.name} handoff without an operation was not dropped`
       );
+      assert.equal(entry.calls(runtime).length, 0);
       assert.deepEqual(readSnapshot(runtime).operationReceipts, []);
 
-      requestId = `request-${uuid()}`;
-      await entry.prepare(runtime, requestId);
       const fields = operationFields(runtime, entry.name);
       let acceptedAtRPC = null;
       entry.setHandler(runtime, async (request) => {
@@ -5014,7 +5001,7 @@ test("all SDK controls preserve legacy behavior and publish correlated receipts"
         () => receipt(runtime, fields.operationId)?.state === "applied",
         `${entry.name} did not publish an applied receipt`
       );
-      assert.equal(entry.calls(runtime).length, 2);
+      assert.equal(entry.calls(runtime).length, 1);
       assert.equal(acceptedAtRPC?.state, "accepted");
       assert.equal(acceptedAtRPC?.payloadFingerprint, fields.payloadFingerprint);
       assert.equal(realExistsSync(entry.path(runtime)), false);

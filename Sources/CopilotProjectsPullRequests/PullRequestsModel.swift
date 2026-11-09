@@ -1011,7 +1011,7 @@ final class PullRequestsModel: ObservableObject {
         )
         if result == .unreachable {
             // The answer may have been lost after the prompt was delivered; the same
-            // request id returns `existing` instead of sending the prompt twice.
+            // request id resolves that delivery instead of sending the prompt twice.
             result = await source.sendSessionPrompt(
                 projectId: nil,
                 sessionId: pending.sessionId,
