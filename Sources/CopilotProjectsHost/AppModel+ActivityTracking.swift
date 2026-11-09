@@ -639,6 +639,7 @@ extension AppModel {
         withCoalescedProjectPublications {
         reconcileRuntimeActivity(now: Date())
         var tracked: Set<String> = []
+        var polled: [String: (runtime: ForegroundActivity?, footer: FooterActivity)] = [:]
         for pi in projects.indices {
             for si in projects[pi].sessions.indices {
                 let status = projects[pi].sessions[si].status
@@ -651,6 +652,7 @@ extension AppModel {
                 }
                 guard let activity = remotePromptTarget?(sid)?.activity
                     ?? controllers[sid]?.agentActivity else { continue }
+                polled[sid] = (runtime, activity)
                 // Self-recovery for the snapshot-driven demotion below: if the
                 // foreground turn has resumed (a fresh `assistant.turn_start` flipped
                 // `foregroundTurnActive` back to true), restore `.running`. This
@@ -836,6 +838,7 @@ extension AppModel {
             }
         }
         sessionSemantics.activityTracker.retain(activeSessionIds: tracked)
+        recordStatusShadow(polled: polled, now: Date())
         }
     }
 
