@@ -1166,7 +1166,7 @@ private struct MarkdownCodeBlockView: View {
                     didCopy = true
                     resetTask?.cancel()
                     resetTask = Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(1_500))
+                        try? await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(1_500)))
                         guard !Task.isCancelled else { return }
                         didCopy = false
                     }
