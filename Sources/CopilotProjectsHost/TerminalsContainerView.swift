@@ -135,7 +135,7 @@ final class TerminalsContainerView: NSView {
             layer?.backgroundColor = view.nativeBackgroundColor.cgColor
             layoutVisible()
             view.isHidden = !showsTerminal
-            if needsReveal { reveal(view, preserveEditorFocus: !sessionChanged) }
+            if needsReveal { reveal(view) }
         } else {
             cover.isHidden = false
             layoutVisible()
@@ -163,12 +163,11 @@ final class TerminalsContainerView: NSView {
 
     /// Size, request the current frame, and focus the newly revealed terminal.
     /// The view also schedules one deferred redraw for drawable readiness.
-    private func reveal(_ view: ProjectsTerminalView, preserveEditorFocus: Bool = false) {
+    private func reveal(_ view: ProjectsTerminalView) {
         view.frame = bounds
         view.layoutSubtreeIfNeeded()
         view.forceRedraw()
-        if let window, window.firstResponder !== view,
-           !(preserveEditorFocus && window.firstResponder is NSTextView) {
+        if let window, window.firstResponder !== view {
             window.makeFirstResponder(view)
         }
     }

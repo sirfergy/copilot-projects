@@ -16785,8 +16785,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(terminal.isHidden)
         XCTAssertTrue(window.firstResponder === terminal)
 
-        // Collapsing from full-width with an active question editor preserves editor focus,
-        // while closing the drawer from full-width unhides and focuses the terminal.
+        // Collapsing from full-width with an active question editor reveals and focuses the terminal,
+        // and closing the drawer from full-width also unhides and focuses the terminal.
         model.projects[0].sessions[0].agentActivity = AgentActivitySnapshot(
             schemaVersion: 1,
             updatedAt: ISO8601DateFormatter().string(from: Date()),
@@ -16818,12 +16818,13 @@ final class AppLogicTests: XCTestCase {
         defaults.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
         await pump(detailHost)
         XCTAssertFalse(terminal.isHidden)
-        XCTAssertNotNil(answerField.currentEditor())
-        XCTAssertFalse(window.firstResponder === terminal)
+        XCTAssertNil(answerField.currentEditor())
+        XCTAssertTrue(window.firstResponder === terminal)
 
         defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
         await pump(detailHost)
         XCTAssertTrue(terminal.isHidden)
+        XCTAssertTrue(window.makeFirstResponder(answerField))
         XCTAssertNotNil(answerField.currentEditor())
 
         model.closeTranscriptDrawer(sessionId: session.id)
@@ -17209,7 +17210,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === s2Terminal)
 
         // 5. Default-view setting (#307) opening the transcript on first visit (and full-width mode) focuses the composer,
-        //    and collapsing full-width to side-drawer preserves the focused composer while unhiding the terminal.
+        //    and collapsing full-width to side-drawer reveals and focuses the terminal.
         defaults.set(
             TranscriptDrawer.DefaultView.transcript.rawValue,
             forKey: TranscriptDrawer.defaultViewKey
@@ -17229,17 +17230,39 @@ final class AppLogicTests: XCTestCase {
         defaults.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
         await pump(host)
         XCTAssertFalse(s4Terminal.isHidden)
-        XCTAssertNotNil(s4ComposerField.currentEditor())
-        XCTAssertTrue(model.sessionPromptComposer(sessionId: s4.id).isPromptFieldFocused)
-        XCTAssertFalse(window.firstResponder === s4Terminal)
+        XCTAssertNil(s4ComposerField.currentEditor())
+        XCTAssertFalse(model.sessionPromptComposer(sessionId: s4.id).isPromptFieldFocused)
+        XCTAssertTrue(window.firstResponder === s4Terminal)
 
-        // 6. Moving focus to s1's terminal in side-drawer mode and receiving background updates or re-selecting s1 does not steal focus.
+        // 6. With the side drawer open and its composer or transcript text holding focus, clicking s1's terminal
+        //    focuses it, typing reaches its shell, and background updates or re-selecting s1 do not move focus back.
         model.show(projectId: project.id, sessionId: s1.id)
         await pump(host)
         XCTAssertTrue(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
-        XCTAssertTrue(window.makeFirstResponder(s1Terminal))
+        let terminalPoint = NSPoint(x: 100, y: 300)
+        XCTAssertTrue(window.contentView?.hitTest(terminalPoint) === s1Terminal)
+        // A window that isn't key drops the click, so put this one in the state the app's window is in when clicked.
+        window.becomeKey()
+        try sendClick(in: window, point: terminalPoint)
         await pump(host)
+        XCTAssertTrue(window.firstResponder === s1Terminal)
         XCTAssertFalse(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+        func s1TerminalShowsTypedKey() -> Bool {
+            s1Terminal.terminalStateSnapshot().visibleRows.contains { $0.text.contains("z") }
+        }
+        XCTAssertFalse(s1TerminalShowsTypedKey())
+        try sendKey(to: window, characters: "z", keyCode: 6)
+        let echoDeadline = ContinuousClock.now + .seconds(5)
+        while !s1TerminalShowsTypedKey(), ContinuousClock.now < echoDeadline {
+            await pump(host)
+        }
+        XCTAssertTrue(s1TerminalShowsTypedKey())
+        XCTAssertEqual(model.sessionPromptComposer(sessionId: s1.id).prompt, "")
+        let transcriptText = try XCTUnwrap(MarkdownSelectableTextView.peerSelectableTextViews(in: host).first)
+        XCTAssertTrue(window.makeFirstResponder(transcriptText))
+        try sendClick(in: window, point: terminalPoint)
+        XCTAssertTrue(window.firstResponder === s1Terminal)
+        window.resignKey()
         model.projects[0].sessions[0].agentActivity = makeActivity(withWorkflow: true, questionId: "q-1")
         model.setStatus(sessionId: s2.id, status: .running, text: "Working", timestamp: 10, source: "test")
         model.setStatus(sessionId: s2.id, status: .idle, text: nil, timestamp: 20, source: "test")

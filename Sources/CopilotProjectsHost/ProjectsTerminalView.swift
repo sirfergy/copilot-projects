@@ -750,6 +750,15 @@ final class ProjectsTerminalView: ProcessTerminalView {
         return Array("\u{1b}[13;\(modifiers.rawValue + 1)u".utf8)
     }
 
+    /// SwiftTerm draws through a Metal-backed subview that covers the terminal and
+    /// refuses first responder. A click landed on it, so AppKit left keyboard focus
+    /// where it was: with the side transcript drawer holding focus, clicking the
+    /// terminal did not let you type in it. Take those hits ourselves.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit?.layer is CAMetalLayer ? self : hit
+    }
+
     override func mouseDown(with event: NSEvent) {
         onUserInteraction?()
         let point = convert(event.locationInWindow, from: nil)
