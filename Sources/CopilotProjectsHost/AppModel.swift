@@ -435,6 +435,8 @@ final class AppModel: ObservableObject {
         [String: (signature: FileSignature, snapshot: AgentActivitySnapshot?)] = [:]
 
     var sessionSemantics = SessionSemanticsState()
+    /// Temporary shadow-run log; see StatusShadow.swift.
+    lazy var statusShadow = StatusShadow(directory: stateRepository.path.deletingLastPathComponent())
     var backgroundAgentsSuppressed: Set<String> = []
     var completionPending: Set<String> = []
     var completionSummaryContexts: [String: CompletionSummaryContext] = [:]
