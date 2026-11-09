@@ -592,7 +592,10 @@ final class TranscriptReloadTests: XCTestCase {
                 harness.turns = cappedTurns
                 await settleDisplayCycle(window)
                 assertTextMoved(0, from: before, "Evicting the oldest turn while scrolled up")
-                XCTAssertNotNil(turn78Prompt.window, "Paging and turn updates should not rebuild a rendered card")
+                XCTAssertTrue(
+                    allText().first { $0.string.contains("User prompt for turn 78:") } === turn78Prompt,
+                    "Paging and turn updates should keep a rendered card, and the turn it shows"
+                )
                 XCTAssertEqual(
                     turn78Prompt.selectedRange(),
                     NSRange(location: 0, length: 11),
