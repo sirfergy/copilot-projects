@@ -8832,6 +8832,84 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testMarkdownCodeBlockCopyButtonCopiesSnippetToPasteboard() async throws {
+        _ = NSApplication.shared
+        let activationPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.prohibited)
+        defer { NSApp.setActivationPolicy(activationPolicy) }
+
+        let firstSnippet = "let greeting = \"hello\"\nprint(greeting)"
+        let secondSnippet = "echo 'second block'"
+        let markdown = """
+        Here is some code:
+
+        ```swift
+        \(firstSnippet)
+        ```
+
+        And another:
+
+        ```sh
+        \(secondSnippet)
+        ```
+        """
+        let window = NSWindow(
+            contentRect: NSRect(x: -20000, y: -20000, width: 480, height: 320),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        let host = NSHostingView(
+            rootView: MarkdownText(text: markdown)
+                .frame(width: 480, alignment: .leading)
+        )
+        host.frame = NSRect(x: 0, y: 0, width: 480, height: 320)
+        window.contentView = host
+        window.orderBack(nil)
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+
+        let codeTextViews = findTextViews(in: host).filter {
+            $0.attributedText.string == firstSnippet || $0.attributedText.string == secondSnippet
+        }
+        XCTAssertEqual(codeTextViews.count, 2)
+
+        func clickCopyButton(near codeTextView: MarkdownSelectableTextView) throws {
+            let codeFrameInWindow = codeTextView.convert(codeTextView.bounds, to: nil)
+            // The code block container has .trailing padding of 34 and the 24x24 copy button sits
+            // in the top-trailing corner with 5pt padding (center ~17pt left of container maxX,
+            // ~7pt right of codeTextView.maxX, and near the top edge of codeTextView).
+            let clickPoint = NSPoint(
+                x: codeFrameInWindow.maxX + 17,
+                y: host.isFlipped ? codeFrameInWindow.minY + 7 : codeFrameInWindow.maxY - 7
+            )
+            let timestamp = ProcessInfo.processInfo.systemUptime
+            for (type, delta): (NSEvent.EventType, TimeInterval) in [(.leftMouseDown, 0), (.leftMouseUp, 0.01)] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(
+                    with: type, location: clickPoint, modifierFlags: [], timestamp: timestamp + delta,
+                    windowNumber: window.windowNumber, context: nil,
+                    eventNumber: 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
+                window.sendEvent(event)
+            }
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+
+        try clickCopyButton(near: codeTextViews[0])
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(pasteboard.string(forType: .string), firstSnippet)
+
+        try clickCopyButton(near: codeTextViews[1])
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(pasteboard.string(forType: .string), secondSnippet)
+    }
+
+    @MainActor
     func testMarkdownTableSelectionCopiesLogicalCellsAcrossRowsAndWraps() throws {
         let alignments: [MarkdownColumnAlignment] = [.leading, .center, .trailing]
         XCTAssertEqual(
