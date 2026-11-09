@@ -633,4 +633,264 @@ final class SessionWorkflowTests: XCTestCase {
         }
         XCTAssertEqual(received.count, countBeforeRejected)
     }
+
+    func testDesktopModelPickerCategoryGroupingAndInitialEffortPreselection() {
+        XCTAssertTrue(DesktopModelPicker.sections(for: []).isEmpty)
+
+        let uncategorized = [
+            RemoteAvailableModel(id: "m1", name: "First"),
+            RemoteAvailableModel(id: "m2", name: "Second", category: "experimental"),
+        ]
+        XCTAssertEqual(
+            DesktopModelPicker.sections(for: uncategorized),
+            [DesktopModelSection(id: "all", title: "", models: uncategorized)]
+        )
+
+        let fast1 = RemoteAvailableModel(id: "haiku", name: "Haiku", category: "lightweight")
+        let pow1 = RemoteAvailableModel(id: "opus", name: "Opus", category: "powerful")
+        let other1 = RemoteAvailableModel(id: "byok", name: "BYOK")
+        let vers1 = RemoteAvailableModel(id: "sonnet", name: "Sonnet", category: "versatile")
+        let pow2 = RemoteAvailableModel(id: "gpt-5.6-sol", name: "GPT-5.6 Sol", category: "powerful")
+        let other2 = RemoteAvailableModel(id: "custom", name: "Custom", category: "preview")
+        XCTAssertEqual(
+            DesktopModelPicker.sections(for: [fast1, pow1, other1, vers1, pow2, other2]),
+            [
+                DesktopModelSection(id: "powerful", title: "Powerful", models: [pow1, pow2]),
+                DesktopModelSection(id: "versatile", title: "Versatile", models: [vers1]),
+                DesktopModelSection(id: "lightweight", title: "Lightweight", models: [fast1]),
+                DesktopModelSection(id: "other", title: "Other", models: [other1, other2]),
+            ]
+        )
+
+        // Never fall back to the first advertised level when it could be "none".
+        XCTAssertNil(
+            ModelReasoningEffortDefault.initialEffort(
+                supported: ["none", "low", "medium", "high"],
+                sessionCurrent: nil,
+                modelDefault: nil
+            )
+        )
+        XCTAssertEqual(
+            ModelReasoningEffortDefault.initialEffort(
+                supported: ["low", "medium", "high", "xhigh"],
+                sessionCurrent: "xhigh",
+                modelDefault: "medium"
+            ),
+            "xhigh"
+        )
+        XCTAssertEqual(
+            ModelReasoningEffortDefault.initialEffort(
+                supported: ["low", "medium", "high"],
+                sessionCurrent: "xhigh",
+                modelDefault: "medium"
+            ),
+            "medium"
+        )
+        XCTAssertNil(
+            ModelReasoningEffortDefault.initialEffort(
+                supported: ["low", "high"],
+                sessionCurrent: "xhigh",
+                modelDefault: "max"
+            )
+        )
+
+        XCTAssertEqual(
+            DesktopModelPicker.modelSummary(
+                RemoteModelInfo(name: "gemini-4-argon", reasoningEffort: "high", contextTier: "long_context")
+            ),
+            "gemini-4-argon · high · long context"
+        )
+        XCTAssertEqual(
+            DesktopModelPicker.modelSummary(RemoteModelInfo(name: "Claude Sonnet 4.6", contextTier: "default")),
+            "Claude Sonnet 4.6"
+        )
+        XCTAssertTrue(DesktopModelPicker.isCurrent(pow2, current: RemoteModelInfo(name: "gpt-5.6-sol")))
+        XCTAssertTrue(DesktopModelPicker.isCurrent(pow2, current: RemoteModelInfo(name: "GPT-5.6 Sol")))
+        XCTAssertFalse(DesktopModelPicker.isCurrent(pow2, current: RemoteModelInfo(name: "opus")))
+    }
+
+    @MainActor
+    func testPerformLocalModelSwitchHandlesAppliedRejectedAndInvalidSelections() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions")
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+
+        let session = Session(title: "Model switch", cwd: root.path)
+        let project = Project(name: "Model switch project", cwd: root.path, sessions: [session])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        let model = AppModel(
+            stateRepository: repository,
+            persistPermissionStatus: { _, _, _, _ in },
+            isAppActive: { false },
+            agentActivityDirectory: sessions,
+            resumeMarkerDirectory: sessions,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
+        )
+
+        let sdkID = UUID().uuidString
+        let snapshotURL = sessions.appendingPathComponent("\(session.id).agent-activity.json")
+        let handoffURL = sessions.appendingPathComponent("\(session.id).set-model-request.json")
+        try Data(sdkID.utf8).write(to: sessions.appendingPathComponent("\(session.id).copilot-session"))
+
+        let now = Date()
+        var snapshot = AgentActivitySnapshot(
+            schemaVersion: 1,
+            updatedAt: now.ISO8601Format(.init(includingFractionalSeconds: true)),
+            foregroundTurnActive: false,
+            scheduledTurnActive: false,
+            activeSubagents: [],
+            schedules: [],
+            idleGeneration: 0,
+            lastIdleAborted: false,
+            lastIdleTurnKind: nil,
+            error: nil,
+            model: TrackedModel(name: "claude-sonnet-4.6", reasoningEffort: "medium", contextTier: "default"),
+            availableModels: [
+                TrackedAvailableModel(
+                    id: "gpt-5.6-sol",
+                    name: "GPT-5.6 Sol",
+                    supportedReasoningEfforts: ["low", "medium", "high"],
+                    defaultReasoningEffort: "high",
+                    longContextAvailable: true,
+                    disabled: nil,
+                    category: "powerful"
+                ),
+                TrackedAvailableModel(
+                    id: "disabled-model",
+                    name: "Disabled",
+                    supportedReasoningEfforts: nil,
+                    defaultReasoningEffort: nil,
+                    longContextAvailable: false,
+                    disabled: true,
+                    category: "lightweight"
+                ),
+            ],
+            copilotSessionId: sdkID,
+            conversationEpoch: "epoch-1",
+            operationReceiptVersion: 1,
+            operationReceipts: [],
+            workflow: RemoteSessionWorkflow(
+                observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+                capabilities: [RemoteSessionActionKind.send.rawValue],
+                sendReady: true
+            )
+        )
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        model.refreshAgentActivitySnapshots(now: now)
+
+        XCTAssertEqual(
+            model.sessionModelInfo(sessionId: session.id),
+            RemoteModelInfo(name: "claude-sonnet-4.6", reasoningEffort: "medium", contextTier: "default")
+        )
+        XCTAssertEqual(model.sessionAvailableModels(sessionId: session.id).map(\.id), ["gpt-5.6-sol", "disabled-model"])
+
+        // Invalid selections (unknown model, disabled model, mismatched epoch) fail immediately without writing handoff.
+        let invalidModel = await model.performLocalModelSwitch(
+            sessionId: session.id,
+            selection: RemoteModelSelection(modelId: "unknown-model")
+        )
+        XCTAssertEqual(invalidModel.state, .rejected)
+        XCTAssertEqual(invalidModel.message, "Model switch was not accepted.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL.path))
+
+        let disabledResult = await model.performLocalModelSwitch(
+            sessionId: session.id,
+            selection: RemoteModelSelection(modelId: "disabled-model")
+        )
+        XCTAssertEqual(disabledResult.state, .rejected)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL.path))
+
+        let epochMismatch = await model.performLocalModelSwitch(
+            sessionId: session.id,
+            selection: RemoteModelSelection(modelId: "gpt-5.6-sol"),
+            expectedConversationEpoch: "epoch-stale"
+        )
+        XCTAssertEqual(epochMismatch.state, .rejected)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL.path))
+
+        // Accepted + applied receipt.
+        let validSelection = RemoteModelSelection(
+            modelId: "gpt-5.6-sol",
+            reasoningEffort: "high",
+            contextTier: "long_context"
+        )
+        let appliedTask = Task {
+            await model.performLocalModelSwitch(
+                sessionId: session.id,
+                selection: validSelection,
+                expectedConversationEpoch: "epoch-1",
+                pollInterval: .milliseconds(5)
+            )
+        }
+        for _ in 0..<20 where !FileManager.default.fileExists(atPath: handoffURL.path) {
+            await Task.yield()
+        }
+        let handoffData = try Data(contentsOf: handoffURL)
+        let handoffJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: handoffData) as? [String: Any])
+        let appliedOpId = try XCTUnwrap(handoffJSON["operationId"] as? String)
+        XCTAssertEqual(handoffJSON["modelId"] as? String, "gpt-5.6-sol")
+        XCTAssertEqual(handoffJSON["reasoningEffort"] as? String, "high")
+        XCTAssertEqual(handoffJSON["contextTier"] as? String, "long_context")
+        try FileManager.default.removeItem(at: handoffURL)
+        snapshot.operationReceipts = [
+            TrackedOperationReceipt(
+                operationId: appliedOpId,
+                conversationEpoch: "epoch-1",
+                kind: CLISDKOperationKind.setModel.rawValue,
+                state: .applied,
+                updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+                payloadFingerprint: CLIOperationAdapter.payloadFingerprint(kind: .setModel, payload: validSelection)
+            ),
+        ]
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        let appliedResult = await appliedTask.value
+        XCTAssertEqual(appliedResult.state, .applied)
+        XCTAssertNil(appliedResult.message)
+        XCTAssertEqual(appliedResult.operationId, appliedOpId)
+
+        // Accepted + rejected receipt.
+        let rejectedSelection = RemoteModelSelection(modelId: "gpt-5.6-sol", reasoningEffort: "low")
+        let rejectedTask = Task {
+            await model.performLocalModelSwitch(
+                sessionId: session.id,
+                selection: rejectedSelection,
+                expectedConversationEpoch: "epoch-1",
+                pollInterval: .milliseconds(5)
+            )
+        }
+        for _ in 0..<20 where !FileManager.default.fileExists(atPath: handoffURL.path) {
+            await Task.yield()
+        }
+        let rejectedHandoff = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: handoffURL)) as? [String: Any]
+        )
+        let rejectedOpId = try XCTUnwrap(rejectedHandoff["operationId"] as? String)
+        try FileManager.default.removeItem(at: handoffURL)
+        snapshot.operationReceipts = [
+            TrackedOperationReceipt(
+                operationId: rejectedOpId,
+                conversationEpoch: "epoch-1",
+                kind: CLISDKOperationKind.setModel.rawValue,
+                state: .rejected,
+                updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+                errorCode: "rpc-error",
+                payloadFingerprint: CLIOperationAdapter.payloadFingerprint(kind: .setModel, payload: rejectedSelection)
+            ),
+        ]
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        let rejectedResult = await rejectedTask.value
+        XCTAssertEqual(rejectedResult.state, .rejected)
+        XCTAssertEqual(rejectedResult.message, "Copilot did not apply this model switch.")
+        XCTAssertEqual(rejectedResult.operationId, rejectedOpId)
+
+        // Terminal disconnect hides sessionModelInfo and sessionAvailableModels.
+        snapshot.error = "Connection is closed."
+        model.projects[0].sessions[0].agentActivity = snapshot
+        XCTAssertNil(model.sessionModelInfo(sessionId: session.id))
+        XCTAssertTrue(model.sessionAvailableModels(sessionId: session.id).isEmpty)
+    }
 }

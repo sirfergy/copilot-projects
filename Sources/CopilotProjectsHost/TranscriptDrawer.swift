@@ -66,6 +66,9 @@ struct TranscriptButton: View {
     let isOpen: Bool
     var workflow: RemoteSessionWorkflow? = nil
     var workflowProvider: (() -> RemoteSessionWorkflow?)? = nil
+    var modelInfo: RemoteModelInfo? = nil
+    var availableModels: [RemoteAvailableModel] = []
+    var operation: AgentOperationProjection = .unavailable
     var receipts: [RemoteOperationReceipt] = []
     var conversationEpoch: String? = nil
     var hasPendingQuestions: Bool = false
@@ -75,6 +78,7 @@ struct TranscriptButton: View {
     var onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult = { _ in
         RemoteWorkflowActionResult(state: .rejected)
     }
+    var onSwitchModel: (@MainActor (RemoteModelSelection) async -> RemoteWorkflowActionResult)? = nil
     @AppStorage(TranscriptDrawer.fullWidthTranscriptKey) private var isFullWidth = false
 
     var body: some View {
@@ -87,15 +91,31 @@ struct TranscriptButton: View {
                 .help(trackerWarning)
                 .accessibilityIdentifier("session-tracker-warning")
         }
-        if controller.snapshot != nil || currentWorkflow != nil || hasPendingQuestions {
+        if controller.snapshot != nil || currentWorkflow != nil || hasPendingQuestions
+            || modelInfo != nil || !availableModels.isEmpty {
             if isOpen {
                 HStack(spacing: 4) {
-                    if let currentWorkflow {
+                    if modelInfo != nil || !availableModels.isEmpty {
+                        TranscriptModelButton(
+                            modelInfo: modelInfo,
+                            availableModels: availableModels,
+                            workflow: currentWorkflow,
+                            workflowProvider: workflowProvider,
+                            operation: operation,
+                            onSwitchModel: onSwitchModel
+                        )
+                        .id(conversationEpoch)
+                    }
+                    if currentWorkflow != nil || modelInfo != nil || !availableModels.isEmpty {
                         TranscriptUsageButton(
                             workflow: currentWorkflow,
                             workflowProvider: workflowProvider,
+                            modelInfo: modelInfo,
+                            availableModels: availableModels,
+                            operation: operation,
                             receipts: receipts,
-                            onAction: onAction
+                            onAction: onAction,
+                            onSwitchModel: onSwitchModel
                         )
                         .id(conversationEpoch)
                     }
@@ -213,17 +233,24 @@ struct TranscriptOverlay: View {
 }
 
 private struct TranscriptUsageButton: View {
-    let workflow: RemoteSessionWorkflow
+    let workflow: RemoteSessionWorkflow?
     var workflowProvider: (() -> RemoteSessionWorkflow?)? = nil
+    var modelInfo: RemoteModelInfo? = nil
+    var availableModels: [RemoteAvailableModel] = []
+    var operation: AgentOperationProjection = .unavailable
     let receipts: [RemoteOperationReceipt]
     let onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult
+    var onSwitchModel: (@MainActor (RemoteModelSelection) async -> RemoteWorkflowActionResult)? = nil
     @State private var showsPopover = false
+    @State private var showingModelPicker = false
     @State private var workflowState = SessionWorkflowState()
 
     var body: some View {
         let currentWorkflow = workflowProvider?() ?? workflow
-        let hasBudgetRequest = currentWorkflow.budgetRequest != nil
-        let accessibilityText = TranscriptDrawer.usageAccessibilityLabel(for: currentWorkflow)
+        let hasBudgetRequest = currentWorkflow?.budgetRequest != nil
+        let accessibilityText = currentWorkflow.map {
+            TranscriptDrawer.usageAccessibilityLabel(for: $0)
+        } ?? "Session details"
         Button {
             showsPopover.toggle()
         } label: {
@@ -236,27 +263,59 @@ private struct TranscriptUsageButton: View {
         .help(accessibilityText)
         .accessibilityLabel(accessibilityText)
         .accessibilityIdentifier("session-usage-button")
-        .onChange(of: currentWorkflow.budgetRequest?.requestId) { _, _ in
+        .onChange(of: currentWorkflow?.budgetRequest?.requestId) { _, _ in
             workflowState.resetBudgetAnswer()
         }
         .onChange(of: receipts) { _, values in
             workflowState.reconcile(receipts: values)
         }
+        .onChange(of: showsPopover) { _, isPresented in
+            if !isPresented {
+                showingModelPicker = false
+            }
+        }
         .background(
             Color.clear.popover(isPresented: $showsPopover, arrowEdge: .bottom) {
-                ScrollView {
-                    SessionWorkflowContentView(
+                if showingModelPicker {
+                    DesktopModelPickerView(
+                        currentModel: modelInfo,
+                        availableModels: availableModels,
                         workflow: currentWorkflow,
-                        canWrite: true,
-                        receipts: receipts,
-                        state: $workflowState,
-                        onAction: onAction
+                        operation: operation,
+                        onBack: { showingModelPicker = false },
+                        onApplied: { showingModelPicker = false },
+                        onSwitchModel: onSwitchModel
                     )
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(width: 380)
+                    .frame(maxHeight: 440)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            SessionDetailsModelSection(
+                                currentModel: modelInfo,
+                                availableModels: availableModels,
+                                onSelectModel: { showingModelPicker = true }
+                            )
+                            if (modelInfo != nil || !availableModels.isEmpty)
+                                && currentWorkflow != nil {
+                                Divider()
+                            }
+                            if let currentWorkflow {
+                                SessionWorkflowContentView(
+                                    workflow: currentWorkflow,
+                                    canWrite: true,
+                                    receipts: receipts,
+                                    state: $workflowState,
+                                    onAction: onAction
+                                )
+                            }
+                        }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(width: 380)
+                    .frame(maxHeight: 440)
                 }
-                .frame(width: 380)
-                .frame(maxHeight: 440)
             }
         )
     }

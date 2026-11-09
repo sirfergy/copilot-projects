@@ -1548,6 +1548,20 @@ extension AppModel {
         return Self.wireWorkflow(projects[location.p].sessions[location.s])
     }
 
+    func sessionModelInfo(sessionId: String) -> RemoteModelInfo? {
+        guard let location = locateIndex(sessionId),
+              let snapshot = projects[location.p].sessions[location.s].agentActivity,
+              !snapshot.reportsTerminalDisconnect else { return nil }
+        return snapshot.remoteModelInfo()
+    }
+
+    func sessionAvailableModels(sessionId: String) -> [RemoteAvailableModel] {
+        guard let location = locateIndex(sessionId),
+              let snapshot = projects[location.p].sessions[location.s].agentActivity,
+              !snapshot.reportsTerminalDisconnect else { return [] }
+        return snapshot.remoteAvailableModels() ?? []
+    }
+
     func sessionPendingUserInputs(sessionId: String) -> [RemoteUserInputRequest] {
         guard let location = locateIndex(sessionId),
               let snapshot = projects[location.p].sessions[location.s].agentActivity,
@@ -1691,6 +1705,49 @@ extension AppModel {
             state: state,
             message: state == .applied ? nil : state == .rejected
                 ? "Copilot did not apply this action."
+                : "Outcome unknown. Inspect the terminal before trying again.",
+            operationId: operation.operationId
+        )
+    }
+
+    func performLocalModelSwitch(
+        sessionId: String,
+        selection: RemoteModelSelection,
+        expectedConversationEpoch: String? = nil,
+        pollInterval: Duration = .milliseconds(500)
+    ) async -> RemoteWorkflowActionResult {
+        let adapter = CLIOperationAdapter(
+            activityDirectory: agentActivityDirectory,
+            resumeMarkerDirectory: resumeMarkerDirectory
+        )
+        guard let snapshot = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
+              let epoch = snapshot.remoteOperationProjection().conversationEpoch else {
+            return RemoteWorkflowActionResult(state: .rejected, message: "Native session controls are unavailable.")
+        }
+        if let expectedConversationEpoch, epoch != expectedConversationEpoch {
+            return RemoteWorkflowActionResult(
+                state: .rejected,
+                message: "The conversation changed. Choose the model again."
+            )
+        }
+        let operation = CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: epoch)
+        guard setModel(sessionId: sessionId, selection: selection, operation: operation) == .accepted else {
+            return RemoteWorkflowActionResult(state: .rejected, message: "Model switch was not accepted.")
+        }
+        guard let state = await terminalReceiptState(
+            sessionId: sessionId, operation: operation, kind: CLISDKOperationKind.setModel.rawValue,
+            pollInterval: pollInterval, adapter: adapter
+        ) else {
+            return RemoteWorkflowActionResult(
+                state: .indeterminate,
+                message: "Couldn't confirm the outcome. Inspect the terminal before trying again.",
+                operationId: operation.operationId
+            )
+        }
+        return RemoteWorkflowActionResult(
+            state: state,
+            message: state == .applied ? nil : state == .rejected
+                ? "Copilot did not apply this model switch."
                 : "Outcome unknown. Inspect the terminal before trying again.",
             operationId: operation.operationId
         )
