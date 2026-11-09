@@ -17233,13 +17233,35 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(model.sessionPromptComposer(sessionId: s4.id).isPromptFieldFocused)
         XCTAssertFalse(window.firstResponder === s4Terminal)
 
-        // 6. Moving focus to s1's terminal in side-drawer mode and receiving background updates or re-selecting s1 does not steal focus.
+        // 6. With the side drawer open and its composer or transcript text holding focus, clicking s1's terminal
+        //    focuses it, typing reaches its shell, and background updates or re-selecting s1 do not move focus back.
         model.show(projectId: project.id, sessionId: s1.id)
         await pump(host)
         XCTAssertTrue(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
-        XCTAssertTrue(window.makeFirstResponder(s1Terminal))
+        let terminalPoint = NSPoint(x: 100, y: 300)
+        XCTAssertTrue(window.contentView?.hitTest(terminalPoint) === s1Terminal)
+        // A window that isn't key drops the click, so put this one in the state the app's window is in when clicked.
+        window.becomeKey()
+        try sendClick(in: window, point: terminalPoint)
         await pump(host)
+        XCTAssertTrue(window.firstResponder === s1Terminal)
         XCTAssertFalse(model.sessionPromptComposer(sessionId: s1.id).isPromptFieldFocused)
+        func s1TerminalShowsTypedKey() -> Bool {
+            s1Terminal.terminalStateSnapshot().visibleRows.contains { $0.text.contains("z") }
+        }
+        XCTAssertFalse(s1TerminalShowsTypedKey())
+        try sendKey(to: window, characters: "z", keyCode: 6)
+        let echoDeadline = ContinuousClock.now + .seconds(5)
+        while !s1TerminalShowsTypedKey(), ContinuousClock.now < echoDeadline {
+            await pump(host)
+        }
+        XCTAssertTrue(s1TerminalShowsTypedKey())
+        XCTAssertEqual(model.sessionPromptComposer(sessionId: s1.id).prompt, "")
+        let transcriptText = try XCTUnwrap(MarkdownSelectableTextView.peerSelectableTextViews(in: host).first)
+        XCTAssertTrue(window.makeFirstResponder(transcriptText))
+        try sendClick(in: window, point: terminalPoint)
+        XCTAssertTrue(window.firstResponder === s1Terminal)
+        window.resignKey()
         model.projects[0].sessions[0].agentActivity = makeActivity(withWorkflow: true, questionId: "q-1")
         model.setStatus(sessionId: s2.id, status: .running, text: "Working", timestamp: 10, source: "test")
         model.setStatus(sessionId: s2.id, status: .idle, text: nil, timestamp: 20, source: "test")
