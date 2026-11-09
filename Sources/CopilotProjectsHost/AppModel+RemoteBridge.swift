@@ -2952,7 +2952,7 @@ extension AppModel {
         }
         return .failure(
             "That session can’t take a prompt from here right now. Check that Copilot is running in its terminal, or type the prompt there.",
-            code: "unavailable"
+            code: "no-copilot"
         )
     }
 

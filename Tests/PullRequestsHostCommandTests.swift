@@ -628,7 +628,7 @@ final class PullRequestsHostCommandTests: XCTestCase {
             // A session whose tracker reports no native sending refuses the prompt.
             let refused = send()
             XCTAssertFalse(refused.ok)
-            XCTAssertEqual(refused.code, "unavailable")
+            XCTAssertEqual(refused.code, "no-copilot")
 
             // A prompt an earlier version typed into the terminal is still in the ledger
             // after an upgrade. It loads, and replaying it never sends the prompt again.
@@ -716,7 +716,7 @@ final class PullRequestsHostCommandTests: XCTestCase {
             try JSONEncoder().encode(snapshot).write(to: snapshotURL)
             XCTAssertEqual(
                 send(nativeReqId, project: nil, session: "a1", prompt: "Queue via SDK").code,
-                "unavailable"
+                "no-copilot"
             )
             XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL.path))
 

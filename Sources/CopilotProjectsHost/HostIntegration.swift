@@ -88,10 +88,12 @@ public protocol SessionHost: AnyObject, Sendable {
     var supportsReopenClosedSession: Bool { get }
     func reopenClosedSession(id: String?) -> RemoteReopenSessionResult
     func moveSession(sessionId: String, toProjectId: String) -> RemoteSessionMoveResult
-    // The next three refuse a request without an `operation`. The exception is a durable
-    // ask-user elicitation, which is answered in the terminal and must be sent without one.
+    /// Refused without an `operation`.
     func answerUserInput(sessionId: String, answer: RemoteUserInputAnswer, operation: CLIOperationRequest?) -> RemoteUserInputResult
+    /// Refused without an `operation`, except for a durable ask-user elicitation, which is
+    /// answered in the terminal and must be sent without one.
     func answerElicitation(sessionId: String, answer: RemoteElicitationAnswer, operation: CLIOperationRequest?) -> RemoteUserInputResult
+    /// Refused without an `operation`.
     func setModel(sessionId: String, selection: RemoteModelSelection, operation: CLIOperationRequest?) -> RemoteUserInputResult
     func performSessionAction(sessionId: String, action: RemoteSessionAction, operation: CLIOperationRequest) -> RemoteUserInputResult
     var supportsSessionSearch: Bool { get }
