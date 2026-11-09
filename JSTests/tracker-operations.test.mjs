@@ -5064,11 +5064,34 @@ test("accepted publication failure blocks RPC and identical operations deduplica
   assert.equal(runtime.session.userInputCalls.length, 1);
   assert.equal(receipt(runtime, fields.operationId).payloadFingerprint, "a".repeat(64));
 
+  const competingFields = operationFields(
+    runtime,
+    "answer-user-input",
+    `competing-${uuid()}`,
+    "c"
+  );
+  writeHandoff(runtime, runtime.userInputPath, {
+    ...payload,
+    ...competingFields,
+  });
+  trigger(runtime, `${runtime.appSessionId}.user-input-response.json`);
+  assert.equal(runtime.session.userInputCalls.length, 1);
+  assert.equal(receipt(runtime, competingFields.operationId), undefined);
+  assert.equal(realExistsSync(runtime.userInputPath), true);
+
   resolveRPC({ success: true });
   await waitFor(
     () => receipt(runtime, fields.operationId)?.state === "applied",
     "original operation did not become applied"
   );
+  trigger(runtime, `${runtime.appSessionId}.user-input-response.json`);
+  await waitFor(
+    () => receipt(runtime, competingFields.operationId)?.state === "rejected",
+    "competing operation did not settle after in-flight lock released"
+  );
+  assert.equal(receipt(runtime, competingFields.operationId).errorCode, "invalid-request");
+  assert.equal(realExistsSync(runtime.userInputPath), false);
+
   const appliedTimestamp = receipt(runtime, fields.operationId).updatedAtMilliseconds;
   writeHandoff(runtime, runtime.userInputPath, payload);
   trigger(runtime, `${runtime.appSessionId}.user-input-response.json`);
@@ -5081,6 +5104,55 @@ test("accepted publication failure blocks RPC and identical operations deduplica
     receipt(runtime, fields.operationId).updatedAtMilliseconds,
     appliedTimestamp
   );
+
+  let resolveModelRPC;
+  runtime.session.modelSwitchHandler = () => new Promise((resolve) => {
+    resolveModelRPC = resolve;
+  });
+  runtime.session.modelListHandler = () => new Promise(() => {});
+  const firstModelFields = operationFields(runtime, "set-model", `model-1-${uuid()}`, "d");
+  const secondModelFields = operationFields(runtime, "set-model", `model-2-${uuid()}`, "e");
+  const modelBase = {
+    schemaVersion: 1,
+    copilotSessionId: runtime.copilotSessionId,
+    modelId: "gpt-5.6-sol",
+    reasoningEffort: "high",
+    contextTier: "long_context",
+  };
+  writeHandoff(runtime, runtime.modelPath, {
+    ...modelBase,
+    requestId: "ignored-1",
+    ...firstModelFields,
+  });
+  trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
+  assert.equal(receipt(runtime, firstModelFields.operationId)?.state, "accepted");
+  assert.equal(runtime.session.modelSwitchCalls.length, 1);
+
+  writeHandoff(runtime, runtime.modelPath, {
+    ...modelBase,
+    requestId: { toString: null },
+    ...secondModelFields,
+  });
+  trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
+  assert.equal(runtime.session.modelSwitchCalls.length, 1);
+  assert.equal(receipt(runtime, secondModelFields.operationId), undefined);
+  assert.equal(realExistsSync(runtime.modelPath), true);
+
+  runtime.session.modelSwitchHandler = async (request) => ({
+    status: "applied", modelId: request.modelId, deferred: false,
+  });
+  resolveModelRPC({ status: "applied", modelId: "gpt-5.6-sol", deferred: false });
+  await waitFor(
+    () => receipt(runtime, firstModelFields.operationId)?.state === "applied",
+    "first model operation did not become applied"
+  );
+  trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
+  await waitFor(
+    () => receipt(runtime, secondModelFields.operationId)?.state === "applied",
+    "queued model operation did not complete after lock release"
+  );
+  assert.equal(runtime.session.modelSwitchCalls.length, 2);
+  assert.equal(realExistsSync(runtime.modelPath), false);
 });
 
 test("model receipts interpret switchTo metadata without a model event", {

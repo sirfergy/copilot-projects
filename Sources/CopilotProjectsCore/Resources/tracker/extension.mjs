@@ -326,7 +326,6 @@ if (validSessionId && socketPath) {
     // requestId. Rebuilt from live events and the runtime's question event
     // log, never resurrected from disk.
     const pendingUserInputs = new Map();
-    const inFlightUserInputResponses = new Set();
     // Outstanding elicitations (schema-form / url questions), keyed by
     // requestId. Same lifecycle as pendingUserInputs.
     const pendingElicitations = new Map();
@@ -334,7 +333,7 @@ if (validSessionId && socketPath) {
     const completedQuestionRequests = new Set();
     const pendingQuestionRequestIds = new Set();
     let questionEventStream = null;
-    const inFlightElicitationResponses = new Set();
+    const inFlightHandoffs = new Set();
     const operationReceipts = new Map();
     const activeOperationKeys = new Set();
     // Passive observation only: NEVER register interest / call setRequired for
@@ -396,7 +395,6 @@ if (validSessionId && socketPath) {
     // every result mutation is fenced on `conversationGeneration`.
     let schedulesRefreshGeneration = null;
     let modelsRefreshGeneration = null;
-    let setModelRequestGeneration = null;
     let closeSessionRequestInFlight = false;
     let closeSessionExitQueued = false;
     let schedules = [];
@@ -1513,7 +1511,8 @@ if (validSessionId && socketPath) {
     }
 
     function parseOperationMetadata(response, expectedKind) {
-        if (!validOperationToken(response.operationId, 128)
+        if (!response || typeof response !== "object"
+                || !validOperationToken(response.operationId, 128)
                 || !validOperationToken(response.conversationEpoch, 512)
                 || !OPERATION_KINDS.has(response.kind)
                 || !/^[0-9a-f]{64}$/.test(response.payloadFingerprint)) {
@@ -1562,6 +1561,30 @@ if (validSessionId && socketPath) {
             return { mode: "busy", context };
         }
         return { mode: "new", context };
+    }
+
+    function claimNewHandoff(payload, kind, path, encoded) {
+        const operation = parseOperationMetadata(payload, kind);
+        if (operation.mode === "busy" || operation.mode === "inflight") return null;
+        if (operation.mode === "terminal") {
+            if (publish()) removeCapturedHandoff(path, encoded, operation.context);
+            return null;
+        }
+        if (operation.mode === "indeterminate") {
+            if (publishTerminalReceipt(
+                operation.context,
+                "indeterminate",
+                "execution-ownership-lost"
+            )) {
+                removeCapturedHandoff(path, encoded, operation.context);
+            }
+            return null;
+        }
+        if (operation.mode !== "new") {
+            removeCapturedHandoff(path, encoded);
+            return null;
+        }
+        return operation.context;
     }
 
     function publishAcceptedReceipt(context) {
@@ -1656,6 +1679,86 @@ if (validSessionId && socketPath) {
         );
         if (published) removeCapturedHandoff(path, encoded, context);
         return published;
+    }
+
+    function completeQuestionAnswer(pendingMap, requestId, rpcResult) {
+        // False means the request is no longer pending, not that our answer succeeded.
+        if (typeof rpcResult?.success === "boolean") {
+            noteQuestionCompleted(requestId);
+            pendingMap.delete(requestId);
+        }
+        return rpcReceiptOutcome(rpcResult);
+    }
+
+    // Execute a single-file host handoff (user input, elicitation, or model
+    // switch) through the receipt state machine: owner/session check,
+    // parseOperationMetadata replay/dedup, synchronous preflight validation,
+    // accepted receipt before RPC, post-publish target recheck, and terminal
+    // receipt before removing the captured file.
+    async function runHandoff(path, kind, prepare) {
+        if (!ownsSharedFiles()) return;
+        let encoded;
+        try {
+            encoded = readFileSync(path, "utf8");
+        } catch {
+            return;
+        }
+        let payload;
+        try {
+            payload = JSON.parse(encoded);
+        } catch {
+            removeCapturedHandoff(path, encoded);
+            return;
+        }
+        if (!payload || typeof payload !== "object"
+                || payload.schemaVersion !== 1
+                || payload.copilotSessionId !== copilotSessionId
+                || (kind !== "set-model" && typeof payload.requestId !== "string")
+                || (kind === "answer-elicitation"
+                    && payload.requestId.startsWith(DURABLE_ASK_USER_PREFIX))) {
+            removeCapturedHandoff(path, encoded);
+            return;
+        }
+        const context = claimNewHandoff(payload, kind, path, encoded);
+        if (!context) return;
+        const lockKey = `${context.generation}\u0000${kind}\u0000${kind === "set-model" ? "" : payload.requestId}`;
+        if (inFlightHandoffs.has(lockKey)) return;
+        const prepared = prepare(payload);
+        if (prepared.errorCode) {
+            publishRejectedPreflight(context, prepared.errorCode, path, encoded);
+            return;
+        }
+        if (!publishAcceptedReceipt(context)) return;
+
+        const operationKey = operationExecutionKey(
+            context.conversationEpoch,
+            context.operationId
+        );
+        inFlightHandoffs.add(lockKey);
+        activeOperationKeys.add(operationKey);
+        let invoked = false;
+        try {
+            if (!operationAuthorityCurrent(context) || !prepared.current()) {
+                publishRejectedPreflight(context, "target-unavailable", path, encoded);
+                return;
+            }
+            invoked = true;
+            const rpcResult = await prepared.invoke();
+            if (!operationAuthorityCurrent(context)) return;
+            const outcome = prepared.complete(rpcResult);
+            if (publishTerminalReceipt(context, outcome.state, outcome.errorCode)) {
+                removeCapturedHandoff(path, encoded, context);
+            }
+            prepared.afterPublish?.(outcome);
+        } catch {
+            if (!operationAuthorityCurrent(context)) return;
+            if (invoked && publishTerminalReceipt(context, "indeterminate", "rpc-indeterminate")) {
+                removeCapturedHandoff(path, encoded, context);
+            }
+        } finally {
+            inFlightHandoffs.delete(lockKey);
+            activeOperationKeys.delete(operationKey);
+        }
     }
 
     function invalidateRuntimeActivity() {
@@ -2616,29 +2719,9 @@ if (validSessionId && socketPath) {
             removeCapturedHandoff(path, encoded);
             return;
         }
-        if (!request || typeof request !== "object") {
-            removeCapturedHandoff(path, encoded);
-            return;
-        }
-        const operation = parseOperationMetadata(request, kind);
-        if (["busy", "inflight"].includes(operation.mode)) return;
-        if (operation.mode === "terminal") {
-            if (publish()) removeCapturedHandoff(path, encoded, operation.context);
-            return;
-        }
-        if (operation.mode === "indeterminate") {
-            if (publishTerminalReceipt(operation.context, "indeterminate", "execution-ownership-lost")) {
-                removeCapturedHandoff(path, encoded, operation.context);
-            }
-            return;
-        }
-        if (operation.mode !== "new") {
-            removeCapturedHandoff(path, encoded);
-            return;
-        }
-        if (!allowNew) return;
+        const context = claimNewHandoff(request, kind, path, encoded);
+        if (!context || !allowNew) return;
         const action = request.action;
-        const context = operation.context;
         if (activeOperationKeys.has(operationExecutionKey(context.conversationEpoch, context.operationId))) return;
         const workflow = workflowSnapshot();
         // Parking stops the CLI as a bounce does, so it asks the same question,
@@ -2966,155 +3049,25 @@ if (validSessionId && socketPath) {
     // retain the pending question. Explicit boolean RPC results or
     // completion events retire it: success:false means the ID is no longer
     // pending, while the losing answer's receipt remains rejected.
-    async function processUserInputResponse() {
-        // Only the owner reconciles remote answers: a spawned classifier helper
-        // shares this session dir and would otherwise delete the owner's pending
-        // response (its session id / pending set won't match), stranding the
-        // answer and forcing the terminal fallback.
-        if (!ownsSharedFiles()) return;
-        let encoded;
-        try {
-            encoded = readFileSync(userInputResponsePath, "utf8");
-        } catch {
-            return;
-        }
-        let response;
-        try {
-            response = JSON.parse(encoded);
-        } catch {
-            removeCapturedHandoff(userInputResponsePath, encoded);
-            return;
-        }
-        if (!response || typeof response !== "object"
-                || response.schemaVersion !== 1
-                || typeof response.requestId !== "string"
-                || typeof response.copilotSessionId !== "string") {
-            removeCapturedHandoff(userInputResponsePath, encoded);
-            return;
-        }
-        const requestId = response.requestId;
-        if (response.copilotSessionId !== copilotSessionId) {
-            removeCapturedHandoff(userInputResponsePath, encoded);
-            return;
-        }
-        const operation = parseOperationMetadata(response, "answer-user-input");
-        if (operation.mode === "invalid"
-                || operation.mode === "stale"
-                || operation.mode === "conflict") {
-            removeCapturedHandoff(userInputResponsePath, encoded);
-            return;
-        }
-        if (operation.mode === "busy" || operation.mode === "inflight") return;
-        if (operation.mode === "indeterminate") {
-            if (publishTerminalReceipt(
-                operation.context,
-                "indeterminate",
-                "execution-ownership-lost"
-            )) {
-                removeCapturedHandoff(
-                    userInputResponsePath,
-                    encoded,
-                    operation.context
-                );
-            }
-            return;
-        }
-        if (operation.mode === "terminal") {
-            if (publish()) {
-                removeCapturedHandoff(
-                    userInputResponsePath,
-                    encoded,
-                    operation.context
-                );
-            }
-            return;
-        }
-        const pending = pendingUserInputs.get(requestId);
-        const answer = response.answer;
-        const wasFreeform = response.wasFreeform;
-        const valid = pending
-            && typeof answer === "string"
-            && userInputByteLength(answer) <= MAX_USER_INPUT_ANSWER_BYTES
-            && typeof wasFreeform === "boolean"
-            && (wasFreeform
-                ? pending.allowFreeform
-                : pending.choices.includes(answer));
-        if (!valid) {
-            publishRejectedPreflight(
-                operation.context,
-                "invalid-request",
-                userInputResponsePath,
-                encoded
-            );
-            return;
-        }
-        if (!publishAcceptedReceipt(operation.context)) return;
-
-        const requestExecutionKey = `${operation.context.generation}\u0000${requestId}`;
-        const operationKey = operationExecutionKey(
-            operation.context.conversationEpoch,
-            operation.context.operationId
-        );
-        if (inFlightUserInputResponses.has(requestExecutionKey)) return;
-        inFlightUserInputResponses.add(requestExecutionKey);
-        activeOperationKeys.add(operationKey);
-        let invoked = false;
-        try {
-            if (!operationAuthorityCurrent(operation.context)
-                    || pendingUserInputs.get(requestId) !== pending) {
-                publishRejectedPreflight(
-                    operation.context,
-                    "target-unavailable",
-                    userInputResponsePath,
-                    encoded
-                );
-                return;
-            }
-            invoked = true;
-            const result = await session.rpc.ui.handlePendingUserInput({
-                requestId,
-                response: { answer, wasFreeform },
-            });
-            if (!operationAuthorityCurrent(operation.context)) return;
-            // False means the request is no longer pending, not that our answer succeeded.
-            const resolved = typeof result?.success === "boolean";
-            if (resolved) {
-                noteQuestionCompleted(requestId);
-                pendingUserInputs.delete(requestId);
-            }
-            const outcome = rpcReceiptOutcome(result);
-            const published = publishTerminalReceipt(
-                operation.context,
-                outcome.state,
-                outcome.errorCode
-            );
-            if (published) {
-                removeCapturedHandoff(
-                    userInputResponsePath,
-                    encoded,
-                    operation.context
-                );
-            }
-        } catch {
-            if (!operationAuthorityCurrent(operation.context)) return;
-            if (invoked) {
-                const published = publishTerminalReceipt(
-                    operation.context,
-                    "indeterminate",
-                    "rpc-indeterminate"
-                );
-                if (published) {
-                    removeCapturedHandoff(
-                        userInputResponsePath,
-                        encoded,
-                        operation.context
-                    );
-                }
-            }
-        } finally {
-            inFlightUserInputResponses.delete(requestExecutionKey);
-            activeOperationKeys.delete(operationKey);
-        }
+    function processUserInputResponse() {
+        return runHandoff(userInputResponsePath, "answer-user-input", (response) => {
+            const { requestId, answer, wasFreeform } = response;
+            const pending = pendingUserInputs.get(requestId);
+            const valid = pending
+                && typeof answer === "string"
+                && userInputByteLength(answer) <= MAX_USER_INPUT_ANSWER_BYTES
+                && typeof wasFreeform === "boolean"
+                && (wasFreeform ? pending.allowFreeform : pending.choices.includes(answer));
+            if (!valid) return { errorCode: "invalid-request" };
+            return {
+                current: () => pendingUserInputs.get(requestId) === pending,
+                invoke: () => session.rpc.ui.handlePendingUserInput({
+                    requestId,
+                    response: { answer, wasFreeform },
+                }),
+                complete: (result) => completeQuestionAnswer(pendingUserInputs, requestId, result),
+            };
+        });
     }
 
     // Build a bounded elicitation record or return null to reject remote
@@ -3567,176 +3520,42 @@ if (validSessionId && socketPath) {
     // processUserInputResponse: owner-only, validates against the pending record,
     // and retains the card on preflight/indeterminate failures. Explicit
     // success:false retires the no-longer-pending request with a rejected receipt.
-    async function processElicitationResponse() {
-        if (!ownsSharedFiles()) return;
-        let encoded;
-        try {
-            encoded = readFileSync(elicitationResponsePath, "utf8");
-        } catch {
-            return;
-        }
-        let response;
-        try {
-            response = JSON.parse(encoded);
-        } catch {
-            removeCapturedHandoff(elicitationResponsePath, encoded);
-            return;
-        }
-        if (!response || typeof response !== "object"
-                || response.schemaVersion !== 1
-                || typeof response.requestId !== "string"
-                || typeof response.copilotSessionId !== "string") {
-            removeCapturedHandoff(elicitationResponsePath, encoded);
-            return;
-        }
-        const requestId = response.requestId;
-        if (requestId.startsWith(DURABLE_ASK_USER_PREFIX)) {
-            removeCapturedHandoff(elicitationResponsePath, encoded);
-            return;
-        }
-        if (response.copilotSessionId !== copilotSessionId) {
-            removeCapturedHandoff(elicitationResponsePath, encoded);
-            return;
-        }
-        const operation = parseOperationMetadata(response, "answer-elicitation");
-        if (operation.mode === "invalid"
-                || operation.mode === "stale"
-                || operation.mode === "conflict") {
-            removeCapturedHandoff(elicitationResponsePath, encoded);
-            return;
-        }
-        if (operation.mode === "busy" || operation.mode === "inflight") return;
-        if (operation.mode === "indeterminate") {
-            if (publishTerminalReceipt(
-                operation.context,
-                "indeterminate",
-                "execution-ownership-lost"
-            )) {
-                removeCapturedHandoff(
-                    elicitationResponsePath,
-                    encoded,
-                    operation.context
-                );
-            }
-            return;
-        }
-        if (operation.mode === "terminal") {
-            if (publish()) {
-                removeCapturedHandoff(
-                    elicitationResponsePath,
-                    encoded,
-                    operation.context
-                );
-            }
-            return;
-        }
-        const pending = pendingElicitations.get(requestId);
-        const action = response.action;
-        let valid = Boolean(pending)
-            && (action === "accept" || action === "decline" || action === "cancel");
-        const result = { action };
-        if (valid && action === "accept") {
-            if (pending.mode === "url" || typeof pending.url === "string") {
-                if (response.content != null) {
-                    valid = false;
+    function processElicitationResponse() {
+        return runHandoff(elicitationResponsePath, "answer-elicitation", (response) => {
+            const { requestId, action } = response;
+            const pending = pendingElicitations.get(requestId);
+            let valid = Boolean(pending)
+                && (action === "accept" || action === "decline" || action === "cancel");
+            const result = { action };
+            if (valid && action === "accept") {
+                if (pending.mode === "url" || typeof pending.url === "string") {
+                    if (response.content != null) valid = false;
+                } else {
+                    const content = response.content;
+                    if (!content || typeof content !== "object" || Array.isArray(content)) {
+                        valid = false;
+                    }
+                    let serialized;
+                    try {
+                        serialized = JSON.stringify(content);
+                    } catch {
+                        valid = false;
+                    }
+                    if (valid && Buffer.byteLength(serialized) > MAX_ELICITATION_CONTENT_BYTES) {
+                        valid = false;
+                    }
+                    if (valid) result.content = content;
                 }
-            } else {
-                const content = response.content;
-                if (!content || typeof content !== "object" || Array.isArray(content)) {
-                    valid = false;
-                }
-                let serialized;
-                try {
-                    serialized = JSON.stringify(content);
-                } catch {
-                    valid = false;
-                }
-                if (valid
-                        && Buffer.byteLength(serialized)
-                            > MAX_ELICITATION_CONTENT_BYTES) {
-                    valid = false;
-                }
-                if (valid) result.content = content;
+            } else if (valid && response.content != null) {
+                valid = false;
             }
-        } else if (valid && response.content != null) {
-            valid = false;
-        }
-        if (!valid) {
-            publishRejectedPreflight(
-                operation.context,
-                "invalid-request",
-                elicitationResponsePath,
-                encoded
-            );
-            return;
-        }
-        if (!publishAcceptedReceipt(operation.context)) return;
-
-        const requestExecutionKey = `${operation.context.generation}\u0000${requestId}`;
-        const operationKey = operationExecutionKey(
-            operation.context.conversationEpoch,
-            operation.context.operationId
-        );
-        if (inFlightElicitationResponses.has(requestExecutionKey)) return;
-        inFlightElicitationResponses.add(requestExecutionKey);
-        activeOperationKeys.add(operationKey);
-        let invoked = false;
-        try {
-            if (!operationAuthorityCurrent(operation.context)
-                    || pendingElicitations.get(requestId) !== pending) {
-                publishRejectedPreflight(
-                    operation.context,
-                    "target-unavailable",
-                    elicitationResponsePath,
-                    encoded
-                );
-                return;
-            }
-            invoked = true;
-            const rpcResult = await session.rpc.ui.handlePendingElicitation({
-                requestId,
-                result,
-            });
-            if (!operationAuthorityCurrent(operation.context)) return;
-            // False means the request is no longer pending, not that our answer succeeded.
-            const resolved = typeof rpcResult?.success === "boolean";
-            if (resolved) {
-                noteQuestionCompleted(requestId);
-                pendingElicitations.delete(requestId);
-            }
-            const outcome = rpcReceiptOutcome(rpcResult);
-            const published = publishTerminalReceipt(
-                operation.context,
-                outcome.state,
-                outcome.errorCode
-            );
-            if (published) {
-                removeCapturedHandoff(
-                    elicitationResponsePath,
-                    encoded,
-                    operation.context
-                );
-            }
-        } catch {
-            if (!operationAuthorityCurrent(operation.context)) return;
-            if (invoked) {
-                const published = publishTerminalReceipt(
-                    operation.context,
-                    "indeterminate",
-                    "rpc-indeterminate"
-                );
-                if (published) {
-                    removeCapturedHandoff(
-                        elicitationResponsePath,
-                        encoded,
-                        operation.context
-                    );
-                }
-            }
-        } finally {
-            inFlightElicitationResponses.delete(requestExecutionKey);
-            activeOperationKeys.delete(operationKey);
-        }
+            if (!valid) return { errorCode: "invalid-request" };
+            return {
+                current: () => pendingElicitations.get(requestId) === pending,
+                invoke: () => session.rpc.ui.handlePendingElicitation({ requestId, result }),
+                complete: (rpcResult) => completeQuestionAnswer(pendingElicitations, requestId, rpcResult),
+            };
+        });
     }
 
     function trimTranscriptTurns(maximumTurns = MAX_TRANSCRIPT_TURNS) {
@@ -5454,13 +5273,12 @@ if (validSessionId && socketPath) {
         activeOperationKeys.clear();
         activeSubagents.clear();
         pendingUserInputs.clear();
-        inFlightUserInputResponses.clear();
         pendingElicitations.clear();
         recoveredQuestionToolCallIds.clear();
         completedQuestionRequests.clear();
         pendingQuestionRequestIds.clear();
         questionEventStream = null;
-        inFlightElicitationResponses.clear();
+        inFlightHandoffs.clear();
         pendingPermissionRequests.clear();
         completedPermissionRequests.clear();
         inputCompletions.clear();
@@ -5765,134 +5583,21 @@ if (validSessionId && socketPath) {
 
     // Consume a host-written model switch request: publish an accepted receipt
     // before the first RPC and a terminal receipt before refreshing the catalog.
-    async function processSetModelRequest() {
-        const generation = conversationGeneration;
-        if (!ownsSharedFiles()
-                || setModelRequestGeneration === generation) return;
-        let encoded;
-        try {
-            encoded = readFileSync(setModelRequestPath, "utf8");
-        } catch {
-            return;
-        }
-        let request;
-        try {
-            request = JSON.parse(encoded);
-        } catch {
-            removeCapturedHandoff(setModelRequestPath, encoded);
-            return;
-        }
-        if (!request || typeof request !== "object"
-                || request.schemaVersion !== 1
-                || typeof request.copilotSessionId !== "string") {
-            removeCapturedHandoff(setModelRequestPath, encoded);
-            return;
-        }
-        if (request.copilotSessionId !== copilotSessionId) {
-            removeCapturedHandoff(setModelRequestPath, encoded);
-            return;
-        }
-        const operation = parseOperationMetadata(request, "set-model");
-        if (operation.mode === "invalid"
-                || operation.mode === "stale"
-                || operation.mode === "conflict") {
-            removeCapturedHandoff(setModelRequestPath, encoded);
-            return;
-        }
-        if (operation.mode === "busy" || operation.mode === "inflight") return;
-        if (operation.mode === "indeterminate") {
-            if (publishTerminalReceipt(
-                operation.context,
-                "indeterminate",
-                "execution-ownership-lost"
-            )) {
-                removeCapturedHandoff(
-                    setModelRequestPath,
-                    encoded,
-                    operation.context
-                );
+    function processSetModelRequest() {
+        return runHandoff(setModelRequestPath, "set-model", (request) => {
+            const params = validatedModelSwitch(request);
+            if (!params) {
+                return { errorCode: bounceRequested ? "target-unavailable" : "invalid-request" };
             }
-            return;
-        }
-        if (operation.mode === "terminal") {
-            if (publish()) {
-                removeCapturedHandoff(
-                    setModelRequestPath,
-                    encoded,
-                    operation.context
-                );
-            }
-            return;
-        }
-        const params = validatedModelSwitch(request);
-        if (!params) {
-            publishRejectedPreflight(
-                operation.context,
-                bounceRequested ? "target-unavailable" : "invalid-request",
-                setModelRequestPath,
-                encoded
-            );
-            return;
-        }
-        if (!publishAcceptedReceipt(operation.context)) return;
-
-        const operationKey = operationExecutionKey(
-            operation.context.conversationEpoch,
-            operation.context.operationId
-        );
-        setModelRequestGeneration = generation;
-        activeOperationKeys.add(operationKey);
-        let invoked = false;
-        try {
-            if (!operationAuthorityCurrent(operation.context)
-                    || !validatedModelSwitch(request)) {
-                publishRejectedPreflight(
-                    operation.context,
-                    "target-unavailable",
-                    setModelRequestPath,
-                    encoded
-                );
-                return;
-            }
-            invoked = true;
-            const result = await session.rpc.model.switchTo(params);
-            if (!operationAuthorityCurrent(operation.context)) return;
-            const outcome = modelSwitchReceiptOutcome(result, params.modelId);
-            const published = publishTerminalReceipt(
-                operation.context,
-                outcome.state,
-                outcome.errorCode
-            );
-            if (published) {
-                removeCapturedHandoff(
-                    setModelRequestPath,
-                    encoded,
-                    operation.context
-                );
-            }
-            if (outcome.state === "applied") refreshModels();
-        } catch {
-            if (!operationAuthorityCurrent(operation.context)) return;
-            if (invoked) {
-                const published = publishTerminalReceipt(
-                    operation.context,
-                    "indeterminate",
-                    "rpc-indeterminate"
-                );
-                if (published) {
-                    removeCapturedHandoff(
-                        setModelRequestPath,
-                        encoded,
-                        operation.context
-                    );
-                }
-            }
-        } finally {
-            activeOperationKeys.delete(operationKey);
-            if (setModelRequestGeneration === generation) {
-                setModelRequestGeneration = null;
-            }
-        }
+            return {
+                current: () => Boolean(validatedModelSwitch(request)),
+                invoke: () => session.rpc.model.switchTo(params),
+                complete: (result) => modelSwitchReceiptOutcome(result, params.modelId),
+                afterPublish: (outcome) => {
+                    if (outcome.state === "applied") refreshModels();
+                },
+            };
+        });
     }
 
     session.on("user.message", (event) => {
