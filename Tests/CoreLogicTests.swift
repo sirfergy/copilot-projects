@@ -4219,7 +4219,9 @@ final class CoreLogicTests: XCTestCase {
         // question from the heartbeat.
         writeFileSync(responsePath, JSON.stringify({
           schemaVersion:1,copilotSessionId:"copilot-session",
-          requestId:"req-root",answer:"Yes, deploy",wasFreeform:false
+          requestId:"req-root",answer:"Yes, deploy",wasFreeform:false,
+          operationId:"answer-root",conversationEpoch:firstSnapshot.conversationEpoch,
+          kind:"answer-user-input",payloadFingerprint:"a".repeat(64)
         }));
         waited = 0;
         while (waited < 6000 && handledUserInputCalls.length === 0) {
@@ -4461,7 +4463,9 @@ final class CoreLogicTests: XCTestCase {
         // A valid form response is delivered over RPC and clears the heartbeat card.
         writeFileSync(responsePath, JSON.stringify({
           schemaVersion:1,copilotSessionId:"copilot-session",requestId:"req-form",
-          action:"accept",content:{fruit:"apple"}
+          action:"accept",content:{fruit:"apple"},
+          operationId:"answer-form",conversationEpoch:firstSnapshot.conversationEpoch,
+          kind:"answer-elicitation",payloadFingerprint:"a".repeat(64)
         }));
         waited = 0;
         while (waited < 6000 && handledElicitationCalls.length === 0) {
@@ -4477,7 +4481,9 @@ final class CoreLogicTests: XCTestCase {
         // URL-mode accept has no form content, but still answers over RPC.
         writeFileSync(responsePath, JSON.stringify({
           schemaVersion:1,copilotSessionId:"copilot-session",requestId:"req-url",
-          action:"accept"
+          action:"accept",
+          operationId:"answer-url",conversationEpoch:firstSnapshot.conversationEpoch,
+          kind:"answer-elicitation",payloadFingerprint:"b".repeat(64)
         }));
         waited = 0;
         while (waited < 6000 && handledElicitationCalls.length < 2) {
