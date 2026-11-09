@@ -432,21 +432,11 @@ struct TranscriptDrawer: View {
         )
     }
 
-    private static let maxEagerBottomTurnCount = 8
-
-    private static func defaultEagerTurnCount(for turns: [TranscriptTurn]) -> Int {
-        var count = 0
-        var estimatedHeight = 0
-        for turn in turns.reversed() {
-            count += 1
-            let chars = turn.userContent.count + turn.assistantMessages.reduce(0) { $0 + $1.content.count }
-            estimatedHeight += 130 + chars / 3
-            if count >= 2 && (estimatedHeight >= 800 || count >= 6) {
-                break
-            }
-        }
-        return count
-    }
+    /// Turns rendered on open, and added per page of earlier history. Only these are laid out, with
+    /// real heights: a lazy stack of the older turns re-estimated its height on most layout passes,
+    /// which moved the turns below it and drew its last card over them. Four of the heaviest turns
+    /// seen (one with 328 tool calls) open in under 100 ms.
+    private static let turnPageSize = 4
 
     private struct ScrollMetrics: Equatable {
         let offsetY: CGFloat
@@ -454,26 +444,41 @@ struct TranscriptDrawer: View {
         let isNearBottom: Bool
     }
 
-    @State private var firstEagerTurnId: String?
-
-    private var resolvedLazyTurnCount: Int {
-        let turns = displayedTurns
-        let total = turns.count
-        let maxLazy = max(0, total - Self.defaultEagerTurnCount(for: turns))
-        let pinnedIndex = firstEagerTurnId.flatMap { id in
-            turns.firstIndex(where: { $0.id == id }) ?? (isAtBottom ? nil : 0)
-        }
-        guard isAtBottom else {
-            return min(pinnedIndex ?? maxLazy, total)
-        }
-        let minLazy = max(0, total - Self.maxEagerBottomTurnCount)
-        return min(max(pinnedIndex ?? maxLazy, minLazy), maxLazy)
+    /// The oldest rendered turn, set once the reader scrolls up or pages in history so turns arriving
+    /// below don't push it out. Until then the newest page is rendered. It holds a start time rather
+    /// than an id because the tracker's 200-turn cap drops the oldest scheduled turn first, which
+    /// can be this one. It holds the conversation because `/new` and `/resume` put another one in
+    /// the same drawer, and every turn of a newer conversation starts after the old pin: a test
+    /// rendered all 80 turns of one at once.
+    private struct FirstRendered: Equatable {
+        let start: Date
+        let conversation: String?
     }
 
-    private func syncLazyTurnCount() {
+    @State private var firstRendered: FirstRendered?
+
+    private var firstRenderedStart: Date? {
+        firstRendered?.conversation == copilotSessionId ? firstRendered?.start : nil
+    }
+
+    private func firstRenderedIndex(in turns: [TranscriptTurn]) -> Int {
+        let newestPage = max(0, turns.count - Self.turnPageSize)
+        guard let firstRenderedStart else { return newestPage }
+        return turns.firstIndex { $0.startedAt >= firstRenderedStart } ?? newestPage
+    }
+
+    private func render(from turn: TranscriptTurn?) {
+        firstRendered = turn.map { FirstRendered(start: $0.startedAt, conversation: copilotSessionId) }
+    }
+
+    /// Renders one more page of earlier turns. Returns false, and writes nothing, when every turn
+    /// is rendered: a write here re-evaluates the whole drawer.
+    private func loadEarlierPage() -> Bool {
         let turns = displayedTurns
-        let index = resolvedLazyTurnCount
-        firstEagerTurnId = index < turns.count ? turns[index].id : nil
+        let first = firstRenderedIndex(in: turns)
+        guard first > 0 else { return false }
+        render(from: turns[max(0, first - Self.turnPageSize)])
+        return true
     }
 
     private func turnCard(_ turn: TranscriptTurn) -> some View {
@@ -507,23 +512,9 @@ struct TranscriptDrawer: View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 let turns = displayedTurns
-                let lazyCount = resolvedLazyTurnCount
-                let eagerEnd = min(turns.count, lazyCount + Self.maxEagerBottomTurnCount)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        if lazyCount > 0 {
-                            LazyVStack(alignment: .leading, spacing: 14) {
-                                ForEach(turns.prefix(lazyCount), content: turnCard)
-                            }
-                        }
-                        ForEach(turns[lazyCount..<eagerEnd], content: turnCard)
-                        // Keep turns appended beyond maxEagerBottomTurnCount while scrolled up in a
-                        // trailing LazyVStack so the eager window stays bounded without shifting lazyCount.
-                        if eagerEnd < turns.count {
-                            LazyVStack(alignment: .leading, spacing: 14) {
-                                ForEach(turns.dropFirst(eagerEnd), content: turnCard)
-                            }
-                        }
+                        ForEach(turns[firstRenderedIndex(in: turns)...], content: turnCard)
                         ForEach(pendingUserInputs, id: \.requestId) { request in
                             DesktopUserInputCard(
                                 request: request,
@@ -570,6 +561,7 @@ struct TranscriptDrawer: View {
                             .frame(height: 1)
                             .id("transcript-bottom")
                     }
+                    .background(TranscriptHistoryPager(loadEarlierPage: loadEarlierPage))
                     .padding(.horizontal, 18)
                     .padding(.top, 5)
                     .padding(.bottom, 6)
@@ -590,10 +582,12 @@ struct TranscriptDrawer: View {
                     }
                     if newValue.isNearBottom {
                         isAtBottom = true
-                        syncLazyTurnCount()
                     } else if newValue.containerWidth == oldValue.containerWidth
                         && newValue.offsetY < oldValue.offsetY {
                         isAtBottom = false
+                        if firstRenderedStart == nil {
+                            render(from: turns.dropFirst(firstRenderedIndex(in: turns)).first)
+                        }
                     }
                 }
                 .background {
@@ -612,7 +606,6 @@ struct TranscriptDrawer: View {
                 }
                 .defaultScrollAnchor(.bottom)
                 .onAppear {
-                    syncLazyTurnCount()
                     isAtBottom = true
                     scrollToBottom(proxy)
                 }
@@ -622,9 +615,19 @@ struct TranscriptDrawer: View {
                     }
                 }
                 .onChange(of: turns) { _, _ in
-                    syncLazyTurnCount()
                     guard isAtBottom else { return }
                     scrollToBottom(proxy)
+                }
+                // A short newest page fills in an earlier one while still following the bottom.
+                // Without this the drawer opened 602 pt above the bottom on a session of short turns.
+                .onChange(of: firstRenderedStart) { _, _ in
+                    guard isAtBottom else { return }
+                    scrollToBottom(proxy)
+                }
+                // Coming back to a conversation starts from its newest turns. A test that paged up,
+                // switched conversation and switched back rendered 20 turns at once instead of 12.
+                .onChange(of: copilotSessionId) { _, _ in
+                    firstRendered = nil
                 }
                 .onChange(of: currentWorkflow?.pendingMessages) { _, _ in
                     guard isAtBottom else { return }
@@ -662,6 +665,83 @@ struct TranscriptDrawer: View {
             }
         }
         .shadow(color: .black.opacity(isFullWidth ? 0 : 0.2), radius: isFullWidth ? 0 : 12, x: isFullWidth ? 0 : -4)
+    }
+}
+
+/// Renders an earlier page of the transcript when the reader comes within a viewport of the oldest
+/// rendered turn, and keeps the turns on screen where they were when that page is laid out above.
+///
+/// The offset moves in AppKit, in the layout pass that places the page. SwiftUI's `ScrollPosition`
+/// applies a scroll one pass later, and a scroll event landing in between replaced it: in the jump
+/// harness, 9 of 49 page loads moved the transcript by the height of the page.
+private struct TranscriptHistoryPager: NSViewRepresentable {
+    /// Renders an earlier page. Returns false once the whole transcript is rendered.
+    let loadEarlierPage: () -> Bool
+
+    func makeNSView(context: Context) -> PagerView { PagerView() }
+
+    func updateNSView(_ view: PagerView, context: Context) {
+        view.loadEarlierPage = loadEarlierPage
+    }
+
+    final class PagerView: NSView {
+        var loadEarlierPage: () -> Bool = { false }
+        /// Set when a page is requested, until it is laid out: the content height, and a text view
+        /// on screen with its position in the content.
+        private var pendingPage: (height: CGFloat, anchor: NSView?, anchorY: CGFloat)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            NotificationCenter.default.removeObserver(self)
+            guard let clip = enclosingScrollView?.contentView else { return }
+            clip.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(loadPageIfNearTop),
+                name: NSView.boundsDidChangeNotification, object: clip
+            )
+        }
+
+        /// This view is the background of the turns, so it is laid out whenever they change size,
+        /// after the hosting view has placed them. The content's frame-change notification arrives
+        /// before they move, and did not arrive at all for a drawer laid out before it was shown.
+        override func layout() {
+            super.layout()
+            loadPageIfNearTop()
+            guard let page = pendingPage, let scrollView = enclosingScrollView,
+                  let content = scrollView.documentView, content.frame.height != page.height else { return }
+            pendingPage = nil
+            let clip = scrollView.contentView
+            // The turns moved down by the height of the page. Measure that on a text view that was
+            // on screen rather than on the content height: a streaming turn growing below the
+            // viewport in the same pass moved the transcript 22 pt on 1 of 49 page loads in the
+            // jump harness.
+            let moved = page.anchor.map { $0.convert(NSPoint.zero, to: content).y - page.anchorY }
+                ?? content.frame.height - page.height
+            clip.scroll(to: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + moved))
+            scrollView.reflectScrolledClipView(clip)
+        }
+
+        @objc private func loadPageIfNearTop() {
+            // Rendering more turns isn't allowed inside a layout pass or a scroll notification.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.pendingPage == nil, let scrollView = self.enclosingScrollView,
+                      let content = scrollView.documentView,
+                      scrollView.contentView.bounds.minY < scrollView.contentView.bounds.height,
+                      self.loadEarlierPage() else { return }
+                let anchor = Self.textView(in: content, intersecting: scrollView.documentVisibleRect, of: content)
+                self.pendingPage = (content.frame.height, anchor, anchor?.convert(NSPoint.zero, to: content).y ?? 0)
+            }
+        }
+
+        private static func textView(in view: NSView, intersecting visible: NSRect, of content: NSView) -> NSView? {
+            if view is NSTextView {
+                return view.convert(view.bounds, to: content).intersects(visible) ? view : nil
+            }
+            for subview in view.subviews {
+                if let found = textView(in: subview, intersecting: visible, of: content) { return found }
+            }
+            return nil
+        }
     }
 }
 
