@@ -8791,7 +8791,19 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
-    func testMarkdownSelectableTextViewSupportsRangeSelectionAcrossBlocks() throws {
+    private func findTextViews(in root: NSView) -> [MarkdownSelectableTextView] {
+        var found: [MarkdownSelectableTextView] = []
+        if let textView = root as? MarkdownSelectableTextView {
+            found.append(textView)
+        }
+        for subview in root.subviews {
+            found.append(contentsOf: findTextViews(in: subview))
+        }
+        return found
+    }
+
+    @MainActor
+    func testMarkdownProseSharesOneTextViewAndKeepsSelectionWhileStreaming() throws {
         let markdown = """
         # Summary
 
@@ -8808,17 +8820,6 @@ final class AppLogicTests: XCTestCase {
         )
         hostingView.frame = NSRect(x: 0, y: 0, width: 320, height: 480)
         hostingView.layoutSubtreeIfNeeded()
-
-        func findTextViews(in root: NSView) -> [MarkdownSelectableTextView] {
-            var found: [MarkdownSelectableTextView] = []
-            if let textView = root as? MarkdownSelectableTextView {
-                found.append(textView)
-            }
-            for subview in root.subviews {
-                found.append(contentsOf: findTextViews(in: subview))
-            }
-            return found
-        }
 
         let textViews = findTextViews(in: hostingView)
         XCTAssertEqual(
@@ -8874,26 +8875,15 @@ final class AppLogicTests: XCTestCase {
         hostingView.layoutSubtreeIfNeeded()
         XCTAssertEqual(textView.selectedRange(), NSRange(location: 0, length: 0))
 
-        let alignments: [MarkdownColumnAlignment] = [.leading, .center, .trailing]
-        XCTAssertEqual(
-            MarkdownText.resolvedTableTextAlignment(
-                alignments, column: 0, layoutDirection: .leftToRight
-            ),
-            .left
-        )
-        XCTAssertEqual(
-            MarkdownText.resolvedTableTextAlignment(
-                alignments, column: 2, layoutDirection: .rightToLeft
-            ),
-            .left
-        )
-
         let uncachedTextView = MarkdownSelectableTextView(frame: .zero)
         uncachedTextView.attributedText = NSAttributedString(string: "Short line")
         let intrinsic = uncachedTextView.intrinsicContentSize
         XCTAssertGreaterThan(intrinsic.width, 0)
         XCTAssertLessThan(intrinsic.width, 1_000)
+    }
 
+    @MainActor
+    func testMarkdownCodeBlockWrapsToItsWidthAndCopiesVerbatim() throws {
         let longCode = """
             let endpoint = "https://api.example.invalid/v1/workspaces/65656978-e32a-431f-9253-bc781012803d/artifacts"
 
@@ -8926,6 +8916,23 @@ final class AppLogicTests: XCTestCase {
         XCTAssertLessThanOrEqual(wideUsed.width, 620.5)
         XCTAssertLessThan(wideUsed.height, narrowUsed.height)
         XCTAssertEqual(codeView.attributedText.string, longCode)
+    }
+
+    @MainActor
+    func testMarkdownTableSelectionCopiesLogicalCellsAcrossRowsAndWraps() throws {
+        let alignments: [MarkdownColumnAlignment] = [.leading, .center, .trailing]
+        XCTAssertEqual(
+            MarkdownText.resolvedTableTextAlignment(
+                alignments, column: 0, layoutDirection: .leftToRight
+            ),
+            .left
+        )
+        XCTAssertEqual(
+            MarkdownText.resolvedTableTextAlignment(
+                alignments, column: 2, layoutDirection: .rightToLeft
+            ),
+            .left
+        )
 
         let tableMarkdown = """
         | Arm | Score |
@@ -9135,28 +9142,6 @@ final class AppLogicTests: XCTestCase {
             "code  )\t\t\nnext    part\trole\tvalue"
         )
 
-        // Wide tables with heavily wrapped cells fall back to plain text once cumulative grid slots exceed the budget.
-        let wideCols = 200
-        let wideHeaderRow = Array(repeating: "h", count: wideCols).joined(separator: " | ")
-        let wideDelimRow = Array(repeating: "---", count: wideCols).joined(separator: " | ")
-        let wideProse = String(repeating: "W", count: 896)
-        let wideBodyRow = ([wideProse] + Array(repeating: "x", count: wideCols - 1)).joined(separator: " | ")
-        let wideMarkdown = "\(wideHeaderRow)\n\(wideDelimRow)\n\(wideBodyRow)"
-        XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(wideMarkdown))
-        let wideWrappedHost = NSHostingView(
-            rootView: MarkdownText(text: wideMarkdown)
-                .frame(width: 320, alignment: .leading)
-        )
-        wideWrappedHost.frame = NSRect(x: 0, y: 0, width: 320, height: 320)
-        wideWrappedHost.layoutSubtreeIfNeeded()
-        let wideWrappedTextView = try XCTUnwrap(findTextViews(in: wideWrappedHost).first)
-        XCTAssertNil(wideWrappedTextView.headerDividerY())
-        XCTAssertEqual(
-            wideWrappedTextView.attributedText.string,
-            Array(repeating: "h", count: wideCols).joined(separator: "\t") + "\n"
-                + ([wideProse] + Array(repeating: "x", count: wideCols - 1)).joined(separator: "\t")
-        )
-
         func renderedTableHeight(_ detail: String) -> CGFloat {
             let md = """
             | Name | Detail |
@@ -9178,9 +9163,37 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertGreaterThan(wrappedHeight, shortHeight + 100)
         XCTAssertGreaterThan(unbrokenHeight, shortHeight + 100)
+    }
 
-        // Dragging across separate MarkdownText messages and segments in a transcript container
-        // highlights every spanned text view and copies their combined text in top-to-bottom order.
+    // Wide tables with heavily wrapped cells fall back to plain text once cumulative grid slots exceed the budget.
+    @MainActor
+    func testMarkdownWideTableWithLongCellFallsBackToPlainText() throws {
+        let wideCols = 200
+        let wideHeaderRow = Array(repeating: "h", count: wideCols).joined(separator: " | ")
+        let wideDelimRow = Array(repeating: "---", count: wideCols).joined(separator: " | ")
+        let wideProse = String(repeating: "W", count: 896)
+        let wideBodyRow = ([wideProse] + Array(repeating: "x", count: wideCols - 1)).joined(separator: " | ")
+        let wideMarkdown = "\(wideHeaderRow)\n\(wideDelimRow)\n\(wideBodyRow)"
+        XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(wideMarkdown))
+        let wideWrappedHost = NSHostingView(
+            rootView: MarkdownText(text: wideMarkdown)
+                .frame(width: 320, alignment: .leading)
+        )
+        wideWrappedHost.frame = NSRect(x: 0, y: 0, width: 320, height: 320)
+        wideWrappedHost.layoutSubtreeIfNeeded()
+        let wideWrappedTextView = try XCTUnwrap(findTextViews(in: wideWrappedHost).first)
+        XCTAssertNil(wideWrappedTextView.headerDividerY())
+        XCTAssertEqual(
+            wideWrappedTextView.attributedText.string,
+            Array(repeating: "h", count: wideCols).joined(separator: "\t") + "\n"
+                + ([wideProse] + Array(repeating: "x", count: wideCols - 1)).joined(separator: "\t")
+        )
+    }
+
+    // Dragging across separate MarkdownText messages and segments in a transcript container
+    // highlights every spanned text view and copies their combined text in top-to-bottom order.
+    @MainActor
+    func testMarkdownDragSelectionSpansTranscriptMessagesAndCopiesInOrder() throws {
         let transcriptRoot = VStack(alignment: .leading, spacing: 12) {
             Text("Copilot")
                 .font(.caption.weight(.semibold))
@@ -9462,7 +9475,10 @@ final class AppLogicTests: XCTestCase {
         codeBlockView.selectAll(nil)
         codeBlockView.copy(nil)
         XCTAssertEqual(pasteboard.string(forType: .string), "let status = \"green\"")
+    }
 
+    @MainActor
+    func testMarkdownOversizedBlocksFallBackWithoutFlatteningNeighbors() throws {
         // A multi-table report with 4 tables (matching the 25 + 60 + 95 + 98 raw-cell /
         // 514 per-cell visual-line shape) renders every heading, divider, table, and fenced code
         // block as formatted Markdown rather than raw text.
@@ -9604,19 +9620,31 @@ final class AppLogicTests: XCTestCase {
             mixedTrailingView.attributedText.attribute(.font, at: trailingBoldLoc, effectiveRange: nil) as? NSFont
         )
         XCTAssertTrue(trailingBoldFont.fontDescriptor.symbolicTraits.contains(.bold))
+    }
 
-        // Growing an earlier table crosses the document budget without crossing its per-table limit.
-        // Updating the same host must switch the unchanged trailing table to plain text and back.
-        let table906 = makeSyntheticTable(rows: 60, cols: 6, lastCellLength: 300)
-        let smallerFirstTable = makeSyntheticTable(rows: 1, cols: 6, lastCellLength: 300)
+    // Growing an earlier table crosses the document budget without crossing its per-table limit.
+    // Updating the same host must switch the unchanged trailing table to plain text and back.
+    @MainActor
+    func testMarkdownTableCellBudgetSwitchesTrailingTableToPlainTextAndBack() throws {
+        // Every row counts 30 cells against the budget, and a body row counts one more because its
+        // key is long enough to wrap. Without the wrapped keys all five large tables would fit.
+        // Only the key has text to lay out.
+        func sparseTable(rows: Int) -> String {
+            let emptyCells = String(repeating: "  |", count: 29)
+            let rowLines = (1...rows).map { "| row_\($0)_with_a_key_longer_than_one_table_line |\(emptyCells)" }
+            return "| Key |\(emptyCells)\n|\(String(repeating: " --- |", count: 30))\n"
+                + rowLines.joined(separator: "\n")
+        }
+        let table805 = sparseTable(rows: 25)
+        let smallerFirstTable = sparseTable(rows: 1)
         let withinBudgetMarkdown = (1...5).map {
-            "### Section \($0)\n\n\($0 == 1 ? smallerFirstTable : table906)"
+            "### Section \($0)\n\n\($0 == 1 ? smallerFirstTable : table805)"
         }.joined(separator: "\n\n")
         XCTAssertFalse(
             MarkdownParser.isWithinRenderingLimits(withinBudgetMarkdown),
             "Notification limits stay at 1,000 table cells while MarkdownText renders up to 4,000 document table cells"
         )
-        let fiveTablesMarkdown = (1...5).map { "### Section \($0)\n\n\(table906)" }.joined(separator: "\n\n")
+        let fiveTablesMarkdown = (1...5).map { "### Section \($0)\n\n\(table805)" }.joined(separator: "\n\n")
         let fiveTablesHost = NSHostingView(
             rootView: MarkdownText(text: withinBudgetMarkdown)
                 .frame(width: 380, alignment: .leading)
@@ -9635,7 +9663,10 @@ final class AppLogicTests: XCTestCase {
             .frame(width: 380, alignment: .leading)
         fiveTablesHost.layoutSubtreeIfNeeded()
         XCTAssertEqual(findTextViews(in: fiveTablesHost).filter { $0.headerDividerY() != nil }.count, 5)
+    }
 
+    @MainActor
+    func testMarkdownInlineMarkerBudgetLeavesLaterBlocksUnformatted() throws {
         let inlineBlocks5 = (1...5).map { idx -> String in
             let p = "para_\(idx) " + Array(repeating: "**b** ", count: 850).joined()
             return idx == 2 ? "<details open>\n<summary>Detail</summary>\n\n\(p)\n</details>" : p
@@ -9652,7 +9683,10 @@ final class AppLogicTests: XCTestCase {
         let inlineBudgetViews = findTextViews(in: inlineBudgetHost)
         XCTAssertTrue(inlineBudgetViews.contains { $0.attributedText.string.contains("para_4 b ") })
         XCTAssertTrue(inlineBudgetViews.contains { $0.attributedText.string.contains("para_5 **b**") })
+    }
 
+    @MainActor
+    func testMarkdownTextViewCountStaysWithinSegmentAndNestingLimits() throws {
         let codeBlocks60 = (1...60).map { "```\ncode_\($0)\n```" }.joined(separator: "\n")
         let manyDetailsMarkdown = (1...6).map {
             "<details open>\n<summary>Group \($0)</summary>\n\(codeBlocks60)\n</details>"
@@ -9707,6 +9741,7 @@ final class AppLogicTests: XCTestCase {
             ) as? NSNumber,
             1
         )
+        let oversizedInlinePara = Array(repeating: "**span** ", count: 1_000).joined()
         let code255BufferedAndOversized = ((1...255).map { "```\ncode_\($0)\n```" }
             + ["# Tail Heading", oversizedInlinePara, "# Final Heading"]).joined(separator: "\n\n")
         boundaryHost.rootView = MarkdownText(text: code255BufferedAndOversized)
@@ -9731,7 +9766,10 @@ final class AppLogicTests: XCTestCase {
         let fifthLevelView = try XCTUnwrap(fiveDeepViews.first { $0.attributedText.string.contains("L5\nInner **five**") })
         XCTAssertNil(fifthLevelView.headerDividerY())
         XCTAssertTrue(fiveDeepViews.contains { $0.attributedText.string.contains("Trailing after five.") })
+    }
 
+    @MainActor
+    func testMarkdownDeepLinkClickRoutesToTheDefaultHandler() throws {
         let deepLinkHost = NSHostingView(
             rootView: MarkdownText(
                 text: "[Feature](copilot-projects://focus?project=proj-9&session=sess-9)"
@@ -9757,10 +9795,14 @@ final class AppLogicTests: XCTestCase {
             [AppDeepLink(projectId: "proj-9", sessionId: "sess-9")]
         )
         XCTAssertFalse(deepLinkTextView.routeDeepLinkIfPossible("https://github.com"))
+    }
 
-        // A 6-column table with a few dozen rows, 5 short cells (including bold), and one 300-600 char
-        // last column with 10-20 inline code spans per cell stays within rendering limits and renders
-        // as a formatted table at drawer and full widths, while a truly huge table still falls back.
+    // A 6-column table with a few dozen rows, 5 short cells (including bold), and one 300-600 char
+    // last column with 10-20 inline code spans per cell stays within rendering limits, and its
+    // shape renders as a formatted table at drawer and full widths, while a truly huge table
+    // still falls back.
+    @MainActor
+    func testMarkdownLongLastColumnTableRendersUntilItExceedsTheCellLimit() throws {
         func makeLongLastColumnTable(rows: Int, codeSpansPerRow: Int = 20) -> String {
             let header = "| Member | Total | Direct | Shared | Requests | Service Breakdown |"
             let delim = "| :--- | ---: | ---: | ---: | ---: | :--- |"
@@ -9782,9 +9824,13 @@ final class AppLogicTests: XCTestCase {
             XCTFail("Expected 36-row breakdown table to parse as a MarkdownTable block")
         }
         XCTAssertTrue(MarkdownParser.isWithinRenderingLimits(breakdownTable36))
+        // The 36-row limit is checked on the parser above, and two rows of the same shape are
+        // rendered. On the macOS 26 CI runner, measuring a table's width took about 7 ms per
+        // line of the table, which was 7.5 s for the 36 rows.
+        let renderedRows = makeLongLastColumnTable(rows: 2)
         for width: CGFloat in [380, 960] {
             let breakdownHost = NSHostingView(
-                rootView: MarkdownText(text: "# Usage\n\n\(breakdownTable36)\n\nTrailing **summary**.")
+                rootView: MarkdownText(text: "# Usage\n\n\(renderedRows)\n\nTrailing **summary**.")
                     .frame(width: width, alignment: .leading)
             )
             breakdownHost.frame = NSRect(x: 0, y: 0, width: width, height: 4_000)

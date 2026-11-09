@@ -194,6 +194,8 @@ final class NotificationIndicatorTests: XCTestCase {
         let parent = Session(title: "Orchestrator", cwd: "/tmp")
         let child = Session(title: "Worker", cwd: "/tmp", parentSessionId: parent.id)
         let originalDockBadge = NSApp.dockTile.badgeLabel
+        // The first step expects no badge, and an earlier test's model can leave a count here.
+        NSApp.dockTile.badgeLabel = nil
         defer {
             NSApp.dockTile.badgeLabel = originalDockBadge
             SessionArtifacts.removeFiles(sessionId: parent.id)

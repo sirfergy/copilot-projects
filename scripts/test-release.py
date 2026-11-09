@@ -93,7 +93,12 @@ elif command == "gh":
         print(json.dumps([{
             "merged_at": "2026-10-08T12:00:00Z", "base": {"ref": "main"},
             "merge_commit_sha": os.environ.get("MOCK_MERGED_SHA"),
+            "head": {"sha": "f" * 40},
         }]))
+    elif any("/actions/workflows/ci.yml/runs?" in a for a in args):
+        print(os.environ.get("MOCK_GREEN_RUN_TREE", ""))
+    elif any("/compare/" in a for a in args):
+        print(os.environ.get("MOCK_BEHIND_BY", ""))
     elif args[:2] == ["release", "view"]:
         if args[2] != os.environ.get("MOCK_LATEST_TAG"):
             sys.exit(1)
@@ -133,9 +138,9 @@ esac
 """
 
 
-def workflow_step_script(step_id):
-    """Return the run block of the Release workflow step with this id."""
-    lines = WORKFLOW.read_text().splitlines()
+def workflow_step_script(step_id, workflow=WORKFLOW):
+    """Return the run block of the workflow step with this id."""
+    lines = workflow.read_text().splitlines()
     run = lines.index("        run: |", lines.index("        id: " + step_id))
     body = []
     for line in lines[run + 1:]:
@@ -955,6 +960,71 @@ class ReleaseTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertIn(message, result.stdout)
                     self.assertEqual(outputs, {})
+
+    def test_workflow_skips_its_tests_only_for_a_tree_a_green_pull_request_run_tested(self):
+        root = self.release_checkout("tested", ("v0.9.121",))
+        tree = self.git(root, "rev-parse", "HEAD^{tree}")
+        pr_head, parent = "f" * 40, self.git(root, "rev-parse", "HEAD^")
+        runs = ("repos/example/integration/actions/workflows/ci.yml/runs"
+                f"?event=pull_request&status=success&head_sha={pr_head}")
+        compare = f"repos/example/integration/compare/{parent}...{pr_head}"
+        for run_tree, behind_by, failing, tested in (
+            # Either lookup exiting non-zero leaves the tests to run, whatever the other one answers.
+            (tree, "0", runs, None),
+            (tree, "0", compare, None),
+            ("1" * 40, "0", "", None),
+            # The pull request head lacked this commit's parent, so its run merged another base.
+            (tree, "1", "", None),
+            (tree, "0", "", "true"),
+        ):
+            with self.subTest(run_tree=run_tree, behind_by=behind_by, failing=failing):
+                self.log.unlink(missing_ok=True)
+                self.env.update(
+                    MOCK_GREEN_RUN_TREE=run_tree, MOCK_BEHIND_BY=behind_by,
+                    FAIL_COMMAND=f"gh api {failing}" if failing else "",
+                )
+                result, outputs = self.run_release_validation(root, "2026 10 08 PDT", latest="v0.9.121")
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(outputs.get("should_release"), "true", result.stdout)
+                self.assertEqual(outputs.get("tested"), tested)
+        # The last, successful case asked about the pull request's head and whether it held the parent.
+        requests = [args[1] for _, command, args in map(json.loads, self.log.read_text().splitlines())
+                    if command == "gh" and args[0] == "api"]
+        self.assertIn(runs, requests)
+        self.assertIn(compare, requests)
+
+    def test_ci_skips_script_tests_only_when_a_pull_request_leaves_their_inputs_alone(self):
+        script = self.root / "find-script-changes.sh"
+        script.write_text(workflow_step_script("scripts", WORKFLOW.with_name("ci.yml")))
+        output = self.root / "github-output"
+
+        def outputs(root):
+            output.write_text("")
+            subprocess.run(
+                ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)], cwd=root,
+                env={**self.env, "GITHUB_OUTPUT": str(output)}, check=True, capture_output=True,
+            )
+            return output.read_text()
+
+        root = self.project("ci-guard", "https://github.com/sirfergy/copilot-projects.git")
+        base = self.git(root, "rev-parse", "HEAD")
+        # A checkout with no parent cannot be compared, so the script tests run.
+        self.assertEqual(outputs(root), "")
+        for path, expected in (
+            ("Sources/App.swift", "unchanged=true\n"),
+            ("scripts/release.sh", ""),
+            (".github/workflows/ci.yml", ""),
+            ("vendor/dtach/main.c", ""),
+        ):
+            with self.subTest(path=path):
+                self.git(root, "checkout", "-q", "-B", "topic", base)
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text("changed\n")
+                self.git(root, "add", ".")
+                self.git(root, "commit", "-qm", "pull request")
+                self.git(root, "checkout", "-q", "--detach", base)
+                self.git(root, "merge", "-q", "--no-ff", "-m", "merge commit", "topic")
+                self.assertEqual(outputs(root), expected)
 
 
 class ReleaseVersionTests(unittest.TestCase):
