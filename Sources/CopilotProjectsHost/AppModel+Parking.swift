@@ -409,8 +409,10 @@ extension AppModel {
         }
     }
 
-    func parkSelectedSession() {
-        guard let sessionId = globalSelectedSessionId else { return }
+    /// Park Session, from the Session menu or a session's row: parks that
+    /// session and says why when it was left alone.
+    @discardableResult
+    func requestParkSession(_ sessionId: String) -> Task<Void, Never> {
         Task { @MainActor [weak self] in
             guard let self, let reason = await self.parkSession(sessionId) else { return }
             self.presentAlert(title: "Couldn't Park This Session", message: reason)

@@ -599,6 +599,26 @@ Markers aren't saved. After the Mac restarts, a mark sent for an earlier snapsho
 ignored and one for a new snapshot applies. No capability is advertised: a client
 echoes the field when a snapshot has it.
 
+#### Remote park session
+
+`SessionHost.parkSession` parks one session as the Mac's **Park Session** does, with
+the same rules. A session's snapshot carries `parkable: true` while **Park Idle
+Sessions** is on and the session isn't already parked; otherwise the field is
+omitted. Hosts report `supportsSessionParking`, and other conformers default to
+unsupported. `RemoteProtocolInfo.current` omits `park-session-v1`: a gateway
+advertises it only when it routes the `park-session` control to a host that declares
+it.
+
+A client offers Park Session for a session only when `park-session-v1` is advertised
+and that session is `parkable`, and applies no rule of its own. `parkSession` returns
+`.refused` with a reason written for the user, and the session is left running, or
+`.parked` once Copilot has exited or 20 seconds after it was told to stop. Before
+that, Copilot has up to 20 seconds to say whether it is idle. The session's `parked`
+state reaches snapshots sooner.
+
+A session open in the web or iOS app is not parked, so parking the session a client
+has open is refused with that reason.
+
 #### Shared quick replies
 
 `SessionHost.quickReplies` and `SessionHost.updateQuickReplies` read and replace the

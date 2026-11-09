@@ -13,6 +13,8 @@ final class SessionParkingTests: XCTestCase {
         var stops: [[String]] = []
         var started: [String] = []
         var masterChecks = 0
+        /// What each alert the model raised said.
+        var alerts: [String] = []
     }
 
     @MainActor
@@ -51,13 +53,17 @@ final class SessionParkingTests: XCTestCase {
             defaults.removePersistentDomain(forName: suite)
             defaults.set(SessionParking.manual, forKey: SessionParking.settingKey)
             let live = session.id
+            let processes = processes
             model = AppModel(
                 stateRepository: repository, persistPermissionStatus: { _, _, _, _ in },
                 isAppActive: { false }, agentActivityDirectory: sessions, resumeMarkerDirectory: sessions,
                 remotePromptLiveSessions: { _ in [live] },
                 remoteSessionBackendAvailable: { true },
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
-                alertPresenter: { _ in .alertFirstButtonReturn },
+                alertPresenter: {
+                    processes.alerts.append($0.informativeText)
+                    return .alertFirstButtonReturn
+                },
                 defaults: defaults
             )
             let now = Date()
@@ -73,7 +79,6 @@ final class SessionParkingTests: XCTestCase {
                     bounceRequested: false
                 )
             )
-            let processes = processes
             let home = copilotHome.path
             let cli = TranscriptController.CloseProcessIdentity(pid: 4_242, startSeconds: 1, startMicroseconds: 2)
             model.parkingRuntime = ParkingRuntime(
@@ -401,7 +406,69 @@ final class SessionParkingTests: XCTestCase {
         XCTAssertEqual(f.processes.started, [f.id])
     }
 
-    func testTheWireSnapshotIsUnchangedUntilASessionIsParked() throws {
+    func testParkSessionOnARowParksThatRowAndARefusalLeavesTheSessionRunning() async throws {
+        // The fixture's session can be parked. The other one has no Copilot.
+        let other = Session(title: "Other", cwd: "/tmp")
+        let f = try Fixture(others: [other])
+        let project = f.model.projects[0].id
+
+        // The parkable session is on screen and the other row is clicked.
+        f.model.show(projectId: project, sessionId: f.id)
+        await f.model.requestParkSession(other.id).value
+        XCTAssertEqual(f.processes.alerts.count, 1, "the refusal is shown")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.question.path), "the session on screen was not asked")
+        XCTAssertEqual(f.processes.stops, [])
+        XCTAssertTrue(f.processes.alive)
+        XCTAssertNil(f.model.parkedState(f.id))
+        XCTAssertNil(f.model.parkedState(other.id))
+
+        // The other session is on screen and the parkable row is clicked.
+        f.model.show(projectId: project, sessionId: other.id)
+        let park = f.model.requestParkSession(f.id)
+        try await f.answerParkCheck(.applied)
+        await park.value
+        XCTAssertEqual(f.processes.stops, [[f.id]])
+        XCTAssertEqual(f.model.parkedState(f.id), .parked)
+        XCTAssertNil(f.model.parkedState(other.id))
+        XCTAssertEqual(f.processes.alerts.count, 1, "a park that goes through says nothing")
+    }
+
+    func testARemoteClientIsOfferedParkOnlyWhileTheMacOffersItAndIsToldWhyAParkWasRefused() async throws {
+        let f = try Fixture(others: [Session(title: "Other", cwd: "/tmp")])
+        let bridge: any SessionHost = RemoteModelBridge(model: f.model)
+        XCTAssertTrue(bridge.supportsSessionParking)
+        XCTAssertEqual(try f.wire.parkable, true)
+
+        // Copilot says it is busy: the client gets the reason and the session keeps running.
+        async let busy = bridge.parkSession(sessionId: f.id)
+        try await f.answerParkCheck(.rejected)
+        let refused = await busy
+        XCTAssertEqual(refused, .refused("Copilot is busy, or didn't answer."))
+        XCTAssertEqual(f.processes.stops, [])
+        XCTAssertTrue(f.processes.alive)
+        XCTAssertNil(try f.savedParked())
+        XCTAssertEqual(try f.wire.parkable, true)
+        XCTAssertEqual(f.processes.alerts, [], "the reason goes to the client, not onto the Mac")
+
+        // Idle the next time: that session is parked, and no longer offers it.
+        async let idle = bridge.parkSession(sessionId: f.id)
+        try await f.answerParkCheck(.applied)
+        let parked = await idle
+        XCTAssertEqual(parked, .parked)
+        XCTAssertEqual(f.processes.stops, [[f.id]])
+        var sessions = f.model.remoteWorkspaceSnapshot().projects[0].sessions
+        XCTAssertEqual(sessions.map(\.parked?.state), ["parked", nil])
+        XCTAssertEqual(sessions.map(\.parkable), [nil, true])
+
+        // With the setting off, no session offers it.
+        f.defaults.set(SessionParking.off, forKey: SessionParking.settingKey)
+        sessions = f.model.remoteWorkspaceSnapshot().projects[0].sessions
+        XCTAssertEqual(sessions.map(\.parkable), [nil, nil])
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(sessions[1])) as? [String: Any]
+        XCTAssertNil(json?["parkable"])
+    }
+
+    func testTheWireSnapshotCarriesNoParkedStateUntilASessionIsParked() throws {
         let f = try Fixture()
         f.model.refreshAgentActivitySnapshots()
         let wire = try f.wire

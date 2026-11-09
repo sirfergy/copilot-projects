@@ -309,6 +309,10 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     /// Set while Copilot is stopped to free memory, or is being stopped or
     /// started again. Omitted otherwise, and by older hosts.
     public let parked: RemoteParkedSession?
+    /// True while the host offers Park Session for this session: Park Idle
+    /// Sessions is on and the session isn't already parked. Omitted otherwise,
+    /// and by older hosts. See `RemoteSessionParkContract`.
+    public let parkable: Bool?
 
     public init(
         id: String,
@@ -339,7 +343,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         runningStartedAtMilliseconds: Int64? = nil,
         pullRequestKeys: [String]? = nil,
         trackerWarning: String? = nil,
-        parked: RemoteParkedSession? = nil
+        parked: RemoteParkedSession? = nil,
+        parkable: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -370,6 +375,7 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.pullRequestKeys = pullRequestKeys
         self.trackerWarning = trackerWarning
         self.parked = parked
+        self.parkable = parkable
     }
 }
 
@@ -384,6 +390,23 @@ public struct RemoteParkedSession: Codable, Equatable, Sendable {
         self.state = state
         self.sinceMilliseconds = sinceMilliseconds
     }
+}
+
+/// Remote "Park Session". A gateway advertises `capability` only when it routes
+/// `controlType` to a host that implements it. A client offers the action for a
+/// session only when the capability is advertised and the session's `parkable`
+/// is true, and shows the reason when the host refuses.
+public enum RemoteSessionParkContract {
+    public static let capability = "park-session-v1"
+    /// `RemoteClientMessage.type` for the control POST. Only `sessionId` is read.
+    public static let controlType = "park-session"
+}
+
+public enum RemoteSessionParkResult: Equatable, Sendable {
+    /// Copilot was told to stop. The session's `parked` state says how far it got.
+    case parked
+    /// The session was left running. The reason is written for the user.
+    case refused(String)
 }
 
 /// The effective model for a session, surfaced so remote clients can display it.
