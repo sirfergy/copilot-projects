@@ -53,7 +53,10 @@ def disagreements(log, now):
 
 
 def kind(entry):
-    source = "tracker alive" if entry["alive"] else "tracker dead, footer"
+    source = "tracker alive"
+    if not entry["alive"]:
+        footer = f'footer {entry["footer"]}' if "footer" in entry else "no footer read"
+        source = f"tracker dead, {footer}"
     return f'{entry["what"]}: shown {entry["shown"]}, tracker-only {entry["tracker"]} ({source})'
 
 
@@ -105,8 +108,7 @@ def main():
     print(f"Lasting: an ended disagreement that held {args.lasting:g}s or longer. Unfinished ones "
           "have no end line and are\nlisted last with the least and most time they can have held.")
     if len(paths) > 1:
-        print("The log has rotated: a disagreement that began before the first line here and "
-              "has not changed since is missing.")
+        print("The log has rotated: disagreements that began before the first line here may be missing.")
     print()
 
     ordered = sorted(ended.items(), key=lambda item: (
