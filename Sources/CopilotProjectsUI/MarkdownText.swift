@@ -2985,14 +2985,19 @@ public final class MarkdownSelectableTextView: NSTextView {
             naturalWidth = max(ceil(bounded), minimumTableWidth)
         }
         textContainer.widthTracksTextView = false
+        let placedSize = frame.size
         isMeasuring = true
-        defer { isMeasuring = false }
         textContainer.size = CGSize(
             width: max(1, naturalWidth),
             height: CGFloat.greatestFiniteMagnitude
         )
         layoutManager.ensureLayout(for: textContainer)
         let used = layoutManager.usedRect(for: textContainer)
+        isMeasuring = false
+        // SwiftUI also measures at widths it then doesn't place the view at. Left laid out at the
+        // last of them, a question in the full-width transcript wrapped at 850 pt in a 935 pt card
+        // and its last lines were cut off.
+        setFrameSize(placedSize)
         return CGSize(
             width: naturalWidth,
             height: ceil(used.height)

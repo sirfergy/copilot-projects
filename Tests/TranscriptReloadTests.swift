@@ -3,6 +3,7 @@ import SwiftUI
 import XCTest
 import CopilotProjectsCore
 import CopilotProjectsProtocol
+import CopilotProjectsUI
 @testable import CopilotProjectsHost
 
 final class TranscriptReloadTests: XCTestCase {
@@ -20,6 +21,36 @@ final class TranscriptReloadTests: XCTestCase {
             to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: sessionId)),
             options: .atomic
         )
+    }
+
+    @MainActor
+    private func stepMainRunLoopBeforeWaiting() {
+        let rl = CFRunLoopGetMain()
+        let observer = CFRunLoopObserverCreateWithHandler(
+            kCFAllocatorDefault,
+            CFRunLoopActivity.beforeWaiting.rawValue,
+            false,
+            CFIndex.max
+        ) { _, _ in
+            CFRunLoopStop(CFRunLoopGetMain())
+        }
+        CFRunLoopAddObserver(rl, observer, .defaultMode)
+        CFRunLoopRunInMode(.defaultMode, 1.0, false)
+        CFRunLoopRemoveObserver(rl, observer, .defaultMode)
+    }
+
+    @MainActor
+    private func settleDisplayCycle(_ window: NSWindow) async {
+        for _ in 0..<3 {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async {
+                    continuation.resume()
+                }
+            }
+            window.contentView?.layoutSubtreeIfNeeded()
+            stepMainRunLoopBeforeWaiting()
+        }
+        window.contentView?.layoutSubtreeIfNeeded()
     }
 
     @MainActor
@@ -313,34 +344,6 @@ final class TranscriptReloadTests: XCTestCase {
                     .id(harness.sessionId)
                 }
             }
-        }
-
-        func stepMainRunLoopBeforeWaiting() {
-            let rl = CFRunLoopGetMain()
-            let observer = CFRunLoopObserverCreateWithHandler(
-                kCFAllocatorDefault,
-                CFRunLoopActivity.beforeWaiting.rawValue,
-                false,
-                CFIndex.max
-            ) { _, _ in
-                CFRunLoopStop(CFRunLoopGetMain())
-            }
-            CFRunLoopAddObserver(rl, observer, .defaultMode)
-            CFRunLoopRunInMode(.defaultMode, 1.0, false)
-            CFRunLoopRemoveObserver(rl, observer, .defaultMode)
-        }
-
-        func settleDisplayCycle(_ window: NSWindow) async {
-            for _ in 0..<3 {
-                await withCheckedContinuation { continuation in
-                    DispatchQueue.main.async {
-                        continuation.resume()
-                    }
-                }
-                window.contentView?.layoutSubtreeIfNeeded()
-                stepMainRunLoopBeforeWaiting()
-            }
-            window.contentView?.layoutSubtreeIfNeeded()
         }
 
         /// Runs display cycles until the transcript stops moving. A short newest page fills in
@@ -731,6 +734,148 @@ final class TranscriptReloadTests: XCTestCase {
                     renderedTurnCount(),
                     renderedInNewConversation,
                     "Returning to a conversation should render only its newest turns"
+                )
+            }
+        }
+    }
+
+    /// SwiftUI measures text at widths it doesn't place it at. Afterwards the text has to be laid
+    /// out at its frame's width again, or it wraps narrower or wider than its frame.
+    @MainActor
+    func testMeasuringMarkdownTextAtAnotherWidthLeavesItLaidOutAtItsFrame() throws {
+        let textView = MarkdownSelectableTextView(frame: .zero)
+        textView.attributedText = NSAttributedString(
+            string: String(repeating: "A sentence that wraps over several lines at each of these widths. ", count: 30)
+        )
+        textView.preferredMaxLayoutWidth = 600
+        textView.setFrameSize(textView.intrinsicContentSize)
+        let placed = textView.frame.size
+        let container = try XCTUnwrap(textView.textContainer)
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        for width: CGFloat in [450, 900] {
+            textView.preferredMaxLayoutWidth = width
+            XCTAssertNotEqual(textView.intrinsicContentSize.height, placed.height)
+            layoutManager.ensureLayout(for: container)
+            XCTAssertEqual(container.size.width, placed.width, "Measuring at \(width) pt should leave the text laid out at its frame's width")
+            XCTAssertEqual(textView.frame.size, placed, "Measuring at \(width) pt should leave the frame as it was placed")
+            XCTAssertEqual(layoutManager.usedRect(for: container).height, placed.height, accuracy: 0.5)
+        }
+    }
+
+    /// A long question in the full-width transcript was cut off part-way through. SwiftUI measures
+    /// the transcript at widths it doesn't place it at, and the full-width transcript follows each
+    /// one: its text stayed laid out at the last of them, narrower than its card, so its last lines
+    /// fell below its frame. The side drawer is always 420 pt wide, so every measurement there is at
+    /// the width it is placed at.
+    @MainActor
+    func testTranscriptTextFitsItsFrameAfterBeingMeasuredAtOtherWidths() async throws {
+        _ = NSApplication.shared
+        let activationPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.prohibited)
+        defer { NSApp.setActivationPolicy(activationPolicy) }
+        let savedFullWidth = UserDefaults.standard.object(forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        defer {
+            if let savedFullWidth {
+                UserDefaults.standard.set(savedFullWidth, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: TranscriptDrawer.fullWidthTranscriptKey)
+            }
+        }
+
+        let start = Date(timeIntervalSince1970: 1_788_633_600)
+        let turns = (0..<3).map { (index: Int) -> TranscriptTurn in
+            TranscriptTurn(
+                id: "turn-\(index)",
+                startedAt: start.addingTimeInterval(Double(index * 60)),
+                endedAt: start.addingTimeInterval(Double(index * 60 + 5)),
+                kind: "foreground",
+                userContent: "Prompt \(index) " + String(repeating: "with a long body of context ", count: 12),
+                assistantMessages: [
+                    TranscriptAssistantMessage(
+                        id: "msg-\(index)",
+                        timestamp: start.addingTimeInterval(Double(index * 60 + 1)),
+                        content: String(repeating: "Reply \(index) wraps over a few lines in the transcript. ", count: 14)
+                    )
+                ],
+                tools: [],
+                isAborted: false
+            )
+        }
+        let question = RemoteElicitationRequest(
+            requestId: "question-1",
+            message: "## Pick a plan\n\n" + (1...6).map {
+                "**Option \($0)**: " + String(repeating: "a long explanation that wraps across lines ", count: 31)
+            }.joined(separator: "\n\n"),
+            schema: .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "choice": .object(["type": .string("string"), "title": .string("Choice")]),
+                ]),
+            ]),
+            requestedAt: start.addingTimeInterval(600)
+        )
+        // Framed like the workspace pane in RootView.
+        let host = NSHostingController(
+            rootView: TranscriptDrawer(
+                turns: turns,
+                imageCapture: nil,
+                sessionId: "s1",
+                copilotSessionId: "conversation-1",
+                workflow: nil,
+                operation: AgentOperationProjection(conversationEpoch: "e1", support: .receipts, receipts: []),
+                pendingElicitations: [question],
+                workflowProvider: nil,
+                operationProvider: nil,
+                promptComposer: nil,
+                onClose: {},
+                onAction: { _ in RemoteWorkflowActionResult(state: .applied) },
+                onPreview: { _ in }
+            )
+            .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 900),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentViewController = host
+        window.setContentSize(NSSize(width: 1100, height: 900))
+        defer {
+            window.contentViewController = nil
+            window.close()
+        }
+
+        func markdownText(in view: NSView) -> [MarkdownSelectableTextView] {
+            (view as? MarkdownSelectableTextView).map { [$0] } ?? view.subviews.flatMap(markdownText)
+        }
+        /// Text laid out at another width than its frame's, or taller than its frame.
+        func textOutsideItsFrame() -> [String] {
+            markdownText(in: host.view).filter(\.wrapsText).compactMap { view in
+                guard let container = view.textContainer, let layoutManager = view.layoutManager else { return nil }
+                layoutManager.ensureLayout(for: container)
+                let used = layoutManager.usedRect(for: container).size
+                guard abs(container.size.width - view.bounds.width) > 0.5 || used.height > view.bounds.height + 0.5 else {
+                    return nil
+                }
+                return "'\(view.string.prefix(20))' laid out \(used) in \(view.bounds.size)"
+            }
+        }
+
+        for fullWidth in [true, false] {
+            UserDefaults.standard.set(fullWidth, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+            await settleDisplayCycle(window)
+            let questionText = try XCTUnwrap(markdownText(in: host.view).first { $0.string.contains("Option 1") })
+            XCTAssertEqual(questionText.bounds.width > 935, fullWidth, "The question should span the transcript")
+            XCTAssertEqual(textOutsideItsFrame(), [], "Text should fit its frame (fullWidth=\(fullWidth))")
+            for width: CGFloat in [900, 1300] {
+                _ = host.sizeThatFits(in: CGSize(width: width, height: 10_000))
+                await settleDisplayCycle(window)
+                XCTAssertEqual(
+                    textOutsideItsFrame(),
+                    [],
+                    "Measuring the transcript at \(width) pt should leave its text fitting its frame (fullWidth=\(fullWidth))"
                 )
             }
         }
