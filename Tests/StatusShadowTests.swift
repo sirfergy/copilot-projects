@@ -152,6 +152,23 @@ final class StatusShadowTests: XCTestCase {
         XCTAssertEqual(status[3]["gate"] as? String, "unknown")
     }
 
+    func testAFooterChangeUnderADeadTrackerIsANewLine() throws {
+        var shadow = StatusShadow(directory: root)
+        let session = Session(title: "footer", cwd: root.path)
+        for (alive, footer) in [(false, FooterActivity.idle), (false, .idle), (false, .unknown), (true, .idle)] {
+            shadow.note(
+                "status", session: session, shown: "Running", tracker: "Idle", alive: alive,
+                read: (nil, footer), live: true, statusAt: nil, now: Date())
+        }
+        shadow.note(
+            "status", session: session, shown: "Running", tracker: "Idle", alive: true,
+            read: (nil, .unknown), live: true, statusAt: nil, now: Date())
+        XCTAssertEqual(
+            try logged(shadow).map { "\($0["alive"] as? Bool == true ? "alive" : "dead") \($0["footer"]!)" },
+            ["dead idle", "dead unknown", "alive idle"],
+            "a live tracker's disagreement does not depend on the footer")
+    }
+
     func testAClosedSessionEndsItsDisagreementAndTheLogStaysBounded() throws {
         var shadow = StatusShadow(directory: root, maximumBytes: 2_000)
         let session = Session(title: "bounded", cwd: root.path)

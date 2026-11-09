@@ -107,7 +107,9 @@ struct StatusShadow {
         statusAt: Int64?, now: Date
     ) {
         let key = Key(what: what, sid: session.id)
-        let kind = shown == tracker ? nil : "\(shown)|\(tracker)|\(alive)"
+        // With a dead tracker the footer decides, so a new footer is a new disagreement.
+        let footer = read.map { "\($0.footer)" }
+        let kind = shown == tracker ? nil : "\(shown)|\(tracker)|\(alive)|\(alive ? "" : footer ?? "")"
         guard open[key] != kind else { return }
         open[key] = kind
         let snapshot = session.agentActivity
@@ -116,7 +118,7 @@ struct StatusShadow {
             shown: shown, tracker: tracker, alive: alive,
             status: session.status, runtimeDerived: session.statusIsRuntimeDerived,
             statusAt: statusAt, pending: session.hasPendingInput, live: live,
-            footer: read.map { "\($0.footer)" },
+            footer: footer,
             gate: read.map { $0.runtime.map { "\($0)" } ?? "none" },
             updatedAt: snapshot?.updatedAt, turn: snapshot?.foregroundTurnActive,
             scheduled: snapshot?.scheduledTurnActive, error: snapshot?.error,
