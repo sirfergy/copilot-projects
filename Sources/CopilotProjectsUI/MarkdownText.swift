@@ -1154,7 +1154,7 @@ private struct MarkdownCodeBlockView: View {
             .padding(.leading, 10)
             .padding(.vertical, 10)
             .padding(.trailing, 34)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
             .overlay(alignment: .topTrailing) {
                 Button {
                     MarkdownText.copyToPasteboard(code)
@@ -1193,6 +1193,7 @@ private struct MarkdownCodeBlockView: View {
             }
             .onDisappear {
                 resetTask?.cancel()
+                didCopy = false
             }
     }
 }

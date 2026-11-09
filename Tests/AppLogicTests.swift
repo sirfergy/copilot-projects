@@ -8885,7 +8885,7 @@ final class AppLogicTests: XCTestCase {
             // ~7pt right of codeTextView.maxX, and near the top edge of codeTextView).
             let clickPoint = NSPoint(
                 x: codeFrameInWindow.maxX + 17,
-                y: host.isFlipped ? codeFrameInWindow.minY + 7 : codeFrameInWindow.maxY - 7
+                y: codeFrameInWindow.maxY - 7
             )
             let timestamp = ProcessInfo.processInfo.systemUptime
             for (type, delta): (NSEvent.EventType, TimeInterval) in [(.leftMouseDown, 0), (.leftMouseUp, 0.01)] {
