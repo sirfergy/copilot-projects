@@ -3,17 +3,9 @@ import CryptoKit
 import CopilotProjectsProtocol
 
 public enum RemoteControlKind: String, CaseIterable, Sendable {
-    case prompt
     case input
     case key
     case command
-
-    enum Lane: Hashable {
-        case prompt
-        case terminal
-    }
-
-    var lane: Lane { self == .prompt ? .prompt : .terminal }
 }
 
 public enum RemoteControlResult: Equatable, Sendable {
@@ -22,7 +14,6 @@ public enum RemoteControlResult: Equatable, Sendable {
     case invalid
     case busy
     case forbidden
-    case noLiveCopilot
     case epochMismatch
     case superseded
     case fingerprintConflict
@@ -45,19 +36,9 @@ public enum RemoteControlResult: Equatable, Sendable {
         case .invalid: self = .invalid
         }
     }
-
-    public init(_ result: RemotePromptResult) {
-        switch result {
-        case .sent: self = .sent
-        case .forbidden: self = .forbidden
-        case .invalid: self = .invalid
-        case .busy: self = .busy
-        case .noLiveCopilot: self = .noLiveCopilot
-        }
-    }
 }
 
-/// Keeps one accepted watermark per client/session/lane for this host lifetime.
+/// Keeps one accepted watermark per client and session for this host lifetime.
 /// A restart changes the epoch rather than risking replay after losing memory.
 /// Live watermarks are never evicted: capacity exhaustion rejects new scopes.
 @MainActor
@@ -67,7 +48,6 @@ final class RemoteControlDeliveryLedger {
     private struct Scope: Hashable {
         let clientId: String
         let sessionId: String
-        let lane: RemoteControlKind.Lane
     }
 
     private struct Accepted {
@@ -109,13 +89,8 @@ final class RemoteControlDeliveryLedger {
         }
         guard sessionExists else { return .missing }
 
-        let scope = Scope(clientId: clientId, sessionId: sessionId, lane: kind.lane)
-        let fingerprint = Self.fingerprint(
-            requestId: requestId,
-            kind: kind,
-            payload: payload,
-            conversationEpoch: message.conversationEpoch
-        )
+        let scope = Scope(clientId: clientId, sessionId: sessionId)
+        let fingerprint = Self.fingerprint(requestId: requestId, kind: kind, payload: payload)
         if let previous = accepted[scope] {
             if delivery.sequence < previous.sequence { return .superseded }
             if delivery.sequence == previous.sequence {
@@ -140,16 +115,10 @@ final class RemoteControlDeliveryLedger {
     private static func fingerprint(
         requestId: String,
         kind: RemoteControlKind,
-        payload: String,
-        conversationEpoch: String?
+        payload: String
     ) -> SHA256.Digest {
         var hash = SHA256()
-        for field in [requestId, kind.rawValue, payload, conversationEpoch] {
-            guard let field else {
-                hash.update(data: Data([0]))
-                continue
-            }
-            hash.update(data: Data([1]))
+        for field in [requestId, kind.rawValue, payload] {
             let bytes = Data(field.utf8)
             var length = UInt64(bytes.count).bigEndian
             withUnsafeBytes(of: &length) { hash.update(data: Data($0)) }

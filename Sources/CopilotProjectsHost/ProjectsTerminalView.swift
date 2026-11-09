@@ -34,10 +34,6 @@ final class ProjectsTerminalView: ProcessTerminalView {
             : .metal
     }()
     private var rendererShouldBeActive = false
-    /// True from the moment a remote prompt's paste is written until its submit
-    /// Enter fires, so an overlapping remote prompt can't interleave its paste
-    /// bytes into a half-submitted one. Main-actor only.
-    private(set) var isSubmittingRemotePrompt = false
     /// The DECSET 1004 report SwiftTerm last wrote to the PTY, if any. SwiftTerm
     /// updates `hasFocus` before its report reaches the PTY (a main-queue hop),
     /// so while reporting is on, remote input scopes its own focus-in/out from
@@ -418,8 +414,7 @@ final class ProjectsTerminalView: ProcessTerminalView {
 
     @discardableResult
     func sendRemoteCommand(_ value: String, forceFocusReporting: Bool) -> Bool {
-        guard !isSubmittingRemotePrompt,
-              let state = terminalInputStateSnapshot(),
+        guard let state = terminalInputStateSnapshot(),
               let bytes = Self.remoteCommandBytes(
                 value,
                 keyboardEnhancementFlags: state.keyboardEnhancementFlags,
@@ -429,96 +424,6 @@ final class ProjectsTerminalView: ProcessTerminalView {
         }
         send(bytes)
         return true
-    }
-
-    @discardableResult
-    func sendRemotePrompt(_ value: String) -> Bool {
-        guard !isSubmittingRemotePrompt,
-              let state = terminalInputStateSnapshot() else {
-            return false
-        }
-        let startedWithScopedFocus = !programHasFocus(state)
-        guard let paste = Self.remotePromptPasteBytes(
-            value,
-            scopedFocus: startedWithScopedFocus
-        ) else { return false }
-        // Deliver the bracketed paste, then submit Enter. The Copilot TUI commits
-        // pasted text to its input asynchronously, so Enter sent too soon fires
-        // before the text lands and leaves the prompt unsubmitted.
-        // There is no commit acknowledgement, so we wait a floor long enough for
-        // the paste to commit, and only *extend* past it (never shorten below it)
-        // while terminal output is still streaming — a slow/loaded commit keeps
-        // emitting — capped so a continuously redrawing TUI still submits. The
-        // in-flight flag rejects an overlapping prompt (the caller keeps it queued
-        // and retries) so two pastes can't interleave before the first submits.
-        isSubmittingRemotePrompt = true
-        send(paste)
-        let floorTicks = Self.promptSubmitFloorTicks(byteCount: paste.count)
-        let maxTicks = Self.promptSubmitMaxTicks(byteCount: paste.count)
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            var submitted = false
-            defer {
-                self.isSubmittingRemotePrompt = false
-                if startedWithScopedFocus,
-                   !submitted,
-                   let state = self.terminalInputStateSnapshot(),
-                   !self.programHasFocus(state) {
-                    self.send(Self.remoteFocusOutBytes)
-                }
-            }
-            var lastGeneration = self.remoteContentGeneration
-            var quietTicks = 0
-            for tick in 0 ..< maxTicks {
-                do {
-                    try await ContinuousClock().sleep(until: .now.advanced(by: Self.promptSubmitPollInterval))
-                } catch {
-                    return // cancelled: don't submit an unsettled paste
-                }
-                guard self.terminalInputStateSnapshot() != nil else { return }
-                let generation = self.remoteContentGeneration
-                if generation != lastGeneration {
-                    lastGeneration = generation
-                    quietTicks = 0
-                } else {
-                    quietTicks += 1
-                }
-                // Submit once past the floor and terminal output has been quiet
-                // for the settle window; keep waiting while output still streams.
-                if tick + 1 >= floorTicks, quietTicks >= Self.promptSubmitSettleTicks {
-                    break
-                }
-            }
-            guard let state = self.terminalInputStateSnapshot() else { return }
-            self.send(Self.remoteSubmitBytes(
-                keyboardEnhancementFlags: state.keyboardEnhancementFlags,
-                scopedFocus: !self.programHasFocus(state)
-            ))
-            submitted = true
-        }
-        return true
-    }
-
-    /// How often to poll terminal-output activity while waiting to submit.
-    static let promptSubmitPollInterval: Duration = .milliseconds(30)
-    /// Consecutive quiet polls that let a submit fire once past the floor
-    /// (≈ `promptSubmitSettleTicks` × `promptSubmitPollInterval`).
-    static let promptSubmitSettleTicks = 3
-
-    /// Minimum wait before submitting, in poll ticks — long enough for the paste
-    /// to commit even under load (comfortably above the old fixed delay). Scales
-    /// with paste size (a single-threaded TUI ingests large pastes slower) and is
-    /// bounded. 30ms ticks: 10 (300ms) … 20 (600ms).
-    nonisolated static func promptSubmitFloorTicks(byteCount: Int) -> Int {
-        let base = 10
-        let extra = min(max(0, byteCount - 1_024) / 960, 10)
-        return base + extra
-    }
-
-    /// Upper bound on the wait, in poll ticks: the floor plus a bounded settle
-    /// extension so a continuously redrawing TUI still submits.
-    nonisolated static func promptSubmitMaxTicks(byteCount: Int) -> Int {
-        promptSubmitFloorTicks(byteCount: byteCount) + 17
     }
 
     nonisolated static let remoteFocusInBytes = Array("\u{1b}[I".utf8)
@@ -578,24 +483,6 @@ final class ProjectsTerminalView: ProcessTerminalView {
         if scopedFocus {
             bytes.append(contentsOf: remoteFocusOutBytes)
         }
-        return bytes
-    }
-
-    /// The bracketed-paste byte sequence for a remote prompt. Enter is encoded
-    /// separately after the paste settles so active keyboard protocols are respected.
-    nonisolated static func remotePromptPasteBytes(
-        _ value: String,
-        scopedFocus: Bool = false
-    ) -> [UInt8]? {
-        let normalized = value
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        guard SessionInputValidation.isValidPrompt(normalized) else { return nil }
-        var bytes = scopedFocus ? remoteFocusInBytes : []
-        bytes.append(contentsOf: [0x1b, 0x1b])
-        bytes.append(contentsOf: "\u{1b}[200~".utf8)
-        bytes.append(contentsOf: normalized.utf8)
-        bytes.append(contentsOf: "\u{1b}[201~".utf8)
         return bytes
     }
 

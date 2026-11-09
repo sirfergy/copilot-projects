@@ -231,10 +231,6 @@ final class RemoteModelBridge: SessionHost {
         }.value
     }
 
-    func sendPrompt(sessionId: String, value: String) -> RemotePromptResult {
-        model?.sendRemotePrompt(sessionId: sessionId, value: value) ?? .invalid
-    }
-
     func answerUserInput(
         sessionId: String,
         answer: RemoteUserInputAnswer,

@@ -110,12 +110,7 @@ final class SessionWorkflowTests: XCTestCase {
             stateRepository: repository, persistPermissionStatus: { _, _, _, _ in },
             isAppActive: { false }, agentActivityDirectory: sessions, resumeMarkerDirectory: sessions,
             remotePromptLiveSessions: { _ in [session.id] },
-            remotePromptTarget: { _ in
-                RemotePromptTarget(activity: .idle, send: { _ in
-                    XCTFail("Native actions must not touch the terminal draft")
-                    return false
-                })
-            },
+            remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) },
             kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
         )
         let now = Date()
@@ -168,7 +163,6 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: sessions.appendingPathComponent("\(session.id).session-bounce.json").path
         ))
-        XCTAssertEqual(model.sendRemotePrompt(sessionId: session.id, value: "pending handoff"), .busy)
         XCTAssertEqual(model.performSessionAction(
             sessionId: session.id, action: bounce, operation: bounceID
         ), .accepted)
@@ -194,7 +188,6 @@ final class SessionWorkflowTests: XCTestCase {
             capabilities: [], sendReady: false, bounceRequested: true
         )
         try JSONEncoder().encode(snapshot).write(to: snapshotURL)
-        XCTAssertEqual(model.sendRemotePrompt(sessionId: session.id, value: "pending bounce"), .busy)
         XCTAssertEqual(model.setModel(
             sessionId: session.id, selection: selection,
             operation: CLIOperationRequest(operationId: "new-model", conversationEpoch: "epoch-1")

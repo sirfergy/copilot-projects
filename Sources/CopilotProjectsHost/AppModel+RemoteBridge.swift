@@ -99,7 +99,6 @@ private struct SetModelRequestFile: Codable {
 
 struct RemotePromptTarget {
     let activity: FooterActivity
-    let send: (String) -> Bool
 }
 
 struct RemoteElicitationTerminalTarget {
@@ -940,20 +939,11 @@ extension AppModel {
         _ message: RemoteClientMessage,
         perform: () -> RemoteControlResult
     ) -> RemoteControlResult {
-        let location = message.sessionId.flatMap { locateIndex($0) }
-        return remoteControlDeliveryLedger.perform(
+        remoteControlDeliveryLedger.perform(
             message,
-            sessionExists: location != nil
-        ) {
-            if message.type == "prompt" {
-                guard let location,
-                      projects[location.p].sessions[location.s].agentActivity?
-                        .remoteOperationProjection().conversationEpoch == message.conversationEpoch else {
-                    return .invalid
-                }
-            }
-            return perform()
-        }
+            sessionExists: message.sessionId.flatMap { locateIndex($0) } != nil,
+            perform: perform
+        )
     }
 
     @discardableResult
@@ -1032,97 +1022,6 @@ extension AppModel {
         )
     }
 
-    func sendRemotePrompt(sessionId: String, value: String) -> RemotePromptResult {
-        guard ProjectsTerminalView.remotePromptPasteBytes(value) != nil,
-              let location = locateIndex(sessionId) else { return .invalid }
-        if parkingBlocksInput(sessionId) { return .busy }
-        let session = projects[location.p].sessions[location.s]
-        let adapter = CLIOperationAdapter(
-            activityDirectory: agentActivityDirectory,
-            resumeMarkerDirectory: resumeMarkerDirectory
-        )
-        if adapter.bounceBlocksAutomaticPrompts(
-            sessionId: sessionId, cachedSnapshot: session.agentActivity, now: { Date() }
-        ) {
-            return .busy
-        }
-        let liveSessions = remotePromptLiveSessions?(agentProcessNames)
-            ?? ProcessTree.agentSessions(
-                agentNames: agentProcessNames,
-                in: ProcessTree.snapshot()
-            )
-        let target: RemotePromptTarget?
-        if let remotePromptTarget {
-            target = remotePromptTarget(sessionId)
-        } else if let controller = controllers[sessionId],
-                  let view = remoteInputTerminal(sessionId: sessionId) {
-            target = RemotePromptTarget(
-                activity: controller.agentActivity,
-                send: { view.sendRemotePrompt($0) }
-            )
-        } else {
-            target = nil
-        }
-        let promptNow = Date()
-        let promptNowMs = SessionArtifacts.currentStatusTimestamp()
-        let foreground = runtimeForegroundActivity(for: session, now: promptNow)
-        let eligibility = Self.remotePromptEligibility(
-            status: projectedStatus(for: session, foreground: foreground, now: promptNow),
-            scheduledTurnActive: session.scheduledTurnActive,
-            hasPendingQuestions: session.hasPendingInput,
-            hasLiveAgent: liveSessions.contains(sessionId),
-            backgroundOnly: Self.backgroundOnlyPromptEvidence(
-                status: session.status,
-                snapshot: session.agentActivity,
-                backgroundAgentsActive: session.backgroundAgentsActive,
-                now: promptNow,
-                nowMs: promptNowMs,
-                clockMs: sessionSemantics.promptSafetyClock.timestamp(for: sessionId)
-            ),
-            footerActivity: target?.activity ?? .unknown,
-            foregroundActivity: foreground
-        )
-        if eligibility == .busy { return .busy }
-        guard liveSessions.contains(sessionId),
-              let target else {
-            return .noLiveCopilot
-        }
-        let fence: RemotePromptFence?
-        if foreground == .idle,
-           let root = session.agentActivity?.copilotSessionId,
-           let epoch = session.agentActivity?.conversationEpoch {
-            fence = RemotePromptFence(
-                submittedAt: promptNowMs,
-                rootSessionId: root,
-                conversationEpoch: epoch
-            )
-            remotePromptFences[sessionId] = fence
-        } else {
-            fence = nil
-        }
-        guard target.send(value) else {
-            if remotePromptFences[sessionId] == fence {
-                remotePromptFences[sessionId] = nil
-            }
-            return .invalid
-        }
-        recordStartingPromptIfNeeded(sessionId: sessionId, prompt: value)
-        return .sent
-    }
-
-    private func recordStartingPromptIfNeeded(sessionId: String, prompt: String) {
-        let normalized = prompt
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              startingPrompt(for: sessionId) == nil,
-              let loc = locateIndex(sessionId) else {
-            return
-        }
-        projects[loc.p].sessions[loc.s].startingPrompt = normalized
-        save()
-    }
-
     /// Whether a remote message may be sent to a session right now. Readiness of the
     /// *foreground* is the gate — primarily the terminal footer, NOT whether the
     /// session is globally `.running`. Scheduled work and subagents can keep the
@@ -1138,7 +1037,6 @@ extension AppModel {
     /// `hasPendingQuestions` is the extension's authoritative signal for structured
     /// questions. Scheduled work is allowed only with fresh, clock-ordered evidence
     /// that the interactive foreground is inactive.
-    /// `sendRemotePrompt` re-checks the footer immediately before the actual send.
     nonisolated static func remotePromptEligibility(
         status: SessionStatus,
         scheduledTurnActive: Bool = false,
@@ -1197,7 +1095,7 @@ extension AppModel {
     func answerUserInput(
         sessionId: String,
         answer: RemoteUserInputAnswer,
-        operation: CLIOperationRequest? = nil,
+        operation: CLIOperationRequest?,
         now: Date = Date()
     ) -> RemoteUserInputResult {
         let clock = advancingClock(from: now)
@@ -1252,7 +1150,7 @@ extension AppModel {
     func answerElicitation(
         sessionId: String,
         answer: RemoteElicitationAnswer,
-        operation: CLIOperationRequest? = nil,
+        operation: CLIOperationRequest?,
         now: Date = Date()
     ) -> RemoteUserInputResult {
         let clock = advancingClock(from: now)
@@ -1459,7 +1357,7 @@ extension AppModel {
     func setModel(
         sessionId: String,
         selection: RemoteModelSelection,
-        operation: CLIOperationRequest? = nil,
+        operation: CLIOperationRequest?,
         now: Date = Date()
     ) -> RemoteUserInputResult {
         let clock = advancingClock(from: now)
@@ -1609,7 +1507,6 @@ extension AppModel {
         return workflow.sendReady && !snapshot.hasPendingInput
             && !session.hasBackgroundWork && remoteSessionHasLiveAgent(sessionId)
             && projectedStatus(for: session, foreground: foreground, now: now) == .idle
-            && remotePromptFences[sessionId] == nil
             && !snapshot.foregroundTurnActive && !snapshot.scheduledTurnActive
             && snapshot.activeSubagents.isEmpty && snapshot.schedules.isEmpty
             && snapshot.runtimeForegroundActivity(
@@ -2856,7 +2753,7 @@ extension AppModel {
 
     /// Sends or queues a prompt into an existing live session for Copilot Pull Requests.
     /// Replaying the same `requestId` for the same session and prompt resolves its prior
-    /// terminal or native outcome without delivering the prompt twice.
+    /// outcome without delivering the prompt twice.
     func sendPullRequestsSessionPrompt(
         requestId: UUID,
         projectId: String?,
@@ -2891,23 +2788,17 @@ extension AppModel {
         } else {
             do {
                 if let persisted = try sessionCreationLedger.promptRecord(for: requestId, now: clock()) {
-                    let route: PullRequestsPromptRoute
-                    switch persisted.route {
-                    case .terminal:
-                        route = .terminal
-                    case .native:
-                        guard let epoch = persisted.conversationEpoch, !epoch.isEmpty else {
-                            return .failure(
-                                "Could not confirm whether Copilot received the prompt. Inspect the terminal before trying again.",
-                                code: "indeterminate"
-                            )
-                        }
-                        route = .native(conversationEpoch: epoch)
+                    // A prompt an earlier version typed into the terminal has no epoch.
+                    guard let epoch = persisted.conversationEpoch, !epoch.isEmpty else {
+                        return .failure(
+                            "Could not confirm whether Copilot received the prompt. Inspect the terminal before trying again.",
+                            code: "indeterminate"
+                        )
                     }
                     let restored = SentPullRequestsPrompt(
                         sessionId: persisted.sessionId,
                         payloadFingerprint: persisted.payloadFingerprint,
-                        route: route,
+                        conversationEpoch: epoch,
                         state: persisted.state,
                         createdAt: persisted.createdAt
                     )
@@ -2934,36 +2825,21 @@ extension AppModel {
             if let projectId, projects[loc.p].id != projectId {
                 return .failure("The session moved to another project.", code: "conflict")
             }
-            switch previous.route {
-            case .terminal:
-                switch previous.state {
-                case .delivered:
-                    return .success(sessionId, code: "existing")
-                case .pending, .queued:
-                    return .failure(
-                        "Could not confirm whether Copilot received the prompt. Inspect the terminal before trying again.",
-                        code: "indeterminate"
-                    )
-                case .rejected:
-                    return .failure("Copilot did not accept the prompt.", code: "rejected")
-                }
-            case .native(let epoch):
-                switch previous.state {
-                case .delivered:
-                    return .success(sessionId, code: "applied")
-                case .rejected:
-                    return .failure("Copilot did not accept the prompt.", code: "rejected")
-                case .pending, .queued:
-                    return resolveNativePullRequestsPrompt(
-                        sessionId: sessionId,
-                        requestId: requestId,
-                        conversationEpoch: epoch,
-                        payloadFingerprint: payloadFingerprint,
-                        createdAt: previous.createdAt,
-                        adapter: adapter,
-                        clock: clock
-                    )
-                }
+            switch previous.state {
+            case .delivered:
+                return .success(sessionId, code: "applied")
+            case .rejected:
+                return .failure("Copilot did not accept the prompt.", code: "rejected")
+            case .pending, .queued:
+                return resolveNativePullRequestsPrompt(
+                    sessionId: sessionId,
+                    requestId: requestId,
+                    conversationEpoch: previous.conversationEpoch,
+                    payloadFingerprint: payloadFingerprint,
+                    createdAt: previous.createdAt,
+                    adapter: adapter,
+                    clock: clock
+                )
             }
         }
         guard let loc = locateIndex(sessionId) else {
@@ -3015,7 +2891,7 @@ extension AppModel {
             return .failure("The session is waiting for your input in the terminal.", code: "busy")
         }
 
-        // Prefer native SDK queueing when the session has a fresh tracker workflow snapshot.
+        // Queue through the SDK; a session whose tracker offers no native send is refused.
         if let snapshot = freshSnapshot,
            let epoch = snapshot.remoteOperationProjection(at: clock()).conversationEpoch,
            let workflow = snapshot.workflow,
@@ -3028,7 +2904,7 @@ extension AppModel {
                 requestId: requestId,
                 sessionId: sessionId,
                 payloadFingerprint: payloadFingerprint,
-                route: .native(conversationEpoch: epoch),
+                conversationEpoch: epoch,
                 state: .pending,
                 now: intentAt
             ) else {
@@ -3044,7 +2920,7 @@ extension AppModel {
                     requestId: requestId,
                     sessionId: sessionId,
                     payloadFingerprint: payloadFingerprint,
-                    route: .native(conversationEpoch: epoch),
+                    conversationEpoch: epoch,
                     state: .queued,
                     now: intentAt
                 )
@@ -3074,42 +2950,10 @@ extension AppModel {
                 return .failure("Could not send the prompt to that session.", code: "invalid")
             }
         }
-
-        let intentAt = clock()
-        guard rememberSentPullRequestsPrompt(
-            requestId: requestId,
-            sessionId: sessionId,
-            payloadFingerprint: payloadFingerprint,
-            route: .terminal,
-            state: .pending,
-            now: intentAt
-        ) else {
-            return .failure(
-                "Copilot Projects couldn’t save the prompt request. Try again; it won’t send twice.",
-                code: "indeterminate"
-            )
-        }
-        switch sendRemotePrompt(sessionId: sessionId, value: normalizedPrompt) {
-        case .sent:
-            _ = rememberSentPullRequestsPrompt(
-                requestId: requestId,
-                sessionId: sessionId,
-                payloadFingerprint: payloadFingerprint,
-                route: .terminal,
-                state: .delivered,
-                now: intentAt
-            )
-            return .success(sessionId, code: "sent")
-        case .busy:
-            forgetPendingPullRequestsPrompt(requestId: requestId, now: clock())
-            return .failure("The session is busy or waiting for input in the terminal.", code: "busy")
-        case .noLiveCopilot:
-            forgetPendingPullRequestsPrompt(requestId: requestId, now: clock())
-            return .failure("Copilot isn’t running in that session.", code: "no-copilot")
-        case .invalid, .forbidden:
-            forgetPendingPullRequestsPrompt(requestId: requestId, now: clock())
-            return .failure("Could not send the prompt to that session.", code: "invalid")
-        }
+        return .failure(
+            "That session can’t take a prompt from here right now. Check that Copilot is running in its terminal, or type the prompt there.",
+            code: "no-copilot"
+        )
     }
 
     private func resolveNativePullRequestsPrompt(
@@ -3157,7 +3001,7 @@ extension AppModel {
                 requestId: requestId,
                 sessionId: sessionId,
                 payloadFingerprint: payloadFingerprint,
-                route: .native(conversationEpoch: conversationEpoch),
+                conversationEpoch: conversationEpoch,
                 state: .queued,
                 now: createdAt
             )
@@ -3167,7 +3011,7 @@ extension AppModel {
                 requestId: requestId,
                 sessionId: sessionId,
                 payloadFingerprint: payloadFingerprint,
-                route: .native(conversationEpoch: conversationEpoch),
+                conversationEpoch: conversationEpoch,
                 state: .delivered,
                 now: createdAt
             )
@@ -3177,7 +3021,7 @@ extension AppModel {
                 requestId: requestId,
                 sessionId: sessionId,
                 payloadFingerprint: payloadFingerprint,
-                route: .native(conversationEpoch: conversationEpoch),
+                conversationEpoch: conversationEpoch,
                 state: .rejected,
                 now: createdAt
             )
@@ -3197,25 +3041,15 @@ extension AppModel {
         requestId: UUID,
         sessionId: String,
         payloadFingerprint: String,
-        route: PullRequestsPromptRoute,
+        conversationEpoch: String,
         state: PullRequestsPromptRecord.DeliveryState,
         now: Date
     ) -> Bool {
-        let recordRoute: PullRequestsPromptRecord.Route
-        let conversationEpoch: String?
-        switch route {
-        case .terminal:
-            recordRoute = .terminal
-            conversationEpoch = nil
-        case .native(let epoch):
-            recordRoute = .native
-            conversationEpoch = epoch
-        }
         let persisted = PullRequestsPromptRecord(
             requestId: requestId.uuidString,
             sessionId: sessionId,
             payloadFingerprint: payloadFingerprint,
-            route: recordRoute,
+            route: .native,
             conversationEpoch: conversationEpoch,
             state: state,
             createdAt: now
@@ -3223,7 +3057,7 @@ extension AppModel {
         let entry = SentPullRequestsPrompt(
             sessionId: sessionId,
             payloadFingerprint: payloadFingerprint,
-            route: route,
+            conversationEpoch: conversationEpoch,
             state: state,
             createdAt: now
         )

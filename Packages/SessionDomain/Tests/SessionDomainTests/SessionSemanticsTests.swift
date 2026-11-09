@@ -155,21 +155,6 @@ final class SessionSemanticsTests: XCTestCase {
         )), .busy)
     }
 
-    func testPromptAcknowledgementMustBeStrictlyAfterSubmission() {
-        XCTAssertFalse(SessionSemantics.acknowledgesSubmittedPrompt(
-            foreground: .working, observedAt: 100, idleAt: nil, submittedAt: 100))
-        XCTAssertFalse(SessionSemantics.acknowledgesSubmittedPrompt(
-            foreground: .idle, observedAt: 101, idleAt: 100, submittedAt: 100))
-        XCTAssertFalse(SessionSemantics.acknowledgesSubmittedPrompt(
-            foreground: .idle, observedAt: 101, idleAt: 102, submittedAt: 100))
-        XCTAssertFalse(SessionSemantics.acknowledgesSubmittedPrompt(
-            foreground: .unknown, observedAt: 102, idleAt: 101, submittedAt: 100))
-        XCTAssertTrue(SessionSemantics.acknowledgesSubmittedPrompt(
-            foreground: .working, observedAt: 101, idleAt: nil, submittedAt: 100))
-        XCTAssertTrue(SessionSemantics.acknowledgesSubmittedPrompt(
-            foreground: .idle, observedAt: 102, idleAt: 101, submittedAt: 100))
-    }
-
     func testBackgroundEvidenceRejectsStaleFutureAndOlderClockValues() {
         let current = evidence(transition: 900)
         XCTAssertEqual(SessionSemantics.backgroundOnlyEvidenceMilliseconds(

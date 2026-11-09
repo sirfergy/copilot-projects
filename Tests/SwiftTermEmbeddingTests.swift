@@ -280,8 +280,6 @@ final class SwiftTermEmbeddingTests: XCTestCase {
 
         XCTAssertTrue(view.sendRemoteCommand("a", forceFocusReporting: true))
         try await expect("\u{1b}[Ia\r\u{1b}[O")
-        XCTAssertTrue(view.sendRemotePrompt("p"))
-        try await expect("\u{1b}[I\u{1b}\u{1b}\u{1b}[200~p\u{1b}[201~\u{1b}[I\r\u{1b}[O")
 
         // Activation flips hasFocus before SwiftTerm's focus-in reaches the PTY,
         // so a command handled in between must still be scoped.

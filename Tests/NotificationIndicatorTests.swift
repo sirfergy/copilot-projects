@@ -219,9 +219,7 @@ final class NotificationIndicatorTests: XCTestCase {
             isAppActive: { false },
             agentActivityDirectory: root,
             resumeMarkerDirectory: root,
-            remotePromptTarget: { _ in
-                RemotePromptTarget(activity: footerActivity, send: { _ in true })
-            }
+            remotePromptTarget: { _ in RemotePromptTarget(activity: footerActivity) }
         )
         model.attach(notifications: spy)
 

@@ -132,7 +132,6 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
     public var observedAtMilliseconds: Int64
     public var capabilities: [String]
     public let sendReady: Bool
-    public let legacyPromptFallback: Bool?
     /// Older trackers omit this field; only an explicit false admits a bounce.
     public let bounceRequested: Bool?
     public let totalAiCredits: Double?
@@ -152,7 +151,6 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
         observedAtMilliseconds: Int64,
         capabilities: [String],
         sendReady: Bool,
-        legacyPromptFallback: Bool? = nil,
         bounceRequested: Bool? = nil,
         totalAiCredits: Double? = nil,
         contextTokens: Int? = nil,
@@ -170,7 +168,6 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
         self.observedAtMilliseconds = observedAtMilliseconds
         self.capabilities = capabilities
         self.sendReady = sendReady
-        self.legacyPromptFallback = legacyPromptFallback
         self.bounceRequested = bounceRequested
         self.totalAiCredits = totalAiCredits
         self.contextTokens = contextTokens

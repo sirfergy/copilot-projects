@@ -93,6 +93,8 @@ struct SessionCreationRecord: Codable, Equatable, Sendable {
 /// never send the same prompt twice.
 struct PullRequestsPromptRecord: Codable, Equatable, Sendable {
     enum Route: String, Codable, Equatable, Sendable {
+        /// No longer written. Records stored by earlier versions carry it, and a
+        /// record that fails to decode makes the whole ledger unreadable.
         case terminal
         case native
     }

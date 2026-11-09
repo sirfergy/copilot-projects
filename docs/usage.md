@@ -58,7 +58,8 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   reason-aware dispatch actions (**Ask Session to Fix Checks**, **Ask Session to Resolve
   Conflicts**, **Ask Session to Address Feedback**, **Ask Session to Update Branch**,
   **Ask Session to Check Status**) and **Send Prompt to Session…** (`P`, or `⇧P` for the
-  primary action) to queue or send a prompt directly into that session and focus it.
+  primary action) to queue a prompt in that session and focus it. A session whose
+  Copilot isn't running, or isn't reporting that it can take a message, refuses the prompt.
   Only one copy per state directory writes its goals; see the README for the rules.
 - **Notifications (`⇧⌘N`):** opens Copilot Notifications, a separate app nested beside
   Copilot Pull Requests, with its own Dock icon, Dock badge, and `⌘Tab` entry. It keeps
@@ -207,11 +208,9 @@ workspace snapshot carries `servedAtMilliseconds` (the Mac's clock when it was
 served), clients age the evidence from that time plus their own monotonic time
 since receipt, so Mac and phone clocks never need to agree; without it, they
 compare wall clocks.
-A host advertising native workflows treats missing session workflow
-state as unknown, not permission to use the legacy composer. Legacy composer sends
-require an older host or explicit fallback from a currently available tracker.
-Unsupported-runtime proof can remain valid without a recent native-action
-observation; raw terminal input is independent of these composer checks.
+A session whose workflow state is missing, stale, or unsupported offers no composer
+send: a message is never typed into the terminal on the composer's behalf, and
+clients say to use Terminal instead. Raw terminal input is independent of these checks.
 Older trackers on a newer host remain blocked even with a fresh heartbeat:
 restart/reload the tracker to activate the updated workflow metadata, or use Terminal.
 Deploy the Mac host before clients using the new protocol.
@@ -485,8 +484,7 @@ The window does not cover the following, and their checks stay:
 
 - Copilot CLI versions, including the tracker's fallbacks for older CLI runtimes.
 - What a session can do now: `RemoteSessionWorkflow.capabilities` (for example
-  `session-bounce`, present only while a `bounce` command is loaded) and
-  `legacyPromptFallback`.
+  `session-bounce`, present only while a `bounce` command is loaded).
 - A capability or field a current peer can still leave out, such as `workflow` for a
   session without a tracker.
 - Records a host stored from a client, such as a push registration, until that client
@@ -749,11 +747,11 @@ when SDK history includes the same events; historical-only completions do not cr
 
 The host uses fresh runtime observations for status and prompt eligibility without rewriting
 ordering clocks to heartbeat time. Input waits are released only by matching, same-conversation
-completion evidence after the wait, with no other input pending. Submitted prompts remain fenced
-until the coordinator acknowledges activity. Suppressed permission notifications use the same
-sender-scoped completion check before restoring status. Terminal footer checks still protect modal UI,
+completion evidence after the wait, with no other input pending. Suppressed permission
+notifications use the same sender-scoped completion check before restoring status.
+Terminal footer checks still protect modal UI,
 including when a draft or autopilot changes the visible shortcut hints; unknown and modal
-footers do not become permission to inject text.
+footers do not make a session promptable.
 
 Confirmed input-wait resolution is persisted at the existing ordering clocks before runtime
 reconciliation clears the live wait. Notification debounce controls banner timing, not whether a

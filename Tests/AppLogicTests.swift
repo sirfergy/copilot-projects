@@ -17,6 +17,39 @@ import Darwin
 #endif
 
 
+/// Each answer below is its own operation in the `epoch-1` conversation the fixtures publish.
+private extension AppModel {
+    private var testOperation: CLIOperationRequest {
+        CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: "epoch-1")
+    }
+
+    func answerUserInput(
+        sessionId: String,
+        answer: RemoteUserInputAnswer
+    ) -> RemoteUserInputResult {
+        answerUserInput(sessionId: sessionId, answer: answer, operation: testOperation)
+    }
+
+    func setModel(sessionId: String, selection: RemoteModelSelection) -> RemoteUserInputResult {
+        setModel(sessionId: sessionId, selection: selection, operation: testOperation)
+    }
+
+    /// A durable ask-user prompt is answered in the terminal and takes no operation.
+    func answerElicitation(
+        sessionId: String,
+        answer: RemoteElicitationAnswer,
+        now: Date = Date()
+    ) -> RemoteUserInputResult {
+        let durable = answer.requestId.hasPrefix("synthetic::durable-ask-user::")
+        return answerElicitation(
+            sessionId: sessionId,
+            answer: answer,
+            operation: durable ? nil : testOperation,
+            now: now
+        )
+    }
+}
+
 private final class AgentActivityCooldownHarness {
     private(set) var delays: [TimeInterval] = []
     private var actions: [@MainActor () -> Void] = []
@@ -157,33 +190,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(TerminalController.classifyFooter("ordinary output"), .unknown)
     }
 
-    func testRemotePromptPasteBytesAreSanitized() throws {
-        let paste = try XCTUnwrap(
-            ProjectsTerminalView.remotePromptPasteBytes("first line\nsecond line")
-        )
-        XCTAssertEqual(Array(paste.prefix(2)), [0x1b, 0x1b])
-        XCTAssertTrue(paste.starts(with: [0x1b, 0x1b] + Array("\u{1b}[200~".utf8)))
-        XCTAssertEqual(
-            String(decoding: paste, as: UTF8.self),
-            "\u{1b}\u{1b}\u{1b}[200~first line\nsecond line\u{1b}[201~"
-        )
-        XCTAssertFalse(paste.contains(0x0d))
-        XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("unsafe\u{1b}[201~input"))
-        XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("unsafe\u{009b}31m"))
-        XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("unsafe\u{0}input"))
-        XCTAssertNil(ProjectsTerminalView.remotePromptPasteBytes("   \n"))
-    }
-
-    func testRemotePromptFocusBytesBracketTheSubmission() throws {
-        let paste = try XCTUnwrap(
-            ProjectsTerminalView.remotePromptPasteBytes(
-                "hello",
-                scopedFocus: true
-            )
-        )
-        XCTAssertTrue(paste.starts(with:
-            ProjectsTerminalView.remoteFocusInBytes + [0x1b, 0x1b]
-        ))
+    func testRemoteSubmitFocusBytesBracketTheSubmission() {
         XCTAssertEqual(
             ProjectsTerminalView.remoteSubmitBytes(
                 keyboardEnhancementFlags: [.disambiguate],
@@ -248,34 +255,6 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(ledger.contains("session:first"))
         XCTAssertTrue(ledger.contains("session:second"))
         XCTAssertTrue(ledger.contains("session:third"))
-    }
-
-    func testPromptSubmitTimingScalesWithSizeAndIsBounded() {
-        // Small prompts get the base floor; large ones wait longer, but bounded.
-        XCTAssertEqual(ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 0), 10)
-        XCTAssertEqual(ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 1_024), 10)
-        XCTAssertGreaterThan(
-            ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 8_192),
-            ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 1_024)
-        )
-        XCTAssertLessThanOrEqual(
-            ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 1_000_000),
-            20
-        )
-        // The floor must comfortably exceed the old 150ms fixed delay (5 ticks).
-        XCTAssertGreaterThan(ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 0), 5)
-        // The cap always leaves room for the settle extension past the floor.
-        for bytes in [0, 1_024, 8_192, 1_000_000] {
-            XCTAssertGreaterThan(
-                ProjectsTerminalView.promptSubmitMaxTicks(byteCount: bytes),
-                ProjectsTerminalView.promptSubmitFloorTicks(byteCount: bytes)
-            )
-        }
-        // A submit can fire at the floor when output is already quiet.
-        XCTAssertLessThan(
-            ProjectsTerminalView.promptSubmitSettleTicks,
-            ProjectsTerminalView.promptSubmitFloorTicks(byteCount: 0)
-        )
     }
 
     func testRemotePromptEligibilityRequiresSettledLiveCopilot() {
@@ -537,7 +516,7 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
-    func testRemotePromptOrchestrationRechecksAndSendsExactlyOnce() throws {
+    func testRemotePromptableFollowsTheLiveForegroundNotBackgroundWork() throws {
         _ = NSApplication.shared
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build/remote-prompt-\(UUID().uuidString)")
@@ -559,51 +538,29 @@ final class AppLogicTests: XCTestCase {
 
         var liveSessions: Set<String> = [session.id]
         var activity = FooterActivity.idle
-        var sendSucceeds = true
-        var sentValues: [String] = []
         let model = AppModel(
             stateRepository: repository,
             agentActivityDirectory: root,
             remotePromptLiveSessions: { _ in liveSessions },
             remotePromptTarget: { requestedSessionId in
                 guard requestedSessionId == session.id else { return nil }
-                return RemotePromptTarget(
-                    activity: activity,
-                    send: { value in
-                        sentValues.append(value)
-                        return sendSucceeds
-                    }
-                )
+                return RemotePromptTarget(activity: activity)
             }
         )
+        func promptable() -> Bool {
+            model.remoteWorkspaceSnapshot().projects[0].sessions[0].promptable == true
+        }
 
-        XCTAssertEqual(model.sendRemotePrompt(sessionId: session.id, value: "hello"), .sent)
-        XCTAssertEqual(sentValues, ["hello"])
+        XCTAssertTrue(promptable())
 
-        XCTAssertEqual(
-            model.sendRemotePrompt(sessionId: "missing", value: "ignored"),
-            .invalid
-        )
-        XCTAssertEqual(
-            model.sendRemotePrompt(sessionId: session.id, value: "bad\u{0}value"),
-            .invalid
-        )
-        XCTAssertEqual(sentValues, ["hello"])
-
-        // Foreground genuinely working (footer working) → busy, nothing sent.
+        // Foreground genuinely working (footer working) → not promptable.
         activity = .working
-        XCTAssertEqual(model.sendRemotePrompt(sessionId: session.id, value: "busy"), .busy)
-        XCTAssertEqual(sentValues, ["hello"])
+        XCTAssertFalse(promptable())
         activity = .idle
 
-        // Background agents active must NOT block a settled foreground at a prompt:
-        // the message sends even while background work runs.
+        // Background agents active must NOT block a settled foreground at a prompt.
         model.setBackgroundAgentsActive(sessionId: session.id, active: true)
-        XCTAssertEqual(
-            model.sendRemotePrompt(sessionId: session.id, value: "background"),
-            .sent
-        )
-        XCTAssertEqual(sentValues, ["hello", "background"])
+        XCTAssertTrue(promptable())
         model.setBackgroundAgentsActive(sessionId: session.id, active: false)
 
         let subagentTransitionAt = ISO8601DateFormatter().string(from: Date())
@@ -633,12 +590,8 @@ final class AppLogicTests: XCTestCase {
         model.refreshAgentActivitySnapshots()
         XCTAssertEqual(model.projects[0].sessions[0].activeSubagentCount, 1)
         XCTAssertTrue(model.projects[0].sessions[0].hasBackgroundWork)
-        // A live background subagent + idle footer must still send (the reported bug).
-        XCTAssertEqual(
-            model.sendRemotePrompt(sessionId: session.id, value: "subagent"),
-            .sent
-        )
-        XCTAssertEqual(sentValues, ["hello", "background", "subagent"])
+        // A live background subagent + idle footer must stay promptable (the reported bug).
+        XCTAssertTrue(promptable())
         model.setStatus(
             sessionId: session.id,
             status: .running,
@@ -646,14 +599,10 @@ final class AppLogicTests: XCTestCase {
             timestamp: 1,
             source: "background-only"
         )
-        XCTAssertEqual(
-            model.sendRemotePrompt(sessionId: session.id, value: "running-background"),
-            .sent
-        )
-        XCTAssertEqual(sentValues, ["hello", "background", "subagent", "running-background"])
+        XCTAssertTrue(promptable())
 
         // A raw permission prompt sets `status == .waiting` (no structured question)
-        // while the footer can still read idle behind the dialog — must NOT inject.
+        // while the footer can still read idle behind the dialog — not promptable.
         model.setStatus(
             sessionId: session.id,
             status: .waiting,
@@ -662,11 +611,7 @@ final class AppLogicTests: XCTestCase {
             source: "permission-prompt"
         )
         XCTAssertEqual(activity, .idle)
-        XCTAssertEqual(
-            model.sendRemotePrompt(sessionId: session.id, value: "over-permission"),
-            .busy
-        )
-        XCTAssertEqual(sentValues, ["hello", "background", "subagent", "running-background"])
+        XCTAssertFalse(promptable())
         model.setStatus(
             sessionId: session.id,
             status: .running,
@@ -703,14 +648,7 @@ final class AppLogicTests: XCTestCase {
             to: root.appendingPathComponent("\(session.id).agent-activity.json")
         )
         model.refreshAgentActivitySnapshots()
-        XCTAssertEqual(
-            model.sendRemotePrompt(sessionId: session.id, value: "scheduled"),
-            .sent
-        )
-        XCTAssertEqual(
-            sentValues,
-            ["hello", "background", "subagent", "running-background", "scheduled"]
-        )
+        XCTAssertTrue(promptable())
         model.setStatus(
             sessionId: session.id,
             status: .idle,
@@ -720,37 +658,12 @@ final class AppLogicTests: XCTestCase {
         )
 
         liveSessions = []
-        XCTAssertEqual(
-            model.sendRemotePrompt(sessionId: session.id, value: "no process"),
-            .noLiveCopilot
-        )
-        XCTAssertEqual(
-            sentValues,
-            ["hello", "background", "subagent", "running-background", "scheduled"]
-        )
+        XCTAssertFalse(promptable())
         liveSessions = [session.id]
 
-        // Footer not idle → busy (queue + retry), never injected mid-work.
+        // Footer not idle → not promptable mid-work.
         activity = .working
-        XCTAssertEqual(
-            model.sendRemotePrompt(sessionId: session.id, value: "working"),
-            .busy
-        )
-        XCTAssertEqual(
-            sentValues,
-            ["hello", "background", "subagent", "running-background", "scheduled"]
-        )
-        activity = .idle
-
-        sendSucceeds = false
-        XCTAssertEqual(
-            model.sendRemotePrompt(sessionId: session.id, value: "not sent"),
-            .invalid
-        )
-        XCTAssertEqual(
-            sentValues,
-            ["hello", "background", "subagent", "running-background", "scheduled", "not sent"]
-        )
+        XCTAssertFalse(promptable())
     }
 
     @MainActor
@@ -1757,7 +1670,7 @@ final class AppLogicTests: XCTestCase {
             completionNotificationDelayNanoseconds: 10_000_000,
             isAppActive: { false },
             agentActivityDirectory: activityDirectory,
-            remotePromptTarget: { _ in RemotePromptTarget(activity: .idle, send: { _ in false }) }
+            remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) }
         )
         let notifications = NotificationSpy()
         model.attach(notifications: notifications)
@@ -18833,7 +18746,7 @@ final class AppLogicTests: XCTestCase {
             at: base.addingTimeInterval(9.4)
         )
         XCTAssertNil(workingModel.indicator)
-        injectedPromptTarget = RemotePromptTarget(activity: .working, send: { _ in false })
+        injectedPromptTarget = RemotePromptTarget(activity: .working)
         XCTAssertEqual(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(9.4)), .working(nil))
         injectedPromptTarget = nil
 
@@ -18850,7 +18763,7 @@ final class AppLogicTests: XCTestCase {
             at: base.addingTimeInterval(10)
         )
         XCTAssertNil(workingModel.indicator)
-        injectedPromptTarget = RemotePromptTarget(activity: .working, send: { _ in false })
+        injectedPromptTarget = RemotePromptTarget(activity: .working)
         XCTAssertEqual(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(10)), .working("Stuck hook"))
         injectedPromptTarget = nil
         model.refreshAgentActivitySnapshots(now: base.addingTimeInterval(26))
@@ -18875,7 +18788,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(workingModel.indicator, .working("Active before expiry"))
         model.setBackgroundAgentsActive(sessionId: session.id, active: true)
         XCTAssertNil(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(50)))
-        injectedPromptTarget = RemotePromptTarget(activity: .working, send: { _ in false })
+        injectedPromptTarget = RemotePromptTarget(activity: .working)
         XCTAssertEqual(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(50)), .working(nil))
         injectedPromptTarget = nil
         model.setBackgroundAgentsActive(sessionId: session.id, active: false)

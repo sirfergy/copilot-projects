@@ -14,30 +14,12 @@ extension AppModel {
             return runtimeTrackedOwners[session.id] == owner?.lowercased()
                 && owner != nil ? .unknown : nil
         }
-        let activity = snapshot.runtimeForegroundActivity(
+        return snapshot.runtimeForegroundActivity(
             expectedSessionId: owner,
             now: now,
             minimumObservationMilliseconds:
                 sessionSemantics.promptSafetyClock.timestamp(for: session.id)
         )
-        guard let fence = remotePromptFences[session.id] else { return activity }
-        if let currentRoot = snapshot.copilotSessionId,
-           let epoch = snapshot.conversationEpoch,
-           currentRoot.lowercased() == owner?.lowercased(),
-           (currentRoot != fence.rootSessionId || epoch != fence.conversationEpoch) {
-            remotePromptFences[session.id] = nil
-            return activity
-        }
-        if SessionSemantics.acknowledgesSubmittedPrompt(
-            foreground: activity,
-            observedAt: snapshot.runtimeActivity?.observedAtMilliseconds,
-            idleAt: snapshot.runtimeActivity?.idleAtMilliseconds,
-            submittedAt: fence.submittedAt
-        ) {
-            remotePromptFences[session.id] = nil
-            return activity
-        }
-        return .unknown
     }
 
     func inputWaitWasResolved(

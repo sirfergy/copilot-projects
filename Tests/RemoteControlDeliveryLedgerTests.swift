@@ -12,7 +12,6 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
         requestId: String? = "request",
         sequence: Int64 = 1,
         data: String? = "hello",
-        conversationEpoch: String? = nil,
         epoch: String? = nil
     ) -> RemoteClientMessage {
         RemoteClientMessage(
@@ -21,7 +20,6 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
             sessionId: sessionId,
             requestId: requestId,
             data: data,
-            conversationEpoch: conversationEpoch,
             delivery: RemoteControlDelivery(epoch: epoch ?? ledger.epoch, sequence: sequence)
         )
     }
@@ -75,7 +73,7 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
 
     @MainActor
     func testRefusalsDoNotCreateOrAdvanceWatermarks() {
-        let refusals: [RemoteControlResult] = [.busy, .invalid, .missing, .forbidden, .noLiveCopilot]
+        let refusals: [RemoteControlResult] = [.busy, .invalid, .missing, .forbidden]
         for refusal in refusals {
             let ledger = RemoteControlDeliveryLedger()
             let rejected = message(ledger, sequence: 10)
@@ -91,16 +89,14 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
     }
 
     @MainActor
-    func testSameSequenceBindsRequestKindPayloadAndOptionalConversationEpoch() {
+    func testSameSequenceBindsRequestKindAndPayload() {
         let ledger = RemoteControlDeliveryLedger()
-        let original = message(ledger, conversationEpoch: "conversation")
+        let original = message(ledger)
         XCTAssertEqual(ledger.perform(original, sessionExists: true) { .sent }, .sent)
         let conflicts = [
-            message(ledger, requestId: "different", conversationEpoch: "conversation"),
-            message(ledger, kind: "command", conversationEpoch: "conversation"),
-            message(ledger, data: "different", conversationEpoch: "conversation"),
-            message(ledger, conversationEpoch: "different"),
-            message(ledger),
+            message(ledger, requestId: "different"),
+            message(ledger, kind: "command"),
+            message(ledger, data: "different"),
         ]
         for conflict in conflicts {
             XCTAssertEqual(ledger.perform(conflict, sessionExists: true) {
@@ -112,16 +108,13 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
     }
 
     @MainActor
-    func testFingerprintFramesFieldsAndDistinguishesAbsentEpoch() {
+    func testFingerprintFramesFields() {
         let ledger = RemoteControlDeliveryLedger()
         XCTAssertEqual(ledger.perform(
             message(ledger, requestId: "ab", data: "c"), sessionExists: true
         ) { .sent }, .sent)
         XCTAssertEqual(ledger.perform(
             message(ledger, requestId: "a", data: "bc"), sessionExists: true
-        ) { .sent }, .fingerprintConflict)
-        XCTAssertEqual(ledger.perform(
-            message(ledger, requestId: "ab", data: "c", conversationEpoch: ""), sessionExists: true
         ) { .sent }, .fingerprintConflict)
     }
 
@@ -172,6 +165,8 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
             message(ledger, data: nil),
             message(ledger, data: String(repeating: "x", count: 8_193)),
             message(ledger, kind: "scroll"),
+            // Prompts are session-send operations; the terminal control is gone.
+            message(ledger, kind: "prompt"),
             RemoteClientMessage(type: "input", clientId: "client", sessionId: "session", data: "hi"),
         ]
         for request in invalid {
@@ -225,16 +220,16 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
     @MainActor
     func testOnlyClosedSessionScopesArePruned() {
         let ledger = RemoteControlDeliveryLedger(capacity: 3)
-        let closedPrompt = message(ledger, kind: "prompt", sessionId: "closing")
-        let closedTerminal = message(ledger, clientId: "other-client", sessionId: "closing")
+        let closed = message(ledger, sessionId: "closing")
+        let closedOtherClient = message(ledger, clientId: "other-client", sessionId: "closing")
         let live = message(ledger, sessionId: "live")
-        for request in [closedPrompt, closedTerminal, live] {
+        for request in [closed, closedOtherClient, live] {
             XCTAssertEqual(ledger.perform(request, sessionExists: true) { .sent }, .sent)
         }
         ledger.removeClosedSession("closing")
         XCTAssertEqual(ledger.scopeCount, 1)
         XCTAssertEqual(ledger.perform(live, sessionExists: true) { .invalid }, .sent)
-        XCTAssertEqual(ledger.perform(closedPrompt, sessionExists: false) { .sent }, .missing)
+        XCTAssertEqual(ledger.perform(closed, sessionExists: false) { .sent }, .missing)
         XCTAssertEqual(ledger.perform(message(ledger, sessionId: "new"), sessionExists: true) { .sent }, .sent)
         XCTAssertEqual(ledger.scopeCount, 2)
     }
@@ -255,13 +250,12 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
     }
 
     @MainActor
-    func testClientSessionAndPromptLaneIsolationWithOneSharedTerminalLane() {
+    func testClientAndSessionIsolationWithOneLaneForEveryKind() {
         let ledger = RemoteControlDeliveryLedger()
         XCTAssertEqual(ledger.perform(
             message(ledger, kind: "command", sequence: 20), sessionExists: true
         ) { .sent }, .sent)
         let independent = [
-            message(ledger, kind: "prompt"),
             message(ledger, clientId: "another-client"),
             message(ledger, sessionId: "another-session"),
         ]
@@ -273,6 +267,6 @@ final class RemoteControlDeliveryLedgerTests: XCTestCase {
                 message(ledger, kind: kind, sequence: 19), sessionExists: true
             ) { .sent }, .superseded)
         }
-        XCTAssertEqual(ledger.scopeCount, 4)
+        XCTAssertEqual(ledger.scopeCount, 3)
     }
 }

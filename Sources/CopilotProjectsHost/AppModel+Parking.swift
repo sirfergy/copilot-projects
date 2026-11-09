@@ -135,8 +135,7 @@ extension AppModel {
             return "Copilot in this session started before parking was available. Run /restart in it first."
         }
         guard attempt != nil || !parkingAdapter.hasPendingHandoff(sessionId: sessionId),
-              snapshot.operationReceipts?.contains(where: { $0.state == .accepted }) != true,
-              controllers[sessionId]?.terminalView.isSubmittingRemotePrompt != true else {
+              snapshot.operationReceipts?.contains(where: { $0.state == .accepted }) != true else {
             return "A request to Copilot is still in progress."
         }
         guard let copilotId = snapshot.copilotSessionId,

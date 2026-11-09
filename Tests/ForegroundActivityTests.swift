@@ -9,8 +9,6 @@ final class ForegroundActivityTests: XCTestCase {
     @MainActor
     private final class Fixture {
         final class Sends {
-            var count = 0
-            var succeeds = true
             var permissionRestores: [SessionStatusRecord] = []
         }
 
@@ -27,6 +25,10 @@ final class ForegroundActivityTests: XCTestCase {
         var baseMs: Int64 { Int64(base.timeIntervalSince1970 * 1_000) }
         var snapshotURL: URL {
             directory.appendingPathComponent("\(session.id).agent-activity.json")
+        }
+        /// Whether the workspace snapshot tells remote clients this session can take a message.
+        var promptable: Bool {
+            model.remoteWorkspaceSnapshot().projects[0].sessions[0].promptable == true
         }
 
         init(
@@ -67,12 +69,7 @@ final class ForegroundActivityTests: XCTestCase {
                 agentActivityDirectory: directory,
                 resumeMarkerDirectory: directory,
                 remotePromptLiveSessions: { _ in [sid] },
-                remotePromptTarget: { _ in
-                    RemotePromptTarget(activity: .idle, send: { _ in
-                        sends.count += 1
-                        return sends.succeeds
-                    })
-                }
+                remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) }
             )
         }
 
@@ -358,7 +355,7 @@ final class ForegroundActivityTests: XCTestCase {
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .waiting)
         XCTAssertTrue(fixture.sends.permissionRestores.isEmpty)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "blocked"), .busy)
+        XCTAssertFalse(fixture.promptable)
 
         snapshot.inputCompletions = [child: waitAt + 50]
         try fixture.publish(snapshot)
@@ -368,7 +365,7 @@ final class ForegroundActivityTests: XCTestCase {
             [
                 SessionStatusRecord(status: .idle, statusTimestamp: waitAt, promptStatusTimestamp: waitAt)
             ])
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "next"), .sent)
+        XCTAssertTrue(fixture.promptable)
     }
 
     @MainActor
@@ -414,7 +411,7 @@ final class ForegroundActivityTests: XCTestCase {
             try fixture.publish(invalidSnapshot)
             XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .waiting)
             XCTAssertTrue(fixture.sends.permissionRestores.isEmpty)
-            XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "blocked"), .busy)
+            XCTAssertFalse(fixture.promptable)
         }
         let recordURL = fixture.directory.appendingPathComponent("\(fixture.session.id).status-record.json")
         let record = try JSONDecoder().decode(SessionStatusRecord.self, from: Data(contentsOf: recordURL))
@@ -604,7 +601,7 @@ final class ForegroundActivityTests: XCTestCase {
         XCTAssertEqual(fixture.sends.permissionRestores, [
             SessionStatusRecord(status: .running, statusTimestamp: waitAt, promptStatusTimestamp: waitAt)
         ])
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "blocked"), .busy)
+        XCTAssertFalse(fixture.promptable)
     }
 
     @MainActor
@@ -628,8 +625,7 @@ final class ForegroundActivityTests: XCTestCase {
             if unsupported { snapshot.inputCompletions = [child: waitAt + 10] }
             try fixture.publish(snapshot)
             XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .waiting)
-            XCTAssertEqual(fixture.model.sendRemotePrompt(
-                sessionId: fixture.session.id, value: "must stay blocked"), .busy)
+            XCTAssertFalse(fixture.promptable, "must stay blocked")
         }
     }
 
@@ -680,8 +676,7 @@ final class ForegroundActivityTests: XCTestCase {
         snapshot.foregroundTransitionAt = fixture.base.addingTimeInterval(-10).ISO8601Format()
         try fixture.publish(snapshot)
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .running)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "next"), .busy)
-        XCTAssertEqual(fixture.sends.count, 0)
+        XCTAssertFalse(fixture.promptable)
     }
 
     @MainActor
@@ -731,7 +726,7 @@ final class ForegroundActivityTests: XCTestCase {
         XCTAssertEqual(fixture.model.totalRunning, 0)
         XCTAssertEqual(fixture.model.projects[0].aggregateStatus, .waiting)
         XCTAssertEqual(fixture.model.remoteWorkspaceSnapshot().projects[0].sessions[0].status, "waiting")
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "next"), .busy)
+        XCTAssertFalse(fixture.promptable)
 
         snapshot.trackedUserInputs = []
         snapshot.inputCompletions = [fixture.owner: fixture.baseMs + 300]
@@ -881,7 +876,7 @@ final class ForegroundActivityTests: XCTestCase {
         fixture.model.setStatus(
             sessionId: fixture.session.id, status: .waiting, text: nil,
             timestamp: waitAt, copilotSessionId: hook.childId, notification: .permission)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "blocked"), .busy)
+        XCTAssertFalse(fixture.promptable)
         try hook.run("idle", payload:
             #"{"sessionId":"\#(hook.childId)","timestamp":\#(waitAt + 100)}"#)
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .waiting)
@@ -890,9 +885,7 @@ final class ForegroundActivityTests: XCTestCase {
         snapshot.runtimeActivity?.observedAtMilliseconds = waitAt + 200
         try fixture.publish(snapshot)
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .idle)
-        XCTAssertEqual(fixture.model.remoteWorkspaceSnapshot().projects[0].sessions[0].promptable, true)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "next"), .sent)
-        XCTAssertEqual(fixture.sends.count, 1)
+        XCTAssertTrue(fixture.promptable)
     }
 
     @MainActor
@@ -952,36 +945,6 @@ final class ForegroundActivityTests: XCTestCase {
     }
 
     @MainActor
-    func testAcceptedPromptNeedsANewCoordinatorAcknowledgement() throws {
-        let fixture = try Fixture()
-        defer { fixture.cleanup() }
-        var snapshot = fixture.snapshot()
-        try fixture.publish(snapshot)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "first"), .sent)
-        Thread.sleep(forTimeInterval: 0.003)
-        let observed = Int64(Date().timeIntervalSince1970 * 1_000)
-        snapshot.runtimeActivity?.observedAtMilliseconds = observed
-        try fixture.publish(snapshot)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "duplicate"), .busy)
-        XCTAssertEqual(fixture.sends.count, 1)
-        snapshot.runtimeActivity?.idleAtMilliseconds = observed
-        try fixture.publish(snapshot)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "next"), .sent)
-        XCTAssertEqual(fixture.sends.count, 2)
-    }
-
-    @MainActor
-    func testFailedPromptDoesNotLeaveAnAdmissionFence() throws {
-        let fixture = try Fixture()
-        defer { fixture.cleanup() }
-        try fixture.publish(fixture.snapshot())
-        fixture.sends.succeeds = false
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "first"), .invalid)
-        fixture.sends.succeeds = true
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "retry"), .sent)
-    }
-
-    @MainActor
     func testRuntimeLossDoesNotBecomeLegacyIdle() throws {
         for bouncing in [false, true] {
             let fixture = try Fixture()
@@ -994,69 +957,30 @@ final class ForegroundActivityTests: XCTestCase {
             try fixture.publish(snapshot)
             try FileManager.default.removeItem(at: fixture.snapshotURL)
             fixture.model.refreshAgentActivitySnapshots()
-            XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "next"), .busy)
-            XCTAssertEqual(fixture.sends.count, 0)
+            XCTAssertFalse(fixture.promptable)
         }
     }
 
     @MainActor
-    func testBounceHandoffIsCheckedBeforeSnapshotPublicationCanRemoveIt() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent(".build/bounce-fence-\(UUID())")
-        let fixture = try Fixture(root: root)
-        defer { fixture.cleanup() }
-        var snapshot = fixture.snapshot(background: false)
-        snapshot.workflow = RemoteSessionWorkflow(
-            observedAtMilliseconds: fixture.baseMs, capabilities: [], sendReady: true, bounceRequested: false
-        )
-        try fixture.publish(snapshot)
-        let handoff = fixture.directory.appendingPathComponent("\(fixture.session.id).session-bounce.json")
-        try Data("{}".utf8).write(to: handoff)
-        let adapter = CLIOperationAdapter(
-            activityDirectory: fixture.directory, resumeMarkerDirectory: fixture.directory
-        )
-        var snapshotReads = 0
-        let blocked = adapter.bounceBlocksAutomaticPrompts(
-            sessionId: fixture.session.id, cachedSnapshot: nil,
-            now: {
-                snapshotReads += 1
-                snapshot.workflow = RemoteSessionWorkflow(
-                    observedAtMilliseconds: fixture.baseMs, capabilities: [], sendReady: false, bounceRequested: true
-                )
-                do {
-                    try JSONEncoder().encode(snapshot).write(to: fixture.snapshotURL, options: .atomic)
-                    try FileManager.default.removeItem(at: handoff)
-                } catch {
-                    XCTFail("Could not simulate tracker publication: \(error)")
-                }
-                return fixture.base
-            }
-        )
-        XCTAssertTrue(blocked)
-        XCTAssertEqual(snapshotReads, 0, "An existing handoff must block before the snapshot is read")
-    }
-
-    @MainActor
-    func testLegacyTrackerKeepsTheExistingPromptPath() throws {
+    func testLegacyTrackerStaysPromptable() throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
         var snapshot = fixture.snapshot()
         snapshot.runtimeActivity = nil
         snapshot.inputCompletions = nil
         try fixture.publish(snapshot)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "legacy"), .sent)
+        XCTAssertTrue(fixture.promptable)
     }
 
     @MainActor
-    func testExplicitUnsupportedRuntimeDoesNotInstallASendFence() throws {
+    func testExplicitUnsupportedRuntimeStaysPromptable() throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
         var snapshot = fixture.snapshot()
         snapshot.runtimeActivity?.error = "unsupported"
         snapshot.runtimeActivity?.processing = nil
         try fixture.publish(snapshot)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "one"), .sent)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "two"), .sent)
+        XCTAssertTrue(fixture.promptable)
     }
 
     @MainActor
@@ -1068,7 +992,7 @@ final class ForegroundActivityTests: XCTestCase {
         try fixture.publish(snapshot)
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .idle)
         XCTAssertTrue(fixture.model.projects[0].sessions[0].hasBackgroundWork)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "next"), .busy)
+        XCTAssertFalse(fixture.promptable)
     }
 
     @MainActor
@@ -1145,7 +1069,7 @@ final class ForegroundActivityTests: XCTestCase {
             try JSONDecoder().decode(SessionStatusRecord.self, from: Data(contentsOf: recordURL)).status,
             .idle
         )
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "resumed"), .sent)
+        XCTAssertTrue(fixture.promptable)
 
         // Legacy/remote runtime snapshots (foreground == nil) also resolve cross-epoch waits to .idle
         // when sessionIdleAtMilliseconds is present and no foreground/scheduled/subagent work is active.
@@ -1211,7 +1135,7 @@ final class ForegroundActivityTests: XCTestCase {
         fixture.model.reconcileAgentFooters()
         fixture.model.reconcileAgentFooters()
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .idle)
-        XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "not ready"), .busy)
+        XCTAssertFalse(fixture.promptable, "not ready")
     }
 
     @MainActor
@@ -1240,7 +1164,7 @@ final class ForegroundActivityTests: XCTestCase {
             snapshot.updatedAt = Date().formatted(Date.ISO8601FormatStyle(includingFractionalSeconds: true))
             try fixture.publish(snapshot)
             XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .idle)
-            XCTAssertEqual(fixture.model.sendRemotePrompt(sessionId: fixture.session.id, value: "next"), .sent)
+            XCTAssertTrue(fixture.promptable)
         }
     }
 }
