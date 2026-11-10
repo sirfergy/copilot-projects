@@ -146,6 +146,15 @@ struct AgentActivitySnapshot: Codable, Equatable {
         return age >= 0 && age <= ttl
     }
 
+    /// Whether the host acts on this snapshot's workflow at `now`, on this Mac's
+    /// clock: the heartbeat and the workflow observation are both fresh. Session
+    /// actions check this before they are taken, and remote snapshots publish
+    /// it as `RemoteSessionWorkflow.fresh`, so what clients offer and what the
+    /// host accepts come from one judgement.
+    func workflowIsFresh(at now: Date) -> Bool {
+        isFresh(at: now) && workflow?.isFresh(at: now) == true
+    }
+
     /// True when the last heartbeat carried a terminal RPC-connection error
     /// (closed/disposed). A disconnected extension can no longer observe
     /// `assistant.idle`/`session.idle`, so its `foregroundTurnActive` (and

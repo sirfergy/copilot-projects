@@ -710,8 +710,9 @@ extension AppModel {
         }
     }
 
-    func remoteWorkspaceSnapshot() -> RemoteWorkspaceSnapshot {
-        let promptNow = Date()
+    /// Built on every gateway poll, so time-dependent fields such as each
+    /// workflow's `fresh` are judged at `promptNow`.
+    func remoteWorkspaceSnapshot(now promptNow: Date = Date()) -> RemoteWorkspaceSnapshot {
         let promptNowMs = SessionArtifacts.currentStatusTimestamp()
         let promptLiveSessions = remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions
         let hosts = availableHosts
@@ -800,7 +801,7 @@ extension AppModel {
                             conversationEpoch: operation.conversationEpoch,
                             operationSupport: operation.support,
                             operationReceipts: operation.receipts?.filter { $0.kind != SessionParking.checkKind },
-                            workflow: Self.wireWorkflow(session),
+                            workflow: Self.wireWorkflow(session, at: promptNow),
                             lastError: status == .idle
                                 ? session.agentActivity?.remoteLastError()
                                 : nil,
@@ -837,10 +838,13 @@ extension AppModel {
     }
 
     /// The workflow as clients see it: without the host's own park question,
-    /// and absent while the session's input is closed for parking.
-    static func wireWorkflow(_ session: Session) -> RemoteSessionWorkflow? {
-        guard session.parked == nil, var workflow = session.agentActivity?.workflow else { return nil }
+    /// absent while the session's input is closed for parking, and `fresh`
+    /// when the host would act on it at `now`.
+    static func wireWorkflow(_ session: Session, at now: Date = Date()) -> RemoteSessionWorkflow? {
+        guard session.parked == nil, let activity = session.agentActivity,
+              var workflow = activity.workflow else { return nil }
         workflow.capabilities.removeAll { $0 == SessionParking.checkKind }
+        workflow.fresh = activity.workflowIsFresh(at: now)
         return workflow
     }
 
@@ -1453,7 +1457,8 @@ extension AppModel {
             blocksInput: { parkingBlocksInput(sessionId) },
             isReady: { snapshot in
                 guard let workflow = snapshot.workflow,
-                      workflow.supports(action.kind, at: clock()) else { return false }
+                      snapshot.workflowIsFresh(at: clock()),
+                      workflow.admits(action.kind) else { return false }
                 return action.kind != .send || (workflow.sendReady && !snapshot.hasPendingInput)
             },
             validate: { snapshot in

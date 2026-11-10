@@ -145,6 +145,13 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
     public let error: String?
     public let imageAttachments: RemoteImageCapabilities?
     public let pendingMessages: [RemotePendingMessage]?
+    /// Whether the Mac would act on this workflow, judged on its own clock each
+    /// time it builds a remote snapshot. The gateway asks for one every couple
+    /// of seconds, so this turns false within a poll of the tracker going quiet.
+    /// A client offers `kind` when this is true and `admits(kind)` holds (and,
+    /// for a send, `sendReady`), with no clock arithmetic of its own. Absent
+    /// from older hosts; trackers never set it.
+    public var fresh: Bool?
 
     public init(
         version: Int = 1,
@@ -162,7 +169,8 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
         schedules: [String] = [],
         error: String? = nil,
         imageAttachments: RemoteImageCapabilities? = nil,
-        pendingMessages: [RemotePendingMessage]? = nil
+        pendingMessages: [RemotePendingMessage]? = nil,
+        fresh: Bool? = nil
     ) {
         self.version = version
         self.observedAtMilliseconds = observedAtMilliseconds
@@ -180,6 +188,7 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
         self.error = error
         self.imageAttachments = imageAttachments
         self.pendingMessages = pendingMessages
+        self.fresh = fresh
     }
 
     /// Wall-clock freshness, for code running on the Mac that observed the workflow.
@@ -190,7 +199,13 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
     }
 
     public func supports(_ kind: RemoteSessionActionKind, at date: Date = Date()) -> Bool {
-        isFresh(at: date) && capabilities.contains(kind.rawValue)
+        isFresh(at: date) && admits(kind)
+    }
+
+    /// Whether this workflow takes `kind`, freshness aside: the tracker offers
+    /// it and no bounce is pending.
+    public func admits(_ kind: RemoteSessionActionKind) -> Bool {
+        capabilities.contains(kind.rawValue)
             && bounceRequested != true && (kind != .bounce || bounceRequested == false)
     }
 }
@@ -291,8 +306,7 @@ extension RemoteSessionWorkflow {
             receivedAt: receivedAt,
             now: now,
             at: date
-        ) && capabilities.contains(kind.rawValue)
-            && bounceRequested != true && (kind != .bounce || bounceRequested == false)
+        ) && admits(kind)
     }
 }
 
