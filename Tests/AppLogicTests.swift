@@ -5794,6 +5794,75 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(afterSync.projects[0].sessions[0].title, "in-flight-scheduled")
     }
 
+    /// macOS flagged the app for excessive disk writes: every tool hook's new status
+    /// timestamp rewrote all of state.json. Hooks during a turn must not write it.
+    @MainActor
+    func testToolHookStatusTimestampsDoNotRewriteWorkspaceState() throws {
+        final class SaveCounter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var count = 0
+            func increment() { lock.lock(); count += 1; lock.unlock() }
+            var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+        }
+        let saves = SaveCounter()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = StateRepository(path: root.appendingPathComponent("state.json")) {
+            saves.increment()
+        }
+        let sessions = (0..<4).map { Session(title: "session \($0)", cwd: "/tmp") }
+        let project = Project(
+            name: "busy",
+            cwd: "/tmp",
+            sessions: sessions,
+            selectedSessionId: sessions[0].id
+        )
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        let model = AppModel(stateRepository: repository, agentActivityDirectory: root)
+        let turnStart: Int64 = 1_788_000_000_000
+        for session in sessions {
+            model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: turnStart)
+        }
+        model.flushScheduledSaveForTesting()
+        let savesAfterTurnStarts = saves.value
+
+        // Pre/post tool hooks, with one permission wait, each followed by the save debounce.
+        let lastHook: Int64 = turnStart + 20_000
+        for step in Int64(1)...20 {
+            for session in sessions {
+                if step == 10 {
+                    model.setStatus(
+                        sessionId: session.id, status: .waiting, text: nil,
+                        timestamp: turnStart + step * 1_000, notification: .permission
+                    )
+                } else {
+                    model.setStatus(
+                        sessionId: session.id, status: .running, text: nil,
+                        timestamp: turnStart + step * 1_000
+                    )
+                }
+                model.flushScheduledSaveForTesting()
+            }
+        }
+        XCTAssertEqual(saves.value, savesAfterTurnStarts)
+
+        // Quitting saves the latest clock, so a relaunch keeps each turn's start.
+        model.save()
+        for session in sessions {
+            SessionArtifacts.persistStatus(
+                sessionId: session.id, status: .running, timestamp: lastHook,
+                promptStatusTimestamp: lastHook, sessionsDirectory: root
+            )
+        }
+        let relaunched = AppModel(stateRepository: repository, agentActivityDirectory: root)
+        XCTAssertEqual(
+            relaunched.projects[0].sessions.map(\.runningStartedAtMilliseconds),
+            Array(repeating: turnStart, count: sessions.count)
+        )
+    }
+
     func testControlCommandRouterValidatesBeforeDispatch() {
         var didSetStatus = false
         var copilotRequests: [ControlRequest] = []
