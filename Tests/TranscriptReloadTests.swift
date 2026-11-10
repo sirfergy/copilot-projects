@@ -755,9 +755,9 @@ final class TranscriptReloadTests: XCTestCase {
         for width: CGFloat in [450, 900] {
             textView.preferredMaxLayoutWidth = width
             XCTAssertNotEqual(textView.intrinsicContentSize.height, placed.height)
+            XCTAssertEqual(textView.frame.size, placed, "Measuring at \(width) pt should leave the frame as it was placed")
             layoutManager.ensureLayout(for: container)
             XCTAssertEqual(container.size.width, placed.width, "Measuring at \(width) pt should leave the text laid out at its frame's width")
-            XCTAssertEqual(textView.frame.size, placed, "Measuring at \(width) pt should leave the frame as it was placed")
             XCTAssertEqual(layoutManager.usedRect(for: container).height, placed.height, accuracy: 0.5)
         }
     }
@@ -854,12 +854,13 @@ final class TranscriptReloadTests: XCTestCase {
         func textOutsideItsFrame() -> [String] {
             markdownText(in: host.view).filter(\.wrapsText).compactMap { view in
                 guard let container = view.textContainer, let layoutManager = view.layoutManager else { return nil }
+                let placedSize = view.bounds.size
                 layoutManager.ensureLayout(for: container)
                 let used = layoutManager.usedRect(for: container).size
-                guard abs(container.size.width - view.bounds.width) > 0.5 || used.height > view.bounds.height + 0.5 else {
+                guard abs(container.size.width - placedSize.width) > 0.5 || used.height > placedSize.height + 0.5 else {
                     return nil
                 }
-                return "'\(view.string.prefix(20))' laid out \(used) in \(view.bounds.size)"
+                return "'\(view.string.prefix(20))' laid out \(used) in \(placedSize)"
             }
         }
 
