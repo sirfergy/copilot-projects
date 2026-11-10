@@ -5832,9 +5832,10 @@ final class AppLogicTests: XCTestCase {
     }
 
     /// macOS flagged the app for excessive disk writes: every tool hook's new status
-    /// timestamp rewrote all of state.json. Hooks during a turn must not write it.
+    /// timestamp rewrote all of state.json, and after that every turn start and end
+    /// still did. A turn must not write it.
     @MainActor
-    func testToolHookStatusTimestampsDoNotRewriteWorkspaceState() throws {
+    func testTurnTimerDoesNotRewriteWorkspaceState() throws {
         final class SaveCounter: @unchecked Sendable {
             private let lock = NSLock()
             private var count = 0
@@ -5858,12 +5859,18 @@ final class AppLogicTests: XCTestCase {
         )
         try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
         let model = AppModel(stateRepository: repository, agentActivityDirectory: root)
+        let savesBeforeTurns = saves.value
+        // One finished turn, then the start of the next.
         let turnStart: Int64 = 1_788_000_000_000
         for session in sessions {
+            model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: turnStart - 2_000)
+            model.setStatus(
+                sessionId: session.id, status: .idle, text: nil,
+                timestamp: turnStart - 1_000, source: "agent-stop"
+            )
             model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: turnStart)
         }
         model.flushScheduledSaveForTesting()
-        let savesAfterTurnStarts = saves.value
 
         // Pre/post tool hooks, with one permission wait, each followed by the save debounce.
         let lastHook: Int64 = turnStart + 20_000
@@ -5883,16 +5890,23 @@ final class AppLogicTests: XCTestCase {
                 model.flushScheduledSaveForTesting()
             }
         }
-        XCTAssertEqual(saves.value, savesAfterTurnStarts)
+        XCTAssertEqual(saves.value, savesBeforeTurns)
 
-        // Quitting saves the latest clock, so a relaunch keeps each turn's start.
-        model.save()
         for session in sessions {
             SessionArtifacts.persistStatus(
                 sessionId: session.id, status: .running, timestamp: lastHook,
                 promptStatusTimestamp: lastHook, sessionsDirectory: root
             )
         }
+        // A crash skips the quit save, so each turn's timer restarts at its last hook.
+        let crashed = AppModel(stateRepository: repository, agentActivityDirectory: root)
+        XCTAssertEqual(
+            crashed.projects[0].sessions.map(\.runningStartedAtMilliseconds),
+            Array(repeating: lastHook, count: sessions.count)
+        )
+
+        // Quitting saves the timer, so a relaunch keeps each turn's start.
+        model.save()
         let relaunched = AppModel(stateRepository: repository, agentActivityDirectory: root)
         XCTAssertEqual(
             relaunched.projects[0].sessions.map(\.runningStartedAtMilliseconds),

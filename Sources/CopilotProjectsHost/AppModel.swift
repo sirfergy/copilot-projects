@@ -3199,9 +3199,6 @@ final class AppModel: ObservableObject {
         } else if let notification, notification != .elicitation {
             elicitationNotificationTokens[sessionId] = nil
         }
-        let previousRunningStart = projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds
-        let previousRunningClock = projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds
-        let previousRequestIdentity = projects[loc.p].sessions[loc.s].runningRequestIdentity
         projects[loc.p].sessions[loc.s].status = status
         projects[loc.p].sessions[loc.s].statusText = text
         if status == .running {
@@ -3235,11 +3232,6 @@ final class AppModel: ObservableObject {
             projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds = nil
             projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = nil
             projects[loc.p].sessions[loc.s].runningRequestIdentity = nil
-        }
-        if projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds != previousRunningStart
-            || projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds != previousRunningClock
-            || projects[loc.p].sessions[loc.s].runningRequestIdentity != previousRequestIdentity {
-            save()
         }
         if status == .running || status == .waiting {
             if status == .running {
@@ -3281,7 +3273,6 @@ final class AppModel: ObservableObject {
             )
             if status != .idle {
                 projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = clocks.status
-                save()
             }
             if status == .waiting, previous == .waiting, notification == nil {
                 refreshRetainedPermissionClocks(sessionId: sessionId, previousTimestamp: previousTimestamp)
