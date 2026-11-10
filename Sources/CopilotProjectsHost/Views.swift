@@ -43,7 +43,10 @@ struct RootView: View {
                         DetailView(model: model, onPreview: input.presentImage)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+                    // Its split view measures this pane at its ideal width. Left to the content, that
+                    // was the message box's one-line text, so typing in the full-width transcript
+                    // re-measured every message at the typed text's width.
+                    .frame(minWidth: 420, idealWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
@@ -1457,7 +1460,9 @@ struct HoverHighlightModifier: ViewModifier {
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(Color.primary.opacity(isHovering ? 0.08 : 0))
             )
-            .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            // Square, so it doesn't cut the corners off the button's own hit area. It can't widen
+            // that area: a plain button only clicks on its label's shape.
+            .contentShape(Rectangle())
             .onHover { isHovering = $0 }
             .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovering)
     }

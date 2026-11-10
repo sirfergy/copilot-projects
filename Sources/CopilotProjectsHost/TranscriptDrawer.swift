@@ -124,6 +124,7 @@ struct TranscriptButton: View {
                     } label: {
                         Image(systemName: isFullWidth ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                             .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .hoverHighlight()
@@ -133,6 +134,7 @@ struct TranscriptButton: View {
                     Button(action: onClose) {
                         Image(systemName: "xmark")
                             .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .hoverHighlight()
@@ -257,6 +259,7 @@ private struct TranscriptUsageButton: View {
             Image(systemName: hasBudgetRequest ? "exclamationmark.circle" : "info.circle")
                 .foregroundStyle(hasBudgetRequest ? Color.orange : StudioStyle.secondaryText)
                 .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .hoverHighlight()
