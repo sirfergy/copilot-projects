@@ -416,6 +416,27 @@ final class ProtocolContractTests: XCTestCase {
         )
     }
 
+    func testAttentionCarriesKindAndRankAndOlderHostsOmitIt() throws {
+        let failed = RemoteSessionSnapshot(
+            id: "s", title: "t", status: "idle", statusText: nil, unread: false, ready: false,
+            background: false, scheduled: false,
+            attention: RemoteSessionAttention(.failed), needsEndConfirmation: false
+        )
+        let json = try jsonObject(failed)
+        XCTAssertEqual(json["attention"] as? NSDictionary, ["kind": "failed", "rank": 1])
+        XCTAssertEqual(json["needsEndConfirmation"] as? Bool, false)
+        // A kind this client doesn't know still decodes and keeps its rank.
+        let later = try JSONDecoder().decode(
+            RemoteSessionAttention.self, from: Data(#"{"kind":"later","rank":3}"#.utf8)
+        )
+        XCTAssertEqual([later.kind, String(later.rank)], ["later", "3"])
+        for fixture in ["served-workspace", "legacy-workspace"] {
+            let session = try XCTUnwrap(try workspace(fixture).projects.first?.sessions.first)
+            XCTAssertNil(session.attention, fixture)
+            XCTAssertNil(session.needsEndConfirmation, fixture)
+        }
+    }
+
     func testRemoteSessionSnapshotOmitsNilParentSessionIdAndRoundTripsWhenPresent() throws {
         let topLevel = RemoteSessionSnapshot(
             id: "root", title: "Root", status: "idle", statusText: nil,

@@ -807,6 +807,9 @@ extension AppModel {
                                 : nil,
                             markedUnread: session.markedUnread ? true : nil,
                             unreadMarker: session.offersMarkAsRead ? session.unreadMarker : nil,
+                            // What the Mac's own sidebar, ⇧⌘A and End Session use.
+                            attention: session.attention.map(RemoteSessionAttention.init),
+                            needsEndConfirmation: session.requiresEndConfirmation,
                             hostId: remoteHost?.id,
                             hostDisplayName: remoteHost?.displayName,
                             parentSessionId: effectiveParents[session.id],
