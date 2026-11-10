@@ -5661,6 +5661,125 @@ test("another process holding the owner lock blocks the claim until it dies", as
   );
 });
 
+// A tracker in its own process, as one loaded by a `copilot -p` run from the
+// tab's shell: it runs one turn and exits, then prints every write it made to
+// the tab's files.
+const nestedTrackerSource = `
+  import fs from "node:fs";
+  import { registerHooks, syncBuiltinESMExports } from "node:module";
+
+  const writes = [];
+  for (const name of ["writeFileSync", "renameSync", "rmSync"]) {
+    const original = fs[name];
+    fs[name] = (path, ...rest) => {
+      if (String(path).includes(process.env.COPILOT_PROJECTS_SESSION)) {
+        writes.push(name + " " + path);
+      }
+      return original(path, ...rest);
+    };
+  }
+  syncBuiltinESMExports();
+
+  const listeners = [];
+  const session = {
+    sessionId: process.env.NESTED_COPILOT_SESSION,
+    on(type, listener) {
+      if (typeof type === "function") listeners.push([null, type]);
+      else listeners.push([type, listener]);
+    },
+    async getEvents() { return []; },
+    connection: {
+      async sendRequest(method) {
+        if (method === "session.getForeground") return { sessionId: session.sessionId };
+        throw Object.assign(new Error("Unknown RPC: " + method), { code: -32601 });
+      },
+    },
+    rpc: {
+      schedule: { list: async () => ({ entries: [] }) },
+      model: { list: async () => ({ list: [] }) },
+      permissions: { getMode: async () => ({ mode: "manual" }) },
+      eventLog: {
+        registerInterest: async () => ({ handle: "interest" }),
+        releaseInterest: async () => ({ success: true }),
+      },
+    },
+  };
+  globalThis.nestedCopilotSession = session;
+  const sdk = "export const joinSession = async () => globalThis.nestedCopilotSession;";
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier !== "@github/copilot-sdk/extension") return nextResolve(specifier, context);
+      return { url: "data:text/javascript," + encodeURIComponent(sdk), shortCircuit: true };
+    },
+  });
+  let poll = null;
+  globalThis.setInterval = (callback) => {
+    poll = callback;
+    return { unref() {} };
+  };
+  await import(process.env.TRACKER_URL);
+  // Runs after the tracker's own exit cleanup.
+  process.on("exit", () => fs.writeSync(1, JSON.stringify(writes)));
+
+  for (const [type, data] of [
+    ["user.message", { content: "Reply OK." }],
+    ["assistant.turn_start", {}],
+    ["assistant.message", { messageId: "reply", content: "OK." }],
+    ["session.idle", { aborted: false }],
+  ]) {
+    const event = { id: "nested-" + type, type, timestamp: new Date().toISOString(), data };
+    await Promise.all(listeners
+      .filter(([name]) => name === null || name === type)
+      .map(([, listener]) => listener(event)));
+  }
+  poll();
+  await new Promise((resolve) => setImmediate(resolve));
+  process.exit(0);
+`;
+
+test("a nested copilot -p tracker never takes the tab from its live interactive owner", async (t) => {
+  const interactive = await createRuntime(t);
+  const shared = ["transcript-owner.json", "copilot-session"].map((suffix) =>
+    join(interactive.sessions, `${interactive.appSessionId}.${suffix}`)
+  );
+  const before = shared.map((path) => realReadFileSync(path, "utf8"));
+  // kern.boottime moves within one boot. On Nov 10 a live owner recorded
+  // usec = 695308 while a nested run read 872232.
+  const [, seconds, micros, rest] = /sec = (\d+), usec = (\d+) (.*)/.exec(
+    JSON.parse(before[0]).bootTime
+  );
+  const jittered = `{ sec = ${seconds}, usec = ${(Number(micros) + 176_924) % 1_000_000} ${rest}`;
+  const bin = join(interactive.root, "nested-bin");
+  realMkdirSync(bin);
+  realWriteFileSync(join(bin, "sysctl"), `#!/bin/sh\necho '${jittered}'\n`, { mode: 0o755 });
+
+  const nested = spawn(process.execPath, ["--input-type=module", "-e", nestedTrackerSource], {
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: join(interactive.root, "home"),
+      COPILOT_HOME: join(interactive.root, "copilot-home"),
+      COPILOT_PROJECTS_SESSION: interactive.appSessionId,
+      COPILOT_PROJECTS_SOCKET: join(interactive.root, "dtach.sock"),
+      // The nested `copilot -p` process that loaded this tracker.
+      COPILOT_EXTENSION_PARENT_PID: "7777",
+      NESTED_COPILOT_SESSION: uuid(),
+      TRACKER_URL: pathToFileURL(extensionPath).href,
+    },
+  });
+  t.after(() => nested.kill("SIGKILL"));
+  let output = "";
+  let errors = "";
+  nested.stdout.on("data", (chunk) => { output += chunk; });
+  nested.stderr.on("data", (chunk) => { errors += chunk; });
+  const [code] = await once(nested, "close");
+
+  assert.equal(code, 0, errors);
+  assert.deepEqual(JSON.parse(output), []);
+  assert.deepEqual(shared.map((path) => realReadFileSync(path, "utf8")), before);
+  assert.equal(readSnapshot(interactive).copilotSessionId, interactive.copilotSessionId);
+});
+
 test("an owner lock file unlinked before it was locked does not admit a claim", async (t) => {
   let lockPath;
   const runtime = await createRuntime(t, (_session, runtime) => {

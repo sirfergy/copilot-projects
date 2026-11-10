@@ -253,7 +253,17 @@ public enum CopilotHooks {
         "$owner_file" 2>/dev/null | head -1)"
       if [ -n "$owner_boot" ]; then
         current_boot="$(/usr/sbin/sysctl -n kern.boottime 2>/dev/null || true)"
-        [ -z "$current_boot" ] || [ "$owner_boot" = "$current_boot" ] || return 1
+        if [ -n "$current_boot" ]; then
+          # usec moves within one boot (see bootTimeSeconds in the tracker), so
+          # compare whole seconds with the same 5-second tolerance.
+          owner_boot="${owner_boot#*sec = }"
+          owner_boot="${owner_boot%%,*}"
+          current_boot="${current_boot#*sec = }"
+          current_boot="${current_boot%%,*}"
+          case "$owner_boot$current_boot" in ""|*[!0-9]*) return 1 ;; esac
+          [ "$((owner_boot - current_boot))" -le 5 ] || return 1
+          [ "$((current_boot - owner_boot))" -le 5 ] || return 1
+        fi
       fi
       current_pid="$PPID"
       depth=0

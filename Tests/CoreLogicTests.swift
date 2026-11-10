@@ -2845,7 +2845,7 @@ final class CoreLogicTests: XCTestCase {
         writeFileSync(ownerPath, JSON.stringify({
           copilotSessionId: "old-session",
           pid: 1,
-          bootTime: "stale-boot-time-from-a-previous-boot"
+          bootTime: "{ sec = 1, usec = 0 } Thu Jan  1 00:00:01 1970"
         }));
 
         namedListeners.get("assistant.turn_start")({
