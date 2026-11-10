@@ -195,8 +195,9 @@ struct StateRepository: Sendable {
             if Darwin.link(path.path, linkURL.path) != 0
                 || Darwin.rename(linkURL.path, backupPath.path) != 0 {
                 NSLog("copilot-projects: could not update state backup: \(String(cString: strerror(errno)))")
-                unlink(linkURL.path)
             }
+            // rename(2) leaves the source in place when both names are already the same file.
+            unlink(linkURL.path)
         }
         let stagingURL = directory.appendingPathComponent(
             ".\(path.lastPathComponent).\(UUID().uuidString).tmp",
