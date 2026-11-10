@@ -53,7 +53,8 @@ public enum RemoteUserInputResult: Equatable, Sendable {
     /// Not now: another operation holds the slot, the session isn't ready, or its
     /// tracker state is too old to judge. Also a reused identity with another payload.
     case conflict
-    /// No matching live question, or the payload failed the host's rules.
+    /// No matching live question, a payload the host's rules refuse, or a bounce
+    /// while Copilot is busy.
     case invalid
     /// The operation names a conversation that has ended (`/new`, a tracker restart,
     /// or another Copilot session). Its outcome can't be known here, and a retry
@@ -1217,8 +1218,8 @@ extension AppModel {
         let initialRequest = initialSnapshot?.trackedElicitations?
             .first(where: { $0.requestId == answer.requestId })
         if answer.requestId.hasPrefix("synthetic::durable-ask-user::") {
+            guard operation == nil else { return .invalid }
             if parkingBlocksInput(sessionId) { return .conflict }
-            guard operation == nil else { return .conflict }
             guard let request = initialRequest,
                   let snapshot = initialSnapshot,
                   validates(request) else {

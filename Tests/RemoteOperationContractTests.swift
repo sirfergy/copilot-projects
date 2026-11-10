@@ -712,7 +712,7 @@ final class RemoteOperationContractTests: XCTestCase {
                 ),
                 now: now
             ),
-            .conflict
+            .invalid
         )
         XCTAssertEqual(enterCount, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: harness.sessions

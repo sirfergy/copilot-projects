@@ -180,9 +180,10 @@ recover receipts that already expired; check the conversation before discarding 
 stuck queued copy.
 
 A client whose reply was lost may resend an operation with the same operation
-identity and conversation epoch. The host answers a resend of an operation it has
-already taken, by its receipt or its pending handoff, as it answered the first,
-whatever the session's state is now:
+identity and conversation epoch. While the operation's receipt or pending handoff
+remains, the host answers the resend as it answered the first, whatever the
+session's state is now. A tracker deletes both when Copilot exits, so until it is
+back a resend answers 409, and then 412:
 
 | Status | Meaning | Client |
 | --- | --- | --- |
