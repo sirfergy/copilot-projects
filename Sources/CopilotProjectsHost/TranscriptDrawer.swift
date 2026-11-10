@@ -534,11 +534,14 @@ struct TranscriptDrawer: View {
     }
 
     /// Renders one more page of earlier turns. Returns false, and writes nothing, when every turn
-    /// is rendered: a write here re-evaluates the whole drawer.
-    private func loadEarlierPage() -> Bool {
+    /// is rendered: a write here re-evaluates the whole drawer. Following the bottom, the reader is
+    /// at the bottom, so a page loads only while the bottom is within a viewport of the top. SwiftUI
+    /// sometimes moves the view 543 pt up for one main-queue pass after a page fills in, which
+    /// loaded a page on 3 of about 1,800 opens.
+    private func loadEarlierPage(bottomIsNearTop: Bool) -> Bool {
         let turns = displayedTurns
         let first = firstRenderedIndex(in: turns)
-        guard first > 0 else { return false }
+        guard first > 0, bottomIsNearTop || !isAtBottom else { return false }
         render(from: turns[max(0, first - Self.turnPageSize)])
         return true
     }
@@ -737,8 +740,9 @@ struct TranscriptDrawer: View {
 /// applies a scroll one pass later, and a scroll event landing in between replaced it: in the jump
 /// harness, 9 of 49 page loads moved the transcript by the height of the page.
 private struct TranscriptHistoryPager: NSViewRepresentable {
-    /// Renders an earlier page. Returns false once the whole transcript is rendered.
-    let loadEarlierPage: () -> Bool
+    /// Renders an earlier page, given whether the bottom is within a viewport of the top. Returns
+    /// false once the whole transcript is rendered.
+    let loadEarlierPage: (_ bottomIsNearTop: Bool) -> Bool
 
     func makeNSView(context: Context) -> PagerView { PagerView() }
 
@@ -747,7 +751,7 @@ private struct TranscriptHistoryPager: NSViewRepresentable {
     }
 
     final class PagerView: NSView {
-        var loadEarlierPage: () -> Bool = { false }
+        var loadEarlierPage: (_ bottomIsNearTop: Bool) -> Bool = { _ in false }
         /// Set when a page is requested, until it is laid out: the content height, and a text view
         /// on screen with its position in the content.
         private var pendingPage: (height: CGFloat, anchor: NSView?, anchorY: CGFloat)?
@@ -773,6 +777,10 @@ private struct TranscriptHistoryPager: NSViewRepresentable {
                   let content = scrollView.documentView, content.frame.height != page.height else { return }
             pendingPage = nil
             let clip = scrollView.contentView
+            // Within 24 pt of the end the drawer follows the bottom, and has already scrolled to the
+            // new bottom in this pass. Moving the page again put the view 606 pt past the end on
+            // every page filled in at the bottom.
+            guard clip.bounds.maxY < content.frame.height - 24 else { return }
             // The turns moved down by the height of the page. Measure that on a text view that was
             // on screen rather than on the content height: a streaming turn growing below the
             // viewport in the same pass moved the transcript 22 pt on 1 of 49 page loads in the
@@ -787,9 +795,10 @@ private struct TranscriptHistoryPager: NSViewRepresentable {
             // Rendering more turns isn't allowed inside a layout pass or a scroll notification.
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.pendingPage == nil, let scrollView = self.enclosingScrollView,
-                      let content = scrollView.documentView,
-                      scrollView.contentView.bounds.minY < scrollView.contentView.bounds.height,
-                      self.loadEarlierPage() else { return }
+                      let content = scrollView.documentView else { return }
+                let clip = scrollView.contentView.bounds
+                guard clip.minY < clip.height,
+                      self.loadEarlierPage(content.frame.height - clip.height < clip.height) else { return }
                 let anchor = Self.textView(in: content, intersecting: scrollView.documentVisibleRect, of: content)
                 self.pendingPage = (content.frame.height, anchor, anchor?.convert(NSPoint.zero, to: content).y ?? 0)
             }

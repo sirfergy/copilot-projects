@@ -727,9 +727,20 @@ final class TranscriptReloadTests: XCTestCase {
                 harness.copilotSessionId = "conversation-3"
                 harness.turns = (3_000..<3_003).map { makeShortTurn(index: $0, variant: 8) }
                 await settleTranscript(window)
+                // Filling in pages at the bottom put the view a page past the end. Pulled back from
+                // there, it now and then landed high enough to load one more page.
+                var pastEnd: CGFloat = 0
+                let watchEnd = NotificationCenter.default
+                    .publisher(for: NSView.boundsDidChangeNotification, object: sv.contentView)
+                    .sink { _ in
+                        let clip = sv.contentView.bounds
+                        pastEnd = max(pastEnd, clip.minY - max(0, doc.frame.height - clip.height))
+                    }
                 harness.copilotSessionId = "conversation-2"
                 harness.turns = conversation2
                 await settleTranscript(window)
+                watchEnd.cancel()
+                XCTAssertLessThan(pastEnd, 1, "Filling in pages at the bottom should not scroll past the end")
                 XCTAssertLessThanOrEqual(
                     renderedTurnCount(),
                     renderedInNewConversation,
