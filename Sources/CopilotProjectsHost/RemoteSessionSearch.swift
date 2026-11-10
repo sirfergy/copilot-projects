@@ -7,11 +7,10 @@ import CopilotProjectsProtocol
 /// Every file read and match runs here, off the main actor.
 actor SessionSearchIndex {
     /// The files `TranscriptController.loadRemoteSnapshot` reads. The same stamp
-    /// means the same conversation, except as `emptyRetryInterval` describes.
+    /// means the same conversation.
     struct Stamp: Equatable, Sendable {
         let transcript: FileSignature?
         let owner: FileSignature?
-        let quarantine: FileSignature?
         let live: FileSignature?
 
         /// When the transcript last changed, as the Mac finder orders sessions:
@@ -26,7 +25,6 @@ actor SessionSearchIndex {
             Stamp(
                 transcript: signature(Paths.transcriptSnapshotPath(sessionId: sessionId)),
                 owner: signature(Paths.transcriptOwnerPath(sessionId: sessionId)),
-                quarantine: signature(Paths.transcriptQuarantinePath(sessionId: sessionId)),
                 live: signature(Paths.transcriptLivePath(sessionId: sessionId))
             )
         }
@@ -41,13 +39,8 @@ actor SessionSearchIndex {
         let source: SessionFinderSource
         let stamp: Stamp
         let entry: SessionFinderEntry
-        let loadedAt: Date
     }
 
-    /// A transcript that read as no conversation is read again after this long
-    /// even when its files are unchanged: an owner check can turn on whether
-    /// another process is still running.
-    static let emptyRetryInterval: TimeInterval = 30
     /// Resumable ended sessions are cached across rapid remote keystrokes for this long.
     static let resumableCacheInterval: TimeInterval = 15
     /// Conversations are dropped from memory after this long without a search.
@@ -56,7 +49,6 @@ actor SessionSearchIndex {
     private let stamp: @Sendable (String) -> Stamp
     private let loadTranscript: @Sendable (String) -> TranscriptSnapshot?
     private let idleLifetime: TimeInterval
-    private let now: @Sendable () -> Date
     private var cache: [String: Cached] = [:]
     private var cachedResumable: (entries: [SessionFinderEntry], loadedAt: Date)?
     private var useCount = 0
@@ -67,13 +59,11 @@ actor SessionSearchIndex {
         loadTranscript: @escaping @Sendable (String) -> TranscriptSnapshot? = {
             TranscriptController.loadRemoteSnapshot(sessionId: $0)
         },
-        idleLifetime: TimeInterval = SessionSearchIndex.defaultIdleLifetime,
-        now: @escaping @Sendable () -> Date = { Date() }
+        idleLifetime: TimeInterval = SessionSearchIndex.defaultIdleLifetime
     ) {
         self.stamp = stamp
         self.loadTranscript = loadTranscript
         self.idleLifetime = idleLifetime
-        self.now = now
     }
 
     deinit { expiry?.cancel() }
@@ -84,7 +74,6 @@ actor SessionSearchIndex {
     /// cancelled; transcripts read before then stay cached for the next search.
     func entries(for sources: [SessionFinderSource]) -> [SessionFinderEntry]? {
         scheduleExpiry()
-        let now = now()
         var refreshed: [String: Cached] = [:]
         var entries: [SessionFinderEntry] = []
         for source in sources where refreshed[source.sessionId] == nil {
@@ -96,19 +85,16 @@ actor SessionSearchIndex {
             var dated = source
             dated.lastActivity = stamp.lastActivity
             let cached: Cached
-            if let previous = cache[source.sessionId], previous.stamp == stamp,
-               !needsRetry(previous, now: now) {
+            if let previous = cache[source.sessionId], previous.stamp == stamp {
                 cached = Cached(
                     source: source, stamp: stamp,
-                    entry: previous.source == source ? previous.entry : previous.entry.rebound(to: dated),
-                    loadedAt: previous.loadedAt
+                    entry: previous.source == source ? previous.entry : previous.entry.rebound(to: dated)
                 )
             } else {
                 // Stamped before reading, so a write during the read shows as a change next time.
                 cached = Cached(
                     source: source, stamp: stamp,
-                    entry: SessionFinderEntry(source: dated, transcript: loadTranscript(source.sessionId)),
-                    loadedAt: now
+                    entry: SessionFinderEntry(source: dated, transcript: loadTranscript(source.sessionId))
                 )
             }
             refreshed[source.sessionId] = cached
@@ -160,7 +146,7 @@ actor SessionSearchIndex {
         load: @Sendable (Set<String>) -> [SessionFinderEntry]
     ) -> [SessionFinderEntry]? {
         scheduleExpiry()
-        let current = now()
+        let current = Date()
         let excluded = excludedCopilotSessionIds()
         if let cached = cachedResumable,
            current.timeIntervalSince(cached.loadedAt) < Self.resumableCacheInterval {
@@ -221,12 +207,6 @@ actor SessionSearchIndex {
                 )
             )
         }
-    }
-
-    private func needsRetry(_ cached: Cached, now: Date) -> Bool {
-        cached.stamp.transcript != nil
-            && cached.entry.requests.isEmpty && cached.entry.replies.isEmpty
-            && now.timeIntervalSince(cached.loadedAt) >= Self.emptyRetryInterval
     }
 
     private func scheduleExpiry() {

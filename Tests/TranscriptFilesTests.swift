@@ -129,7 +129,7 @@ final class TranscriptFilesTests: XCTestCase {
         }
         let stamp = { (sealed: TimeInterval?, live: TimeInterval?) in
             SessionSearchIndex.Stamp(
-                transcript: sealed.map(signature), owner: nil, quarantine: nil,
+                transcript: sealed.map(signature), owner: nil,
                 live: live.map(signature)
             )
         }

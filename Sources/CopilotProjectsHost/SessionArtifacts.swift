@@ -268,6 +268,7 @@ enum SessionArtifacts {
     /// don't linger.
     private static let retiredFileSuffixes = [
         "status", "status-timestamp", "prompt-status-timestamp", "copilot-allow-all",
+        "transcript-quarantine.json",
     ]
 
     /// Files `removeFiles` has no `Paths` helper for. The hook (`CopilotHooks.script`)
@@ -335,7 +336,6 @@ enum SessionArtifacts {
             Paths.transcriptSnapshotPath(sessionId: sessionId),
             Paths.transcriptLivePath(sessionId: sessionId),
             Paths.transcriptOwnerPath(sessionId: sessionId),
-            Paths.transcriptQuarantinePath(sessionId: sessionId),
         ] + suffixed {
             try? fm.removeItem(atPath: path)
         }

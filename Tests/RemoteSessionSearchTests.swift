@@ -50,7 +50,7 @@ private final class FakeTranscripts: @unchecked Sendable {
                     .modificationDate: date ?? Date(),
                 ])
             },
-            owner: nil, quarantine: nil, live: nil
+            owner: nil, live: nil
         )
     }
 
@@ -65,19 +65,12 @@ private final class FakeTranscripts: @unchecked Sendable {
     func loadCount(_ sessionId: String) -> Int { lock.withLock { loads[sessionId] ?? 0 } }
     var totalLoads: Int { lock.withLock { loads.values.reduce(0, +) } }
 
-    func index(idleLifetime: TimeInterval = 600, now: @escaping @Sendable () -> Date = { Date() }) -> SessionSearchIndex {
+    func index(idleLifetime: TimeInterval = 600) -> SessionSearchIndex {
         SessionSearchIndex(
             stamp: { [self] in stamp($0) }, loadTranscript: { [self] in load($0) },
-            idleLifetime: idleLifetime, now: now
+            idleLifetime: idleLifetime
         )
     }
-}
-
-private final class Clock: @unchecked Sendable {
-    private let lock = NSLock()
-    private var current = Date()
-    var now: Date { lock.withLock { current } }
-    func advance(_ seconds: TimeInterval) { lock.withLock { current = current.addingTimeInterval(seconds) } }
 }
 
 /// Answers once released, recording every query it is asked.
@@ -400,25 +393,6 @@ final class RemoteSessionSearchTests: XCTestCase {
         let conversation = await search.search(.init(query: "webhook", mode: .instant)) { renamed }
         XCTAssertEqual(matches(conversation, mode: .instant)?.map(\.snippet), ["billing webhook"])
         XCTAssertEqual(transcripts.loadCount("a"), 1)
-    }
-
-    func testUnreadableConversationsAreRetriedAfterAPauseEvenWhenUnchanged() async throws {
-        let transcripts = FakeTranscripts()
-        transcripts.set("a", requests: [])
-        let clock = Clock()
-        let index = transcripts.index(now: { clock.now })
-        let sources = [source("a", "Alpha"), source("terminal", "Shell")]
-
-        _ = await index.entries(for: sources)
-        clock.advance(SessionSearchIndex.emptyRetryInterval - 1)
-        _ = await index.entries(for: sources)
-        XCTAssertEqual(transcripts.loadCount("a"), 1)
-
-        clock.advance(1)
-        _ = await index.entries(for: sources)
-        XCTAssertEqual(transcripts.loadCount("a"), 2)
-        // A session without a transcript file has nothing to retry.
-        XCTAssertEqual(transcripts.loadCount("terminal"), 1)
     }
 
     func testCancelledIndexingStopsBetweenSessionsAndKeepsWhatItRead() async throws {

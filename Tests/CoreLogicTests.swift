@@ -1643,7 +1643,6 @@ final class CoreLogicTests: XCTestCase {
         const activityFile = `${base}.agent-activity.json`;
         const ownerFile = `${base}.transcript-owner.json`;
         const copilotSessionFile = `${base}.copilot-session`;
-        const quarantineFile = `${base}.transcript-quarantine.json`;
         const durableFile = (id) =>
           join(process.env.COPILOT_HOME, "session-state", id, "events.jsonl");
         const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
@@ -1933,7 +1932,6 @@ final class CoreLogicTests: XCTestCase {
           betaPendingPermissions: betaActivity.pendingPermissionRequestIds.length,
           betaTrackedQuestion: betaQuestionActivity.trackedUserInputs.length,
           betaTrackedElicitation: betaQuestionActivity.trackedElicitations.length,
-          quarantineRecorded: fileExistsSync(quarantineFile),
           gammaTranscriptSessionId: gammaSnapshot.copilotSessionId,
           gammaTurnCount: gammaSnapshot.turns.length,
           gammaModel: gammaActivity.model?.name,
@@ -1996,8 +1994,6 @@ final class CoreLogicTests: XCTestCase {
         // Gated question listeners keep working after a rotation.
         XCTAssertEqual(summary["betaTrackedQuestion"] as? Int, 1)
         XCTAssertEqual(summary["betaTrackedElicitation"] as? Int, 1)
-        // Rotation must not look like foreign content to the host.
-        XCTAssertEqual(summary["quarantineRecorded"] as? Bool, false)
         // A conversation with no durable history publishes an empty drawer
         // under its own identity, keeps the announced model, and starts with no
         // inherited questions.
