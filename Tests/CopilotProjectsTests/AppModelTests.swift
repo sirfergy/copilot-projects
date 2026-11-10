@@ -1102,9 +1102,15 @@ final class AppModelTests: XCTestCase {
                 ]
             )
 
-            // Timestamp-less waiting -> running sequence updates runningStatusTimestampMilliseconds from clocks.status.
+            // Timestamp-less waiting -> running sequence updates runningStatusTimestampMilliseconds from clocks.status,
+            // without writing state.json.
+            let stateFile = {
+                try FileManager.default.attributesOfItem(atPath: repository.path.path)[.systemFileNumber] as? NSNumber
+            }
+            let beforeTimestampless = try stateFile()
             relaunched.setStatus(sessionId: s1.id, status: .waiting, text: "Wait", notification: .permission)
             relaunched.setStatus(sessionId: s1.id, status: .running, text: "Resume")
+            XCTAssertEqual(try stateFile(), beforeTimestampless)
             relaunched.save()
             let relaunchedTimestampless = AppModel(
                 stateRepository: repository,

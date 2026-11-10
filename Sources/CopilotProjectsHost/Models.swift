@@ -60,10 +60,6 @@ struct Session: Identifiable, Codable, Equatable {
     /// any other offers Mark as Unread.
     var offersMarkAsRead: Bool { isUnread || finishedUnseen }
 
-    // Transient (not persisted): reset on load.
-    var status: SessionStatus = .idle
-    var statusIsRuntimeDerived = false
-    var statusText: String? = nil
     // The elapsed-turn timer. Saved so a relaunch keeps a running turn's start, but a
     // change never saves on its own: on Nov 10, saving at every turn start and end
     // rewrote state.json at four times macOS's disk-write limit. The quit save, or a
@@ -71,6 +67,11 @@ struct Session: Identifiable, Codable, Equatable {
     var runningStartedAtMilliseconds: Int64? = nil
     var runningStatusTimestampMilliseconds: Int64? = nil
     var runningRequestIdentity: String? = nil
+
+    // Transient (not persisted): reset on load.
+    var status: SessionStatus = .idle
+    var statusIsRuntimeDerived = false
+    var statusText: String? = nil
     var hasUnread: Bool = false {
         didSet { if hasUnread { unreadMarker = UUID().uuidString } }
     }

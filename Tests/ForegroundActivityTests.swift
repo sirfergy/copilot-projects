@@ -705,7 +705,8 @@ final class ForegroundActivityTests: XCTestCase {
         defer { fixture.cleanup() }
         let session = { fixture.model.projects[0].sessions[0] }
         func stateFile() throws -> NSNumber? {
-            try FileManager.default.attributesOfItem(atPath: fixture.repository.path.path)[.systemFileNumber]
+            fixture.model.flushScheduledSaveForTesting()
+            return try FileManager.default.attributesOfItem(atPath: fixture.repository.path.path)[.systemFileNumber]
                 as? NSNumber
         }
         let untouched = try stateFile()
@@ -714,11 +715,20 @@ final class ForegroundActivityTests: XCTestCase {
 
         var working = fixture.snapshot(processing: true, background: false)
         try fixture.publish(working, now: now)
-        let start = try XCTUnwrap(session().runningStartedAtMilliseconds)
+        let firstStart = try XCTUnwrap(session().runningStartedAtMilliseconds)
         // The next scan records which request the start belongs to.
         working.currentIntent = "Running tests"
         try fixture.publish(working, now: now)
         XCTAssertNotNil(session().runningRequestIdentity)
+        XCTAssertEqual(try stateFile(), untouched)
+
+        // A new request with no idle between restarts the timer.
+        working.idleGeneration += 1
+        working.foregroundTransitionAt = fixture.base.addingTimeInterval(0.25)
+            .formatted(Date.ISO8601FormatStyle(includingFractionalSeconds: true))
+        try fixture.publish(working, now: now)
+        let start = try XCTUnwrap(session().runningStartedAtMilliseconds)
+        XCTAssertGreaterThan(start, firstStart)
         XCTAssertEqual(try stateFile(), untouched)
 
         // Quitting saves the timer. A hook that fires while the app is down moves the status
