@@ -653,6 +653,33 @@ stays on each client because each has its own selection.
 waiting, has background or scheduled work, or has something waiting for an answer.
 Hosts always send it; a client asks when it is absent.
 
+#### Remote question forms
+
+The Mac parses a question's schema into a form once, and each pending elicitation
+in a snapshot carries it as `form`. The Mac's own question card shows the same
+fields. `form` is absent when the question is answered another way: a link, a
+terminal default, or a schema outside the supported subset, which is answered in
+the terminal. Older hosts omit it. `schema` is still sent.
+
+`form.fields` are in display order. Each has `key`, `title` (the key when the
+schema gives none), `description` when there is one, `required`, the schema's
+`default` when there is one, and a `kind`:
+
+| `kind` | Answer | Also carries |
+| --- | --- | --- |
+| `choice` | one `choices` value | `choices`, each a `value` and the `title` to show |
+| `multiChoice` | an array of `choices` values | `choices`, `minItems`, `maxItems` |
+| `boolean` | `true` or `false` | |
+| `number` | a number | `integer` when it must be whole |
+| `string` | text | `minLength` and `maxLength` in code points |
+
+`form.allowsFreeformChoices` says the Mac also accepts typed text: any non-blank
+text for a `choice` or `boolean`, and one typed entry in a `multiChoice`. Clients
+render the fields with their own controls and apply no schema rule of their own.
+The Mac checks every answer against the agent's schema, whatever the client
+checked. That includes a number's range and a string's format, which the form
+doesn't carry.
+
 #### Remote park session
 
 `SessionHost.parkSession` parks one session as the Mac's **Park Session** does, with

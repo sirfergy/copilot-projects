@@ -813,7 +813,7 @@ final class TranscriptReloadTests: XCTestCase {
                 isAborted: false
             )
         }
-        let question = RemoteElicitationRequest(
+        let question = TrackedElicitation(
             requestId: "question-1",
             message: "## Pick a plan\n\n" + (1...6).map {
                 "**Option \($0)**: " + String(repeating: "a long explanation that wraps across lines ", count: 31)
@@ -824,8 +824,8 @@ final class TranscriptReloadTests: XCTestCase {
                     "choice": .object(["type": .string("string"), "title": .string("Choice")]),
                 ]),
             ]),
-            requestedAt: start.addingTimeInterval(600)
-        )
+            requestedAt: start.addingTimeInterval(600).ISO8601Format()
+        ).remoteRequest()
         // Framed like the workspace pane in RootView.
         let host = NSHostingController(
             rootView: TranscriptDrawer(

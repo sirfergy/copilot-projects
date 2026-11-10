@@ -169,15 +169,7 @@ struct DesktopElicitationCard: View {
     @FocusState private var focusedCustomChoice: String?
 
     private var form: DesktopElicitationForm? {
-        guard !isURLMode,
-              !request.requestId.hasPrefix("synthetic::durable-ask-user::"),
-              request.mode == nil || request.mode == "form" else {
-            return nil
-        }
-        return DesktopElicitationForm.parse(
-            request.schema,
-            allowFreeformChoices: request.elicitationSource == nil
-        )
+        DesktopElicitationForm(request.form, schema: request.schema)
     }
 
     private var terminalDefault: DesktopTerminalDefaultBooleanElicitation? {
@@ -366,10 +358,10 @@ struct DesktopElicitationCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             switch field.kind {
-            case .stringEnum, .stringOneOf, .stringMultiSelect:
+            case .choice, .multiChoice:
                 DesktopElicitationChoiceControl(
                     field: field,
-                    choices: field.singleChoiceOptions,
+                    choices: field.choices ?? [],
                     allowsFreeform: form?.allowsFreeformChoices == true,
                     isDisabled: isDisabled,
                     values: $values,
@@ -377,7 +369,7 @@ struct DesktopElicitationCard: View {
                     touched: $touched,
                     focusedCustomChoice: $focusedCustomChoice
                 )
-            case .bool:
+            case .boolean:
                 if form?.allowsFreeformChoices == true {
                     DesktopElicitationChoiceControl(
                         field: field,
@@ -416,7 +408,7 @@ struct DesktopElicitationCard: View {
                 .lineLimit(1...6)
                 .textFieldStyle(.roundedBorder)
                 .disabled(isDisabled)
-                if let requirement = stringLengthRequirement(field.kind) {
+                if let requirement = stringLengthRequirement(field) {
                     Text(requirement)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
@@ -445,9 +437,8 @@ struct DesktopElicitationCard: View {
         customChoiceFields = initialState.customChoiceFields
     }
 
-    private func stringLengthRequirement(_ kind: DesktopElicitationField.Kind) -> String? {
-        guard case let .string(minLength, maxLength) = kind else { return nil }
-        switch (minLength, maxLength) {
+    private func stringLengthRequirement(_ field: DesktopElicitationField) -> String? {
+        switch (field.minLength, field.maxLength) {
         case let (min?, max?):
             return "Use \(min)–\(max) code points."
         case let (min?, nil):
@@ -573,7 +564,7 @@ private struct DesktopElicitationChoiceControl: View {
 
     var body: some View {
         Group {
-            if case .stringMultiSelect = field.kind {
+            if field.kind == .multiChoice {
                 let isCustom = choiceSelection == .other
                 let selectedChoices = field.multiSelectParts(
                     values[field.key],
@@ -608,7 +599,7 @@ private struct DesktopElicitationChoiceControl: View {
                     if !field.required {
                         Text("Not set").tag(DesktopElicitationChoiceSelection.unset)
                     }
-                    if field.kind == .bool {
+                    if field.kind == .boolean {
                         Text("True").tag(DesktopElicitationChoiceSelection.boolean(true))
                         Text("False").tag(DesktopElicitationChoiceSelection.boolean(false))
                     } else {

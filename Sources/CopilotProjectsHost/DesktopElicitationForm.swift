@@ -3,36 +3,28 @@ import CopilotProjectsProtocol
 
 // MARK: - Interactive pending questions (`ask_user` & `elicitation`)
 
+@dynamicMemberLookup
 struct DesktopElicitationField: Identifiable, Equatable {
-    enum Kind: Equatable {
-        case stringEnum([String])
-        case stringOneOf([Choice])
-        case stringMultiSelect(choices: [Choice], maxItems: Int?)
-        case bool
-        case number
-        case string(minLength: Int?, maxLength: Int?)
-    }
+    typealias Choice = RemoteElicitationForm.Choice
 
-    struct Choice: Equatable {
-        let value: String
-        let title: String
-    }
-
-    let key: String
-    let title: String
-    let description: String?
-    let kind: Kind
-    let required: Bool
-    let defaultValue: RemoteJSONValue?
+    /// The field as the Mac parsed it, which is what remote clients are sent.
+    let published: RemoteElicitationForm.Field
+    /// The agent's schema for this field. Answers are checked against it.
     let schema: RemoteJSONValue
 
-    var id: String { key }
+    var id: String { published.key }
+
+    subscript<Value>(
+        dynamicMember keyPath: KeyPath<RemoteElicitationForm.Field, Value>
+    ) -> Value {
+        published[keyPath: keyPath]
+    }
 
     func accepts(
         _ value: RemoteJSONValue,
         allowFreeformChoice: Bool = false
     ) -> Bool {
-        guard AppModel.isValidElicitationContent([key: value]),
+        guard AppModel.isValidElicitationContent([published.key: value]),
               AppModel.elicitationValue(
                   value,
                   satisfies: schema,
@@ -40,7 +32,7 @@ struct DesktopElicitationField: Identifiable, Equatable {
               ) else {
             return false
         }
-        if case .stringMultiSelect = kind, case let .array(items) = value {
+        if published.kind == .multiChoice, case let .array(items) = value {
             var seen = Set<String>()
             return items.allSatisfy {
                 if case let .string(string) = $0 { return seen.insert(string).inserted }
@@ -51,23 +43,12 @@ struct DesktopElicitationField: Identifiable, Equatable {
     }
 
     func normalizedStringInput(_ text: String) -> RemoteJSONValue? {
-        guard case .string = kind else { return nil }
+        guard published.kind == .string else { return nil }
         let value = RemoteJSONValue.string(text)
-        if !required, text.isEmpty, !accepts(value) {
+        if !published.required, text.isEmpty, !accepts(value) {
             return nil
         }
         return value
-    }
-
-    var singleChoiceOptions: [Choice] {
-        switch kind {
-        case .stringEnum(let options):
-            options.map { Choice(value: $0, title: $0.isEmpty ? "Empty string" : $0) }
-        case .stringOneOf(let choices), .stringMultiSelect(let choices, _):
-            choices
-        case .bool, .number, .string:
-            []
-        }
     }
 
     static func toggledSelection(
@@ -99,7 +80,9 @@ struct DesktopElicitationField: Identifiable, Equatable {
         allowsFreeform: Bool = false,
         isCustom: Bool = false
     ) -> (listed: [String], custom: String?) {
-        guard case let .stringMultiSelect(choices, _) = kind else { return ([], nil) }
+        guard published.kind == .multiChoice, let choices = published.choices else {
+            return ([], nil)
+        }
         var strings = Self.selectedStrings(current)
         let choiceValues = Set(choices.map(\.value))
         let unlistedIndex = strings.lastIndex(where: { !choiceValues.contains($0) })
@@ -113,7 +96,7 @@ struct DesktopElicitationField: Identifiable, Equatable {
     private func multiSelectValue(listed: [String], custom: String?) -> RemoteJSONValue? {
         let all = listed + (custom.map { [$0] } ?? [])
         let selection = RemoteJSONValue.array(all.map(RemoteJSONValue.string))
-        return (all.isEmpty && !required && !accepts(selection)) ? nil : selection
+        return (all.isEmpty && !published.required && !accepts(selection)) ? nil : selection
     }
 
     func toggledSelectionValue(
@@ -122,8 +105,9 @@ struct DesktopElicitationField: Identifiable, Equatable {
         allowsFreeform: Bool = false,
         isCustom: Bool = false
     ) -> RemoteJSONValue?? {
-        guard case let .stringMultiSelect(choices, maxItems) = kind else { return nil }
+        guard published.kind == .multiChoice, let choices = published.choices else { return nil }
         let parts = multiSelectParts(current, allowsFreeform: allowsFreeform, isCustom: isCustom)
+        let maxItems = published.maxItems
         let limit = parts.custom == nil ? maxItems : maxItems.map { max(0, $0 - 1) }
         guard let ordered = Self.toggledSelection(
             value,
@@ -139,7 +123,8 @@ struct DesktopElicitationField: Identifiable, Equatable {
         values: inout [String: RemoteJSONValue],
         customChoiceFields: inout Set<String>
     ) -> Bool? {
-        guard allowsFreeform, case let .stringMultiSelect(_, maxItems) = kind else { return nil }
+        guard allowsFreeform, published.kind == .multiChoice else { return nil }
+        let key = published.key
         let parts = multiSelectParts(
             values[key],
             allowsFreeform: true,
@@ -150,7 +135,7 @@ struct DesktopElicitationField: Identifiable, Equatable {
             values[key] = multiSelectValue(listed: parts.listed, custom: nil)
             return false
         }
-        if let maxItems, parts.listed.count >= maxItems { return nil }
+        if let maxItems = published.maxItems, parts.listed.count >= maxItems { return nil }
         customChoiceFields.insert(key)
         values[key] = multiSelectValue(listed: parts.listed, custom: "")
         return true
@@ -166,10 +151,10 @@ struct DesktopElicitationField: Identifiable, Equatable {
         in current: RemoteJSONValue?,
         customChoiceFields: inout Set<String>
     ) -> RemoteJSONValue? {
-        guard customChoiceFields.contains(key)
+        guard customChoiceFields.contains(published.key)
             || multiSelectParts(current, allowsFreeform: true).custom != nil else { return nil }
-        if case .stringMultiSelect = kind {
-            customChoiceFields.insert(key)
+        if published.kind == .multiChoice {
+            customChoiceFields.insert(published.key)
             let listed = multiSelectParts(current, allowsFreeform: true, isCustom: true).listed
             return multiSelectValue(listed: listed, custom: text)
         }
@@ -186,69 +171,21 @@ struct DesktopElicitationForm: Equatable {
     let fields: [DesktopElicitationField]
     let allowsFreeformChoices: Bool
     let schema: RemoteJSONValue
-    private static let maxFields = 32
-    private static let maxChoices = 50
-    static let propertyOrderKey = "x-copilot-projects-property-order"
 
-    static func parse(
-        _ schema: RemoteJSONValue?,
-        allowFreeformChoices: Bool = false
-    ) -> DesktopElicitationForm? {
-        guard let schema, case let .object(root) = schema else { return nil }
-        let supportedRootKeys: Set<String> = [
-            "$schema", "type", "title", "description", "properties", "required",
-            "additionalProperties", propertyOrderKey,
-        ]
-        guard root.keys.allSatisfy({ supportedRootKeys.contains($0) }) else { return nil }
-        if let type = root["type"] {
-            guard case .string("object") = type else { return nil }
-        }
-        guard case let .object(properties)? = root["properties"], !properties.isEmpty else {
-            return nil
-        }
-        guard properties.count <= maxFields else { return nil }
-        var required = Set<String>()
-        if let requiredValue = root["required"] {
-            guard case let .array(items) = requiredValue else { return nil }
-            for item in items {
-                guard case let .string(name) = item else { return nil }
-                required.insert(name)
-            }
-        }
-        guard required.isSubset(of: Set(properties.keys)) else { return nil }
-
+    /// Pairs the form the Mac parsed and publishes for a question with the agent's
+    /// schema, which the Mac checks answers against.
+    init?(_ form: RemoteElicitationForm?, schema: RemoteJSONValue?) {
+        guard let form, let schema,
+              case .object(let root) = schema,
+              case .object(let properties)? = root["properties"] else { return nil }
         var fields: [DesktopElicitationField] = []
-        for key in fieldOrder(root[propertyOrderKey], properties: properties) {
-            guard let fieldSchema = properties[key],
-                  case let .object(prop) = fieldSchema else { return nil }
-            guard let kind = fieldKind(prop) else { return nil }
-            let title: String
-            if case let .string(value)? = prop["title"] { title = value } else { title = key }
-            let description: String?
-            if case let .string(value)? = prop["description"] {
-                description = value
-            } else {
-                description = nil
-            }
-            fields.append(
-                DesktopElicitationField(
-                    key: key,
-                    title: title,
-                    description: description,
-                    kind: kind,
-                    required: required.contains(key),
-                    defaultValue: prop["default"],
-                    schema: fieldSchema
-                )
-            )
+        for field in form.fields {
+            guard let fieldSchema = properties[field.key] else { return nil }
+            fields.append(DesktopElicitationField(published: field, schema: fieldSchema))
         }
-
-        guard !fields.isEmpty else { return nil }
-        return DesktopElicitationForm(
-            fields: fields,
-            allowsFreeformChoices: allowFreeformChoices,
-            schema: schema
-        )
+        self.fields = fields
+        allowsFreeformChoices = form.allowsFreeformChoices
+        self.schema = schema
     }
 
     func validatedContent(
@@ -301,19 +238,15 @@ struct DesktopElicitationForm: Equatable {
                 }
             } else if field.required {
                 switch field.kind {
-                case .stringEnum(let options):
-                    if let first = options.first {
-                        values[field.key] = .string(first)
-                    }
-                case .stringOneOf(let choices):
-                    if let first = choices.first {
+                case .choice:
+                    if let first = field.choices?.first {
                         values[field.key] = .string(first.value)
                     }
-                case .bool:
+                case .boolean:
                     values[field.key] = .bool(false)
                 case .string:
                     values[field.key] = .string("")
-                case .stringMultiSelect:
+                case .multiChoice:
                     values[field.key] = .array([])
                 case .number:
                     break
@@ -324,206 +257,6 @@ struct DesktopElicitationForm: Equatable {
             values: values,
             customChoiceFields: customChoiceFields
         )
-    }
-
-    private static func fieldOrder(
-        _ value: RemoteJSONValue?,
-        properties: [String: RemoteJSONValue]
-    ) -> [String] {
-        if case let .array(entries)? = value {
-            let keys = entries.compactMap { entry -> String? in
-                if case let .string(key) = entry { return key }
-                return nil
-            }
-            if keys.count == entries.count, keys.count == properties.count,
-               Set(keys) == Set(properties.keys) {
-                return keys
-            }
-        }
-        return properties.keys.sorted()
-    }
-
-    private static func fieldKind(
-        _ prop: [String: RemoteJSONValue]
-    ) -> DesktopElicitationField.Kind? {
-        if prop["$ref"] != nil { return nil }
-        if prop["anyOf"] != nil || prop["allOf"] != nil || prop["not"] != nil
-            || prop["if"] != nil || prop["then"] != nil || prop["else"] != nil
-            || prop["const"] != nil || prop["pattern"] != nil
-            || prop["exclusiveMinimum"] != nil || prop["exclusiveMaximum"] != nil
-            || prop["multipleOf"] != nil {
-            return nil
-        }
-        if case let .array(oneOf)? = prop["oneOf"] {
-            guard prop["enum"] == nil, prop["format"] == nil,
-                  prop["minimum"] == nil, prop["maximum"] == nil,
-                  prop["minItems"] == nil, prop["maxItems"] == nil, prop["items"] == nil,
-                  prop["minLength"] == nil, prop["maxLength"] == nil else { return nil }
-            guard case .string("string")? = prop["type"] else { return nil }
-            guard let choices = labeledChoices(oneOf) else { return nil }
-            return .stringOneOf(choices)
-        }
-        if case let .array(values)? = prop["enum"] {
-            guard prop["format"] == nil,
-                  prop["minimum"] == nil, prop["maximum"] == nil,
-                  prop["minItems"] == nil, prop["maxItems"] == nil, prop["items"] == nil,
-                  prop["minLength"] == nil, prop["maxLength"] == nil else { return nil }
-            guard case .string("string")? = prop["type"] else { return nil }
-            guard values.count <= maxChoices else { return nil }
-            var choices: [String] = []
-            for entry in values {
-                guard case let .string(value) = entry else { return nil }
-                choices.append(value)
-            }
-            guard Set(choices).count == choices.count else { return nil }
-            return choices.isEmpty ? nil : .stringEnum(choices)
-        }
-        guard case let .string(type)? = prop["type"] else { return nil }
-        if type != "string",
-           prop["minLength"] != nil || prop["maxLength"] != nil || prop["format"] != nil {
-            return nil
-        }
-        if type != "number" && type != "integer",
-           prop["minimum"] != nil || prop["maximum"] != nil {
-            return nil
-        }
-        if type != "array",
-           prop["minItems"] != nil || prop["maxItems"] != nil || prop["items"] != nil {
-            return nil
-        }
-        switch type {
-        case "boolean": return .bool
-        case "integer", "number": return numberKind(prop)
-        case "string": return stringKind(prop)
-        case "array": return arrayKind(prop)
-        default: return nil
-        }
-    }
-
-    private static func numberKind(
-        _ prop: [String: RemoteJSONValue]
-    ) -> DesktopElicitationField.Kind? {
-        let minimum: Double?
-        if let raw = prop["minimum"] {
-            guard case let .number(value) = raw, value.isFinite else { return nil }
-            minimum = value
-        } else {
-            minimum = nil
-        }
-        let maximum: Double?
-        if let raw = prop["maximum"] {
-            guard case let .number(value) = raw, value.isFinite else { return nil }
-            maximum = value
-        } else {
-            maximum = nil
-        }
-        if let minimum, let maximum, minimum > maximum { return nil }
-        return .number
-    }
-
-    private static func stringKind(
-        _ prop: [String: RemoteJSONValue]
-    ) -> DesktopElicitationField.Kind? {
-        if let rawFormat = prop["format"] {
-            guard case .string = rawFormat else { return nil }
-        }
-        let minLength: Int?
-        if let raw = prop["minLength"] {
-            guard let value = nonNegativeInt(raw) else { return nil }
-            minLength = value
-        } else {
-            minLength = nil
-        }
-        let maxLength: Int?
-        if let raw = prop["maxLength"] {
-            guard let value = nonNegativeInt(raw) else { return nil }
-            maxLength = value
-        } else {
-            maxLength = nil
-        }
-        if let minLength, let maxLength, minLength > maxLength { return nil }
-        return .string(minLength: minLength, maxLength: maxLength)
-    }
-
-    private static func arrayKind(_ prop: [String: RemoteJSONValue]) -> DesktopElicitationField.Kind? {
-        guard case let .object(items)? = prop["items"] else { return nil }
-        guard let choices = choiceSet(items) else { return nil }
-        let minItems: Int?
-        if let raw = prop["minItems"] {
-            guard let value = nonNegativeInt(raw) else { return nil }
-            minItems = value
-        } else {
-            minItems = nil
-        }
-        let maxItems: Int?
-        if let raw = prop["maxItems"] {
-            guard let value = nonNegativeInt(raw) else { return nil }
-            maxItems = value
-        } else {
-            maxItems = nil
-        }
-        if let minItems, let maxItems, minItems > maxItems { return nil }
-        return .stringMultiSelect(choices: choices, maxItems: maxItems)
-    }
-
-    private static func choiceSet(_ items: [String: RemoteJSONValue]) -> [DesktopElicitationField.Choice]? {
-        let supportedItemKeys: Set<String> = [
-            "anyOf", "oneOf", "enum", "type", "title", "description",
-        ]
-        guard items.keys.allSatisfy({ supportedItemKeys.contains($0) }) else { return nil }
-        if let itemType = items["type"] {
-            guard case .string("string") = itemType else { return nil }
-        }
-        if (items["oneOf"] == nil) != (items["anyOf"] == nil),
-           case let .array(alternatives)? = items["oneOf"] ?? items["anyOf"] {
-            guard items["enum"] == nil else { return nil }
-            return labeledChoices(alternatives)
-        }
-        if case let .array(values)? = items["enum"],
-           items["oneOf"] == nil,
-           items["anyOf"] == nil {
-            return bareChoices(values)
-        }
-        return nil
-    }
-
-    private static func labeledChoices(_ entries: [RemoteJSONValue]) -> [DesktopElicitationField.Choice]? {
-        guard entries.count <= maxChoices else { return nil }
-        var choices: [DesktopElicitationField.Choice] = []
-        var seen = Set<String>()
-        for entry in entries {
-            guard case let .object(option) = entry,
-                  option.keys.allSatisfy({ $0 == "const" || $0 == "title" || $0 == "description" }),
-                  case let .string(value)? = option["const"],
-                  seen.insert(value).inserted else { return nil }
-            let title: String
-            if let titleValue = option["title"] {
-                guard case let .string(label) = titleValue else { return nil }
-                title = label
-            } else {
-                title = value
-            }
-            choices.append(.init(value: value, title: title))
-        }
-        return choices.isEmpty ? nil : choices
-    }
-
-    private static func bareChoices(_ values: [RemoteJSONValue]) -> [DesktopElicitationField.Choice]? {
-        guard values.count <= maxChoices else { return nil }
-        var choices: [DesktopElicitationField.Choice] = []
-        var seen = Set<String>()
-        for entry in values {
-            guard case let .string(value) = entry, seen.insert(value).inserted else { return nil }
-            choices.append(.init(value: value, title: value))
-        }
-        return choices.isEmpty ? nil : choices
-    }
-
-    private static func nonNegativeInt(_ value: RemoteJSONValue) -> Int? {
-        guard case let .number(number) = value,
-              number.isFinite, number >= 0,
-              let integer = Int(exactly: number) else { return nil }
-        return integer
     }
 }
 
@@ -540,14 +273,14 @@ enum DesktopElicitationChoiceSelection: Hashable {
         allowsFreeform: Bool,
         isCustom: Bool
     ) -> Self {
-        if case .stringMultiSelect = field.kind {
+        if field.kind == .multiChoice {
             return field.multiSelectParts(
                 value,
                 allowsFreeform: allowsFreeform,
                 isCustom: allowsFreeform && isCustom
             ).custom != nil ? .other : .unset
         }
-        if field.kind == .bool, value == nil {
+        if field.kind == .boolean, value == nil {
             return field.required ? .boolean(false) : .unset
         }
         if isCustom {
