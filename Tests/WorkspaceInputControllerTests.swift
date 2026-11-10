@@ -2,6 +2,7 @@ import AppKit
 import XCTest
 import CopilotProjectsCore
 @testable import CopilotProjectsHost
+import CopilotProjectsProtocol
 @testable import SwiftTerm
 
 /// Any finder query can reach Luna, so input tests must never start a real copilot run.
@@ -247,19 +248,31 @@ final class WorkspaceInputControllerTests: XCTestCase {
 
             // Repeated ⇧⌘A cycles through ALL waiting sessions (`b2` -> `b3`), then lower-tier
             // unread/ready sessions (`sessions[1]` -> `b4`) without getting stuck on `b2`/`b3`,
-            // and wraps back to `b2`.
+            // and wraps back to `b2`. A remote client stepping through the published
+            // snapshot from the same session goes to the same place each time.
             let shiftCommandA = try key("A", code: 0, modifiers: [.command, .shift])
-            XCTAssertNil(input.handleKeyDown(shiftCommandA))
+            var clientCursor: RemoteAttentionCursor?
+            @MainActor func pressAgreeingWithClient() {
+                let published = model.remoteWorkspaceSnapshot().projects.flatMap(\.sessions)
+                clientCursor = RemoteAttentionCursor.next(
+                    in: published.map { ($0.id, $0.attention?.rank) },
+                    from: model.globalSelectedSessionId,
+                    previous: clientCursor
+                )
+                XCTAssertNil(input.handleKeyDown(shiftCommandA))
+                XCTAssertEqual(model.globalSelectedSessionId, clientCursor?.sessionId)
+            }
+            pressAgreeingWithClient()
             XCTAssertEqual(model.globalSelectedSessionId, "b2")
-            XCTAssertNil(input.handleKeyDown(shiftCommandA))
+            pressAgreeingWithClient()
             XCTAssertEqual(model.globalSelectedSessionId, "b3")
-            XCTAssertNil(input.handleKeyDown(shiftCommandA))
+            pressAgreeingWithClient()
             XCTAssertEqual(model.globalSelectedSessionId, sessions[1].id)
             XCTAssertEqual(model.projects[0].sessions[1].markedUnread, false)
-            XCTAssertNil(input.handleKeyDown(shiftCommandA))
+            pressAgreeingWithClient()
             XCTAssertEqual(model.globalSelectedSessionId, "b4")
             XCTAssertEqual(model.totalReady, 0)
-            XCTAssertNil(input.handleKeyDown(shiftCommandA))
+            pressAgreeingWithClient()
             XCTAssertEqual(model.globalSelectedSessionId, "b2", "wraps back to the first waiting session")
         }
     }

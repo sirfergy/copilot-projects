@@ -375,10 +375,8 @@ final class AppModel: ObservableObject {
         qos: .utility
     )
     private(set) var isTerminating = false
-    /// Remembers the `(tier, workspaceIndex)` of an `.unread` session whose unread
-    /// flag was cleared by `selectNextAttentionSession()`, so pressing `⇧⌘A` again
-    /// from that session continues advancing through the cycle instead of restarting.
-    private var lastClearedAttentionCursor: (sessionId: String, tier: SessionAttentionTier, workspaceIndex: Int)?
+    /// Where `selectNextAttentionSession()` last went.
+    private var lastAttentionCursor: RemoteAttentionCursor?
     @Published private(set) var sessionNavigationHistory = SessionNavigationHistory()
     private var isNavigatingSessionHistory = false
 
@@ -2614,7 +2612,7 @@ final class AppModel: ObservableObject {
     }
 
     var hasAttentionSessions: Bool {
-        projects.contains { $0.sessions.contains { $0.attentionTier != nil } }
+        projects.contains { $0.sessions.contains { $0.attention != nil } }
     }
 
     func requestCloseProject(_ pid: String) {
@@ -3036,43 +3034,24 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    /// Jumps to the next session across all projects that needs attention,
-    /// cycling through a stable `(urgency tier, workspace order)` list
-    /// (`waiting` → `failed` → `unread/finished`).
+    /// Jumps to the next session across all projects that needs attention, in the
+    /// order every client uses (`RemoteAttentionCursor.next`).
     @discardableResult
     func selectNextAttentionSession() -> (projectId: String, sessionId: String)? {
         let all = projects.flatMap { project in
             project.sessions.map { (projectId: project.id, session: $0) }
         }
-        guard !all.isEmpty else { return nil }
-        let ordered = all.enumerated().compactMap { index, entry -> (tier: SessionAttentionTier, workspaceIndex: Int, projectId: String, sessionId: String)? in
-            guard let tier = entry.session.attentionTier else { return nil }
-            return (tier, index, entry.projectId, entry.session.id)
-        }.sorted { lhs, rhs in
-            lhs.tier != rhs.tier ? lhs.tier < rhs.tier : lhs.workspaceIndex < rhs.workspaceIndex
+        guard let target = RemoteAttentionCursor.next(
+            in: all.map { ($0.session.id, $0.session.attention?.rank) },
+            from: globalSelectedSessionId,
+            previous: lastAttentionCursor
+        ), let projectId = all.first(where: { $0.session.id == target.sessionId })?.projectId else {
+            return nil
         }
-        guard !ordered.isEmpty else { return nil }
-
-        let currentId = globalSelectedSessionId
-        let target: (tier: SessionAttentionTier, workspaceIndex: Int, projectId: String, sessionId: String)
-        if let currentIndex = ordered.firstIndex(where: { $0.sessionId == currentId }) {
-            target = ordered[(currentIndex + 1) % ordered.count]
-        } else if let cursor = lastClearedAttentionCursor, cursor.sessionId == currentId {
-            target = ordered.first {
-                ($0.tier, $0.workspaceIndex) > (cursor.tier, cursor.workspaceIndex)
-            } ?? ordered[0]
-        } else {
-            target = ordered[0]
-        }
-
-        if target.tier == .unread {
-            lastClearedAttentionCursor = (target.sessionId, target.tier, target.workspaceIndex)
-        } else {
-            lastClearedAttentionCursor = nil
-        }
-        show(projectId: target.projectId, sessionId: target.sessionId)
+        lastAttentionCursor = target
+        show(projectId: projectId, sessionId: target.sessionId)
         save()
-        return (target.projectId, target.sessionId)
+        return (projectId, target.sessionId)
     }
 
     // MARK: - status / notifications (driven by the CLI)

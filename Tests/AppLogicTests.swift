@@ -7878,7 +7878,9 @@ final class AppLogicTests: XCTestCase {
                             background: true,
                             scheduled: false,
                             promptable: false,
-                            operationSupport: .unavailable
+                            operationSupport: .unavailable,
+                            attention: RemoteSessionAttention(.waiting),
+                            needsEndConfirmation: true
                         ),
                         RemoteSessionSnapshot(
                             id: completed.id,
@@ -7891,7 +7893,9 @@ final class AppLogicTests: XCTestCase {
                             scheduled: false,
                             promptable: false,
                             operationSupport: .unavailable,
-                            unreadMarker: model.projects[0].sessions[1].unreadMarker
+                            unreadMarker: model.projects[0].sessions[1].unreadMarker,
+                            attention: RemoteSessionAttention(.ready),
+                            needsEndConfirmation: false
                         ),
                     ]
                 ),

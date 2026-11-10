@@ -292,24 +292,24 @@ struct Session: Identifiable, Codable, Equatable {
         status != .idle || hasBackgroundWork || !schedules.isEmpty || hasPendingInput
     }
 
-    /// The attention state shown beside a session's name.
+    /// The state shown beside a session's name.
     var attentionLabel: String {
         if let parked { return parked.label }
-        switch displayStatus {
-        case .running: return "Running"
+        switch attention {
         case .waiting: return "Waiting for input"
-        case .idle:
-            if failedRequest != nil { return "Request failed" }
-            return finishedUnseen ? "Finished" : "Idle"
+        case .failed: return "Request failed"
+        case .ready: return "Finished"
+        case .unread, nil: return displayStatus == .running ? "Running" : "Idle"
         }
     }
 
-    /// Urgency tier for jumping to the next session that needs the user's attention.
-    var attentionTier: SessionAttentionTier? {
+    /// What this session needs from the user. Remote snapshots publish it, and
+    /// the sidebar and Next Session Needing Attention read it.
+    var attention: RemoteSessionAttention.Kind? {
         if displayStatus == .waiting { return .waiting }
         if failedRequest != nil { return .failed }
-        if finishedUnseen || isUnread { return .unread }
-        return nil
+        if displayStatus == .idle && finishedUnseen { return .ready }
+        return isUnread ? .unread : nil
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -681,15 +681,6 @@ struct PersistedState: Codable {
         self.projects = projects
         self.selectedProjectId = selectedProjectId
     }
-}
-
-/// Urgency order when cycling through sessions that need attention (`⇧⌘A`).
-enum SessionAttentionTier: Int, Comparable, Sendable {
-    case waiting = 0
-    case failed = 1
-    case unread = 2
-
-    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
 /// Interactive categories in `FleetStatusBar`.
