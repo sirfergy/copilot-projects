@@ -2985,8 +2985,6 @@ public final class MarkdownSelectableTextView: NSTextView {
             naturalWidth = max(ceil(bounded), minimumTableWidth)
         }
         textContainer.widthTracksTextView = false
-        isMeasuring = true
-        defer { isMeasuring = false }
         textContainer.size = CGSize(
             width: max(1, naturalWidth),
             height: CGFloat.greatestFiniteMagnitude
@@ -2999,14 +2997,9 @@ public final class MarkdownSelectableTextView: NSTextView {
         )
     }
 
-    /// Laying out for a measurement resizes the view to fit, at its current width. Putting the
-    /// container back to that width then made the measurement return the height for the old width:
-    /// narrowing the transcript drawer left every message its full-width height, so text overlapped.
-    private var isMeasuring = false
-
     public override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        if !isMeasuring, newSize.width > 0, let textContainer {
+        if newSize.width > 0, let textContainer {
             let containerWidth = wrapsText
                 ? newSize.width
                 : max(newSize.width, minimumTableWidth)
