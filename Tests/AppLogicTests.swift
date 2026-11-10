@@ -5597,7 +5597,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
 
         // Unreadable state file recovered from its backup.
-        try repository.save(state)
+        try repository.save(PersistedState(projects: [project], selectedProjectId: nil))
         try repository.save(state)
         try Data("{".utf8).write(to: repository.path)
         finishStartup()
@@ -5676,7 +5676,7 @@ final class AppLogicTests: XCTestCase {
         let path = root.appendingPathComponent("state.json")
         let repository = StateRepository(path: path)
         let project = Project(name: "test", cwd: "/tmp")
-        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: nil))
         try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
         try FileManager.default.removeItem(at: path)
 
@@ -5727,6 +5727,43 @@ final class AppLogicTests: XCTestCase {
         guard case .recovered(let recovered, _) = repository.load() else {
             return XCTFail("expected backup recovery after external primary rewrite")
         }
+        XCTAssertEqual(recovered.projects.map(\.name), ["external"])
+    }
+
+    /// macOS flagged the app for excessive disk writes on Nov 9: saves rewrote an unchanged
+    /// state.json, and every save also copied the previous file into the backup.
+    func testStateRepositorySkipsUnchangedSaveAndKeepsPriorFileAsBackup() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("state.json")
+        let repository = StateRepository(path: path)
+        let session = Session(title: "shell", cwd: "/tmp", hostId: "local", startingPrompt: "hello")
+        let project = Project(name: "test", cwd: "/tmp", sessions: [session], selectedSessionId: session.id)
+        func fileNumber(_ url: URL) throws -> NSNumber? {
+            try FileManager.default.attributesOfItem(atPath: url.path)[.systemFileNumber] as? NSNumber
+        }
+
+        try repository.save(PersistedState(projects: [project], selectedProjectId: nil))
+        let first = try fileNumber(path)
+        try repository.save(PersistedState(projects: [project], selectedProjectId: nil))
+        XCTAssertEqual(try fileNumber(path), first)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repository.backupPath.path))
+
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        XCTAssertNotEqual(try fileNumber(path), first)
+        XCTAssertEqual(try fileNumber(repository.backupPath), first)
+
+        // An external rewrite changes the signature, so the same state is written again.
+        let external = Project(name: "external", cwd: "/tmp")
+        try JSONEncoder().encode(PersistedState(projects: [external], selectedProjectId: external.id))
+            .write(to: path, options: .atomic)
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        guard case .loaded(let reloaded) = repository.load() else { return XCTFail("expected primary") }
+        XCTAssertEqual(reloaded.projects.map(\.name), ["test"])
+        try FileManager.default.removeItem(at: path)
+        guard case .recovered(let recovered, _) = repository.load() else { return XCTFail("expected backup") }
         XCTAssertEqual(recovered.projects.map(\.name), ["external"])
     }
 

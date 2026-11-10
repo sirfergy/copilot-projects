@@ -167,7 +167,16 @@ struct StateRepository: Sendable {
 
     private func saveLocked(_ state: PersistedState) throws {
         try validate(state)
-        let encoded = try JSONEncoder().encode(state)
+        let encoder = JSONEncoder()
+        // Unsorted keys came out in a different order on each encode, so an unchanged
+        // state never matched the bytes on disk.
+        encoder.outputFormatting = .sortedKeys
+        let encoded = try encoder.encode(state)
+        let currentSignature = Self.fileSignature(atPath: path.path)
+        let primaryIsCached = currentSignature != nil && box.cachedPrimary?.signature == currentSignature
+        // macOS flagged the app for excessive disk writes on Nov 9. Runtime status
+        // changes, which aren't persisted, rewrote an unchanged state.json each time.
+        if primaryIsCached, box.cachedPrimary?.data == encoded { return }
         let directory = path.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: directory,
@@ -175,26 +184,20 @@ struct StateRepository: Sendable {
             attributes: [.posixPermissions: 0o700]
         )
         // Preserve only a known-good prior file. A corrupt primary must never replace
-        // the last usable backup. When the primary file's signature matches the last
-        // validated primary write or read from this repository, reuse those validated
-        // bytes instead of re-reading and re-decoding `path` on every save.
-        let backupBytes: Data?
-        if let currentSignature = Self.fileSignature(atPath: path.path),
-           let cached = box.cachedPrimary,
-           cached.signature == currentSignature {
-            backupBytes = cached.data
-        } else if let existing = try? Data(contentsOf: path),
-                  (try? decode(existing)) != nil {
-            backupBytes = existing
-        } else {
-            backupBytes = nil
-        }
-        if let backupBytes {
-            do {
-                try backupBytes.write(to: backupPath, options: .atomic)
-            } catch {
-                NSLog("copilot-projects: could not update state backup: \(error)")
+        // the last usable backup. Hard-link the prior file rather than copying its
+        // bytes: the rename below gives `path` a new inode, so the backup keeps the old
+        // one and never shares a file with the new primary.
+        if primaryIsCached || (try? Data(contentsOf: path)).flatMap({ try? decode($0) }) != nil {
+            let linkURL = directory.appendingPathComponent(
+                ".\(backupPath.lastPathComponent).\(UUID().uuidString).tmp",
+                isDirectory: false
+            )
+            if Darwin.link(path.path, linkURL.path) != 0
+                || Darwin.rename(linkURL.path, backupPath.path) != 0 {
+                NSLog("copilot-projects: could not update state backup: \(String(cString: strerror(errno)))")
             }
+            // rename(2) leaves the source in place when both names are already the same file.
+            unlink(linkURL.path)
         }
         let stagingURL = directory.appendingPathComponent(
             ".\(path.lastPathComponent).\(UUID().uuidString).tmp",
