@@ -44,15 +44,22 @@ struct RemoteCommandRequestLedger {
     }
 }
 
-/// Outcome of accepting a remote answer to a structured `ask_user` question.
+/// Outcome of a remote operation: an answer, a model switch, or a session action.
+/// A client may resend the same operation identity until it gets an answer other
+/// than `conflict`; the host deduplicates it by its receipt or pending handoff.
 public enum RemoteUserInputResult: Equatable, Sendable {
     /// The request was published, or an identical correlated operation was replayed.
     case accepted
-    /// A response for this tab is already awaiting the extension, or the question
-    /// context changed underneath the answer.
+    /// Not now: another operation holds the slot, the session isn't ready, or its
+    /// tracker state is too old to judge. Also a reused identity with another payload.
     case conflict
-    /// No matching live question, or the answer failed the choice/freeform/size rules.
+    /// No matching live question, a payload the host's rules refuse, or a bounce
+    /// while Copilot is busy.
     case invalid
+    /// The operation names a conversation that has ended (`/new`, a tracker restart,
+    /// or another Copilot session). Its outcome can't be known here, and a retry
+    /// with the same identity can't succeed.
+    case epochMismatch
 }
 
 /// On-disk shape of the host-written user-input response file. The extension
@@ -1100,7 +1107,6 @@ extension AppModel {
     ) -> RemoteUserInputResult {
         let clock = advancingClock(from: now)
         guard locateIndex(sessionId) != nil else { return .invalid }
-        if parkingBlocksInput(sessionId) { return .conflict }
         guard !answer.requestId.isEmpty,
               answer.requestId.utf8.count <= 200,
               answer.answer.utf8.count <= 8_192 else {
@@ -1117,6 +1123,7 @@ extension AppModel {
             fingerprintPayload: answer,
             handoffSuffix: "user-input-response.json",
             now: clock,
+            blocksInput: { parkingBlocksInput(sessionId) },
             validate: { snapshot in
                 guard let request = snapshot.trackedUserInputs?
                     .first(where: { $0.requestId == answer.requestId }) else {
@@ -1155,7 +1162,6 @@ extension AppModel {
     ) -> RemoteUserInputResult {
         let clock = advancingClock(from: now)
         guard let location = locateIndex(sessionId) else { return .invalid }
-        if parkingBlocksInput(sessionId) { return .conflict }
         let adapter = CLIOperationAdapter(
             activityDirectory: agentActivityDirectory,
             resumeMarkerDirectory: resumeMarkerDirectory
@@ -1212,7 +1218,8 @@ extension AppModel {
         let initialRequest = initialSnapshot?.trackedElicitations?
             .first(where: { $0.requestId == answer.requestId })
         if answer.requestId.hasPrefix("synthetic::durable-ask-user::") {
-            guard operation == nil else { return .conflict }
+            guard operation == nil else { return .invalid }
+            if parkingBlocksInput(sessionId) { return .conflict }
             guard let request = initialRequest,
                   let snapshot = initialSnapshot,
                   validates(request) else {
@@ -1271,6 +1278,7 @@ extension AppModel {
             fingerprintPayload: answer,
             handoffSuffix: "elicitation-response.json",
             now: clock,
+            blocksInput: { parkingBlocksInput(sessionId) },
             validate: { freshSnapshot in
                 guard let freshRequest = freshSnapshot.trackedElicitations?
                     .first(where: { $0.requestId == answer.requestId }) else {
@@ -1362,7 +1370,6 @@ extension AppModel {
     ) -> RemoteUserInputResult {
         let clock = advancingClock(from: now)
         guard locateIndex(sessionId) != nil else { return .invalid }
-        if parkingBlocksInput(sessionId) { return .conflict }
         guard !selection.modelId.isEmpty,
               selection.modelId.utf8.count <= 200,
               (selection.reasoningEffort?.utf8.count ?? 0) <= 64,
@@ -1385,6 +1392,7 @@ extension AppModel {
             fingerprintPayload: selection,
             handoffSuffix: "set-model-request.json",
             now: clock,
+            blocksInput: { parkingBlocksInput(sessionId) },
             validate: { snapshot in
                 guard snapshot.workflow?.bounceRequested != true,
                       let target = snapshot.availableModels?
@@ -1431,7 +1439,6 @@ extension AppModel {
               let kind = CLISDKOperationKind(rawValue: action.kind.rawValue) else {
             return .invalid
         }
-        if parkingBlocksInput(sessionId) { return .conflict }
         let adapter = CLIOperationAdapter(
             activityDirectory: agentActivityDirectory,
             resumeMarkerDirectory: resumeMarkerDirectory
@@ -1443,9 +1450,14 @@ extension AppModel {
             fingerprintPayload: action,
             handoffSuffix: "\(kind.rawValue).json",
             now: clock,
-            validate: { snapshot in
+            blocksInput: { parkingBlocksInput(sessionId) },
+            isReady: { snapshot in
                 guard let workflow = snapshot.workflow,
                       workflow.supports(action.kind, at: clock()) else { return false }
+                return action.kind != .send || (workflow.sendReady && !snapshot.hasPendingInput)
+            },
+            validate: { snapshot in
+                guard let workflow = snapshot.workflow else { return false }
                 switch action.kind {
                 case .send:
                     if let attachmentIds = action.attachmentIds {
@@ -1466,7 +1478,7 @@ extension AppModel {
                                   at: now
                               ) else { return false }
                     }
-                    return workflow.sendReady && !snapshot.hasPendingInput
+                    return true
                 case .abort:
                     return true
                 case .bounce:
@@ -2978,20 +2990,11 @@ extension AppModel {
                     adapter: adapter,
                     clock: clock
                 )
-            case .conflict:
+            case .conflict, .epochMismatch:
                 forgetPendingPullRequestsPrompt(requestId: requestId, now: clock())
-                return .failure("Another session action is already awaiting Copilot.", code: "busy")
+                return .failure("The session is busy or waiting for input in the terminal.", code: "busy")
             case .invalid:
                 forgetPendingPullRequestsPrompt(requestId: requestId, now: clock())
-                if let latest = adapter.loadFreshSnapshot(sessionId: sessionId, now: clock),
-                   latest.hasPendingInput || latest.workflow?.sendReady == false {
-                    return .failure(
-                        latest.hasPendingInput
-                            ? "The session is waiting for your input in the terminal."
-                            : "The session is busy or waiting for input in the terminal.",
-                        code: "busy"
-                    )
-                }
                 return .failure("Could not send the prompt to that session.", code: "invalid")
             }
         }

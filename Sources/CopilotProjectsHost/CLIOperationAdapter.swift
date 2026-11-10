@@ -115,8 +115,8 @@ struct CLIOperationAdapter {
 
     private enum BoundSnapshotResult {
         case ready(BoundSnapshot)
-        case invalid
-        case conflict
+        case notReady
+        case epochMismatch
     }
 
     private enum AtomicPublishResult {
@@ -142,23 +142,27 @@ struct CLIOperationAdapter {
         sessionId: String,
         now: () -> Date
     ) -> (snapshot: AgentActivitySnapshot, readAt: Date)? {
-        let url = SessionArtifacts.cliAgentActivityURL(
-            sessionId: sessionId,
-            sessionsDirectory: activityDirectory
-        )
-        guard let data = try? Data(contentsOf: url),
-              data.count <= 2 * 1_024 * 1_024,
-              let snapshot = try? JSONDecoder().decode(
-                AgentActivitySnapshot.self,
-                from: data
-              ) else {
-            return nil
-        }
+        guard let snapshot = load(sessionId: sessionId) else { return nil }
         let readAt = now()
         guard snapshot.isFresh(at: readAt) else { return nil }
         return (snapshot, readAt)
     }
 
+    private func load(sessionId: String) -> AgentActivitySnapshot? {
+        let url = SessionArtifacts.cliAgentActivityURL(
+            sessionId: sessionId,
+            sessionsDirectory: activityDirectory
+        )
+        guard let data = try? Data(contentsOf: url),
+              data.count <= 2 * 1_024 * 1_024 else {
+            return nil
+        }
+        return try? JSONDecoder().decode(AgentActivitySnapshot.self, from: data)
+    }
+
+    /// Publishes the operation's handoff, or answers a retry of one already taken.
+    /// `blocksInput` and `isReady` refusals answer `.conflict` (try again);
+    /// `validate` refusals answer `.invalid` (final).
     func submit<Payload: Encodable, Handoff: Encodable>(
         sessionId: String,
         kind: CLISDKOperationKind,
@@ -166,33 +170,23 @@ struct CLIOperationAdapter {
         fingerprintPayload: Payload,
         handoffSuffix: String,
         now: () -> Date,
+        blocksInput: () -> Bool = { false },
+        isReady: (AgentActivitySnapshot) -> Bool = { _ in true },
         validate: (AgentActivitySnapshot) -> Bool,
         makeHandoff: (CLIOperationHandoffMetadata) -> Handoff
     ) -> RemoteUserInputResult {
         // Every handoff carries an operation identity so the tracker can publish its receipt.
-        guard let operation else { return .invalid }
-        let bound: BoundSnapshot
-        switch loadBoundSnapshot(
-            sessionId: sessionId,
-            operation: operation,
-            now: now
-        ) {
-        case .ready(let value):
-            bound = value
-        case .invalid:
-            return .invalid
-        case .conflict:
-            return .conflict
-        }
-
-        guard let fingerprint = Self.payloadFingerprint(
-            kind: kind,
-            payload: fingerprintPayload
-        ) else {
+        guard let operation,
+              let fingerprint = Self.payloadFingerprint(kind: kind, payload: fingerprintPayload) else {
             return .invalid
         }
-        if let replay = replayResult(
-            snapshot: bound.snapshot,
+        // A retry whose first reply was lost gets the first answer whatever the
+        // session's state is now: a receipt proves the tracker took it, even in a
+        // snapshot too old to judge readiness by, and a matching handoff is still
+        // waiting for the tracker.
+        let snapshot = load(sessionId: sessionId)
+        if let snapshot, let replay = replayResult(
+            snapshot: snapshot,
             operation: operation,
             kind: kind,
             payloadFingerprint: fingerprint
@@ -214,7 +208,25 @@ struct CLIOperationAdapter {
         ) {
             return existing
         }
+        if blocksInput() { return .conflict }
 
+        let readAt = now()
+        guard let snapshot, snapshot.isFresh(at: readAt) else { return .conflict }
+        let bound: BoundSnapshot
+        switch bind(
+            snapshot,
+            sessionId: sessionId,
+            correlatedEpoch: operation.conversationEpoch,
+            now: readAt
+        ) {
+        case .ready(let value):
+            bound = value
+        case .notReady:
+            return .conflict
+        case .epochMismatch:
+            return .epochMismatch
+        }
+        guard isReady(bound.snapshot) else { return .conflict }
         guard validate(bound.snapshot) else { return .invalid }
 
         let metadata = CLIOperationHandoffMetadata(
@@ -314,7 +326,7 @@ struct CLIOperationAdapter {
                 let projection = loaded.snapshot.remoteOperationProjection(at: loaded.readAt)
                 currentEpochBound = projection.support == .receipts
                     && projection.conversationEpoch == operation.conversationEpoch
-            case .invalid, .conflict:
+            case .notReady, .epochMismatch:
                 currentEpochBound = false
             }
         } else {
@@ -358,22 +370,6 @@ struct CLIOperationAdapter {
         return .notFound
     }
 
-    private func loadBoundSnapshot(
-        sessionId: String,
-        operation: CLIOperationRequest,
-        now: () -> Date
-    ) -> BoundSnapshotResult {
-        guard let loaded = loadFresh(sessionId: sessionId, now: now) else {
-            return .invalid
-        }
-        return bind(
-            loaded.snapshot,
-            sessionId: sessionId,
-            correlatedEpoch: operation.conversationEpoch,
-            now: loaded.readAt
-        )
-    }
-
     private func bind(
         _ snapshot: AgentActivitySnapshot,
         sessionId: String,
@@ -382,21 +378,21 @@ struct CLIOperationAdapter {
     ) -> BoundSnapshotResult {
         guard !snapshot.reportsTerminalDisconnect,
               let copilotSessionId = readCopilotSessionId(sessionId: sessionId) else {
-            return .invalid
+            return .notReady
         }
 
         let projection = snapshot.remoteOperationProjection(at: now)
         if let correlatedEpoch {
-            guard projection.support == .receipts else { return .invalid }
+            guard projection.support == .receipts else { return .notReady }
             guard projection.conversationEpoch == correlatedEpoch,
                   snapshot.copilotSessionId == copilotSessionId else {
-                return .conflict
+                return .epochMismatch
             }
         } else {
-            guard projection.support != .unavailable else { return .invalid }
+            guard projection.support != .unavailable else { return .notReady }
             if projection.support == .receipts,
                snapshot.copilotSessionId != copilotSessionId {
-                return .conflict
+                return .notReady
             }
         }
 

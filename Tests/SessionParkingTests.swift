@@ -177,6 +177,29 @@ final class SessionParkingTests: XCTestCase {
                 sessionId: id, action: self.send,
                 operation: CLIOperationRequest(operationId: "send", conversationEpoch: "epoch-1")
             ), .conflict)
+            // A retry of a send the tracker already took still gets its first answer.
+            let sent = CLIOperationRequest(operationId: "sent", conversationEpoch: "epoch-1")
+            try f.publish {
+                $0.operationReceipts = [TrackedOperationReceipt(
+                    operationId: sent.operationId, conversationEpoch: sent.conversationEpoch,
+                    kind: CLISDKOperationKind.sessionSend.rawValue, state: .applied,
+                    updatedAtMilliseconds: 1,
+                    payloadFingerprint: CLIOperationAdapter.payloadFingerprint(kind: .sessionSend, payload: self.send)
+                )]
+            }
+            XCTAssertEqual(f.model.performSessionAction(sessionId: id, action: self.send, operation: sent), .accepted)
+            let operation = CLIOperationRequest(operationId: "new", conversationEpoch: "epoch-1")
+            XCTAssertEqual(f.model.answerUserInput(
+                sessionId: id, answer: RemoteUserInputAnswer(requestId: "q", answer: "Yes", wasFreeform: false),
+                operation: operation
+            ), .conflict)
+            XCTAssertEqual(f.model.answerElicitation(
+                sessionId: id, answer: RemoteElicitationAnswer(requestId: "form", action: .cancel),
+                operation: operation
+            ), .conflict)
+            XCTAssertEqual(f.model.setModel(
+                sessionId: id, selection: RemoteModelSelection(modelId: "gpt-5.4"), operation: operation
+            ), .conflict)
             XCTAssertNil(try f.wire.workflow)
             XCTAssertEqual(f.processes.stops, [])
             XCTAssertEqual(f.processes.started, [], "input during parking must not start a resume")

@@ -3403,7 +3403,7 @@ final class AppLogicTests: XCTestCase {
                     requestId: "req-choice", answer: "Yes, deploy", wasFreeform: false
                 )
             ),
-            .invalid
+            .conflict
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
         try writeSnapshot(updatedAt: Date())
@@ -3455,7 +3455,7 @@ final class AppLogicTests: XCTestCase {
         )
         try FileManager.default.removeItem(at: responseURL)
 
-        // A stale heartbeat can no longer be answered.
+        // A stale heartbeat is too old to judge: try again.
         try writeSnapshot(updatedAt: Date(timeIntervalSince1970: 0))
         XCTAssertEqual(
             model.answerUserInput(
@@ -3464,10 +3464,10 @@ final class AppLogicTests: XCTestCase {
                     requestId: "req-choice", answer: "Yes, deploy", wasFreeform: false
                 )
             ),
-            .invalid
+            .conflict
         )
 
-        // Without a live Copilot session marker the answer cannot be bound to context.
+        // Without a live Copilot session marker the answer cannot be bound yet: try again.
         try writeSnapshot(updatedAt: Date())
         try FileManager.default.removeItem(at: markerURL)
         XCTAssertEqual(
@@ -3477,7 +3477,7 @@ final class AppLogicTests: XCTestCase {
                     requestId: "req-choice", answer: "Yes, deploy", wasFreeform: false
                 )
             ),
-            .invalid
+            .conflict
         )
     }
 
@@ -3618,17 +3618,17 @@ final class AppLogicTests: XCTestCase {
         )
         try FileManager.default.removeItem(at: requestURL)
 
-        // Without a live Copilot session marker the switch cannot be bound.
+        // Without a live Copilot session marker the switch cannot be bound yet: try again.
         try FileManager.default.removeItem(at: markerURL)
         XCTAssertEqual(
             model.setModel(
                 sessionId: session.id,
                 selection: RemoteModelSelection(modelId: "gpt-5.4")
             ),
-            .invalid
+            .conflict
         )
 
-        // A stale heartbeat can no longer be switched.
+        // A stale heartbeat is too old to judge: try again.
         try Data("copilot-session".utf8).write(to: markerURL)
         try writeSnapshot(updatedAt: Date(timeIntervalSince1970: 0))
         XCTAssertEqual(
@@ -3636,7 +3636,7 @@ final class AppLogicTests: XCTestCase {
                 sessionId: session.id,
                 selection: RemoteModelSelection(modelId: "gpt-5.4")
             ),
-            .invalid
+            .conflict
         )
     }
 
@@ -3869,7 +3869,7 @@ final class AppLogicTests: XCTestCase {
                     ]
                 )
             ),
-            .invalid
+            .conflict
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
         try writeSnapshot(updatedAt: Date())
@@ -4137,17 +4137,17 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(writtenURLAccept["content"])
         try FileManager.default.removeItem(at: responseURL)
 
-        // A stale heartbeat can no longer be answered.
+        // A stale heartbeat is too old to judge: try again.
         try writeSnapshot(updatedAt: Date(timeIntervalSince1970: 0))
         XCTAssertEqual(
             model.answerElicitation(
                 sessionId: session.id,
                 answer: RemoteElicitationAnswer(requestId: "req-form", action: .cancel)
             ),
-            .invalid
+            .conflict
         )
 
-        // Without a live Copilot session marker the answer cannot be bound.
+        // Without a live Copilot session marker the answer cannot be bound yet: try again.
         try writeSnapshot(updatedAt: Date())
         try FileManager.default.removeItem(at: markerURL)
         XCTAssertEqual(
@@ -4155,7 +4155,7 @@ final class AppLogicTests: XCTestCase {
                 sessionId: session.id,
                 answer: RemoteElicitationAnswer(requestId: "req-form", action: .cancel)
             ),
-            .invalid
+            .conflict
         )
     }
 
