@@ -739,8 +739,9 @@ final class TranscriptReloadTests: XCTestCase {
         }
     }
 
-    /// SwiftUI measures text at widths it doesn't place it at. Afterwards the text has to be laid
-    /// out at its frame's width again, or it wraps narrower or wider than its frame.
+    /// AppKit measures text through intrinsicContentSize at the last width SwiftUI proposed, which
+    /// needn't be the width it placed the text at. Afterwards the text has to be laid out at its
+    /// frame's width again, or it wraps narrower or wider than its frame.
     @MainActor
     func testMeasuringMarkdownTextAtAnotherWidthLeavesItLaidOutAtItsFrame() throws {
         let textView = MarkdownSelectableTextView(frame: .zero)
@@ -762,11 +763,11 @@ final class TranscriptReloadTests: XCTestCase {
         }
     }
 
-    /// A long question in the full-width transcript was cut off part-way through. SwiftUI measures
-    /// the transcript at widths it doesn't place it at, and the full-width transcript follows each
-    /// one: its text stayed laid out at the last of them, narrower than its card, so its last lines
-    /// fell below its frame. The side drawer is always 420 pt wide, so every measurement there is at
-    /// the width it is placed at.
+    /// A long question in the full-width transcript was cut off part-way through. Its text was
+    /// measured at a width it wasn't placed at, and stayed laid out at that width: narrower than its
+    /// card, so its last lines fell below its frame. The full-width transcript takes every width
+    /// it's proposed; the side drawer is always 420 pt wide, so every measurement there is at the
+    /// width it is placed at.
     @MainActor
     func testTranscriptTextFitsItsFrameAfterBeingMeasuredAtOtherWidths() async throws {
         _ = NSApplication.shared
