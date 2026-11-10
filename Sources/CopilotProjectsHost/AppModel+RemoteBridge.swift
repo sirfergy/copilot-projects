@@ -713,7 +713,7 @@ extension AppModel {
     /// Built on every gateway poll, so time-dependent fields such as each
     /// workflow's `fresh` are judged at `promptNow`.
     func remoteWorkspaceSnapshot(now promptNow: Date = Date()) -> RemoteWorkspaceSnapshot {
-        let promptNowMs = SessionArtifacts.currentStatusTimestamp()
+        let promptNowMs = Int64(promptNow.timeIntervalSince1970 * 1_000)
         let promptLiveSessions = remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions
         let hosts = availableHosts
         let resolvedHostHealth = hostHealthProvider?() ?? hostHealth

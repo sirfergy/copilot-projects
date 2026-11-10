@@ -147,9 +147,9 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
     public let pendingMessages: [RemotePendingMessage]?
     /// Whether the Mac would act on this workflow, judged on its own clock each
     /// time it builds a remote snapshot. The gateway asks for one every couple
-    /// of seconds, so this turns false within a poll of the tracker going quiet.
-    /// A client offers `kind` when this is true and `admits(kind)` holds (and,
-    /// for a send, `sendReady`), with no clock arithmetic of its own. Absent
+    /// of seconds, so this turns false within a poll of the observation passing
+    /// `freshnessLimitMilliseconds`. Clients use it in place of their own age
+    /// check, alongside `admits(_:)` and each action's other conditions. Absent
     /// from older hosts; trackers never set it.
     public var fresh: Bool?
 

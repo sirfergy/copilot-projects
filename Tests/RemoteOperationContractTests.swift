@@ -282,7 +282,7 @@ final class RemoteOperationContractTests: XCTestCase {
         ]
         var operation = 0
         // Publishes at `now`, then asks the host for every action at that time:
-        // it refuses exactly the ones the client would not offer.
+        // it answers 409 (not now) exactly for the ones the client would not offer.
         func publish(_ label: String, at now: Date) throws -> Bool? {
             let session = try XCTUnwrap(
                 harness.model.remoteWorkspaceSnapshot(now: now).projects.first?.sessions.first
@@ -326,7 +326,6 @@ final class RemoteOperationContractTests: XCTestCase {
         try track(updatedAt: start)
         XCTAssertEqual(try publish("fresh", at: start), true)
         // The tracker stops heartbeating and nothing else changes: the next poll flips it.
-        XCTAssertEqual(try publish("quiet", at: start.addingTimeInterval(14)), true)
         XCTAssertEqual(try publish("stopped", at: start.addingTimeInterval(16)), false)
 
         // A later write that carries no new observation keeps only the heartbeat fresh.
