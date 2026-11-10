@@ -66,7 +66,7 @@ final class GracefulCloseTests: XCTestCase {
         let project = Project(name: "project", cwd: root.path, sessions: [session],
                               selectedSessionId: session.id)
         let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: nil))
         return (repository, project)
     }
 
