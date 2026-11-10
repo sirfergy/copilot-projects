@@ -13,7 +13,7 @@
       "workflow": {
         "version": 1, "observedAtMilliseconds": 1787788800000,
         "capabilities": ["session-send", "session-abort", "answer-session-budget", "image-attachments-v1"],
-        "sendReady": true, "limitsKnown": true,
+        "sendReady": true, "limitsKnown": true, "fresh": true,
         "agents": [], "schedules": []
       }
     }]
