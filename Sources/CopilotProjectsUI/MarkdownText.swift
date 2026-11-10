@@ -1071,15 +1071,8 @@ public struct MarkdownText: View, Equatable {
         case .thematicBreak:
             Divider()
                 .padding(.vertical, 2)
-        case .codeBlock:
-            SelectableMarkdownText(wraps: true, segment: segment)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    Self.containerBackgroundColor,
-                    in: RoundedRectangle(cornerRadius: 8)
-                )
+        case let .codeBlock(code):
+            MarkdownCodeBlockView(code: code)
         case .table:
             ScrollView(.horizontal, showsIndicators: false) {
                 SelectableMarkdownText(wraps: false, segment: segment)
@@ -1136,6 +1129,81 @@ public struct MarkdownText: View, Equatable {
         case .center: return .center
         case .trailing: return isRTL ? .left : .right
         }
+    }
+
+    fileprivate static func copyToPasteboard(_ string: String) {
+        #if canImport(UIKit) && !os(watchOS)
+        UIPasteboard.general.string = string
+        #elseif canImport(AppKit)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(string, forType: .string)
+        #endif
+    }
+}
+
+private struct MarkdownCodeBlockView: View {
+    let code: String
+    @State private var didCopy = false
+    @State private var isHoveringButton = false
+    @State private var resetTask: Task<Void, Never>?
+
+    var body: some View {
+        SelectableMarkdownText(wraps: true, segment: .codeBlock(code))
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 10)
+            .padding(.vertical, 10)
+            #if canImport(UIKit)
+            .padding(.trailing, 54)
+            .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+            #else
+            .padding(.trailing, 34)
+            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+            #endif
+            .overlay(alignment: .topTrailing) {
+                Button {
+                    MarkdownText.copyToPasteboard(code)
+                    didCopy = true
+                    resetTask?.cancel()
+                    resetTask = Task { @MainActor in
+                        try? await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(1_500)))
+                        guard !Task.isCancelled else { return }
+                        didCopy = false
+                    }
+                } label: {
+                    Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(didCopy ? Color.green : .secondary)
+                        #if canImport(UIKit)
+                        .frame(width: 44, height: 44)
+                        #else
+                        .frame(width: 24, height: 24)
+                        #endif
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.primary.opacity(isHoveringButton ? 0.08 : 0))
+                        )
+                        .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .onHover { isHoveringButton = $0 }
+                .padding(5)
+                .help(didCopy ? "Copied" : "Copy code")
+                .accessibilityLabel(didCopy ? "Copied" : "Copy code")
+                .accessibilityIdentifier("markdown-code-copy-button")
+            }
+            .background(
+                MarkdownText.containerBackgroundColor,
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .onChange(of: code) { _, _ in
+                resetTask?.cancel()
+                didCopy = false
+            }
+            .onDisappear {
+                resetTask?.cancel()
+                didCopy = false
+            }
     }
 }
 
