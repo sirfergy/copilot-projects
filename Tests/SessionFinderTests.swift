@@ -1,7 +1,17 @@
 import Foundation
+import SQLite3
 import XCTest
 import CopilotProjectsProtocol
 @testable import CopilotProjectsHost
+
+/// The bytes this process has written to files, which macOS's disk-writes report counts.
+private func logicalWrites() -> UInt64 {
+    var usage = rusage_info_v4()
+    _ = withUnsafeMutablePointer(to: &usage) {
+        $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0) }
+    }
+    return usage.ri_logical_writes
+}
 
 final class SessionFinderTests: XCTestCase {
     private func source(
@@ -369,15 +379,18 @@ final class SessionFinderTests: XCTestCase {
 
     func testSearchHistorySnapshotsDatabaseIntoIsolatedHomeAndRemovesIt() async throws {
         let targetId = "59ff5130-adeb-4f0d-b713-d12e7a729c7e"
+        let recentId = "7b1e2a44-9c0d-4e21-8f5a-3d6c1b2a9e10"
         let (ranker, root) = try fakeCopilot("""
         test -z "$COPILOT_PROJECTS_SESSION" || { echo leaked >&2; exit 3; }
         case "$*" in
           *--available-tools=session_store_sql,sql*) ;;
           *) echo missing-tools-flag >&2; exit 5 ;;
         esac
-        test -s "$COPILOT_HOME/session-store.db" || { echo missing-db >&2; exit 4; }
-        copied_id=$(/usr/bin/sqlite3 "$COPILOT_HOME/session-store.db" "SELECT id FROM sessions LIMIT 1")
-        [ "$copied_id" = "\(targetId)" ] || { echo "wrong-db-contents:$copied_id" >&2; exit 6; }
+        store="$COPILOT_HOME/session-store.db"
+        test -s "$store" || { echo missing-db >&2; exit 4; }
+        copied=$(/usr/bin/sqlite3 "$store" "SELECT count(*) FROM sessions WHERE id IN ('\(targetId)', '\(recentId)')")
+        [ "$copied" = 2 ] || { echo "wrong-db-contents:$copied" >&2; exit 6; }
+        /usr/bin/sqlite3 "$store" "INSERT INTO sessions (id, cwd) VALUES ('this-run', '')" || exit 7
         mkdir -p "$COPILOT_HOME/session-state/temp-finder-session"
         echo '{"type":"assistant.message","data":{"content":"{\\"matches\\":[{\\"id\\":\\"\(targetId)\\",\\"reason\\":\\"fixed the beachball issue\\"}]}"}}'
         """)
@@ -389,6 +402,20 @@ final class SessionFinderTests: XCTestCase {
             name: "Fix Beachball Issue",
             transcript: #"{"type":"user.message","data":{"content":"beachball"}}"#
         )
+        // A running CLI session keeps the store open, so its latest commit is only in the log.
+        let store = userHome.appendingPathComponent("session-store.db")
+        let log = URL(fileURLWithPath: store.path + "-wal")
+        var running: OpaquePointer?
+        defer { sqlite3_close(running) }
+        XCTAssertEqual(sqlite3_open(store.path, &running), SQLITE_OK)
+        XCTAssertEqual(
+            sqlite3_exec(
+                running, "PRAGMA journal_mode=WAL; INSERT INTO sessions (id, cwd) VALUES ('\(recentId)', '')", nil, nil, nil
+            ),
+            SQLITE_OK
+        )
+        let userStore = try [Data(contentsOf: store), Data(contentsOf: log)]
+        XCTAssertNil(userStore[0].range(of: Data(recentId.utf8)), "The recent session must be only in the log")
 
         let matches = try await ranker.searchHistory(
             query: "beachball",
@@ -405,10 +432,38 @@ final class SessionFinderTests: XCTestCase {
             ]
         )
         XCTAssertEqual(
+            try [Data(contentsOf: store), Data(contentsOf: log)], userStore,
+            "The search, and the session the CLI records for it, must never write the user's store"
+        )
+        XCTAssertEqual(
             try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("runs").path),
             [],
             "The temporary COPILOT_HOME and the session opened to search history must be removed on completion"
         )
+    }
+
+    func testSnapshottingTheStoreClonesItRatherThanWritingACopy() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CopilotHomeFixture(root: root).store.databasePath
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(store, &database), SQLITE_OK)
+        XCTAssertEqual(
+            sqlite3_exec(
+                database, "INSERT INTO sessions (id, summary) VALUES ('large', hex(zeroblob(4 << 20)))", nil, nil, nil
+            ),
+            SQLITE_OK
+        )
+        sqlite3_close(database)
+        let size = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: store)[.size] as? UInt64)
+        XCTAssertGreaterThan(size, 8 << 20)
+
+        let written = logicalWrites()
+        try LunaSessionRanker.cloneSessionStoreDatabase(
+            from: store, to: root.appendingPathComponent("snapshot.db").path
+        )
+
+        XCTAssertLessThan(logicalWrites() - written, size / 8, "A copy writes the whole store on every search")
     }
 
     func testRankReportsSignInAndOtherFailures() async throws {
