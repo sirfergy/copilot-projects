@@ -259,6 +259,94 @@ final class RemoteOperationContractTests: XCTestCase {
         XCTAssertEqual(session.operationReceipts, [])
     }
 
+    /// What a client offers from a served session, with no clock of its own.
+    private func offers(_ session: RemoteSessionSnapshot, _ kind: RemoteSessionActionKind) -> Bool {
+        guard session.operationSupport == .receipts, session.conversationEpoch != nil,
+              let workflow = session.workflow, workflow.fresh == true,
+              workflow.admits(kind) else { return false }
+        return kind != .send || workflow.sendReady
+    }
+
+    @MainActor
+    func testWorkspacePublishesWhetherTheHostWouldTakeEachActionNow() throws {
+        let harness = try makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        try writeMarker("sdk-session", to: harness)
+        let start = Date()
+        let actions = [
+            RemoteSessionAction(kind: .send, prompt: "hello", mode: .immediate),
+            RemoteSessionAction(kind: .abort),
+            RemoteSessionAction(kind: .bounce),
+            RemoteSessionAction(kind: .setBudget),
+            RemoteSessionAction(kind: .answerBudget, requestId: "budget"),
+        ]
+        var operation = 0
+        // Publishes at `now`, then asks the host for every action at that time:
+        // it answers 409 (not now) exactly for the ones the client would not offer.
+        func publish(_ label: String, at now: Date) throws -> Bool? {
+            let session = try XCTUnwrap(
+                harness.model.remoteWorkspaceSnapshot(now: now).projects.first?.sessions.first
+            )
+            for action in actions {
+                operation += 1
+                let answer = harness.model.performSessionAction(
+                    sessionId: harness.session.id, action: action,
+                    operation: CLIOperationRequest(operationId: "op-\(operation)", conversationEpoch: "epoch-1"),
+                    now: now
+                )
+                XCTAssertEqual(offers(session, action.kind), answer != .conflict, "\(label): \(action.kind)")
+                try? FileManager.default.removeItem(at: harness.sessions.appendingPathComponent(
+                    "\(harness.session.id).\(action.kind.rawValue).json"
+                ))
+            }
+            return session.workflow?.fresh
+        }
+        func track(
+            updatedAt: Date,
+            sendReady: Bool = true,
+            bounceRequested: Bool = false,
+            userInputs: [TrackedUserInput]? = nil
+        ) throws {
+            var tracked = snapshot(
+                at: updatedAt, userInputs: userInputs, copilotSessionId: "sdk-session",
+                conversationEpoch: "epoch-1", operationReceiptVersion: 1, operationReceipts: []
+            )
+            tracked.workflow = RemoteSessionWorkflow(
+                observedAtMilliseconds: Int64(start.timeIntervalSince1970 * 1_000),
+                capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+                sendReady: sendReady, bounceRequested: bounceRequested, limitsKnown: true
+            )
+            try JSONEncoder().encode(tracked).write(
+                to: harness.sessions.appendingPathComponent("\(harness.session.id).agent-activity.json"),
+                options: .atomic
+            )
+            harness.model.refreshAgentActivitySnapshots(now: updatedAt)
+        }
+
+        try track(updatedAt: start)
+        XCTAssertEqual(try publish("fresh", at: start), true)
+        // The tracker stops heartbeating and nothing else changes: the next poll flips it.
+        XCTAssertEqual(try publish("stopped", at: start.addingTimeInterval(16)), false)
+
+        // A later write that carries no new observation keeps only the heartbeat fresh.
+        try track(updatedAt: start.addingTimeInterval(10))
+        XCTAssertEqual(try publish("old observation", at: start.addingTimeInterval(16)), false)
+
+        // As the tracker publishes them: no send while a question waits or a bounce is pending.
+        let question = TrackedUserInput(
+            requestId: "question", question: "Continue?", choices: [], allowFreeform: true,
+            requestedAt: start.ISO8601Format(), agentId: nil
+        )
+        try track(updatedAt: start, sendReady: false, userInputs: [question])
+        XCTAssertEqual(try publish("question", at: start), true)
+        try track(updatedAt: start, sendReady: false, bounceRequested: true)
+        XCTAssertEqual(try publish("bounce requested", at: start), true)
+
+        try track(updatedAt: start)
+        harness.model.projects[0].sessions[0].parked = ParkedSession(state: .failed, sinceMilliseconds: 1)
+        XCTAssertNil(try publish("parked", at: start))
+    }
+
     @MainActor
     func testSDKOperationsRefuseAMissingIdentityAndWriteCorrelatedMetadata() throws {
         let harness = try makeHarness()

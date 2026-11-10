@@ -164,6 +164,7 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertEqual(snapshot.servedAtMilliseconds, 1_787_788_802_500)
         let workflow = try XCTUnwrap(snapshot.projects.first?.sessions.first?.workflow)
         XCTAssertEqual(workflow.observedAtMilliseconds, 1_787_788_800_000)
+        XCTAssertEqual(workflow.fresh, true)
         XCTAssertEqual(
             try JSONDecoder().decode(RemoteWorkspaceSnapshot.self, from: JSONEncoder().encode(snapshot)),
             snapshot

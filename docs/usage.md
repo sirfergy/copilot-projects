@@ -229,6 +229,15 @@ workspace snapshot carries `servedAtMilliseconds` (the Mac's clock when it was
 served), clients age the evidence from that time plus their own monotonic time
 since receipt, so Mac and phone clocks never need to agree; without it, they
 compare wall clocks.
+The Mac also judges this itself every time it builds a snapshot for a client
+(each gateway poll, every two seconds) and publishes the answer as the workflow's
+`fresh`, which turns false within a poll of the evidence passing 15 seconds. It
+makes the same judgement before taking any session action, so clients can use
+`fresh` instead of aging the evidence: offer an action when `fresh` is true, the
+session's `operationSupport` is `receipts`, and `admits(kind)` holds (the
+capability is listed, no bounce is pending, and for a bounce `bounceRequested`
+is explicitly false). Each action's own conditions still apply, such as
+`sendReady` for a send.
 A session whose workflow state is missing, stale, or unsupported offers no composer
 send: a message is never typed into the terminal on the composer's behalf, and
 clients say to use Terminal instead. Raw terminal input is independent of these checks.

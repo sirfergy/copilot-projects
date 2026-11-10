@@ -3097,12 +3097,12 @@ final class AppModel: ObservableObject {
             source: source
         ) else { return }
         projectStorage[loc.p].sessions[loc.s].statusIsRuntimeDerived = false
+        // Every tool hook advances this clock. Saving state.json for each one made macOS
+        // report excessive disk writes, so the next save records it, at the latest on quit.
         if status != .idle,
            projectStorage[loc.p].sessions[loc.s].runningStartedAtMilliseconds != nil,
-           let timestamp,
-           projectStorage[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds != timestamp {
+           let timestamp {
             projectStorage[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = timestamp
-            scheduleSave()
         }
         withCoalescedProjectPublications {
         if status == .waiting {
