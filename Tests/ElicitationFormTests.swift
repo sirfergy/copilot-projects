@@ -87,6 +87,20 @@ final class ElicitationFormTests: XCTestCase {
         XCTAssertNil(form(id: "synthetic::durable-ask-user::tool-call"))
     }
 
+    func testANumbersRangeAndAStringsFormatArePublishedAsTheSchemaGivesThem() throws {
+        let parsed = try XCTUnwrap(form(#"""
+        {"properties":{
+          "count":{"type":"integer","minimum":-2},
+          "note":{"type":"string"},
+          "ratio":{"type":"number","maximum":0.5},
+          "when":{"type":"string","format":"date"}}}
+        """#))
+        XCTAssertEqual(parsed.fields.map(\.key), ["count", "note", "ratio", "when"])
+        XCTAssertEqual(parsed.fields.map(\.minimum), [-2, nil, nil, nil])
+        XCTAssertEqual(parsed.fields.map(\.maximum), [nil, nil, 0.5, nil])
+        XCTAssertEqual(parsed.fields.map(\.format), [nil, nil, nil, "date"])
+    }
+
     func testASchemaOutsideTheSubsetGetsNoForm() throws {
         func properties(_ count: Int) -> String {
             let fields = (1...count).map { #""f\#($0)":{"type":"string"}"# }.joined(separator: ",")

@@ -18,9 +18,9 @@ public struct RemoteElicitationForm: Codable, Equatable, Sendable {
             /// Any of `choices`, from `minItems` to `maxItems` of them.
             case multiChoice
             case boolean
-            /// A number, whole when `integer` is true.
+            /// A number from `minimum` to `maximum`, whole when `integer` is true.
             case number
-            /// Text of `minLength` to `maxLength` code points.
+            /// Text of `minLength` to `maxLength` code points, in `format` when set.
             case string
         }
 
@@ -36,14 +36,18 @@ public struct RemoteElicitationForm: Codable, Equatable, Sendable {
         public fileprivate(set) var minItems: Int?
         public fileprivate(set) var maxItems: Int?
         public fileprivate(set) var integer: Bool?
+        public fileprivate(set) var minimum: Double?
+        public fileprivate(set) var maximum: Double?
         public fileprivate(set) var minLength: Int?
         public fileprivate(set) var maxLength: Int?
+        /// The schema's `format`, as the agent wrote it.
+        public fileprivate(set) var format: String?
 
         public var id: String { key }
 
         private enum CodingKeys: String, CodingKey {
             case key, title, description, required, defaultValue = "default", kind, choices
-            case minItems, maxItems, integer, minLength, maxLength
+            case minItems, maxItems, integer, minimum, maximum, minLength, maxLength, format
         }
     }
 
@@ -68,8 +72,7 @@ extension RemoteElicitationForm {
         "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
     ]
     /// The constraints each type takes. One on a field of another type, or on a
-    /// choice, contradicts the schema. The Mac checks a number's range and a
-    /// string's format when it is answered; the form doesn't carry them.
+    /// choice, contradicts the schema.
     private static let constraints: [String: Set<String>] = [
         "string": ["minLength", "maxLength", "format"],
         "number": ["minimum", "maximum"],
@@ -162,16 +165,18 @@ extension RemoteElicitationForm {
         case "boolean":
             return answered(.boolean)
         case "integer", "number":
-            guard bounds(prop, "minimum", "maximum", finiteNumber) != nil else { return nil }
+            guard let range = bounds(prop, "minimum", "maximum", finiteNumber) else { return nil }
             var field = answered(.number)
             field.integer = type == "integer" ? true : nil
+            (field.minimum, field.maximum) = range
             return field
         case "string":
-            if let format = prop["format"] {
-                guard case .string = format else { return nil }
-            }
             guard let length = bounds(prop, "minLength", "maxLength", nonNegativeInt) else { return nil }
             var field = answered(.string)
+            if let format = prop["format"] {
+                guard case let .string(name) = format else { return nil }
+                field.format = name
+            }
             (field.minLength, field.maxLength) = length
             return field
         case "array":

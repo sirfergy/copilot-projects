@@ -670,15 +670,15 @@ schema gives none), `description` when there is one, `required`, the schema's
 | `choice` | one `choices` value | `choices`, each a `value` and the `title` to show |
 | `multiChoice` | an array of `choices` values | `choices`, `minItems`, `maxItems` |
 | `boolean` | `true` or `false` | |
-| `number` | a number | `integer` when it must be whole |
-| `string` | text | `minLength` and `maxLength` in code points |
+| `number` | a number | `integer` when it must be whole, `minimum`, `maximum` |
+| `string` | text | `minLength` and `maxLength` in code points, `format` |
 
 `form.allowsFreeformChoices` says the Mac also accepts typed text: any non-blank
 text for a `choice` or `boolean`, and one typed entry in a `multiChoice`. Clients
 render the fields with their own controls and apply no schema rule of their own.
-The Mac checks every answer against the agent's schema, whatever the client
-checked. That includes a number's range and a string's format, which the form
-doesn't carry.
+`format` is the schema's own value: the Mac checks `email`, `uri`, `date` and
+`date-time`, and accepts any text for another. The Mac checks every answer
+against the agent's schema, whatever the client checked.
 
 #### Remote park session
 
