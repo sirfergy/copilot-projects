@@ -430,7 +430,7 @@ final class RemoteOperationContractTests: XCTestCase {
                 operation: operation,
                 now: now
             ),
-            .invalid
+            .conflict
         )
 
         try write(snapshot(
@@ -447,7 +447,7 @@ final class RemoteOperationContractTests: XCTestCase {
                 operation: operation,
                 now: now
             ),
-            .conflict
+            .epochMismatch
         )
 
         try write(snapshot(
@@ -464,7 +464,7 @@ final class RemoteOperationContractTests: XCTestCase {
                 operation: operation,
                 now: now
             ),
-            .conflict
+            .epochMismatch
         )
 
         try write(snapshot(
@@ -480,7 +480,7 @@ final class RemoteOperationContractTests: XCTestCase {
                 operation: operation,
                 now: now
             ),
-            .invalid
+            .conflict
         )
     }
 
@@ -548,6 +548,83 @@ final class RemoteOperationContractTests: XCTestCase {
         )
     }
 
+    /// A client whose reply is lost resends the same identity until it gets an
+    /// answer other than 409. Each retry here is one the readiness gates alone refuse.
+    @MainActor
+    func testSessionSendRetryWithTheSameIdentityGetsTheFirstAnswer() throws {
+        let harness = try makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        let now = Date()
+        let stale = now.addingTimeInterval(30)
+        let prompt = RemoteSessionAction(kind: .send, prompt: "hello", mode: .enqueue)
+        let changed = RemoteSessionAction(kind: .send, prompt: "goodbye", mode: .enqueue)
+        let first = CLIOperationRequest(operationId: "send-1", conversationEpoch: "epoch-1")
+        let second = CLIOperationRequest(operationId: "send-2", conversationEpoch: "epoch-1")
+        let handoffURL = harness.sessions.appendingPathComponent(
+            "\(harness.session.id).session-send.json"
+        )
+        func tracker(
+            epoch: String = "epoch-1",
+            error: String? = nil,
+            receipts: [TrackedOperationReceipt] = []
+        ) -> AgentActivitySnapshot {
+            var value = snapshot(
+                at: now, error: error, copilotSessionId: "sdk-session", conversationEpoch: epoch,
+                operationReceiptVersion: 1, operationReceipts: receipts
+            )
+            value.workflow = RemoteSessionWorkflow(
+                observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+                capabilities: [RemoteSessionActionKind.send.rawValue], sendReady: true
+            )
+            return value
+        }
+        @MainActor func send(
+            _ action: RemoteSessionAction, _ operation: CLIOperationRequest, at date: Date
+        ) -> RemoteUserInputResult {
+            harness.model.performSessionAction(
+                sessionId: harness.session.id, action: action, operation: operation, now: date
+            )
+        }
+        try writeMarker("sdk-session", to: harness)
+        try write(tracker(), to: harness)
+
+        // The reply is lost after the handoff is written, and by the retry the
+        // tracker's snapshot is too old to judge. The one handoff stays as it was.
+        XCTAssertEqual(send(prompt, first, at: now), .accepted)
+        let written = try Data(contentsOf: handoffURL)
+        XCTAssertEqual(send(prompt, first, at: stale), .accepted)
+        XCTAssertEqual(send(changed, first, at: now), .conflict)
+        XCTAssertEqual(try Data(contentsOf: handoffURL), written)
+
+        // The tracker takes the handoff and publishes its receipt, then loses its CLI.
+        try FileManager.default.removeItem(at: handoffURL)
+        try write(tracker(error: "Connection is closed", receipts: [TrackedOperationReceipt(
+            operationId: first.operationId,
+            conversationEpoch: first.conversationEpoch,
+            kind: CLISDKOperationKind.sessionSend.rawValue,
+            state: .applied,
+            updatedAtMilliseconds: 10,
+            errorCode: nil,
+            payloadFingerprint: CLIOperationAdapter.payloadFingerprint(kind: .sessionSend, payload: prompt)
+        )]), to: harness)
+        XCTAssertEqual(send(prompt, first, at: now), .accepted)
+        XCTAssertEqual(send(prompt, first, at: stale), .accepted)
+        XCTAssertEqual(send(changed, first, at: now), .conflict)
+        // A send that never landed, retried while the tracker is gone: try again.
+        XCTAssertEqual(send(prompt, second, at: now), .conflict)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL.path))
+
+        // A new snapshot that is already too old to judge: try again, not 422.
+        try write(tracker(), to: harness)
+        XCTAssertEqual(send(prompt, second, at: stale), .conflict)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL.path))
+
+        // `/new` clears the receipts and names a new epoch: final for both.
+        try write(tracker(epoch: "epoch-2"), to: harness)
+        XCTAssertEqual(send(prompt, first, at: now), .epochMismatch)
+        XCTAssertEqual(send(prompt, second, at: now), .epochMismatch)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL.path))
+    }
 
     @MainActor
     func testSyntheticTerminalDefaultRejectsReceiptModeWithoutInvokingTerminal() throws {

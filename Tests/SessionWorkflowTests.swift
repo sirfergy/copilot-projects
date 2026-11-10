@@ -143,11 +143,11 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: sessions.appendingPathComponent("\(session.id).session-send.json").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: sessions.appendingPathComponent("\(session.id).session-abort.json").path))
         XCTAssertEqual(model.performSessionAction(sessionId: session.id, action: stop, operation: sendID), .conflict)
+        try FileManager.default.removeItem(at: sessions.appendingPathComponent("\(session.id).session-send.json"))
         XCTAssertEqual(model.performSessionAction(
             sessionId: session.id, action: send,
             operation: CLIOperationRequest(operationId: "old", conversationEpoch: "epoch-0")
-        ), .conflict)
-        try FileManager.default.removeItem(at: sessions.appendingPathComponent("\(session.id).session-send.json"))
+        ), .epochMismatch)
         let bounce = RemoteSessionAction(kind: .bounce)
         let bounceID = CLIOperationRequest(operationId: "bounce", conversationEpoch: "epoch-1")
         XCTAssertEqual(model.performSessionAction(
@@ -209,7 +209,7 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertEqual(model.performSessionAction(
             sessionId: session.id, action: send,
             operation: CLIOperationRequest(operationId: "blocked", conversationEpoch: "epoch-1")
-        ), .invalid)
+        ), .conflict)
 
         // Verify host attachment admission in performSessionAction for text-only and mixed sends.
         snapshot.pendingPermissionRequestIds = []

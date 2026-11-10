@@ -175,8 +175,25 @@ conversation, without a time limit, so a mobile client can recover a missed
 confirmation after reconnecting or restarting its app. This history ends when
 the Copilot conversation or tracker process changes, and older receipts can be
 evicted by later operations. An unavailable receipt remains an unknown outcome,
-not permission to resend. Updating the tracker cannot recover receipts that
-already expired; check the conversation before discarding a stuck queued copy.
+not permission to send it again as a new operation. Updating the tracker cannot
+recover receipts that already expired; check the conversation before discarding a
+stuck queued copy.
+
+A client whose reply was lost may resend an operation with the same operation
+identity and conversation epoch. The host answers a resend of an operation it has
+already taken, by its receipt or its pending handoff, as it answered the first,
+whatever the session's state is now:
+
+| Status | Meaning | Client |
+| --- | --- | --- |
+| 204 | Taken, now or by an earlier attempt | Follow its receipt |
+| 409 | Not now: another operation holds the slot, the session isn't ready to take it, or its tracker state is too old to judge | Resend the same identity |
+| 412 | The conversation it names has ended (`/new`, a tracker restart, another Copilot session) | Stop; its outcome is unknown |
+| 422 | Not taken: a bad payload, a question or model that's gone, or a bounce while Copilot is busy | Stop |
+| 400, 403 | Malformed or without an identity; another device holds control | Stop |
+
+409 also answers an identity reused for a different payload, which a resend never
+is. A resend after its receipt has been evicted is taken as a new operation.
 
 The session drawer and native/web conversation views render live response updates
 within their conversation turns. Final messages replace their matching streamed text.

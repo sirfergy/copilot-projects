@@ -177,6 +177,17 @@ final class SessionParkingTests: XCTestCase {
                 sessionId: id, action: self.send,
                 operation: CLIOperationRequest(operationId: "send", conversationEpoch: "epoch-1")
             ), .conflict)
+            // A retry of a send the tracker already took still gets its first answer.
+            let sent = CLIOperationRequest(operationId: "sent", conversationEpoch: "epoch-1")
+            try f.publish {
+                $0.operationReceipts = [TrackedOperationReceipt(
+                    operationId: sent.operationId, conversationEpoch: sent.conversationEpoch,
+                    kind: CLISDKOperationKind.sessionSend.rawValue, state: .applied,
+                    updatedAtMilliseconds: 1,
+                    payloadFingerprint: CLIOperationAdapter.payloadFingerprint(kind: .sessionSend, payload: self.send)
+                )]
+            }
+            XCTAssertEqual(f.model.performSessionAction(sessionId: id, action: self.send, operation: sent), .accepted)
             XCTAssertNil(try f.wire.workflow)
             XCTAssertEqual(f.processes.stops, [])
             XCTAssertEqual(f.processes.started, [], "input during parking must not start a resume")
