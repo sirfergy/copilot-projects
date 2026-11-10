@@ -88,7 +88,7 @@ struct LunaSessionRanker: SessionRanking, SessionHistorySearching {
         try Task.checkCancellation()
         let home = try prepareRunHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        try Self.copySessionStoreDatabase(
+        try Self.cloneSessionStoreDatabase(
             from: sourceDB.path,
             to: home.appendingPathComponent("session-store.db").path
         )
@@ -230,9 +230,17 @@ struct LunaSessionRanker: SessionRanking, SessionHistorySearching {
     }
 
     /// Snapshots `sourcePath` (opened strictly read-only) into a writable SQLite
-    /// database at `destinationPath` so the isolated CLI run can query — and, if
-    /// needed, migrate — its disposable copy without touching the user's store.
-    static func copySessionStoreDatabase(from sourcePath: String, to destinationPath: String) throws {
+    /// database at `destinationPath` so the isolated CLI run can query its disposable
+    /// copy, and record its own session there, without touching the user's store. The
+    /// database and its write-ahead log are cloned (APFS copy-on-write), not copied:
+    /// copying wrote the whole 2 GB store on every search.
+    ///
+    /// The read transaction makes the two clones one consistent snapshot. While it is
+    /// open, a checkpoint can only move frames into the database that are still in the
+    /// log when the log is cloned, so opening the pair recovers the log's last commit,
+    /// as after a crash. Cloned without it beside a process that commits and
+    /// checkpoints, 184 of 728 snapshots were inconsistent; with it, none of 911.
+    static func cloneSessionStoreDatabase(from sourcePath: String, to destinationPath: String) throws {
         var sourceDB: OpaquePointer?
         let sourceURI = URL(fileURLWithPath: sourcePath).absoluteString + "?mode=ro"
         guard sqlite3_open_v2(sourceURI, &sourceDB, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK,
@@ -243,30 +251,14 @@ struct LunaSessionRanker: SessionRanking, SessionHistorySearching {
         }
         defer { sqlite3_close(sourceDB) }
         sqlite3_busy_timeout(sourceDB, 250)
-
-        var destinationDB: OpaquePointer?
-        guard sqlite3_open_v2(
-            destinationPath,
-            &destinationDB,
-            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
-            nil
-        ) == SQLITE_OK, let destinationDB else {
-            let detail = destinationDB.flatMap { sqlite3_errmsg($0) }.map { String(cString: $0) } ?? "open copy failed"
-            sqlite3_close(destinationDB)
-            throw LunaSearchError.failed(detail)
+        guard sqlite3_exec(sourceDB, "BEGIN; SELECT count(*) FROM sqlite_master", nil, nil, nil) == SQLITE_OK else {
+            throw LunaSearchError.failed(sqlite3_errmsg(sourceDB).map { String(cString: $0) } ?? "read failed")
         }
-        defer { sqlite3_close(destinationDB) }
-        sqlite3_busy_timeout(destinationDB, 250)
-
-        guard let backup = sqlite3_backup_init(destinationDB, "main", sourceDB, "main") else {
-            let detail = sqlite3_errmsg(destinationDB).map { String(cString: $0) } ?? "backup init failed"
-            throw LunaSearchError.failed(detail)
-        }
-        let stepResult = sqlite3_backup_step(backup, -1)
-        let finishResult = sqlite3_backup_finish(backup)
-        guard stepResult == SQLITE_DONE, finishResult == SQLITE_OK else {
-            let detail = sqlite3_errmsg(destinationDB).map { String(cString: $0) } ?? "backup failed"
-            throw LunaSearchError.failed(detail)
+        // A store in rollback-journal mode has no log, and cloning one fails with ENOENT.
+        for suffix in ["", "-wal"] where suffix.isEmpty || FileManager.default.fileExists(atPath: sourcePath + suffix) {
+            guard clonefile(sourcePath + suffix, destinationPath + suffix, 0) == 0 else {
+                throw LunaSearchError.failed(String(cString: strerror(errno)))
+            }
         }
     }
 
