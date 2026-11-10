@@ -203,7 +203,7 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
     }
 
     /// Whether this workflow takes `kind`, freshness aside: the tracker offers
-    /// it and no bounce is pending.
+    /// it and no bounce is pending, and for a bounce says so explicitly.
     public func admits(_ kind: RemoteSessionActionKind) -> Bool {
         capabilities.contains(kind.rawValue)
             && bounceRequested != true && (kind != .bounce || bounceRequested == false)

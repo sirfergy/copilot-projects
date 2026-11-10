@@ -232,8 +232,8 @@ compare wall clocks.
 The Mac also judges this itself every time it builds a snapshot for a client
 (each gateway poll, every two seconds) and publishes the answer as the workflow's
 `fresh`, which turns false within a poll of the evidence passing 15 seconds. It
-makes the same judgement before taking any action, so clients can use `fresh`
-instead of aging the evidence: offer an action when `fresh` is true, the
+makes the same judgement before taking any session action, so clients can use
+`fresh` instead of aging the evidence: offer an action when `fresh` is true, the
 session's `operationSupport` is `receipts`, and `admits(kind)` holds (the
 capability is listed, no bounce is pending, and for a bounce `bounceRequested`
 is explicitly false). Each action's own conditions still apply, such as
