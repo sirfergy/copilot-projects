@@ -165,7 +165,8 @@ unsupported CLI versions.
 Native actions retain the writer lease, conversation identity, and SDK operation
 receipt checks. HTTP acceptance is not completion. A send's `applied` receipt
 means Copilot accepted the message, not that it finished the task. Unknown
-outcomes are never automatically resubmitted or downgraded to terminal input.
+outcomes are never automatically resubmitted as a new operation or downgraded to
+terminal input.
 The web queue removes the confirmed message when its receipt arrives, without
 another click or session switch; messages still awaiting confirmation stay visible.
 Stop has its own handoff lane, so an unresolved send cannot block cancellation.
@@ -190,7 +191,7 @@ back a resend answers 409, and then 412:
 | 204 | Taken, now or by an earlier attempt | Follow its receipt |
 | 409 | Not now: another operation holds the slot, the session isn't ready to take it, or its tracker state is too old to judge | Resend the same identity |
 | 412 | The conversation it names has ended (`/new`, a tracker restart, another Copilot session) | Stop; its outcome is unknown |
-| 422 | Not taken: a bad payload, a question or model that's gone, or a bounce while Copilot is busy | Stop |
+| 422 | Not taken, for example a bad payload, a question or model that's gone, or a bounce while Copilot is busy | Stop |
 | 400, 403 | Malformed or without an identity; another device holds control | Stop |
 
 409 also answers an identity reused for a different payload, which a resend never
