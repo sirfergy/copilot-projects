@@ -94,9 +94,9 @@ final class ForegroundActivityTests: XCTestCase {
             )
         }
 
-        func publish(_ snapshot: AgentActivitySnapshot, to target: AppModel? = nil) throws {
+        func publish(_ snapshot: AgentActivitySnapshot, to target: AppModel? = nil, now: Date = Date()) throws {
             try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
-            (target ?? model).refreshAgentActivitySnapshots()
+            (target ?? model).refreshAgentActivitySnapshots(now: now)
         }
 
         func beginWait(sender: String, timestamp: Int64, kind: StatusNotificationKind? = .permission) throws {
@@ -695,6 +695,50 @@ final class ForegroundActivityTests: XCTestCase {
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .idle)
         XCTAssertEqual(fixture.model.remoteWorkspaceSnapshot().projects[0].sessions[0].promptable, true)
         XCTAssertEqual(try JSONDecoder().decode(SessionStatusRecord.self, from: Data(contentsOf: recordURL)), record)
+    }
+
+    /// The tracker reports turn starts and ends too. With about 20 busy sessions, saving
+    /// each one kept state.json over macOS's disk-write limit on Nov 10.
+    @MainActor
+    func testRuntimeDetectedTurnsDoNotWriteWorkspaceState() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let session = { fixture.model.projects[0].sessions[0] }
+        func stateFile() throws -> NSNumber? {
+            try FileManager.default.attributesOfItem(atPath: fixture.repository.path.path)[.systemFileNumber]
+                as? NSNumber
+        }
+        let untouched = try stateFile()
+        // The snapshots carry the fixture's time, so the scans are judged at it too.
+        let now = fixture.base.addingTimeInterval(1)
+
+        var working = fixture.snapshot(processing: true, background: false)
+        try fixture.publish(working, now: now)
+        let start = try XCTUnwrap(session().runningStartedAtMilliseconds)
+        // The next scan records which request the start belongs to.
+        working.currentIntent = "Running tests"
+        try fixture.publish(working, now: now)
+        XCTAssertNotNil(session().runningRequestIdentity)
+        XCTAssertEqual(try stateFile(), untouched)
+
+        // Quitting saves the timer. A hook that fires while the app is down moves the status
+        // record on, and the tracker's request identity still keeps the turn's start.
+        fixture.model.save()
+        XCTAssertTrue(SessionArtifacts.persistStatus(
+            sessionId: fixture.session.id, status: .running, timestamp: fixture.baseMs + 500,
+            promptStatusTimestamp: fixture.baseMs + 500, sessionsDirectory: fixture.directory))
+        let relaunched = AppModel(
+            stateRepository: fixture.repository,
+            isAppActive: { false },
+            agentActivityDirectory: fixture.directory,
+            resumeMarkerDirectory: fixture.directory)
+        XCTAssertEqual(relaunched.projects[0].sessions[0].runningStartedAtMilliseconds, start)
+
+        let saved = try stateFile()
+        try fixture.publish(fixture.snapshot(background: false), now: now)
+        XCTAssertEqual(session().status, .idle)
+        XCTAssertNil(session().runningStartedAtMilliseconds)
+        XCTAssertEqual(try stateFile(), saved)
     }
 
     @MainActor

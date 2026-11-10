@@ -171,10 +171,7 @@ extension AppModel {
             }
             dismissAnsweredQuestionNotifications(now: now)
             syncSessionWorkingModels(now: now)
-            if changed {
-                save()
-                updateDockBadge()
-            }
+            if changed { updateDockBadge() }
         }
     }
 
@@ -480,13 +477,11 @@ extension AppModel {
                     if nextProjects[pi].sessions[si].runningStartedAtMilliseconds == nil || isNewRequest {
                         nextProjects[pi].sessions[si].runningStartedAtMilliseconds = transitionMs
                         activityChanged = true
-                        startingPromptChanged = true
                     }
                     if let identity,
                        existingIdentity == nil || isNewRequest,
                        transitionMs >= (nextProjects[pi].sessions[si].runningStartedAtMilliseconds ?? .min) {
                         nextProjects[pi].sessions[si].runningRequestIdentity = identity
-                        startingPromptChanged = true
                     }
                 }
 

@@ -1063,9 +1063,11 @@ final class AppModelTests: XCTestCase {
             )
             XCTAssertEqual(remotePostWait.runningStartedAtMilliseconds, nextTurnStartMs)
 
-            // Relaunching after an off-host tool hook (where statusTimestamp advances in .status-record.json
-            // while the active snapshot's idleGeneration is unchanged) preserves the original request start,
-            // and timestamp-less status transitions persist clocks.status so relaunch preserves the start too.
+            // Quitting saves the timer. Relaunching after an off-host tool hook (where statusTimestamp
+            // advances in .status-record.json while the active snapshot's idleGeneration is unchanged)
+            // preserves the original request start, and timestamp-less status transitions record
+            // clocks.status so relaunch preserves the start too.
+            model.save()
             SessionArtifacts.persistStatus(
                 sessionId: s1.id,
                 status: .running,
@@ -1103,6 +1105,7 @@ final class AppModelTests: XCTestCase {
             // Timestamp-less waiting -> running sequence updates runningStatusTimestampMilliseconds from clocks.status.
             relaunched.setStatus(sessionId: s1.id, status: .waiting, text: "Wait", notification: .permission)
             relaunched.setStatus(sessionId: s1.id, status: .running, text: "Resume")
+            relaunched.save()
             let relaunchedTimestampless = AppModel(
                 stateRepository: repository,
                 isAppActive: { false },
