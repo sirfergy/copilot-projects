@@ -194,7 +194,9 @@ back a resend answers 409, and then 412:
 | 400, 403 | Malformed or without an identity; another device holds control | Stop |
 
 409 also answers an identity reused for a different payload, which a resend never
-is. A resend after its receipt has been evicted is taken as a new operation.
+is. A resend after its receipt has been evicted is taken as a new operation. 409 can
+last as long as Copilot is stopped, so a client bounds its resends, and if they end
+on 409 the outcome is still unknown.
 
 The session drawer and native/web conversation views render live response updates
 within their conversation turns. Final messages replace their matching streamed text.
