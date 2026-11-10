@@ -1050,6 +1050,14 @@ if (validSessionId && socketPath) {
         return cachedBootTime;
     }
 
+    // kern.boottime reads "{ sec = S, usec = U } <date>", and macOS moves it
+    // within one boot: on Nov 10 a live owner's marker said usec = 695308
+    // while a nested `copilot -p` read 872232, judged the owner dead and took
+    // its tab. Compare whole seconds with the host's 5-second tolerance.
+    function bootTimeSeconds(value) {
+        return Number(/sec = (\d+)/.exec(value)?.[1]);
+    }
+
     function ownerProcessAlive(owner) {
         if (!processAlive(owner.pid)) return false;
         if (typeof owner.bootTime !== "string" || !owner.bootTime) {
@@ -1059,7 +1067,8 @@ if (validSessionId && socketPath) {
         const current = currentBootTime();
         // Fail open (as elsewhere) if we can't determine the current boot
         // time rather than spuriously reclaiming a live owner.
-        return current === null || current === owner.bootTime;
+        return current === null
+            || Math.abs(bootTimeSeconds(current) - bootTimeSeconds(owner.bootTime)) <= 5;
     }
 
     // A live pid alone does not entitle a marker to keep this tab's shared

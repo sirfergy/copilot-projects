@@ -556,7 +556,11 @@ final class BackgroundHookTests: XCTestCase {
             ownerCLI.terminate()
             ownerTracker.terminate()
         }
-        let bootTime = try currentKernelBootTime()
+        // kern.boottime's usec moves within one boot, so the owner's reading can
+        // differ from the hook's.
+        let bootTime = try currentKernelBootTime().replacingOccurrences(
+            of: #"usec = \d+"#, with: "usec = 1", options: .regularExpression
+        )
         let ownerJSON = """
         {"appSessionId":"\(fixture.tabId)","copilotSessionId":"\(fixture.ownerId)","pid":\(ownerTracker.processIdentifier),"bootTime":"\(bootTime)","parentPid":\(ownerCLI.processIdentifier),"claimedAt":100}
         """
