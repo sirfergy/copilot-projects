@@ -1156,6 +1156,10 @@ private struct MarkdownCodeBlockView: View {
             #if canImport(UIKit)
             .padding(.trailing, 54)
             .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+            // A minimum height with no maximum takes a smaller height proposal, so a code block
+            // taller than 54 pt shrank to it and was clipped: copilot-projects-ios's
+            // testMarkdownMessageResistsVerticalTruncation measured 481 pt against 494 pt.
+            .fixedSize(horizontal: false, vertical: true)
             #else
             .padding(.trailing, 34)
             .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
