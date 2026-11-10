@@ -584,17 +584,20 @@ public enum RemoteElicitationAction: String, Codable, Equatable, Sendable {
 }
 
 /// A schema-form (or url-mode) question surfaced by the agent's
-/// `elicitation.requested` event. `schema` is the agent's `requestedSchema` the
-/// client renders as a form; `url` is set for url-mode requests instead. The
-/// tracker adds a reserved `x-copilot-projects-property-order` key (the
-/// `properties` names in the agent's authored order) and replaces or drops any
-/// agent-supplied value under it, so it is metadata, not agent-authored schema.
+/// `elicitation.requested` event. `schema` is the agent's `requestedSchema`;
+/// `url` is set for url-mode requests instead. The tracker adds a reserved
+/// `x-copilot-projects-property-order` key (the `properties` names in the
+/// agent's authored order) and replaces or drops any agent-supplied value under
+/// it, so it is metadata, not agent-authored schema.
 public struct RemoteElicitationRequest: Codable, Equatable, Sendable, Identifiable {
     public let requestId: String
     public let message: String
     public let mode: String?
     public let url: String?
     public let schema: RemoteJSONValue?
+    /// The form the Mac shows for `schema`, for clients to render as it is. Absent
+    /// when the question is answered another way, and from older hosts.
+    public let form: RemoteElicitationForm?
     public let elicitationSource: String?
     public let requestedAt: Date
     public let agentId: String?
@@ -607,6 +610,7 @@ public struct RemoteElicitationRequest: Codable, Equatable, Sendable, Identifiab
         mode: String? = nil,
         url: String? = nil,
         schema: RemoteJSONValue? = nil,
+        form: RemoteElicitationForm? = nil,
         elicitationSource: String? = nil,
         requestedAt: Date,
         agentId: String? = nil
@@ -616,6 +620,7 @@ public struct RemoteElicitationRequest: Codable, Equatable, Sendable, Identifiab
         self.mode = mode
         self.url = url
         self.schema = schema
+        self.form = form
         self.elicitationSource = elicitationSource
         self.requestedAt = requestedAt
         self.agentId = agentId

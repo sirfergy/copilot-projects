@@ -315,8 +315,8 @@ struct TrackedUserInput: Codable, Equatable, Identifiable {
 
 /// One outstanding elicitation, mirrored from the extension's heartbeat. `schema`
 /// is the agent's requested schema as the tracker published it, including the
-/// reserved `x-copilot-projects-property-order` metadata key, so the client
-/// renders the exact form the agent requested in the agent's field order.
+/// reserved `x-copilot-projects-property-order` metadata key, so the form keeps
+/// the agent's field order.
 struct TrackedElicitation: Codable, Equatable, Identifiable {
     var requestId: String
     var message: String
@@ -329,13 +329,22 @@ struct TrackedElicitation: Codable, Equatable, Identifiable {
 
     var id: String { requestId }
 
+    /// The question as the Mac's own card and remote snapshots both read it. A
+    /// link, a terminal default and a synthetic durable question have their own
+    /// controls, so only a form question gets a form.
     func remoteRequest() -> RemoteElicitationRequest {
-        RemoteElicitationRequest(
+        let asksForForm = url == nil && (mode == nil || mode == "form")
+            && !requestId.hasPrefix(NotificationReplyResolver.syntheticRequestPrefix)
+        let form = asksForForm
+            ? RemoteElicitationForm.parse(schema, allowFreeformChoices: elicitationSource == nil)
+            : nil
+        return RemoteElicitationRequest(
             requestId: requestId,
             message: message,
             mode: mode,
             url: url,
             schema: schema,
+            form: form,
             elicitationSource: elicitationSource,
             requestedAt: AgentTimestamp.parse(requestedAt) ?? Date(),
             agentId: agentId

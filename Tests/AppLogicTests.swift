@@ -15044,7 +15044,7 @@ final class AppLogicTests: XCTestCase {
                 .string("note"),
                 .string("regions"),
             ]),
-            DesktopElicitationForm.propertyOrderKey: .array([
+            RemoteElicitationForm.propertyOrderKey: .array([
                 .string("strategy"),
                 .string("environment"),
                 .string("confirm"),
@@ -15111,7 +15111,7 @@ final class AppLogicTests: XCTestCase {
         ])
 
         let form = try XCTUnwrap(
-            DesktopElicitationForm.parse(schema, allowFreeformChoices: true)
+            DesktopElicitationForm(.parse(schema, allowFreeformChoices: true), schema: schema)
         )
         XCTAssertEqual(
             form.fields.map(\.key),
@@ -15133,9 +15133,8 @@ final class AppLogicTests: XCTestCase {
         var values = initial.values
         var touched: Set<String> = ["regions", "ratio"]
         let regionsField = try XCTUnwrap(form.fields.first { $0.key == "regions" })
-        guard case let .stringMultiSelect(regionChoices, maxItems) = regionsField.kind else {
-            return XCTFail("Expected stringMultiSelect for regions")
-        }
+        let regionChoices = try XCTUnwrap(regionsField.choices)
+        let maxItems = regionsField.maxItems
         let firstToggle = try XCTUnwrap(
             DesktopElicitationField.toggledSelection(
                 "eu-west",
@@ -15213,7 +15212,9 @@ final class AppLogicTests: XCTestCase {
                 "email": .object(["type": .string("string"), "format": .string("email")]),
             ]),
         ])
-        let unconstrainedForm = try XCTUnwrap(DesktopElicitationForm.parse(unconstrainedSchema))
+        let unconstrainedForm = try XCTUnwrap(
+            DesktopElicitationForm(.parse(unconstrainedSchema), schema: unconstrainedSchema)
+        )
         XCTAssertNil(
             unconstrainedForm.validatedContent(
                 values: ["body": .string("ok"), "email": .string("not-an-email")],
@@ -15256,7 +15257,9 @@ final class AppLogicTests: XCTestCase {
                 ]),
             ]),
         ])
-        let optionalMultiForm = try XCTUnwrap(DesktopElicitationForm.parse(optionalMultiSchema))
+        let optionalMultiForm = try XCTUnwrap(
+            DesktopElicitationForm(.parse(optionalMultiSchema), schema: optionalMultiSchema)
+        )
         let tagsField = try XCTUnwrap(optionalMultiForm.fields.first)
         var optionalValues: [String: RemoteJSONValue] = [:]
         optionalValues["tags"] = try XCTUnwrap(tagsField.toggledSelectionValue("a", in: optionalValues["tags"]))
@@ -15279,7 +15282,7 @@ final class AppLogicTests: XCTestCase {
         var customFields: Set<String> = []
         DesktopElicitationChoiceSelection.other.apply(
             fieldKey: "strategy",
-            choices: form.fields[0].singleChoiceOptions,
+            choices: form.fields[0].choices ?? [],
             allowsFreeform: true,
             values: &values,
             customChoiceFields: &customFields
@@ -15465,7 +15468,10 @@ final class AppLogicTests: XCTestCase {
             ]),
         ])
         let agentMultiDefault = try XCTUnwrap(
-            DesktopElicitationForm.parse(multiDefaultSchema, allowFreeformChoices: true)
+            DesktopElicitationForm(
+                .parse(multiDefaultSchema, allowFreeformChoices: true),
+                schema: multiDefaultSchema
+            )
         ).initialState()
         XCTAssertEqual(
             agentMultiDefault.values["toppings"],
@@ -15473,7 +15479,7 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertEqual(agentMultiDefault.customChoiceFields, ["toppings"])
         let mcpMultiDefault = try XCTUnwrap(
-            DesktopElicitationForm.parse(multiDefaultSchema, allowFreeformChoices: false)
+            DesktopElicitationForm(.parse(multiDefaultSchema), schema: multiDefaultSchema)
         ).initialState()
         XCTAssertEqual(mcpMultiDefault.values["toppings"], .array([]))
         XCTAssertTrue(mcpMultiDefault.customChoiceFields.isEmpty)
@@ -15600,7 +15606,7 @@ final class AppLogicTests: XCTestCase {
         let multiFieldSchema: RemoteJSONValue = .object([
             "type": .string("object"),
             "required": .array([.string("summary"), .string("count"), .string("mode")]),
-            DesktopElicitationForm.propertyOrderKey: .array([
+            RemoteElicitationForm.propertyOrderKey: .array([
                 .string("summary"),
                 .string("count"),
                 .string("mode"),
@@ -15627,12 +15633,12 @@ final class AppLogicTests: XCTestCase {
         var submittedElicitations: [RemoteElicitationAnswer] = []
         let elicitationHost = NSHostingView(
             rootView: DesktopElicitationCard(
-                request: RemoteElicitationRequest(
+                request: TrackedElicitation(
                     requestId: "req-elicitation",
                     message: "Configure run",
                     schema: multiFieldSchema,
-                    requestedAt: requestedAt
-                ),
+                    requestedAt: requestedAt.ISO8601Format()
+                ).remoteRequest(),
                 onAnswer: { answer in
                     submittedElicitations.append(answer)
                     return RemoteWorkflowActionResult(state: .applied)
@@ -15733,12 +15739,12 @@ final class AppLogicTests: XCTestCase {
                 workflow: workflow,
                 operation: operation,
                 pendingElicitations: [
-                    RemoteElicitationRequest(
+                    TrackedElicitation(
                         requestId: "req-other",
                         message: "Pick strategy",
                         schema: customChoiceSchema,
-                        requestedAt: requestedAt
-                    ),
+                        requestedAt: requestedAt.ISO8601Format()
+                    ).remoteRequest(),
                 ],
                 workflowProvider: { workflow },
                 operationProvider: { operation },
@@ -15848,13 +15854,13 @@ final class AppLogicTests: XCTestCase {
         ])
         let mcpMultiHost = NSHostingView(
             rootView: DesktopElicitationCard(
-                request: RemoteElicitationRequest(
+                request: TrackedElicitation(
                     requestId: "req-mcp-multi",
                     message: "Pick toppings",
                     schema: multiSelectSchema,
                     elicitationSource: "mcp-server",
-                    requestedAt: requestedAt
-                ),
+                    requestedAt: requestedAt.ISO8601Format()
+                ).remoteRequest(),
                 onAnswer: { _ in RemoteWorkflowActionResult(state: .applied) },
                 onFocusTerminal: {}
             )
@@ -15867,12 +15873,12 @@ final class AppLogicTests: XCTestCase {
         var submittedMultiAnswers: [RemoteElicitationAnswer] = []
         let agentMultiHost = NSHostingView(
             rootView: DesktopElicitationCard(
-                request: RemoteElicitationRequest(
+                request: TrackedElicitation(
                     requestId: "req-agent-multi",
                     message: "Pick up to two toppings",
                     schema: multiSelectSchema,
-                    requestedAt: requestedAt
-                ),
+                    requestedAt: requestedAt.ISO8601Format()
+                ).remoteRequest(),
                 onAnswer: { answer in
                     submittedMultiAnswers.append(answer)
                     return RemoteWorkflowActionResult(state: .applied)

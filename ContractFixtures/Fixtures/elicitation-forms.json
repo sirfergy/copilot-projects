@@ -1,0 +1,112 @@
+[
+  {
+    "requestId": "rollout",
+    "message": "Configure the rollout",
+    "mode": "form",
+    "requestedAt": "2026-11-10T20:00:00Z",
+    "schema": {
+      "type": "object",
+      "required": ["environment", "confirm", "retries", "regions"],
+      "x-copilot-projects-property-order": [
+        "environment", "strategy", "confirm", "retries", "ratio", "note", "contact", "regions", "tags"
+      ],
+      "properties": {
+        "environment": {
+          "type": "string", "title": "Environment", "enum": ["staging", "prod", ""], "default": "prod"
+        },
+        "strategy": {
+          "type": "string", "description": "How the change goes out",
+          "oneOf": [
+            {"const": "canary", "title": "Canary rollout", "description": "A few hosts first"},
+            {"const": "full"}
+          ]
+        },
+        "confirm": {"type": "boolean", "title": "Confirm", "default": true},
+        "retries": {"type": "integer", "title": "Retries", "minimum": 1, "maximum": 5, "default": 3},
+        "ratio": {"type": "number", "title": "Ratio"},
+        "note": {"type": "string", "title": "Note", "minLength": 2, "maxLength": 20},
+        "contact": {"type": "string", "title": "Contact", "format": "email"},
+        "regions": {
+          "type": "array", "title": "Regions", "minItems": 1, "maxItems": 2,
+          "items": {
+            "type": "string",
+            "anyOf": [{"const": "us-east", "title": "US East"}, {"const": "eu-west", "title": "EU West"}]
+          }
+        },
+        "tags": {"type": "array", "title": "Tags", "items": {"enum": ["urgent", ""]}}
+      }
+    },
+    "form": {
+      "fields": [
+        {
+          "key": "environment", "title": "Environment", "required": true, "default": "prod",
+          "kind": "choice",
+          "choices": [
+            {"value": "staging", "title": "staging"},
+            {"value": "prod", "title": "prod"},
+            {"value": "", "title": "Empty string"}
+          ]
+        },
+        {
+          "key": "strategy", "title": "strategy", "description": "How the change goes out",
+          "required": false, "kind": "choice",
+          "choices": [{"value": "canary", "title": "Canary rollout"}, {"value": "full", "title": "full"}]
+        },
+        {"key": "confirm", "title": "Confirm", "required": true, "default": true, "kind": "boolean"},
+        {
+          "key": "retries", "title": "Retries", "required": true, "default": 3,
+          "kind": "number", "integer": true, "minimum": 1, "maximum": 5
+        },
+        {"key": "ratio", "title": "Ratio", "required": false, "kind": "number"},
+        {
+          "key": "note", "title": "Note", "required": false,
+          "kind": "string", "minLength": 2, "maxLength": 20
+        },
+        {"key": "contact", "title": "Contact", "required": false, "kind": "string", "format": "email"},
+        {
+          "key": "regions", "title": "Regions", "required": true,
+          "kind": "multiChoice", "minItems": 1, "maxItems": 2,
+          "choices": [{"value": "us-east", "title": "US East"}, {"value": "eu-west", "title": "EU West"}]
+        },
+        {
+          "key": "tags", "title": "Tags", "required": false, "kind": "multiChoice",
+          "choices": [{"value": "urgent", "title": "urgent"}, {"value": "", "title": ""}]
+        }
+      ],
+      "allowsFreeformChoices": true
+    }
+  },
+  {
+    "requestId": "account",
+    "message": "Which account?",
+    "requestedAt": "2026-11-10T20:00:01Z",
+    "elicitationSource": "mcp-server",
+    "schema": {
+      "type": "object",
+      "properties": {"name": {"type": "string"}, "billing": {"type": "boolean"}}
+    },
+    "form": {
+      "fields": [
+        {"key": "billing", "title": "billing", "required": false, "kind": "boolean"},
+        {"key": "name", "title": "name", "required": false, "kind": "string"}
+      ],
+      "allowsFreeformChoices": false
+    }
+  },
+  {
+    "requestId": "owner",
+    "message": "Describe the owner",
+    "requestedAt": "2026-11-10T20:00:02Z",
+    "schema": {
+      "type": "object",
+      "properties": {"owner": {"type": "object", "properties": {"name": {"type": "string"}}}}
+    }
+  },
+  {
+    "requestId": "sign-in",
+    "message": "Sign in to continue",
+    "mode": "url",
+    "url": "https://example.com/sign-in",
+    "requestedAt": "2026-11-10T20:00:03Z"
+  }
+]
