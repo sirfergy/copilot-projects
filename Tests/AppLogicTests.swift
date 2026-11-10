@@ -17108,6 +17108,106 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(window.firstResponder === s1Terminal)
     }
 
+    /// Typing in the full-width transcript's message box re-measured every message at the box's
+    /// one-line text width, 534 pt after ten words and 3766 pt after seventy, because that was the
+    /// workspace pane's ideal width and its split view measures the pane there. Until #341 the
+    /// messages were left wrapped at that width, so the transcript changed width as you typed.
+    @MainActor
+    func testTypingInTheFullWidthTranscriptLeavesItsMessagesAtTheirWidth() async throws {
+        _ = NSApplication.shared
+        let suite = "full-width-typing-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let keys = ["SHELL", "COPILOT_PROJECTS_STATE_DIR", "COPILOT_PROJECTS_SOCKET", "COPILOT_PROJECTS_DTACH"]
+        let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, ProcessInfo.processInfo.environment[$0]) })
+        setenv("SHELL", "/bin/cat", 1)
+        setenv("COPILOT_PROJECTS_STATE_DIR", root.path, 1)
+        setenv("COPILOT_PROJECTS_SOCKET", root.appendingPathComponent("control.sock").path, 1)
+        unsetenv("COPILOT_PROJECTS_DTACH")
+        defer {
+            for (key, value) in previous {
+                if let value { setenv(key, value, 1) } else { unsetenv(key) }
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let now = Date()
+        let session = Session(title: "Typing", cwd: root.path)
+        let project = Project(name: "Projects", cwd: root.path, sessions: [session], selectedSessionId: session.id)
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        Paths.ensureStateDir()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(TranscriptSnapshot(
+            schemaVersion: 3, updatedAt: now, copilotSessionId: "conversation-1",
+            turns: [TranscriptTurn(
+                id: "t1", startedAt: now.addingTimeInterval(-10), endedAt: now.addingTimeInterval(-5),
+                kind: "user", userContent: "Hello",
+                assistantMessages: [TranscriptAssistantMessage(
+                    id: "m1", timestamp: now,
+                    content: String(repeating: "A reply that wraps over a few lines. ", count: 20)
+                )],
+                tools: [], isAborted: false
+            )]
+        )).write(to: URL(fileURLWithPath: Paths.transcriptSnapshotPath(sessionId: session.id)))
+
+        let model = AppModel(
+            stateRepository: repository, isAppActive: { false },
+            agentActivityDirectory: root, resumeMarkerDirectory: root,
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+            defaults: defaults
+        )
+        defer { model.detachAllClients() }
+        _ = try XCTUnwrap(model.controller(for: session.id))
+        model.refreshSelectedTranscriptController()
+        try XCTUnwrap(model.activeTranscriptController).reload()
+        model.projects[0].sessions[0].agentActivity = AgentActivitySnapshot(
+            schemaVersion: 1, updatedAt: ISO8601DateFormatter().string(from: now),
+            foregroundTurnActive: false, scheduledTurnActive: false, activeSubagents: [], schedules: [],
+            idleGeneration: 1, lastIdleAborted: false, lastIdleTurnKind: "user", error: nil,
+            workflow: RemoteSessionWorkflow(
+                observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+                capabilities: ["session-send"], sendReady: true
+            )
+        )
+        model.openTranscriptDrawer(sessionId: session.id)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: -16_000, y: -16_000, width: 1440, height: 900),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: RootView(
+            model: model, input: WorkspaceInputController(model: model), showsProjects: .constant(true)
+        ).defaultAppStorage(defaults))
+        window.contentView = host
+        defer {
+            window.makeFirstResponder(nil)
+            window.contentView = nil
+            window.close()
+        }
+        // Open in the side drawer, then expand it, as the reporter did.
+        await pump(host)
+        defaults.set(true, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        await pump(host)
+        let messages = MarkdownSelectableTextView.peerSelectableTextViews(in: host)
+        XCTAssertFalse(messages.isEmpty)
+        XCTAssertTrue(messages.allSatisfy { $0.bounds.width > 420 }, "The transcript should be full width")
+        let measuredWidths = messages.map(\.preferredMaxLayoutWidth)
+        let field = try XCTUnwrap(findEditableTextFields(in: host).first { $0.placeholderString == "Message Copilot" })
+        let oneLineHeight = field.frame.height
+
+        try await typeText(String(repeating: "typing a longer message ", count: 12), into: field, in: window, host: host)
+        XCTAssertGreaterThan(field.frame.height, oneLineHeight, "The message should wrap")
+        XCTAssertEqual(messages.map(\.preferredMaxLayoutWidth), measuredWidths)
+        for message in messages {
+            XCTAssertEqual(message.textContainer?.size.width, message.bounds.width)
+        }
+    }
+
     @MainActor
     func testSelectingSessionFocusesComposerOrTerminalWithoutStealingFocus() async throws {
         _ = NSApplication.shared

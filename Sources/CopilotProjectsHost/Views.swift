@@ -43,7 +43,10 @@ struct RootView: View {
                         DetailView(model: model, onPreview: input.presentImage)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+                    // Its split view measures this pane at its ideal width. Left to the content, that
+                    // was the message box's one-line text, so typing in the full-width transcript
+                    // re-measured every message at the typed text's width.
+                    .frame(minWidth: 420, idealWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
