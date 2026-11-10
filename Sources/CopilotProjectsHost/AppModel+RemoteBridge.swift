@@ -807,6 +807,8 @@ extension AppModel {
                                 : nil,
                             markedUnread: session.markedUnread ? true : nil,
                             unreadMarker: session.offersMarkAsRead ? session.unreadMarker : nil,
+                            attention: effectiveSession.attention.map(RemoteSessionAttention.init),
+                            needsEndConfirmation: effectiveSession.requiresEndConfirmation,
                             hostId: remoteHost?.id,
                             hostDisplayName: remoteHost?.displayName,
                             parentSessionId: effectiveParents[session.id],

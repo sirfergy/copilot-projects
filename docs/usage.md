@@ -96,7 +96,8 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   (`waiting`, `failed`, `ready`, `running`, `background`, `scheduled`) jumps to the
   next session in that state across all projects, and **Session ▸ Next Session Needing
   Attention** (`⇧⌘A`) cycles across projects in urgency order (`waiting` → `failed` →
-  `unread` / `finished`). With the Copilot CLI hooks installed (below), this is driven automatically.
+  `unread` / `finished`). When the session it went to no longer needs you, it carries
+  on from there instead of starting over. With the Copilot CLI hooks installed (below), this is driven automatically.
 - **Completed-turn drawer:** Copilot CLI remains the native interactive terminal, while a
   collapsible drawer overlays its right edge with independently scrollable completed turns
   rendered as Markdown. Live work, permissions, shortcuts, and input stay entirely in the CLI.
@@ -626,6 +627,31 @@ without a marker always applies, so older clients, older gateways, and the Mac's
 Markers aren't saved. After the Mac restarts, a mark sent for an earlier snapshot is
 ignored and one for a new snapshot applies. No capability is advertised: a client
 echoes the field when a snapshot has it.
+
+#### Remote attention
+
+The Mac decides once which sessions need the user, and publishes it. A session's
+snapshot carries `attention` while it does: `kind` is `waiting` (a question, a
+permission or budget request, or the terminal is waiting), `failed` (the latest
+request failed; seeing it or marking it read doesn't clear it, the next request
+does), `ready` (finished while the user was away, and idle), or `unread` (an
+unseen notification or the user's mark), and `rank` orders them. The Mac's
+sidebar and **Next Session Needing Attention** read the same decision. Older hosts
+omit the field.
+
+Clients show `attention` with their own glyphs, colours and copy, and apply no
+rule of their own; `markedUnread` says why a session is `unread`, and `lastError`
+carries a failure's message. Next goes through the sessions that have `attention`
+by `rank`, then in workspace order (projects in order, then each project's
+sessions in order), starting after the current session and wrapping around. A
+client remembers the session and rank Next last went to. When that session is
+current and no longer has `attention`, Next carries on from its place instead of
+starting from the top. `RemoteAttentionCursor.next` implements this. The cursor
+stays on each client because each has its own selection.
+
+`needsEndConfirmation` says to ask before ending a session: it is running or
+waiting, has background or scheduled work, or has something waiting for an answer.
+Hosts always send it; a client asks when it is absent.
 
 #### Remote park session
 

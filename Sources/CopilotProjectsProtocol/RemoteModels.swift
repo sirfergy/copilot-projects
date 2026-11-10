@@ -288,6 +288,11 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
     /// Opaque: compare or echo it, nothing else. Present only while `unread` or
     /// `ready` is set; older hosts omit it.
     public let unreadMarker: String?
+    /// What the session needs from the user, absent when nothing. Older hosts omit it.
+    public let attention: RemoteSessionAttention?
+    /// Ending the session would stop work or drop a pending question, so ask first.
+    /// Hosts always send it; older hosts omit it, and then a client asks.
+    public let needsEndConfirmation: Bool?
     /// Identifier of the remote host running this session (`nil` for local Mac sessions).
     public let hostId: String?
     /// Human-readable label for the remote host running this session (`nil` for local Mac sessions).
@@ -335,6 +340,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         lastError: TranscriptTurnError? = nil,
         markedUnread: Bool? = nil,
         unreadMarker: String? = nil,
+        attention: RemoteSessionAttention? = nil,
+        needsEndConfirmation: Bool? = nil,
         hostId: String? = nil,
         hostDisplayName: String? = nil,
         parentSessionId: String? = nil,
@@ -366,6 +373,8 @@ public struct RemoteSessionSnapshot: Codable, Equatable, Sendable {
         self.lastError = lastError
         self.markedUnread = markedUnread
         self.unreadMarker = unreadMarker
+        self.attention = attention
+        self.needsEndConfirmation = needsEndConfirmation
         self.hostId = hostId
         self.hostDisplayName = hostDisplayName
         self.parentSessionId = parentSessionId
