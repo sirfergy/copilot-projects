@@ -610,7 +610,14 @@ final class RemoteOperationContractTests: XCTestCase {
         XCTAssertEqual(send(prompt, first, at: now), .accepted)
         XCTAssertEqual(send(prompt, first, at: stale), .accepted)
         XCTAssertEqual(send(changed, first, at: now), .conflict)
-        // A send that never landed, retried while the tracker is gone: try again.
+        // A send that never landed is retryable while the tracker is disconnected.
+        XCTAssertEqual(send(prompt, second, at: now), .conflict)
+
+        // The tracker deletes its snapshot when Copilot exits: neither outcome is known.
+        try FileManager.default.removeItem(at: harness.sessions.appendingPathComponent(
+            "\(harness.session.id).agent-activity.json"
+        ))
+        XCTAssertEqual(send(prompt, first, at: now), .conflict)
         XCTAssertEqual(send(prompt, second, at: now), .conflict)
         XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL.path))
 
