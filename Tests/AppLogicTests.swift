@@ -18380,6 +18380,76 @@ final class AppLogicTests: XCTestCase {
         }
     }
 
+    /// The x, expand and session details buttons highlighted a 28 pt square on hover but only
+    /// clicked on their glyph, about 10 pt across, so a click near the square's edge did nothing.
+    /// The model button lost its corners to the hover highlight's rounded hit shape.
+    @MainActor
+    func testTranscriptHeaderButtonsClickAnywhereInTheirSquare() async throws {
+        _ = NSApplication.shared
+        let suite = "transcript-header-buttons-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let controller = TranscriptController(sessionId: "transcript-header-buttons")
+        let workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+            capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+            sendReady: true
+        )
+
+        /// Clicks a point, given from the controls' trailing edge, in a fresh window so each click
+        /// starts with the drawer open and no popover shown.
+        func click(trailing: CGFloat, y: CGFloat) async throws -> (closed: Bool, expanded: Bool, popover: Bool) {
+            var closed = false
+            let host = NSHostingView(rootView: TranscriptButton(
+                controller: controller,
+                isOpen: true,
+                workflow: workflow,
+                modelInfo: RemoteModelInfo(name: "GPT-5", reasoningEffort: "high"),
+                availableModels: [RemoteAvailableModel(id: "gpt-5", name: "GPT-5")],
+                operation: AgentOperationProjection(conversationEpoch: "epoch-1", support: .receipts, receipts: []),
+                onClose: { closed = true },
+                onSwitchModel: { _ in RemoteWorkflowActionResult(state: .applied) }
+            ).defaultAppStorage(defaults))
+            host.frame.size = host.fittingSize
+            let window = NSWindow(
+                contentRect: NSRect(origin: NSPoint(x: -16_000, y: -16_000), size: host.frame.size),
+                styleMask: [.borderless], backing: .buffered, defer: false
+            )
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            window.orderBack(nil)
+            defer {
+                window.contentView = nil
+                window.close()
+            }
+            await pump(host)
+            try sendClick(in: window, point: host.convert(NSPoint(x: host.bounds.width - trailing, y: y), to: nil))
+            await pump(host)
+            return (closed, defaults.bool(forKey: TranscriptDrawer.fullWidthTranscriptKey), window.childWindows?.isEmpty == false)
+        }
+
+        // The controls, trailing first: x, expand, session details, each 28 pt with 4 pt between,
+        // then the 24 pt tall model button. Each is clicked 1 pt inside its corners.
+        let width = NSHostingView(rootView: TranscriptButton(
+            controller: controller, isOpen: true, workflow: workflow,
+            modelInfo: RemoteModelInfo(name: "GPT-5", reasoningEffort: "high"),
+            availableModels: [RemoteAvailableModel(id: "gpt-5", name: "GPT-5")]
+        )).fittingSize.width
+        for (trailing, y) in [(1, 1), (27, 1), (1, 27), (27, 27)] as [(CGFloat, CGFloat)] {
+            let close = try await click(trailing: trailing, y: y)
+            XCTAssertTrue(close.closed && !close.expanded && !close.popover, "x at \(trailing), \(y)")
+            let expand = try await click(trailing: 32 + trailing, y: y)
+            XCTAssertTrue(expand.expanded && !expand.closed && !expand.popover, "expand at \(trailing), \(y)")
+            defaults.removeObject(forKey: TranscriptDrawer.fullWidthTranscriptKey)
+            let details = try await click(trailing: 64 + trailing, y: y)
+            XCTAssertTrue(details.popover && !details.closed && !details.expanded, "details at \(trailing), \(y)")
+        }
+        for (trailing, y) in [(97, 3), (width - 1, 3), (97, 25), (width - 1, 25)] as [(CGFloat, CGFloat)] {
+            let model = try await click(trailing: trailing, y: y)
+            XCTAssertTrue(model.popover && !model.closed && !model.expanded, "model at \(trailing), \(y)")
+        }
+    }
+
     @MainActor
     func testTranscriptDrawerUsagePopoverSurvivesRefreshAndBudgetTransition() throws {
         _ = NSApplication.shared

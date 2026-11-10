@@ -1457,7 +1457,9 @@ struct HoverHighlightModifier: ViewModifier {
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(Color.primary.opacity(isHovering ? 0.08 : 0))
             )
-            .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            // Square, so it doesn't cut the corners off the button's own hit area. It can't widen
+            // that area: a plain button only clicks on its label's shape.
+            .contentShape(Rectangle())
             .onHover { isHovering = $0 }
             .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovering)
     }
