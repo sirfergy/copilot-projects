@@ -291,6 +291,14 @@ final class SlashCommandTests: XCTestCase {
         f.model.setStatus(sessionId: f.other.id, status: .idle, text: nil, timestamp: 2)
         XCTAssertTrue(try rowMenu(in: row).items[0].isEnabled)
 
+        // A heartbeat that only refreshes the tracker's observation is not published, so an
+        // item judged while it was stale is judged again by the publish a right-click makes.
+        f.model.projects[0].sessions[1].agentActivity?.workflow?.observedAtMilliseconds -= 16_000
+        XCTAssertFalse(try rowMenu(in: row).items[0].isEnabled)
+        try f.heartbeat(f.other)
+        f.model.objectWillChange.send()
+        XCTAssertTrue(try rowMenu(in: row).items[0].isEnabled)
+
         // The Session menu's item follows the session on screen.
         f.model.syncMenuState(includeRuntimeAttention: true)
         XCTAssertTrue(f.model.menuState.snapshot.selectedSessionCanRestart)
