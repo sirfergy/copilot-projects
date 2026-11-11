@@ -63,9 +63,7 @@ jobs:
               echo "Could not verify PR provenance for $GITHUB_SHA." >&2
               exit 1
             fi
-            if ! jq -e --arg sha "$GITHUB_SHA" \
-              'any(.[]; .merged_at != null and .base.ref == "main" and .merge_commit_sha == $sha)' \
-              <<< "$triggering_pull_requests" >/dev/null; then
+            if ! is_pull_request_merge_to_main "$GITHUB_SHA" <<< "$triggering_pull_requests"; then
               echo "should_release=false" >> "$GITHUB_OUTPUT"
               echo "Skipped: $GITHUB_SHA was not created by a PR merge to main." \
                 >> "$GITHUB_STEP_SUMMARY"
