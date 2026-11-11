@@ -191,6 +191,14 @@ final class SessionWorkflowTests: XCTestCase {
             XCTAssertEqual(model.parkedState(session.id), .parked, "a refused request must not resume a parked session")
             model.projects[0].sessions[0].parked = nil
         }
+        // A tracker that started before reload-session-mcp existed is handed nothing.
+        snapshot.workflow?.capabilities.removeAll { $0 == "session-reload-mcp" }
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        XCTAssertEqual(model.reloadAutomationSessionMCP(sessionId: session.id, projectId: nil).code, "busy")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: sessions.appendingPathComponent("\(session.id).session-reload-mcp.json").path
+        ))
+        snapshot.workflow?.capabilities.append("session-reload-mcp")
         snapshot.schedules = []
         let readyWorkflow = snapshot.workflow
         let selection = RemoteModelSelection(modelId: "gpt-5.6-sol")
