@@ -1440,8 +1440,8 @@ private struct SessionCreationButtons: View {
                 }
                 Divider()
                 Menu("Fleet Actions") {
-                    Button("Bounce Idle Sessions") {
-                        model.bounceIdleSessions(inProjectId: project.id)
+                    Button("Restart Idle Sessions") {
+                        model.restartIdleSessions(inProjectId: project.id)
                     }
                     Button("Mark All Sessions as Read") {
                         model.markAllSessionsRead(inProjectId: project.id)

@@ -155,7 +155,6 @@ class FakeSession {
     this.queueProcessCalls = [];
     this.queueProcessHandler = async () => null;
     this.extensionsReloadHandler = async () => null;
-    this.commandListHandler = async () => ({ commands: [] });
     this.scheduleListHandler = async () => ({ entries: [] });
     this.userInputHandler = async () => ({ success: true });
     this.elicitationHandler = async () => ({ success: true });
@@ -235,7 +234,6 @@ class FakeSession {
         if (method === "session.workspaces.diff") return this.diffHandler(params);
         if (method === "session.model.getCurrent") return { modelId: "gpt-5.6-sol" };
         if (method === "session.model.list") return this.modelListHandler();
-        if (method === "session.commands.list") return this.commandListHandler(params);
         if (method === "session.schedule.list") return this.scheduleListHandler(params);
         this.workflowCalls.push({ method, ...params });
         if (method === "session.commands.enqueue") return this.enqueueHandler(params);
@@ -768,14 +766,12 @@ function workflowHandoff(runtime, kind, action, fields = operationFields(runtime
 test("bounce enqueues the registered command for its owner once without sending a prompt", {
   concurrency: false,
 }, async (t) => {
-  const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
-  });
+  const runtime = await createRuntime(t);
   assert.ok((await workflowReady(runtime)).capabilities.includes("session-bounce"));
   const request = workflowHandoff(runtime, "session-bounce", {});
   await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "bounce not queued");
   assert.deepEqual(runtime.session.workflowCalls, [{
-    method: "session.commands.enqueue", sessionId: runtime.copilotSessionId, command: "/bounce",
+    method: "session.commands.enqueue", sessionId: runtime.copilotSessionId, command: "/restart",
   }]);
   assert.deepEqual(runtime.session.closeCalls, []);
   assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
@@ -844,31 +840,11 @@ test("the park check answers idle or busy and never sends anything to the runtim
   assert.equal(readSnapshot(runtime).workflow.bounceRequested, false);
 });
 
-test("bounce discovery fails closed without disabling existing native workflows", {
-  concurrency: false,
-}, async (t) => {
-  for (const catalog of [null, {}, { commands: [] }, { commands: [{ name: "restart" }] },
-    { commands: [{ name: "bounce", kind: "skill" }] }]) {
-    const runtime = await createRuntime(t, (session) => {
-      session.commandListHandler = async () => catalog;
-    });
-    assert.equal((await workflowReady(runtime)).capabilities.includes("session-bounce"), false);
-    const request = workflowHandoff(runtime, "session-bounce", {});
-    await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "unsupported bounce not rejected");
-    assert.deepEqual(runtime.session.workflowCalls, []);
-  }
-  const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => { throw Object.assign(new Error("unsupported"), { code: -32601 }); };
-  });
-  assert.equal((await workflowReady(runtime)).capabilities.includes("session-bounce"), false);
-});
-
 test("bounce rejects while initial question recovery is pending and until the recovered question completes", {
   concurrency: false,
 }, async (t) => {
   let release;
   const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
     session.questionEvents.push(questionEvent("elicitation.requested", pendingURLQuestion("recovering")));
     const read = session.questionEventHandler;
     session.questionEventHandler = (params) => session.questionEventCalls.length === 1
@@ -906,7 +882,6 @@ test("bounce rejects failed, unavailable, malformed, and incomplete question rec
 }, async (t) => {
   for (const failure of ["failed", "unavailable", "malformed", "incomplete"]) {
     const runtime = await createRuntime(t, (session) => {
-      session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
       session.questionEventHandler = async () => {
         if (failure === "failed") throw new Error("question recovery failed");
         if (failure === "unavailable") throw Object.assign(new Error("unavailable"), { code: -32601 });
@@ -928,9 +903,7 @@ test("bounce rejects failed, unavailable, malformed, and incomplete question rec
 test("bounce cannot reuse question recovery from a previous conversation", {
   concurrency: false,
 }, async (t) => {
-  const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
-  });
+  const runtime = await createRuntime(t);
   await workflowReady(runtime);
   const oldID = runtime.session.sessionId;
   const nextID = uuid();
@@ -970,7 +943,6 @@ test("bounce waits for oversized questions that cannot be displayed remotely", {
         ? { ...pendingURLQuestion("oversized"), message: "x".repeat(16_385) }
         : { requestId: "oversized", question: "x".repeat(16_385), choices: ["Continue"] };
       const runtime = await createRuntime(t, (session) => {
-        session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
         if (recovered) session.questionEvents.push(questionEvent(`${kind}.requested`, data));
       });
       await workflowReady(runtime);
@@ -999,9 +971,7 @@ test("heartbeat bounce waits for question recovery without delaying exact receip
   concurrency: false,
 }, async (t) => {
   for (const delayed of [false, true]) {
-    const runtime = await createRuntime(t, (session) => {
-      session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
-    });
+    const runtime = await createRuntime(t);
     await workflowReady(runtime);
     const emptyPage = { events: [], cursor: "tail", hasMore: false, cursorStatus: "ok" };
     let finish;
@@ -1041,9 +1011,7 @@ test("heartbeat bounce waits for question recovery without delaying exact receip
 test("watcher bounce refreshes questions missed after startup without a heartbeat", {
   concurrency: false,
 }, async (t) => {
-  const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
-  });
+  const runtime = await createRuntime(t);
   await workflowReady(runtime);
   const reads = runtime.session.questionEventCalls.length;
   await runtime.session.emit("elicitation.requested", pendingURLQuestion("missed"), {}, false);
@@ -1061,9 +1029,7 @@ test("heartbeat rejects bounce after failed or unsupported question recovery", {
   concurrency: false,
 }, async (t) => {
   for (const code of [undefined, -32601]) {
-    const runtime = await createRuntime(t, (session) => {
-      session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
-    });
+    const runtime = await createRuntime(t);
     await workflowReady(runtime);
     runtime.session.questionEventHandler = async () => {
       throw Object.assign(new Error("question recovery failed"), { code });
@@ -1086,9 +1052,7 @@ test("stalled question reads reject watcher and polling bounce without releasing
   concurrency: false,
 }, async (t) => {
   for (const watcher of [false, true]) {
-    const runtime = await createRuntime(t, (session) => {
-      session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
-    });
+    const runtime = await createRuntime(t);
     await workflowReady(runtime);
     const read = runtime.session.questionEventHandler;
     const reads = runtime.session.questionEventCalls.length;
@@ -1132,9 +1096,7 @@ test("stalled question reads reject watcher and polling bounce without releasing
 test("a completed native send invalidates bounce preflight before a delayed turn-start event", {
   concurrency: false,
 }, async (t) => {
-  const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
-  });
+  const runtime = await createRuntime(t);
   await workflowReady(runtime);
   const emptyPage = { events: [], cursor: "0", hasMore: false, cursorStatus: "ok" };
   let finishRecovery;
@@ -1159,7 +1121,6 @@ test("a reloaded tracker rejects bounce over unfinished child work reported by t
 }, async (t) => {
   const child = uuid();
   const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
     session.history = [{
       id: uuid(), type: "subagent.started", timestamp: new Date().toISOString(), agentId: child,
       data: { toolCallId: "unfinished-child", agentName: "explore", agentDisplayName: "Child" },
@@ -1189,7 +1150,6 @@ test("bounce rejects unknown or unavailable session-wide activity", {
 }, async (t) => {
   for (const activity of [undefined, {}, {hasActiveWork: null}, {hasActiveWork: "false"}, new Error("unavailable")]) {
     const runtime = await createRuntime(t, (session) => {
-      session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
       session.activityHandler = async () => {
         if (activity instanceof Error) throw Object.assign(activity, { code: -32601 });
         return activity;
@@ -1204,22 +1164,20 @@ test("bounce rejects unknown or unavailable session-wide activity", {
   }
 });
 
-test("bounce rechecks live processing and command registration before dispatch", {
+test("restart rechecks live processing and questions before dispatch", {
   concurrency: false,
 }, async (t) => {
-  for (const change of ["processing", "removed", "question"]) {
-    const runtime = await createRuntime(t, (session) => {
-      session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
-    });
+  for (const change of ["processing", "question"]) {
+    const runtime = await createRuntime(t);
     await workflowReady(runtime);
     if (change === "processing") runtime.session.processing = true;
-    if (change === "removed") runtime.session.commandListHandler = async () => ({ commands: [] });
     if (change === "question") {
-      runtime.session.commandListHandler = async () => {
+      const idleActivity = runtime.session.activityHandler;
+      runtime.session.activityHandler = async (params) => {
         runtime.session.emit("session_limits_exhausted.requested", {
           requestId: "budget", maxAiCredits: 30, usedAiCredits: 30,
         });
-        return { commands: [{ name: "bounce", kind: "client" }] };
+        return idleActivity(params);
       };
     }
     const request = workflowHandoff(runtime, "session-bounce", {});
@@ -1232,7 +1190,6 @@ test("bounce rejects payloads and keeps an ambiguous dispatch from executing aga
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
     session.enqueueHandler = async () => { throw new Error("connection closed after enqueue"); };
   });
   await workflowReady(runtime);
@@ -1250,7 +1207,6 @@ test("a definitive bounce refusal leaves the conversation usable", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
     session.enqueueHandler = async () => ({ queued: false });
   });
   await workflowReady(runtime);
@@ -1263,17 +1219,18 @@ test("a definitive bounce refusal leaves the conversation usable", {
 test("duplicate bounce watcher events during preflight neither reject nor execute twice", {
   concurrency: false,
 }, async (t) => {
-  const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
-  });
+  const runtime = await createRuntime(t);
   await workflowReady(runtime);
   let release;
-  runtime.session.commandListHandler = () => new Promise((resolve) => { release = resolve; });
+  const idleActivity = runtime.session.activityHandler;
+  runtime.session.activityHandler = (params) => new Promise((resolve) => {
+    release = () => resolve(idleActivity(params));
+  });
   const request = workflowHandoff(runtime, "session-bounce", {});
   await waitFor(() => release, "preflight did not start");
   trigger(runtime, `${runtime.appSessionId}.session-bounce.json`);
   assert.equal(receipt(runtime, request.operationId), undefined);
-  release({ commands: [{ name: "bounce", kind: "client" }] });
+  release();
   await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "bounce not queued");
   assert.equal(runtime.session.workflowCalls.length, 1);
 });
@@ -1282,7 +1239,6 @@ test("an unsupported enqueue RPC does not latch unrelated session controls off",
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
     session.enqueueHandler = async () => { throw Object.assign(new Error("unsupported"), { code: -32601 }); };
   });
   await workflowReady(runtime);
@@ -1292,34 +1248,46 @@ test("an unsupported enqueue RPC does not latch unrelated session controls off",
   assert.equal(readSnapshot(runtime).workflow.bounceRequested, false);
 });
 
-test("bounce waits for live schedules instead of trusting the empty startup cache", {
+test("the park check waits for live schedules instead of trusting the empty startup cache", {
   concurrency: false,
 }, async (t) => {
   let release;
   const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
     session.rpc.schedule.list = async () => new Promise(() => {});
     session.scheduleListHandler = () => new Promise(resolve => { release = resolve; });
   });
   await workflowReady(runtime);
   assert.deepEqual(readSnapshot(runtime).schedules, []);
-  const request = workflowHandoff(runtime, "session-bounce", {});
-  await waitFor(() => release, "bounce did not request live schedules");
+  const request = workflowHandoff(runtime, "session-park-check", {});
+  await waitFor(() => release, "park check did not request live schedules");
   assert.equal(receipt(runtime, request.operationId), undefined);
   assert.deepEqual(runtime.session.workflowCalls, []);
   const read = runtime.session.runtimeCalls.find(call => call.method === "session.schedule.list");
   assert.equal(read.sessionId, runtime.copilotSessionId);
   release({ entries: [{ id: "scheduled-work" }] });
-  await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "scheduled bounce was not rejected");
+  await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "scheduled park was not rejected");
   assert.deepEqual(runtime.session.workflowCalls, []);
 });
 
-test("unavailable or malformed schedule observations cannot admit bounce", {
+test("a waiting schedule does not block a restart", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, (session) => {
+    session.scheduleListHandler = async () => ({ entries: [{ id: "scheduled-work" }] });
+  });
+  await waitFor(() => (readSnapshot(runtime).workflow?.schedules ?? []).length === 1, "schedule not published");
+  const request = workflowHandoff(runtime, "session-bounce", {});
+  await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "scheduled restart not queued");
+  assert.deepEqual(runtime.session.workflowCalls, [{
+    method: "session.commands.enqueue", sessionId: runtime.copilotSessionId, command: "/restart",
+  }]);
+});
+
+test("unavailable or malformed schedule observations cannot admit a park", {
   concurrency: false,
 }, async (t) => {
   for (const result of [null, {}, { entries: "unknown" }, new Error("schedule query failed")]) {
     const runtime = await createRuntime(t, (session) => {
-      session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
       session.rpc.schedule.list = async () => ({ entries: [] });
       session.scheduleListHandler = async () => {
         if (result instanceof Error) throw result;
@@ -1327,7 +1295,7 @@ test("unavailable or malformed schedule observations cannot admit bounce", {
       };
     });
     await workflowReady(runtime);
-    const request = workflowHandoff(runtime, "session-bounce", {});
+    const request = workflowHandoff(runtime, "session-park-check", {});
     await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "unknown schedules were accepted");
     assert.deepEqual(runtime.session.workflowCalls, []);
   }
@@ -1336,9 +1304,7 @@ test("unavailable or malformed schedule observations cannot admit bounce", {
 test("failed acceptance publication rolls back the bounce fence without invoking RPC", {
   concurrency: false,
 }, async (t) => {
-  const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
-  });
+  const runtime = await createRuntime(t);
   await workflowReady(runtime);
   let failedWrites = 0;
   runtime.failWrite = path => {
@@ -1359,9 +1325,7 @@ test("failed acceptance publication rolls back the bounce fence without invoking
 test("bounce fences new model switches but preserves exact replay", {
   concurrency: false,
 }, async (t) => {
-  const runtime = await createRuntime(t, (session) => {
-    session.commandListHandler = async () => ({ commands: [{ name: "bounce", kind: "client" }] });
-  });
+  const runtime = await createRuntime(t);
   await workflowReady(runtime);
   const fields = operationFields(runtime, "set-model");
   const payload = {
@@ -1427,7 +1391,7 @@ test("a tracker replaced on disk reloads the session's extensions once, after tw
   await heartbeat(runtime);
   assert.deepEqual(activityReads(runtime), [], "one idle heartbeat must not be enough");
   await heartbeat(runtime);
-  // A waiting schedule blocks a bounce, which would drop it, but not a reload.
+  // A waiting schedule does not block a reload.
   assert.deepEqual(readSnapshot(runtime).workflow.schedules, ["scheduled-work"]);
   assert.deepEqual(reloadCalls(runtime), [{
     method: "session.extensions.reload", sessionId: runtime.copilotSessionId,

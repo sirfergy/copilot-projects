@@ -2152,9 +2152,10 @@ if (validSessionId && socketPath) {
             && !workflowHasPendingInput();
     }
 
-    // A bounce restarts the CLI, which would drop its schedules.
-    function bounceIsIdle() {
-        return sessionIsIdle() && schedules.length === 0;
+    // Parking stops the CLI, so a waiting schedule would never fire. A restart
+    // keeps them: the CLI re-arms a persisted session's schedules on resume.
+    function stopIsIdle(parkCheck) {
+        return sessionIsIdle() && (!parkCheck || schedules.length === 0);
     }
 
     // Hot reload: once the app has installed a different tracker and the
@@ -2192,15 +2193,7 @@ if (validSessionId && socketPath) {
         }
     }
 
-    async function hasBounceCommand(context) {
-        const catalog = await workflowRead("session.commands.list", {
-            includeBuiltins: false, includeSkills: false, includeClientCommands: true,
-        }, context);
-        return Array.isArray(catalog?.commands)
-            && catalog.commands.some((command) => command.name === "bounce" && command.kind === "client");
-    }
-
-    async function recoverQuestionsForBounce() {
+    async function recoverQuestionsBounded() {
         let timeout;
         try {
             // Bound admission without cancelling or releasing the shared recovery.
@@ -2387,29 +2380,17 @@ if (validSessionId && socketPath) {
                     || finiteNonnegative(metadata.sessionLimits?.maxAiCredits));
             let totalAiCredits = null;
             let usageError = null;
-            let bounceAvailable = false;
-            await Promise.all([
-                (async () => {
-                    try {
-                        const metrics = await workflowRead("session.usage.getMetrics", {}, context);
-                        if (finiteNonnegative(metrics?.totalNanoAiu)) {
-                            totalAiCredits = metrics.totalNanoAiu / 1e9;
-                        } else {
-                            usageError = "Session credit usage is unavailable";
-                        }
-                    } catch (error) {
-                        usageError = "Session credit usage is unavailable";
-                        console.error("[copilot-projects] workflow usage query failed:", error);
-                    }
-                })(),
-                (async () => {
-                    try {
-                        bounceAvailable = await hasBounceCommand(context);
-                    } catch (error) {
-                        console.error("[copilot-projects] bounce command discovery failed:", error);
-                    }
-                })(),
-            ]);
+            try {
+                const metrics = await workflowRead("session.usage.getMetrics", {}, context);
+                if (finiteNonnegative(metrics?.totalNanoAiu)) {
+                    totalAiCredits = metrics.totalNanoAiu / 1e9;
+                } else {
+                    usageError = "Session credit usage is unavailable";
+                }
+            } catch (error) {
+                usageError = "Session credit usage is unavailable";
+                console.error("[copilot-projects] workflow usage query failed:", error);
+            }
             if (!operationAuthorityCurrent(context) || runtimeMetadataError !== null) return;
             const newerHeartbeat = workflowObservation
                 && workflowObservation.capabilities.length > 0
@@ -2424,9 +2405,8 @@ if (validSessionId && socketPath) {
                 capabilities: [
                     "session-send", "session-abort", "answer-session-budget",
                     "image-attachments-v1", "file-attachments-v1", "pending-messages-v1",
-                    "session-park-check",
+                    "session-park-check", "session-bounce",
                     ...(effectiveLimitsKnown ? ["set-session-budget"] : []),
-                    ...(bounceAvailable ? ["session-bounce"] : []),
                 ],
                 totalAiCredits,
                 limitsKnown: effectiveLimitsKnown,
@@ -2677,7 +2657,7 @@ if (validSessionId && socketPath) {
         case "session-abort":
             return rpcReceiptOutcome(await workflowRPC("session.abort", {}, context));
         case "session-bounce": {
-            const result = await workflowRPC("session.commands.enqueue", { command: "/bounce" }, context);
+            const result = await workflowRPC("session.commands.enqueue", { command: "/restart" }, context);
             if (result?.queued === false) {
                 if (operationAuthorityCurrent(context)) bounceRequested = false;
                 return { state: "rejected", errorCode: "bounce-unavailable" };
@@ -2734,13 +2714,13 @@ if (validSessionId && socketPath) {
         if (activeOperationKeys.has(operationExecutionKey(context.conversationEpoch, context.operationId))) return;
         const workflow = workflowSnapshot();
         // Parking stops the CLI as a bounce does, so it asks the same question,
-        // minus the `bounce` command and plus an empty message queue.
+        // plus no waiting schedule and an empty message queue.
         const parkCheck = kind === "session-park-check";
         const needsIdle = kind === "session-bounce" || parkCheck;
         const valid = request.schemaVersion === 1 && validWorkflowAction(action, kind)
             && workflow.capabilities.includes(kind)
             && (kind !== "session-send" || workflow.sendReady)
-            && (!needsIdle || (bounceIsIdle() && activeOperationKeys.size === 0))
+            && (!needsIdle || (stopIsIdle(parkCheck) && activeOperationKeys.size === 0))
             && (!parkCheck || pendingMessages.length === 0)
             && (kind !== "set-session-budget" || pendingBudgetRequest === null)
             && (kind !== "answer-session-budget"
@@ -2757,24 +2737,23 @@ if (validSessionId && socketPath) {
             activeOperationKeys.add(preparingKey);
             let ready = false;
             try {
-                const available = parkCheck || await hasBounceCommand(context);
-                const scheduled = await workflowRead("session.schedule.list", {}, context);
+                const scheduled = parkCheck ? await workflowRead("session.schedule.list", {}, context) : null;
                 const processing = await workflowRead("session.metadata.isProcessing", {}, context);
                 const activity = await workflowRead("session.metadata.activity", {}, context);
                 // The published list leaves out what it can't show, so read the queue itself.
                 const queue = parkCheck ? await workflowRead("session.queue.pendingItems", {}, context) : null;
-                await recoverQuestionsForBounce();
-                ready = available && Array.isArray(scheduled?.entries) && scheduled.entries.length === 0
-                    && processing?.processing === false && activity?.hasActiveWork === false
-                    && (!parkCheck || (Array.isArray(queue?.items) && queue.items.length === 0
+                await recoverQuestionsBounded();
+                ready = processing?.processing === false && activity?.hasActiveWork === false
+                    && (!parkCheck || (Array.isArray(scheduled?.entries) && scheduled.entries.length === 0
+                        && Array.isArray(queue?.items) && queue.items.length === 0
                         && Array.isArray(queue.steeringMessages) && queue.steeringMessages.length === 0
                         && queue.inFlightSteeringCount === 0));
             } catch (error) {
-                console.error("[copilot-projects] bounce preflight failed:", error);
+                console.error("[copilot-projects] idle preflight failed:", error);
             } finally {
                 activeOperationKeys.delete(preparingKey);
             }
-            if (!ready || !operationAuthorityCurrent(context) || !bounceIsIdle()
+            if (!ready || !operationAuthorityCurrent(context) || !stopIsIdle(parkCheck)
                     || nativeSendRevision !== sendRevision || activeOperationKeys.size !== 0
                     // A turn that came and went during the reads may have left work behind.
                     || (parkCheck && (pendingMessages.length !== 0
@@ -5981,7 +5960,7 @@ if (validSessionId && socketPath) {
         // extra write per tick), so the workflow it certifies is current.
         publish();
         const generation = conversationGeneration;
-        const questionRecovery = recoverQuestionsForBounce();
+        const questionRecovery = recoverQuestionsBounded();
         refreshRuntimeActivity(false, { heartbeat: true });
         refreshSchedules();
         refreshModels();

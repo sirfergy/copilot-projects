@@ -287,6 +287,11 @@ final class AppModel: ObservableObject {
                 parentSessionId: request.parentSessionId
             )
         },
+        restartSession: { [unowned self] request in
+            self.restartAutomationSession(
+                sessionId: request.sessionId ?? "", projectId: request.projectId
+            )
+        },
         listHosts: { [unowned self] in self.renderHosts() },
         setDefaultHost: { [unowned self] request in
             guard let pid = self.resolveProject(request) else { return .failure("no project") }
@@ -2981,7 +2986,7 @@ final class AppModel: ObservableObject {
         if clearedMark { save() }
     }
 
-    func bounceIdleSessions(inProjectId pid: String) {
+    func restartIdleSessions(inProjectId pid: String) {
         guard let pi = projectIndex(pid) else { return }
         let sessionIds = projects[pi].sessions
             .filter { $0.displayStatus == .idle && !$0.hasBackgroundWork }

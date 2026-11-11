@@ -167,6 +167,21 @@ final class SessionWorkflowTests: XCTestCase {
             sessionId: session.id, action: bounce, operation: bounceID
         ), .accepted)
         try FileManager.default.removeItem(at: sessions.appendingPathComponent("\(session.id).session-bounce.json"))
+        // restart-session: a waiting schedule does not block a restart.
+        snapshot.schedules = [TrackedSchedule(
+            id: 1, intervalMs: 60_000, cron: nil, tz: nil, at: nil,
+            prompt: "Later", recurring: true, displayPrompt: nil, nextRunAt: "later"
+        )]
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: "other").code, "conflict")
+        XCTAssertEqual(model.restartAutomationSession(sessionId: "missing", projectId: nil).code, "gone")
+        XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: project.id).code, "requested")
+        try FileManager.default.removeItem(at: sessions.appendingPathComponent("\(session.id).session-bounce.json"))
+        model.projects[0].sessions[0].parked = ParkedSession(state: .parked, sinceMilliseconds: 1)
+        XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: nil).code, "busy")
+        XCTAssertEqual(model.parkedState(session.id), .parked, "a refused restart must not resume a parked session")
+        model.projects[0].sessions[0].parked = nil
+        snapshot.schedules = []
         let readyWorkflow = snapshot.workflow
         let selection = RemoteModelSelection(modelId: "gpt-5.6-sol")
         let modelOperation = CLIOperationRequest(operationId: "model", conversationEpoch: "epoch-1")
@@ -203,6 +218,7 @@ final class SessionWorkflowTests: XCTestCase {
             sessionId: session.id, action: bounce,
             operation: CLIOperationRequest(operationId: "busy-bounce", conversationEpoch: "epoch-1")
         ), .invalid)
+        XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: nil).code, "busy")
         snapshot.scheduledTurnActive = false
         snapshot.pendingPermissionRequestIds = ["pending"]
         try JSONEncoder().encode(snapshot).write(to: snapshotURL)
