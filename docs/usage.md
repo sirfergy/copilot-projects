@@ -192,7 +192,7 @@ back a resend answers 409, and then 412:
 | 204 | Taken, now or by an earlier attempt | Follow its receipt |
 | 409 | Not now: another operation holds the slot, the session isn't ready to take it, or its tracker state is too old to judge | Resend the same identity |
 | 412 | The conversation it names has ended (`/new`, a tracker restart, another Copilot session) | Stop; its outcome is unknown |
-| 422 | Not taken, for example a bad payload, a question or model that's gone, or a bounce while Copilot is busy | Stop |
+| 422 | Not taken, for example a bad payload, a question or model that's gone, or a restart while Copilot is busy | Stop |
 | 400, 403 | Malformed or without an identity; another device holds control | Stop |
 
 409 also answers an identity reused for a different payload, which a resend never
@@ -236,7 +236,7 @@ The Mac also judges this itself every time it builds a snapshot for a client
 makes the same judgement before taking any session action, so clients can use
 `fresh` instead of aging the evidence: offer an action when `fresh` is true, the
 session's `operationSupport` is `receipts`, and `admits(kind)` holds (the
-capability is listed, no bounce is pending, and for a bounce `bounceRequested`
+capability is listed, no restart is pending, and for a restart `restartRequested`
 is explicitly false). Each action's own conditions still apply, such as
 `sendReady` for a send.
 A session whose workflow state is missing, stale, or unsupported offers no composer

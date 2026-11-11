@@ -9,7 +9,7 @@ enum CLISDKOperationKind: String, Codable {
     case setModel = "set-model"
     case sessionSend = "session-send"
     case sessionAbort = "session-abort"
-    case sessionBounce = "session-bounce"
+    case sessionRestart = "session-restart"
     case setSessionBudget = "set-session-budget"
     case answerSessionBudget = "answer-session-budget"
     /// Asked by the host before parking; never offered to remote clients.
@@ -81,7 +81,7 @@ struct CLIOperationAdapter {
         "set-model-request.json",
         "session-send.json",
         "session-abort.json",
-        "session-bounce.json",
+        "session-restart.json",
         "set-session-budget.json",
         "answer-session-budget.json",
         "session-park-check.json",

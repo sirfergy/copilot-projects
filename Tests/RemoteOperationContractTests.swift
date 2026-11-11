@@ -276,7 +276,7 @@ final class RemoteOperationContractTests: XCTestCase {
         let actions = [
             RemoteSessionAction(kind: .send, prompt: "hello", mode: .immediate),
             RemoteSessionAction(kind: .abort),
-            RemoteSessionAction(kind: .bounce),
+            RemoteSessionAction(kind: .restart),
             RemoteSessionAction(kind: .setBudget),
             RemoteSessionAction(kind: .answerBudget, requestId: "budget"),
         ]
@@ -304,7 +304,7 @@ final class RemoteOperationContractTests: XCTestCase {
         func track(
             updatedAt: Date,
             sendReady: Bool = true,
-            bounceRequested: Bool = false,
+            restartRequested: Bool = false,
             userInputs: [TrackedUserInput]? = nil
         ) throws {
             var tracked = snapshot(
@@ -314,7 +314,7 @@ final class RemoteOperationContractTests: XCTestCase {
             tracked.workflow = RemoteSessionWorkflow(
                 observedAtMilliseconds: Int64(start.timeIntervalSince1970 * 1_000),
                 capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
-                sendReady: sendReady, bounceRequested: bounceRequested, limitsKnown: true
+                sendReady: sendReady, restartRequested: restartRequested, limitsKnown: true
             )
             try JSONEncoder().encode(tracked).write(
                 to: harness.sessions.appendingPathComponent("\(harness.session.id).agent-activity.json"),
@@ -332,15 +332,15 @@ final class RemoteOperationContractTests: XCTestCase {
         try track(updatedAt: start.addingTimeInterval(10))
         XCTAssertEqual(try publish("old observation", at: start.addingTimeInterval(16)), false)
 
-        // As the tracker publishes them: no send while a question waits or a bounce is pending.
+        // As the tracker publishes them: no send while a question waits or a restart is pending.
         let question = TrackedUserInput(
             requestId: "question", question: "Continue?", choices: [], allowFreeform: true,
             requestedAt: start.ISO8601Format(), agentId: nil
         )
         try track(updatedAt: start, sendReady: false, userInputs: [question])
         XCTAssertEqual(try publish("question", at: start), true)
-        try track(updatedAt: start, sendReady: false, bounceRequested: true)
-        XCTAssertEqual(try publish("bounce requested", at: start), true)
+        try track(updatedAt: start, sendReady: false, restartRequested: true)
+        XCTAssertEqual(try publish("restart requested", at: start), true)
 
         try track(updatedAt: start)
         harness.model.projects[0].sessions[0].parked = ParkedSession(state: .failed, sinceMilliseconds: 1)

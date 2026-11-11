@@ -763,32 +763,32 @@ function workflowHandoff(runtime, kind, action, fields = operationFields(runtime
   return { path, payload, operationId: fields.operationId };
 }
 
-test("bounce enqueues Copilot's /restart for its owner once without sending a prompt", {
+test("restart enqueues Copilot's /restart for its owner once without sending a prompt", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
-  assert.ok((await workflowReady(runtime)).capabilities.includes("session-bounce"));
-  const request = workflowHandoff(runtime, "session-bounce", {});
-  await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "bounce not queued");
+  assert.ok((await workflowReady(runtime)).capabilities.includes("session-restart"));
+  const request = workflowHandoff(runtime, "session-restart", {});
+  await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "restart not queued");
   assert.deepEqual(runtime.session.workflowCalls, [{
     method: "session.commands.enqueue", sessionId: runtime.copilotSessionId, command: "/restart",
   }]);
   assert.deepEqual(runtime.session.closeCalls, []);
   assert.deepEqual(readSnapshot(runtime).workflow.capabilities, []);
-  assert.equal(readSnapshot(runtime).workflow.bounceRequested, true);
+  assert.equal(readSnapshot(runtime).workflow.restartRequested, true);
   assert.equal(readSnapshot(runtime).availableModels, undefined);
   const acceptedSnapshots = runtime.activityWrites.filter(snapshot =>
     snapshot.operationReceipts.some(item => item.operationId === request.operationId && item.state === "accepted")
   );
   assert.ok(acceptedSnapshots.length > 0);
   assert.ok(acceptedSnapshots.every(snapshot =>
-    snapshot.workflow.bounceRequested === true && snapshot.availableModels === undefined
+    snapshot.workflow.restartRequested === true && snapshot.availableModels === undefined
       && snapshot.workflow.capabilities.length === 0
   ));
   writeHandoff(runtime, request.path, request.payload);
-  trigger(runtime, `${runtime.appSessionId}.session-bounce.json`);
-  const second = workflowHandoff(runtime, "session-bounce", {});
-  await waitFor(() => receipt(runtime, second.operationId)?.state === "rejected", "second bounce not rejected");
+  trigger(runtime, `${runtime.appSessionId}.session-restart.json`);
+  const second = workflowHandoff(runtime, "session-restart", {});
+  await waitFor(() => receipt(runtime, second.operationId)?.state === "rejected", "second restart not rejected");
   assert.equal(runtime.session.workflowCalls.length, 1);
 });
 
@@ -837,10 +837,10 @@ test("the park check answers idle or busy and never sends anything to the runtim
   assert.deepEqual(runtime.session.workflowCalls, []);
   assert.deepEqual(runtime.session.closeCalls, []);
   assert.deepEqual(readSnapshot(runtime).workflow.capabilities, capabilities);
-  assert.equal(readSnapshot(runtime).workflow.bounceRequested, false);
+  assert.equal(readSnapshot(runtime).workflow.restartRequested, false);
 });
 
-test("bounce rejects while initial question recovery is pending and until the recovered question completes", {
+test("restart rejects while initial question recovery is pending and until the recovered question completes", {
   concurrency: false,
 }, async (t) => {
   let release;
@@ -856,28 +856,28 @@ test("bounce rejects while initial question recovery is pending and until the re
   assert.equal(runtime.session.processing, false);
   assert.equal(runtime.session.questionEventCalls[0].sessionId, runtime.copilotSessionId);
   assert.deepEqual(readSnapshot(runtime).trackedElicitations, []);
-  const pending = workflowHandoff(runtime, "session-bounce", {});
+  const pending = workflowHandoff(runtime, "session-restart", {});
   await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, pending.operationId)?.state),
-    "bounce did not settle while question recovery was pending");
+    "restart did not settle while question recovery was pending");
   assert.equal(receipt(runtime, pending.operationId).state, "rejected");
   assert.deepEqual(runtime.session.workflowCalls, []);
 
   release();
   await waitFor(() => readSnapshot(runtime).trackedElicitations.length === 1, "question was not recovered");
-  const unanswered = workflowHandoff(runtime, "session-bounce", {});
+  const unanswered = workflowHandoff(runtime, "session-restart", {});
   await waitFor(() => receipt(runtime, unanswered.operationId)?.state === "rejected",
-    "unanswered recovered question did not block bounce");
+    "unanswered recovered question did not block restart");
   assert.deepEqual(runtime.session.workflowCalls, []);
 
   await runtime.session.emit("elicitation.completed", { requestId: "recovering" }, {}, false);
   runtime.intervalCallback();
   await waitFor(() => readSnapshot(runtime).trackedElicitations.length === 0, "completion was not recovered");
-  const ready = workflowHandoff(runtime, "session-bounce", {});
-  await waitFor(() => receipt(runtime, ready.operationId)?.state === "applied", "completed recovery kept bounce blocked");
+  const ready = workflowHandoff(runtime, "session-restart", {});
+  await waitFor(() => receipt(runtime, ready.operationId)?.state === "applied", "completed recovery kept restart blocked");
   assert.equal(runtime.session.workflowCalls.length, 1);
 });
 
-test("bounce rejects failed, unavailable, malformed, and incomplete question recovery", {
+test("restart rejects failed, unavailable, malformed, and incomplete question recovery", {
   concurrency: false,
 }, async (t) => {
   for (const failure of ["failed", "unavailable", "malformed", "incomplete"]) {
@@ -892,15 +892,15 @@ test("bounce rejects failed, unavailable, malformed, and incomplete question rec
     await workflowReady(runtime);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(runtime.session.processing, false);
-    const request = workflowHandoff(runtime, "session-bounce", {});
+    const request = workflowHandoff(runtime, "session-restart", {});
     await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, request.operationId)?.state),
-      "bounce did not settle after question recovery failed");
+      "restart did not settle after question recovery failed");
     assert.equal(receipt(runtime, request.operationId).state, "rejected", failure);
     assert.deepEqual(runtime.session.workflowCalls, [], failure);
   }
 });
 
-test("bounce cannot reuse question recovery from a previous conversation", {
+test("restart cannot reuse question recovery from a previous conversation", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
@@ -923,18 +923,18 @@ test("bounce cannot reuse question recovery from a previous conversation", {
   await waitFor(() => finishNew, "current question recovery did not start");
   finishOld(emptyPage);
   await workflowReady(runtime);
-  const pending = workflowHandoff(runtime, "session-bounce", {});
+  const pending = workflowHandoff(runtime, "session-restart", {});
   await waitFor(() => receipt(runtime, pending.operationId)?.state === "rejected",
-    "old recovery admitted bounce into the new conversation");
+    "old recovery admitted restart into the new conversation");
   assert.deepEqual(runtime.session.workflowCalls, []);
   finishNew(emptyPage);
   await new Promise(resolve => setImmediate(resolve));
-  const ready = workflowHandoff(runtime, "session-bounce", {});
-  await waitFor(() => receipt(runtime, ready.operationId)?.state === "applied", "current recovery did not admit bounce");
+  const ready = workflowHandoff(runtime, "session-restart", {});
+  await waitFor(() => receipt(runtime, ready.operationId)?.state === "applied", "current recovery did not admit restart");
   assert.equal(runtime.session.workflowCalls[0].sessionId, nextID);
 });
 
-test("bounce waits for oversized questions that cannot be displayed remotely", {
+test("restart waits for oversized questions that cannot be displayed remotely", {
   concurrency: false,
 }, async (t) => {
   for (const kind of ["elicitation", "user_input"]) {
@@ -950,24 +950,24 @@ test("bounce waits for oversized questions that cannot be displayed remotely", {
       assert.equal(runtime.session.processing, false);
       const field = kind === "elicitation" ? "trackedElicitations" : "trackedUserInputs";
       assert.deepEqual(readSnapshot(runtime)[field], []);
-      const pending = workflowHandoff(runtime, "session-bounce", {});
+      const pending = workflowHandoff(runtime, "session-restart", {});
       await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, pending.operationId)?.state),
-        "bounce did not settle with a terminal-only question");
+        "restart did not settle with a terminal-only question");
       assert.equal(receipt(runtime, pending.operationId).state, "rejected", `${kind} recovered=${recovered}`);
       assert.deepEqual(runtime.session.workflowCalls, []);
 
       await runtime.session.emit(`${kind}.completed`, { requestId: "oversized" }, {}, !recovered);
       if (recovered) runtime.intervalCallback();
       await new Promise(resolve => setImmediate(resolve));
-      const ready = workflowHandoff(runtime, "session-bounce", {});
+      const ready = workflowHandoff(runtime, "session-restart", {});
       await waitFor(() => receipt(runtime, ready.operationId)?.state === "applied",
-        "completed terminal-only question kept bounce blocked");
+        "completed terminal-only question kept restart blocked");
       assert.equal(runtime.session.workflowCalls.length, 1);
     }
   }
 });
 
-test("heartbeat bounce waits for question recovery without delaying exact receipt replay", {
+test("heartbeat restart waits for question recovery without delaying exact receipt replay", {
   concurrency: false,
 }, async (t) => {
   for (const delayed of [false, true]) {
@@ -979,11 +979,11 @@ test("heartbeat bounce waits for question recovery without delaying exact receip
       ? Promise.resolve(emptyPage)
       : new Promise(resolve => { finish = resolve; });
     t.after(() => finish?.(emptyPage));
-    const fields = operationFields(runtime, "session-bounce");
-    const path = join(runtime.sessions, `${runtime.appSessionId}.session-bounce.json`);
+    const fields = operationFields(runtime, "session-restart");
+    const path = join(runtime.sessions, `${runtime.appSessionId}.session-restart.json`);
     const payload = {
       schemaVersion: 1, copilotSessionId: runtime.copilotSessionId,
-      ...fields, action: { kind: "session-bounce" },
+      ...fields, action: { kind: "session-restart" },
     };
     writeHandoff(runtime, path, payload);
     runtime.intervalCallback();
@@ -994,7 +994,7 @@ test("heartbeat bounce waits for question recovery without delaying exact receip
       finish(emptyPage);
     }
     await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, fields.operationId)?.state),
-      "heartbeat did not dispatch bounce after recovery");
+      "heartbeat did not dispatch restart after recovery");
     assert.equal(receipt(runtime, fields.operationId).state, "applied");
     assert.equal(runtime.session.workflowCalls.length, 1);
 
@@ -1008,7 +1008,7 @@ test("heartbeat bounce waits for question recovery without delaying exact receip
   }
 });
 
-test("watcher bounce refreshes questions missed after startup without a heartbeat", {
+test("watcher restart refreshes questions missed after startup without a heartbeat", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
@@ -1016,16 +1016,16 @@ test("watcher bounce refreshes questions missed after startup without a heartbea
   const reads = runtime.session.questionEventCalls.length;
   await runtime.session.emit("elicitation.requested", pendingURLQuestion("missed"), {}, false);
   assert.deepEqual(readSnapshot(runtime).trackedElicitations, []);
-  const request = workflowHandoff(runtime, "session-bounce", {});
+  const request = workflowHandoff(runtime, "session-restart", {});
   await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, request.operationId)?.state),
-    "watcher bounce did not settle");
+    "watcher restart did not settle");
   assert.equal(receipt(runtime, request.operationId).state, "rejected");
   assert.ok(runtime.session.questionEventCalls.length > reads);
   assert.equal(readSnapshot(runtime).trackedElicitations[0].requestId, "missed");
   assert.deepEqual(runtime.session.workflowCalls, []);
 });
 
-test("heartbeat rejects bounce after failed or unsupported question recovery", {
+test("heartbeat rejects restart after failed or unsupported question recovery", {
   concurrency: false,
 }, async (t) => {
   for (const code of [undefined, -32601]) {
@@ -1034,21 +1034,21 @@ test("heartbeat rejects bounce after failed or unsupported question recovery", {
     runtime.session.questionEventHandler = async () => {
       throw Object.assign(new Error("question recovery failed"), { code });
     };
-    const fields = operationFields(runtime, "session-bounce");
-    const path = join(runtime.sessions, `${runtime.appSessionId}.session-bounce.json`);
+    const fields = operationFields(runtime, "session-restart");
+    const path = join(runtime.sessions, `${runtime.appSessionId}.session-restart.json`);
     writeHandoff(runtime, path, {
       schemaVersion: 1, copilotSessionId: runtime.copilotSessionId,
-      ...fields, action: { kind: "session-bounce" },
+      ...fields, action: { kind: "session-restart" },
     });
     runtime.intervalCallback();
     await waitFor(() => receipt(runtime, fields.operationId)?.state === "rejected",
-      "failed question recovery left the bounce handoff outstanding");
+      "failed question recovery left the restart handoff outstanding");
     assert.equal(realExistsSync(path), false);
     assert.deepEqual(runtime.session.workflowCalls, []);
   }
 });
 
-test("stalled question reads reject watcher and polling bounce without releasing recovery ownership", {
+test("stalled question reads reject watcher and polling restart without releasing recovery ownership", {
   concurrency: false,
 }, async (t) => {
   for (const watcher of [false, true]) {
@@ -1060,18 +1060,18 @@ test("stalled question reads reject watcher and polling bounce without releasing
     let finish;
     runtime.session.questionEventHandler = () => new Promise(resolve => { finish = resolve; });
     t.after(() => finish?.(emptyPage));
-    const fields = operationFields(runtime, "session-bounce");
-    const path = join(runtime.sessions, `${runtime.appSessionId}.session-bounce.json`);
+    const fields = operationFields(runtime, "session-restart");
+    const path = join(runtime.sessions, `${runtime.appSessionId}.session-restart.json`);
     const payload = {
       schemaVersion: 1, copilotSessionId: runtime.copilotSessionId,
-      ...fields, action: { kind: "session-bounce" },
+      ...fields, action: { kind: "session-restart" },
     };
     writeHandoff(runtime, path, payload);
-    if (watcher) trigger(runtime, `${runtime.appSessionId}.session-bounce.json`);
+    if (watcher) trigger(runtime, `${runtime.appSessionId}.session-restart.json`);
     else runtime.intervalCallback();
     await waitFor(() => finish, "question read did not stall");
     await waitFor(() => receipt(runtime, fields.operationId)?.state === "rejected",
-      "stalled recovery did not reject bounce within the existing recovery deadline", 4_000);
+      "stalled recovery did not reject restart within the existing recovery deadline", 4_000);
     assert.equal(realExistsSync(path), false);
     assert.deepEqual(runtime.session.workflowCalls, []);
     runtime.intervalCallback();
@@ -1080,20 +1080,20 @@ test("stalled question reads reject watcher and polling bounce without releasing
     finish(emptyPage);
     runtime.session.questionEventHandler = read;
     await new Promise(resolve => setImmediate(resolve));
-    assert.deepEqual(runtime.session.workflowCalls, [], "Late recovery executed an expired bounce");
+    assert.deepEqual(runtime.session.workflowCalls, [], "Late recovery executed an expired restart");
     writeHandoff(runtime, path, payload);
-    trigger(runtime, `${runtime.appSessionId}.session-bounce.json`);
-    await waitFor(() => !realExistsSync(path), "expired bounce receipt did not replay");
+    trigger(runtime, `${runtime.appSessionId}.session-restart.json`);
+    await waitFor(() => !realExistsSync(path), "expired restart receipt did not replay");
     assert.equal(receipt(runtime, fields.operationId).state, "rejected");
     assert.deepEqual(runtime.session.workflowCalls, []);
-    const ready = workflowHandoff(runtime, "session-bounce", {});
+    const ready = workflowHandoff(runtime, "session-restart", {});
     await waitFor(() => receipt(runtime, ready.operationId)?.state === "applied",
       "expired preflight kept a new request reserved after recovery");
     assert.equal(runtime.session.workflowCalls.length, 1);
   }
 });
 
-test("a completed native send invalidates bounce preflight before a delayed turn-start event", {
+test("a completed native send invalidates restart preflight before a delayed turn-start event", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
@@ -1102,21 +1102,21 @@ test("a completed native send invalidates bounce preflight before a delayed turn
   let finishRecovery;
   runtime.session.questionEventHandler = () => new Promise(resolve => { finishRecovery = resolve; });
   t.after(() => finishRecovery?.(emptyPage));
-  const bounce = workflowHandoff(runtime, "session-bounce", {});
-  await waitFor(() => finishRecovery, "bounce preflight did not wait for question recovery");
+  const restart = workflowHandoff(runtime, "session-restart", {});
+  await waitFor(() => finishRecovery, "restart preflight did not wait for question recovery");
   const send = workflowHandoff(runtime, "session-send", { prompt: "new work", mode: "enqueue" });
   await waitFor(() => receipt(runtime, send.operationId)?.state === "applied", "native send did not complete");
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(runtime.session.processing, false, "The turn-start notification must still be delayed");
-  assert.equal(receipt(runtime, bounce.operationId), undefined, "The race must finish before preflight expiry");
+  assert.equal(receipt(runtime, restart.operationId), undefined, "The race must finish before preflight expiry");
   finishRecovery(emptyPage);
-  await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, bounce.operationId)?.state),
-    "bounce did not settle after the intervening send");
-  assert.equal(receipt(runtime, bounce.operationId).state, "rejected");
+  await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, restart.operationId)?.state),
+    "restart did not settle after the intervening send");
+  assert.equal(receipt(runtime, restart.operationId).state, "rejected");
   assert.deepEqual(runtime.session.workflowCalls.map(call => call.method), ["session.send"]);
 });
 
-test("a reloaded tracker rejects bounce over unfinished child work reported by the runtime", {
+test("a reloaded tracker rejects restart over unfinished child work reported by the runtime", {
   concurrency: false,
 }, async (t) => {
   const child = uuid();
@@ -1130,22 +1130,22 @@ test("a reloaded tracker rejects bounce over unfinished child work reported by t
   await workflowReady(runtime);
   assert.equal(runtime.session.processing, false);
   assert.deepEqual(readSnapshot(runtime).activeSubagents, [], "Reload must not have a live child notification");
-  const request = workflowHandoff(runtime, "session-bounce", {});
+  const request = workflowHandoff(runtime, "session-restart", {});
   await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, request.operationId)?.state),
-    "bounce did not settle for unfinished child work");
+    "restart did not settle for unfinished child work");
   assert.equal(receipt(runtime, request.operationId).state, "rejected");
   assert.deepEqual(runtime.session.runtimeCalls
     .filter(call => call.method === "session.metadata.activity")
     .map(call => call.sessionId), [runtime.copilotSessionId]);
   assert.deepEqual(runtime.session.workflowCalls, []);
   runtime.session.activityHandler = async () => ({ abortable: false, hasActiveWork: false });
-  const idle = workflowHandoff(runtime, "session-bounce", {});
+  const idle = workflowHandoff(runtime, "session-restart", {});
   await waitFor(() => receipt(runtime, idle.operationId)?.state === "applied",
-    "authoritatively idle child work kept bounce blocked");
+    "authoritatively idle child work kept restart blocked");
   assert.equal(runtime.session.workflowCalls.length, 1);
 });
 
-test("bounce rejects unknown or unavailable session-wide activity", {
+test("restart rejects unknown or unavailable session-wide activity", {
   concurrency: false,
 }, async (t) => {
   for (const activity of [undefined, {}, {hasActiveWork: null}, {hasActiveWork: "false"}, new Error("unavailable")]) {
@@ -1156,9 +1156,9 @@ test("bounce rejects unknown or unavailable session-wide activity", {
       };
     });
     await workflowReady(runtime);
-    const request = workflowHandoff(runtime, "session-bounce", {});
+    const request = workflowHandoff(runtime, "session-restart", {});
     await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, request.operationId)?.state),
-      "bounce did not settle with unknown background work");
+      "restart did not settle with unknown background work");
     assert.equal(receipt(runtime, request.operationId).state, "rejected");
     assert.deepEqual(runtime.session.workflowCalls, []);
   }
@@ -1180,43 +1180,43 @@ test("restart rechecks live processing and questions before dispatch", {
         return idleActivity(params);
       };
     }
-    const request = workflowHandoff(runtime, "session-bounce", {});
-    await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "unsafe bounce not rejected");
+    const request = workflowHandoff(runtime, "session-restart", {});
+    await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "unsafe restart not rejected");
     assert.deepEqual(runtime.session.workflowCalls, []);
   }
 });
 
-test("bounce rejects payloads and keeps an ambiguous dispatch from executing again", {
+test("restart rejects payloads and keeps an ambiguous dispatch from executing again", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t, (session) => {
     session.enqueueHandler = async () => { throw new Error("connection closed after enqueue"); };
   });
   await workflowReady(runtime);
-  const invalid = workflowHandoff(runtime, "session-bounce", { prompt: "/quit" });
+  const invalid = workflowHandoff(runtime, "session-restart", { prompt: "/quit" });
   await waitFor(() => receipt(runtime, invalid.operationId)?.state === "rejected", "payload not rejected");
   assert.deepEqual(runtime.session.workflowCalls, []);
-  const request = workflowHandoff(runtime, "session-bounce", {});
-  await waitFor(() => receipt(runtime, request.operationId)?.state === "indeterminate", "unknown bounce not retained");
-  const retry = workflowHandoff(runtime, "session-bounce", {});
-  await waitFor(() => receipt(runtime, retry.operationId)?.state === "rejected", "ambiguous bounce retried");
+  const request = workflowHandoff(runtime, "session-restart", {});
+  await waitFor(() => receipt(runtime, request.operationId)?.state === "indeterminate", "unknown restart not retained");
+  const retry = workflowHandoff(runtime, "session-restart", {});
+  await waitFor(() => receipt(runtime, retry.operationId)?.state === "rejected", "ambiguous restart retried");
   assert.equal(runtime.session.workflowCalls.length, 1);
 });
 
-test("a definitive bounce refusal leaves the conversation usable", {
+test("a definitive restart refusal leaves the conversation usable", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t, (session) => {
     session.enqueueHandler = async () => ({ queued: false });
   });
   await workflowReady(runtime);
-  const request = workflowHandoff(runtime, "session-bounce", {});
-  await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "bounce refusal not reported");
-  assert.ok((await workflowReady(runtime)).capabilities.includes("session-bounce"));
-  assert.equal(readSnapshot(runtime).workflow.bounceRequested, false);
+  const request = workflowHandoff(runtime, "session-restart", {});
+  await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "restart refusal not reported");
+  assert.ok((await workflowReady(runtime)).capabilities.includes("session-restart"));
+  assert.equal(readSnapshot(runtime).workflow.restartRequested, false);
 });
 
-test("duplicate bounce watcher events during preflight neither reject nor execute twice", {
+test("duplicate restart watcher events during preflight neither reject nor execute twice", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
@@ -1226,12 +1226,12 @@ test("duplicate bounce watcher events during preflight neither reject nor execut
   runtime.session.activityHandler = (params) => new Promise((resolve) => {
     release = () => resolve(idleActivity(params));
   });
-  const request = workflowHandoff(runtime, "session-bounce", {});
+  const request = workflowHandoff(runtime, "session-restart", {});
   await waitFor(() => release, "preflight did not start");
-  trigger(runtime, `${runtime.appSessionId}.session-bounce.json`);
+  trigger(runtime, `${runtime.appSessionId}.session-restart.json`);
   assert.equal(receipt(runtime, request.operationId), undefined);
   release();
-  await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "bounce not queued");
+  await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "restart not queued");
   assert.equal(runtime.session.workflowCalls.length, 1);
 });
 
@@ -1242,10 +1242,10 @@ test("an unsupported enqueue RPC does not latch unrelated session controls off",
     session.enqueueHandler = async () => { throw Object.assign(new Error("unsupported"), { code: -32601 }); };
   });
   await workflowReady(runtime);
-  const request = workflowHandoff(runtime, "session-bounce", {});
+  const request = workflowHandoff(runtime, "session-restart", {});
   await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "unsupported RPC not rejected");
-  assert.equal((await workflowReady(runtime)).capabilities.includes("session-bounce"), false);
-  assert.equal(readSnapshot(runtime).workflow.bounceRequested, false);
+  assert.equal((await workflowReady(runtime)).capabilities.includes("session-restart"), false);
+  assert.equal(readSnapshot(runtime).workflow.restartRequested, false);
 });
 
 test("the park check waits for live schedules instead of trusting the empty startup cache", {
@@ -1276,7 +1276,7 @@ test("a waiting schedule does not block a restart", {
     session.scheduleListHandler = async () => ({ entries: [{ id: "scheduled-work" }] });
   });
   await waitFor(() => (readSnapshot(runtime).workflow?.schedules ?? []).length === 1, "schedule not published");
-  const request = workflowHandoff(runtime, "session-bounce", {});
+  const request = workflowHandoff(runtime, "session-restart", {});
   await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "scheduled restart not queued");
   assert.deepEqual(runtime.session.workflowCalls, [{
     method: "session.commands.enqueue", sessionId: runtime.copilotSessionId, command: "/restart",
@@ -1301,7 +1301,7 @@ test("unavailable or malformed schedule observations cannot admit a park", {
   }
 });
 
-test("failed acceptance publication rolls back the bounce fence without invoking RPC", {
+test("failed acceptance publication rolls back the restart fence without invoking RPC", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
@@ -1312,17 +1312,17 @@ test("failed acceptance publication rolls back the bounce fence without invoking
     failedWrites++;
     return true;
   };
-  const request = workflowHandoff(runtime, "session-bounce", {});
+  const request = workflowHandoff(runtime, "session-restart", {});
   await waitFor(() => failedWrites > 0, "acceptance write did not fail");
   assert.deepEqual(runtime.session.workflowCalls, []);
   assert.equal(realExistsSync(request.path), true);
   runtime.failWrite = null;
   await runtime.session.emit("session.usage_info", { currentTokens: 1, tokenLimit: 10 });
-  assert.equal(readSnapshot(runtime).workflow.bounceRequested, false);
+  assert.equal(readSnapshot(runtime).workflow.restartRequested, false);
   assert.ok(readSnapshot(runtime).availableModels.length > 0);
 });
 
-test("bounce fences new model switches but preserves exact replay", {
+test("restart fences new model switches but preserves exact replay", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
@@ -1335,8 +1335,8 @@ test("bounce fences new model switches but preserves exact replay", {
   writeHandoff(runtime, runtime.modelPath, payload);
   trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
   await waitFor(() => receipt(runtime, fields.operationId)?.state === "applied", "initial model switch failed");
-  const bounce = workflowHandoff(runtime, "session-bounce", {});
-  await waitFor(() => receipt(runtime, bounce.operationId)?.state === "applied", "bounce not queued");
+  const restart = workflowHandoff(runtime, "session-restart", {});
+  await waitFor(() => receipt(runtime, restart.operationId)?.state === "applied", "restart not queued");
   writeHandoff(runtime, runtime.modelPath, payload);
   trigger(runtime, `${runtime.appSessionId}.set-model-request.json`);
   await waitFor(() => !realExistsSync(runtime.modelPath), "exact replay was not consumed");

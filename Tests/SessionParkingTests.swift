@@ -76,7 +76,7 @@ final class SessionParkingTests: XCTestCase {
                 workflow: RemoteSessionWorkflow(
                     observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
                     capabilities: ["session-send", SessionParking.checkKind], sendReady: true,
-                    bounceRequested: false
+                    restartRequested: false
                 )
             )
             let home = copilotHome.path
@@ -266,7 +266,7 @@ final class SessionParkingTests: XCTestCase {
             ("tracker without the question", { try $0.publish {
                 $0.workflow = RemoteSessionWorkflow(
                     observedAtMilliseconds: $0.workflow!.observedAtMilliseconds,
-                    capabilities: ["session-send"], sendReady: true, bounceRequested: false
+                    capabilities: ["session-send"], sendReady: true, restartRequested: false
                 )
             } }),
             ("another Copilot session", { try $0.publish { $0.copilotSessionId = UUID().uuidString } }),
@@ -280,7 +280,7 @@ final class SessionParkingTests: XCTestCase {
             ("queued message", { try $0.publish {
                 $0.workflow = RemoteSessionWorkflow(
                     observedAtMilliseconds: $0.workflow!.observedAtMilliseconds,
-                    capabilities: $0.workflow!.capabilities, sendReady: true, bounceRequested: false,
+                    capabilities: $0.workflow!.capabilities, sendReady: true, restartRequested: false,
                     pendingMessages: [RemotePendingMessage(messageId: "m", text: "queued", mode: .enqueue)]
                 )
             } }),
