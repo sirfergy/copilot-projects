@@ -263,3 +263,138 @@ final class AgentActivityBackgroundScanTests: XCTestCase {
         XCTAssertEqual(activity?.idleGeneration, 2)
     }
 }
+
+/// Holds each load until `width` of them are waiting at once, so only a reader
+/// whose loads overlap gets past it.
+private final class LoadBarrier {
+    private let condition = NSCondition()
+    private let width: Int
+    private var waiting = 0
+    private var open = false
+    private var _overlapped = false
+
+    init(width: Int) { self.width = width }
+
+    var overlapped: Bool { condition.withLock { _overlapped } }
+
+    func wait() {
+        condition.lock()
+        defer { condition.unlock() }
+        waiting += 1
+        if waiting == width, !open {
+            _overlapped = true
+            open = true
+            condition.broadcast()
+        }
+        // A reader that loads one file at a time never fills the barrier. The deadline
+        // only turns that hang into a failure; a passing run never waits for it.
+        let deadline = Date().addingTimeInterval(30)
+        while !open {
+            if !condition.wait(until: deadline) {
+                open = true
+                condition.broadcast()
+            }
+        }
+    }
+}
+
+final class AgentActivityReaderTests: XCTestCase {
+    private var root: URL!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func url(_ sessionId: String) -> URL {
+        root.appendingPathComponent("\(sessionId).agent-activity.json")
+    }
+
+    private func publish(_ sessionId: String, generation: Int) throws {
+        let now = Date().formatted(Date.ISO8601FormatStyle(includingFractionalSeconds: true))
+        let activity = AgentActivitySnapshot(
+            schemaVersion: 1, updatedAt: now, foregroundTurnActive: false,
+            foregroundTransitionAt: now, scheduledTurnActive: false, activeSubagents: [],
+            schedules: [], idleGeneration: generation, lastIdleAborted: false,
+            lastIdleTurnKind: "foreground", error: nil
+        )
+        try JSONEncoder().encode(activity).write(to: url(sessionId), options: .atomic)
+    }
+
+    private func signature(_ sessionId: String) throws -> FileSignature {
+        FileSignature(attributes: try FileManager.default.attributesOfItem(atPath: url(sessionId).path))
+    }
+
+    private func describe(_ read: AgentActivityRead) -> String {
+        switch read.outcome {
+        case .missing: return "missing"
+        case .unchanged: return "unchanged"
+        case .unreadable: return "unreadable"
+        case .read(_, let snapshot): return "read \(snapshot.map { String($0.idleGeneration) } ?? "nil")"
+        }
+    }
+
+    func testChangedFilesAreReadConcurrently() throws {
+        let sessionIds = (0..<8).map { "session-\($0)" }
+        for (generation, sessionId) in sessionIds.enumerated() {
+            try publish(sessionId, generation: generation)
+        }
+        let barrier = LoadBarrier(width: 4)
+        let reads = AgentActivityReader.read(sessionIds, root, [:], { Date() }) { url in
+            barrier.wait()
+            return try Data(contentsOf: url)
+        }
+        XCTAssertTrue(barrier.overlapped, "four loads were never in flight together")
+        XCTAssertEqual(
+            reads.mapValues(describe),
+            Dictionary(uniqueKeysWithValues: sessionIds.enumerated().map { ($1, "read \($0)") }),
+            "each session gets its own file"
+        )
+    }
+
+    func testOutcomesAndReadTimesMatchAOneByOneRead() throws {
+        for (generation, sessionId) in ["unchanged", "changed", "new", "unreadable"].enumerated() {
+            try publish(sessionId, generation: generation)
+        }
+        try Data("{".utf8).write(to: url("malformed"))
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: url("unreadable").path)
+        let cached = ["unchanged": try signature("unchanged"), "changed": try signature("malformed")]
+
+        // One counter for the loads and the clock places each read time against its load.
+        let lock = NSLock()
+        var tick = 0.0
+        var loadedAt: [String: Double] = [:]
+        let next = { lock.withLock { tick += 1; return tick } }
+        let reads = AgentActivityReader.read(
+            ["missing", "unchanged", "changed", "new", "malformed", "unreadable"], root, cached,
+            { Date(timeIntervalSince1970: next()) }
+        ) { url in
+            let at = next()
+            let sessionId = url.deletingPathExtension().deletingPathExtension().lastPathComponent
+            lock.withLock { loadedAt[sessionId] = at }
+            return try Data(contentsOf: url)
+        }
+
+        XCTAssertEqual(reads.mapValues(describe), [
+            "missing": "missing", "unchanged": "unchanged", "changed": "read 1", "new": "read 2",
+            "malformed": "read nil", "unreadable": "unreadable",
+        ])
+        guard case .read(let newSignature, _) = reads["new"]?.outcome else {
+            return XCTFail("new was not read")
+        }
+        XCTAssertEqual(newSignature, try signature("new"))
+        XCTAssertEqual(
+            Set(loadedAt.keys), ["changed", "new", "malformed", "unreadable"], "only changed files are opened"
+        )
+        for (sessionId, loaded) in loadedAt {
+            XCTAssertGreaterThan(
+                try XCTUnwrap(reads[sessionId]).readAt.timeIntervalSince1970, loaded,
+                "\(sessionId) was timed before it was read"
+            )
+        }
+    }
+}
