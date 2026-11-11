@@ -70,9 +70,9 @@ struct TranscriptPromptComposerView: View {
     }
 
     private func blockedMessage(now: Date) -> String? {
-        composer.statusMessage
-            ?? (composer.slashCommand != nil ? composer.slashCommandBlockedReason() : nil)
-            ?? composer.attachmentsBlockedReason(workflow: liveWorkflow, operation: liveOperation, now: now)
+        if let message = composer.statusMessage { return message }
+        if composer.slashCommand != nil { return composer.slashCommandBlockedReason() }
+        return composer.attachmentsBlockedReason(workflow: liveWorkflow, operation: liveOperation, now: now)
     }
 
     /// The slash commands the draft could become, as the iOS composer offers them:
