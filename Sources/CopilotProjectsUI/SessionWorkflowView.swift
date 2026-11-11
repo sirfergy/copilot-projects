@@ -106,7 +106,7 @@ public struct SessionWorkflowContentView: View {
                 Text("Context: \(tokens.formatted()) / \(limit.formatted()) tokens")
                     .font(.caption)
             }
-            if !workflow.isFresh() {
+            if !isFresh {
                 Label("Runtime information is stale", systemImage: "exclamationmark.triangle")
             } else if let error = workflow.error {
                 Text(error).font(.caption).foregroundStyle(.secondary)
@@ -141,7 +141,7 @@ public struct SessionWorkflowContentView: View {
                     .disabled(!enabled(.answerBudget))
                     .help("Cancel the model request blocked by this budget")
                 }
-            } else if workflow.supports(.setBudget) {
+            } else if offers(.setBudget) {
                 HStack {
                     TextField("Soft limit (minimum 30)", text: $state.limitText)
                         .accessibilityLabel("Session soft limit in AI credits")
@@ -175,7 +175,7 @@ public struct SessionWorkflowContentView: View {
                         HStack {
                             Text(schedule).font(.caption)
                             Spacer()
-                            if workflow.supports(.send),
+                            if offers(.send),
                                workflow.schedules.filter({ $0 == schedule }).count == 1 {
                                 Button("Run Now") {
                                     submit(RemoteSessionAction(
@@ -200,14 +200,14 @@ public struct SessionWorkflowContentView: View {
                     }
                 }
             }
-            if workflow.supports(.abort) {
+            if offers(.abort) {
                 HStack {
                     Button("Stop task", role: .destructive) {
                         submit(RemoteSessionAction(kind: .abort))
                     }
                     .disabled(!enabled(.abort))
                     .help("Request Copilot cancellation without closing this terminal session")
-                    if workflow.supports(.send) {
+                    if offers(.send) {
                         Button("Stop & Poke") {
                             submitStopAndPoke()
                         }
@@ -228,9 +228,20 @@ public struct SessionWorkflowContentView: View {
         }
     }
 
+    /// A workflow the Mac published says whether it is fresh, judged on the
+    /// Mac's clock. One without `fresh`, as the Mac's own views pass, is
+    /// judged from its observation time on this device's clock.
+    private var isFresh: Bool {
+        workflow.fresh ?? workflow.isFresh()
+    }
+
+    private func offers(_ kind: RemoteSessionActionKind) -> Bool {
+        isFresh && workflow.admits(kind)
+    }
+
     private func enabled(_ kind: RemoteSessionActionKind) -> Bool {
         canWrite
-            && workflow.supports(kind)
+            && offers(kind)
             && (kind != .send || workflow.sendReady)
             && !state.pending.contains(kind)
             && state.uncertain[kind] == nil

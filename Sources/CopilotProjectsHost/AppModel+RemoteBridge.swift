@@ -852,13 +852,21 @@ extension AppModel {
         )
     }
 
-    /// The workflow as clients see it: without the host's own park question,
-    /// absent while the session's input is closed for parking, and `fresh`
-    /// when the host would act on it at `now`.
-    static func wireWorkflow(_ session: Session, at now: Date = Date()) -> RemoteSessionWorkflow? {
-        guard session.parked == nil, let activity = session.agentActivity,
-              var workflow = activity.workflow else { return nil }
+    /// The workflow as this Mac's own views see it: without the host's own park
+    /// question, and absent while the session's input is closed for parking. It
+    /// carries no `fresh`: the shared view follows one when it is there, and the
+    /// Mac's views judge the observation on the Mac's clock each time they ask.
+    static func localWorkflow(_ session: Session) -> RemoteSessionWorkflow? {
+        guard session.parked == nil, var workflow = session.agentActivity?.workflow else { return nil }
         workflow.capabilities.removeAll { $0 == SessionParking.checkKind }
+        return workflow
+    }
+
+    /// The workflow as clients see it: the same, with `fresh` set to whether
+    /// the host would act on it at `now`.
+    static func wireWorkflow(_ session: Session, at now: Date) -> RemoteSessionWorkflow? {
+        guard let activity = session.agentActivity,
+              var workflow = localWorkflow(session) else { return nil }
         workflow.fresh = activity.workflowIsFresh(at: now)
         return workflow
     }
@@ -1675,7 +1683,7 @@ extension AppModel {
 
     func sessionWorkflow(sessionId: String) -> RemoteSessionWorkflow? {
         guard let location = locateIndex(sessionId) else { return nil }
-        return Self.wireWorkflow(projects[location.p].sessions[location.s])
+        return Self.localWorkflow(projects[location.p].sessions[location.s])
     }
 
     func sessionModelInfo(sessionId: String) -> RemoteModelInfo? {

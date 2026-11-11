@@ -325,6 +325,9 @@ final class RemoteOperationContractTests: XCTestCase {
 
         try track(updatedAt: start)
         XCTAssertEqual(try publish("fresh", at: start), true)
+        // The Mac's own views get it without the verdict, which the shared view
+        // would follow: they judge the observation on the Mac's clock when they ask.
+        XCTAssertNil(try XCTUnwrap(harness.model.sessionWorkflow(sessionId: harness.session.id)).fresh)
         // The tracker stops heartbeating and nothing else changes: the next poll flips it.
         XCTAssertEqual(try publish("stopped", at: start.addingTimeInterval(16)), false)
 
