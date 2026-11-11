@@ -18201,6 +18201,53 @@ final class AppLogicTests: XCTestCase {
         )
     }
 
+    /// The shared Session Details view offers the soft-limit field only while
+    /// the workflow is fresh. A workflow the Mac published says so itself;
+    /// the Mac's own copy is judged on the Mac's clock from when it was observed.
+    @MainActor
+    func testSessionDetailsTakesStalenessFromFreshOrTheMacsOwnClock() async throws {
+        _ = NSApplication.shared
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1_000)
+        func offersSoftLimit(observedAtMilliseconds: Int64, fresh: Bool?) async -> Bool {
+            var state = SessionWorkflowState()
+            let host = NSHostingView(rootView: SessionWorkflowContentView(
+                workflow: RemoteSessionWorkflow(
+                    observedAtMilliseconds: observedAtMilliseconds,
+                    capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+                    sendReady: true, limitsKnown: true, fresh: fresh
+                ),
+                canWrite: true,
+                state: Binding(get: { state }, set: { state = $0 }),
+                onAction: { _ in RemoteWorkflowActionResult(state: .applied) }
+            ))
+            host.frame = NSRect(x: 0, y: 0, width: 380, height: 300)
+            let window = NSWindow(
+                contentRect: NSRect(origin: NSPoint(x: -16_000, y: -16_000), size: host.frame.size),
+                styleMask: [.borderless], backing: .buffered, defer: false
+            )
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            window.orderBack(nil)
+            defer {
+                window.contentView = nil
+                window.close()
+            }
+            await pump(host)
+            return !findEditableTextFields(in: host).isEmpty
+        }
+
+        // A workflow the Mac published: its verdict decides, whatever the observation time says.
+        let published = await offersSoftLimit(observedAtMilliseconds: 0, fresh: true)
+        XCTAssertTrue(published)
+        let publishedStale = await offersSoftLimit(observedAtMilliseconds: nowMs, fresh: false)
+        XCTAssertFalse(publishedStale)
+        // As Desktop's own Session Details gets it: observed now, then 16 seconds ago.
+        let local = await offersSoftLimit(observedAtMilliseconds: nowMs, fresh: nil)
+        XCTAssertTrue(local)
+        let localStale = await offersSoftLimit(observedAtMilliseconds: nowMs - 16_000, fresh: nil)
+        XCTAssertFalse(localStale)
+    }
+
     @MainActor
     private func findTranscriptScrollView(in view: NSView) -> NSScrollView? {
         if let scroll = view as? NSScrollView,
