@@ -220,6 +220,14 @@ final class SlashCommandTests: XCTestCase {
         try f.heartbeat(f.session)
         XCTAssertNil(f.blocked)
 
+        // The tracker has moved to another conversation since the model read its snapshot.
+        f.model.projects[0].sessions[0].agentActivity?.conversationEpoch = "epoch-0"
+        await f.submit()
+        XCTAssertEqual(
+            composer.statusMessage, "The conversation changed. Review your message before sending again."
+        )
+        f.model.refreshAgentActivitySnapshots()
+
         // The host's admission still decides: no Copilot is running in the session.
         f.copilot.live.remove(f.session.id)
         XCTAssertNil(f.blocked)

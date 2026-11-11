@@ -1089,7 +1089,11 @@ extension AppModel {
         if let reason = restartBlockedReason(sessionId: sessionId) {
             return RemoteWorkflowActionResult(state: .rejected, message: reason)
         }
-        return await performLocalSessionAction(sessionId: sessionId, action: RemoteSessionAction(kind: .restart))
+        // The request is for the conversation just judged, not one the tracker has moved to since.
+        return await performLocalSessionAction(
+            sessionId: sessionId, action: RemoteSessionAction(kind: .restart),
+            expectedConversationEpoch: sessionOperationProjection(sessionId: sessionId).conversationEpoch
+        )
     }
 
     private func remoteSessionHasLiveAgent(_ sessionId: String) -> Bool {

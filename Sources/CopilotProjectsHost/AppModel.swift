@@ -2988,7 +2988,7 @@ final class AppModel: ObservableObject {
 
     func restartIdleSessions(inProjectId pid: String) {
         guard let pi = projectIndex(pid) else { return }
-        for sessionId in projects[pi].sessions.map(\.id) {
+        for sessionId in projects[pi].sessions.map(\.id) where restartBlockedReason(sessionId: sessionId) == nil {
             Task { await restartSession(sessionId) }
         }
     }
