@@ -69,7 +69,8 @@ final class SlashCommandTests: XCTestCase {
 
         /// Publishes a session's tracker snapshot, as its heartbeat does, and has the model read it.
         func heartbeat(
-            _ session: Session, offering capabilities: [String] = ["session-send", "session-restart"]
+            _ session: Session, offering capabilities: [String] = ["session-send", "session-restart"],
+            receipts: [TrackedOperationReceipt] = []
         ) throws {
             let now = Date()
             let milliseconds = Int64(now.timeIntervalSince1970 * 1_000)
@@ -78,7 +79,7 @@ final class SlashCommandTests: XCTestCase {
                 foregroundTurnActive: false, scheduledTurnActive: false, activeSubagents: [], schedules: [],
                 idleGeneration: 0, lastIdleAborted: false, lastIdleTurnKind: nil, error: nil,
                 pendingPermissionRequestIds: [], copilotSessionId: session.id,
-                conversationEpoch: "epoch-1", operationReceiptVersion: 1, operationReceipts: [],
+                conversationEpoch: "epoch-1", operationReceiptVersion: 1, operationReceipts: receipts,
                 workflow: RemoteSessionWorkflow(
                     observedAtMilliseconds: milliseconds, capabilities: capabilities, sendReady: true,
                     restartRequested: false
@@ -90,8 +91,20 @@ final class SlashCommandTests: XCTestCase {
             model.refreshAgentActivitySnapshots()
         }
 
-        /// A tracker that exits removes its snapshot and any request it was handed,
-        /// as it does when Copilot restarts.
+        /// Plays the tracker: takes the restart request it was handed and says it queued `/restart`.
+        func confirmRestart(of session: Session) throws {
+            let handoff = file(session, "session-restart.json")
+            let asked = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: handoff)) as? [String: Any])
+            try FileManager.default.removeItem(at: handoff)
+            try heartbeat(session, receipts: [TrackedOperationReceipt(
+                operationId: asked["operationId"] as? String, conversationEpoch: "epoch-1",
+                kind: "session-restart", state: .applied,
+                updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+                payloadFingerprint: asked["payloadFingerprint"] as? String
+            )])
+        }
+
+        /// A tracker that exits removes its snapshot and any request it was handed.
         func stopTracker(of session: Session) throws {
             try FileManager.default.removeItem(at: file(session, "agent-activity.json"))
             try? FileManager.default.removeItem(at: file(session, "session-restart.json"))
@@ -128,34 +141,48 @@ final class SlashCommandTests: XCTestCase {
         f.composer.prompt = " /Restart\n"
         XCTAssertTrue(f.composer.canSend(workflow: f.workflow, operation: f.operation))
         let run = Task { await f.submit() }
-        // A second Run before the first has started asks for nothing more.
-        let repeated = Task { await f.submit() }
         let requested = await f.restartRequested(of: f.session)
         XCTAssertTrue(requested)
-        await repeated.value
-        // Until the tracker answers, the draft stays and can't be run again.
+        // Until the tracker answers, the draft stays and a second Run asks for nothing more.
+        await f.submit()
         XCTAssertEqual(f.composer.prompt, " /Restart\n")
         XCTAssertEqual(f.composer.statusMessage, "Waiting for Copilot to confirm...")
         XCTAssertFalse(f.composer.canSend(workflow: f.workflow, operation: f.operation))
 
-        // Copilot restarts, which stops the tracker before the app reads its answer.
-        try f.stopTracker(of: f.session)
+        try f.confirmRestart(of: f.session)
         await run.value
         XCTAssertNil(f.composer.statusMessage)
         XCTAssertEqual(f.composer.prompt, "")
         // Nothing went to Copilot as a message, and no terminal was started to type into.
         XCTAssertEqual(f.sent.count, 1)
         XCTAssertNil(f.model.controllers[f.session.id])
+    }
 
-        // A draft written while the tracker had the request is kept.
-        try f.heartbeat(f.session)
+    func testAnUnconfirmedRestartSaysSoAndADraftWrittenWhileWaitingIsKept() async throws {
+        let f = try Fixture()
+        defer { f.close() }
+
+        // A tracker that stops before the app reads its answer leaves the outcome unknown.
         f.composer.prompt = "/restart"
-        let next = Task { await f.submit() }
+        let unconfirmed = Task { await f.submit() }
+        let requested = await f.restartRequested(of: f.session)
+        XCTAssertTrue(requested)
+        try f.stopTracker(of: f.session)
+        await unconfirmed.value
+        XCTAssertEqual(
+            f.composer.statusMessage, "Couldn't confirm the outcome. Inspect the terminal before trying again."
+        )
+        XCTAssertEqual(f.composer.prompt, "/restart")
+
+        // The tracker's answer doesn't erase a draft written while it was awaited.
+        try f.heartbeat(f.session)
+        let confirmed = Task { await f.submit() }
         let requestedAgain = await f.restartRequested(of: f.session)
         XCTAssertTrue(requestedAgain)
         f.composer.prompt = "next message"
-        try f.stopTracker(of: f.session)
-        await next.value
+        try f.confirmRestart(of: f.session)
+        await confirmed.value
+        XCTAssertNil(f.composer.statusMessage)
         XCTAssertEqual(f.composer.prompt, "next message")
     }
 

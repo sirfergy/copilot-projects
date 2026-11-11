@@ -877,8 +877,7 @@ final class DesktopSessionPromptComposer: ObservableObject {
             statusMessage = "Waiting for Copilot to confirm..."
             let result = await restart()
             isSending = false
-            // Restarting stops the tracker that would confirm it, so only a refusal is reported.
-            statusMessage = result.state == .rejected ? result.message ?? "Copilot did not restart." : nil
+            statusMessage = result.state == .applied ? nil : result.message ?? "Copilot did not restart."
             if statusMessage == nil, prompt == command { prompt = "" }
             return
         }
