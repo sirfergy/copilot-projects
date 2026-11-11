@@ -1000,13 +1000,13 @@ final class ForegroundActivityTests: XCTestCase {
 
     @MainActor
     func testRuntimeLossDoesNotBecomeLegacyIdle() throws {
-        for bouncing in [false, true] {
+        for restarting in [false, true] {
             let fixture = try Fixture()
             defer { fixture.cleanup() }
             var snapshot = fixture.snapshot()
             snapshot.workflow = RemoteSessionWorkflow(
                 observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
-                capabilities: [], sendReady: false, bounceRequested: bouncing
+                capabilities: [], sendReady: false, restartRequested: restarting
             )
             try fixture.publish(snapshot)
             try FileManager.default.removeItem(at: fixture.snapshotURL)

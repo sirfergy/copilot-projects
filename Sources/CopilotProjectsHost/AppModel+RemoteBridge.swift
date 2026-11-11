@@ -53,7 +53,7 @@ public enum RemoteUserInputResult: Equatable, Sendable {
     /// Not now: another operation holds the slot, the session isn't ready, or its
     /// tracker state is too old to judge. Also a reused identity with another payload.
     case conflict
-    /// No matching live question, a payload the host's rules refuse, or a bounce
+    /// No matching live question, a payload the host's rules refuse, or a restart
     /// while Copilot is busy.
     case invalid
     /// The operation names a conversation that has ended (`/new`, a tracker restart,
@@ -713,7 +713,7 @@ extension AppModel {
                   .remoteOperationProjection().conversationEpoch,
               performSessionAction(
                   sessionId: sessionId,
-                  action: RemoteSessionAction(kind: .bounce),
+                  action: RemoteSessionAction(kind: .restart),
                   operation: CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: epoch)
               ) == .accepted else {
             return .failure("the session is parked or not idle, or its tracker is not ready", code: "busy")
@@ -1501,7 +1501,7 @@ extension AppModel {
             now: clock,
             blocksInput: { parkingBlocksInput(sessionId) },
             validate: { snapshot in
-                guard snapshot.workflow?.bounceRequested != true,
+                guard snapshot.workflow?.restartRequested != true,
                       let target = snapshot.availableModels?
                     .first(where: { $0.id == selection.modelId }),
                       target.disabled != true else {
@@ -1589,7 +1589,7 @@ extension AppModel {
                     return true
                 case .abort:
                     return true
-                case .bounce:
+                case .restart:
                     return self.sessionIsSettledIdle(
                         sessionId: sessionId, snapshot: snapshot, workflow: workflow, now: clock(),
                         allowingSchedules: true
@@ -1615,8 +1615,8 @@ extension AppModel {
     }
 
     /// A live Copilot with nothing running, waiting or in the background: the
-    /// state in which a bounce or a park may stop the CLI. Waiting schedules
-    /// block too unless `allowingSchedules`: a bounce may leave them, since the
+    /// state in which a restart or a park may stop the CLI. Waiting schedules
+    /// block too unless `allowingSchedules`: a restart may leave them, since the
     /// CLI re-arms them when it resumes; a parked session would never run them.
     func sessionIsSettledIdle(
         sessionId: String,
@@ -3052,8 +3052,8 @@ extension AppModel {
         }
 
         let session = projects[loc.p].sessions[loc.s]
-        if freshSnapshot?.workflow?.bounceRequested == true
-            || session.agentActivity?.workflow?.bounceRequested == true {
+        if freshSnapshot?.workflow?.restartRequested == true
+            || session.agentActivity?.workflow?.restartRequested == true {
             return .failure("The session is restarting. Check the terminal before sending more work.", code: "busy")
         }
         if session.displayStatus == .waiting || session.hasPendingInput {

@@ -89,7 +89,7 @@ enum DesktopModelPicker {
         !availableModels.isEmpty
             && !isSubmitting
             && operation.support == .receipts
-            && workflow?.bounceRequested != true
+            && workflow?.restartRequested != true
     }
 
     static func blockedReason(
@@ -98,7 +98,7 @@ enum DesktopModelPicker {
         workflow: RemoteSessionWorkflow?
     ) -> String? {
         guard !availableModels.isEmpty else { return "Model list not available yet." }
-        if workflow?.bounceRequested == true {
+        if workflow?.restartRequested == true {
             return "Wait for Copilot to finish restarting before switching models."
         }
         guard operation.support == .receipts else {

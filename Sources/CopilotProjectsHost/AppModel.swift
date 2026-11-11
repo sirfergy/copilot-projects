@@ -2991,16 +2991,16 @@ final class AppModel: ObservableObject {
         let sessionIds = projects[pi].sessions
             .filter { $0.displayStatus == .idle && !$0.hasBackgroundWork }
             .map(\.id)
-        for sessionId in sessionIds where sessionWorkflow(sessionId: sessionId)?.supports(.bounce) == true {
+        for sessionId in sessionIds where sessionWorkflow(sessionId: sessionId)?.supports(.restart) == true {
             let epoch = sessionOperationProjection(sessionId: sessionId).conversationEpoch
             Task { @MainActor in
                 guard let loc = self.locateIndex(sessionId),
                       self.projects[loc.p].sessions[loc.s].displayStatus == .idle,
                       !self.projects[loc.p].sessions[loc.s].hasBackgroundWork,
-                      self.sessionWorkflow(sessionId: sessionId)?.supports(.bounce) == true else { return }
+                      self.sessionWorkflow(sessionId: sessionId)?.supports(.restart) == true else { return }
                 _ = await performLocalSessionAction(
                     sessionId: sessionId,
-                    action: RemoteSessionAction(kind: .bounce),
+                    action: RemoteSessionAction(kind: .restart),
                     expectedConversationEpoch: epoch
                 )
             }

@@ -311,7 +311,7 @@ if (validSessionId && socketPath) {
     // "session-park-check" is a question, not an action: it answers whether the
     // session is idle right now and never aborts, queues or changes anything.
     const workflowKinds = [
-        "session-send", "session-abort", "session-bounce", "set-session-budget", "answer-session-budget",
+        "session-send", "session-abort", "session-restart", "set-session-budget", "answer-session-budget",
         "session-park-check",
     ];
     const workflowPaths = new Map(workflowKinds.map((kind) => [
@@ -479,7 +479,7 @@ if (validSessionId && socketPath) {
     const trackerInstanceId = randomUUID();
     let conversationEpoch = `${trackerInstanceId}:${conversationGeneration}`;
     let workflowRuntime = null;
-    let bounceRequested = false;
+    let restartRequested = false;
     let nativeSendRevision = 0;
     let workflowRefresh = null;
     let workflowRefreshAt = 0;
@@ -2145,7 +2145,7 @@ if (validSessionId && socketPath) {
 
     function sessionIsIdle() {
         return questionEventStream?.sessionId === copilotSessionId && questionEventStream.caughtUp === true
-            && !bounceRequested && runtimeActivity?.processing === false
+            && !restartRequested && runtimeActivity?.processing === false
             && !foregroundTurnActive && !scheduledTurnActive
             && activeSubagents.size === 0
             && pendingQuestionRequestIds.size === 0
@@ -2253,16 +2253,16 @@ if (validSessionId && socketPath) {
             && runtimeActivity?.error !== "remote"
             && runtimeActivity?.error !== "Error: invalid runtime session metadata"
             && !terminalDisconnectError && Date.now() - observation.observedAtMilliseconds <= 15_000;
-        const capabilities = fresh && !bounceRequested ? observation.capabilities.filter(
+        const capabilities = fresh && !restartRequested ? observation.capabilities.filter(
             (kind) => !unavailableWorkflowActions.has(kind)
         ) : [];
-        const activePendingMessages = fresh && !bounceRequested ? pendingMessages : [];
+        const activePendingMessages = fresh && !restartRequested ? pendingMessages : [];
         return {
             version: 1,
             observedAtMilliseconds: observation?.observedAtMilliseconds ?? 0,
             capabilities,
-            sendReady: fresh === true && !bounceRequested && !workflowHasPendingInput(),
-            bounceRequested,
+            sendReady: fresh === true && !restartRequested && !workflowHasPendingInput(),
+            restartRequested,
             imageAttachments: fresh ? availableModels?.find(
                 (model) => model.id === currentModel?.name
             )?.imageAttachments ?? null : null,
@@ -2405,7 +2405,7 @@ if (validSessionId && socketPath) {
                 capabilities: [
                     "session-send", "session-abort", "answer-session-budget",
                     "image-attachments-v1", "file-attachments-v1", "pending-messages-v1",
-                    "session-park-check", "session-bounce",
+                    "session-park-check", "session-restart",
                     ...(effectiveLimitsKnown ? ["set-session-budget"] : []),
                 ],
                 totalAiCredits,
@@ -2471,7 +2471,7 @@ if (validSessionId && socketPath) {
                 && ["enqueue", "immediate"].includes(action.mode)
                 && absent("maxAiCredits", "requestId", "additionalAiCredits");
         case "session-abort":
-        case "session-bounce":
+        case "session-restart":
         case "session-park-check":
             return absent("prompt", "mode", "maxAiCredits", "requestId", "additionalAiCredits");
         case "set-session-budget":
@@ -2656,11 +2656,11 @@ if (validSessionId && socketPath) {
         }
         case "session-abort":
             return rpcReceiptOutcome(await workflowRPC("session.abort", {}, context));
-        case "session-bounce": {
+        case "session-restart": {
             const result = await workflowRPC("session.commands.enqueue", { command: "/restart" }, context);
             if (result?.queued === false) {
-                if (operationAuthorityCurrent(context)) bounceRequested = false;
-                return { state: "rejected", errorCode: "bounce-unavailable" };
+                if (operationAuthorityCurrent(context)) restartRequested = false;
+                return { state: "rejected", errorCode: "restart-unavailable" };
             }
             return result?.queued === true
                 ? { state: "applied" } : { state: "indeterminate", errorCode: "rpc-indeterminate" };
@@ -2713,10 +2713,10 @@ if (validSessionId && socketPath) {
         const action = request.action;
         if (activeOperationKeys.has(operationExecutionKey(context.conversationEpoch, context.operationId))) return;
         const workflow = workflowSnapshot();
-        // Parking stops the CLI as a bounce does, so it asks the same question,
+        // Parking stops the CLI as a restart does, so it asks the same question,
         // plus no waiting schedule and an empty message queue.
         const parkCheck = kind === "session-park-check";
-        const needsIdle = kind === "session-bounce" || parkCheck;
+        const needsIdle = kind === "session-restart" || parkCheck;
         const valid = request.schemaVersion === 1 && validWorkflowAction(action, kind)
             && workflow.capabilities.includes(kind)
             && (kind !== "session-send" || workflow.sendReady)
@@ -2792,9 +2792,9 @@ if (validSessionId && socketPath) {
         }
         // Publish the mutation fence atomically with acceptance, before the
         // command can run.
-        if (kind === "session-bounce") bounceRequested = true;
+        if (kind === "session-restart") restartRequested = true;
         if (!publishAcceptedReceipt(context)) {
-            if (kind === "session-bounce") bounceRequested = false;
+            if (kind === "session-restart") restartRequested = false;
             return;
         }
         const key = operationExecutionKey(context.conversationEpoch, context.operationId);
@@ -2822,7 +2822,7 @@ if (validSessionId && socketPath) {
         } catch (error) {
             if (!operationAuthorityCurrent(context)) return;
             const unsupported = error?.code === -32601;
-            if (unsupported && kind === "session-bounce") bounceRequested = false;
+            if (unsupported && kind === "session-restart") restartRequested = false;
             if (unsupported) unavailableWorkflowActions.add(kind);
             console.error("[copilot-projects] native session action failed:", error);
             if (publishTerminalReceipt(
@@ -2956,7 +2956,7 @@ if (validSessionId && socketPath) {
             // extension from an older build that cannot validate prompts.
             pendingPermissionRequestIds: [...pendingPermissionRequests.keys()],
             ...(currentModel ? { model: currentModel } : {}),
-            ...(availableModels && !bounceRequested ? { availableModels } : {}),
+            ...(availableModels && !restartRequested ? { availableModels } : {}),
             copilotSessionId,
             conversationEpoch,
             operationReceiptVersion: OPERATION_RECEIPT_VERSION,
@@ -5246,7 +5246,7 @@ if (validSessionId && socketPath) {
         transcriptDeltaPublishTimer = null;
         conversationEpoch = `${trackerInstanceId}:${conversationGeneration}`;
         workflowObservation = null;
-        bounceRequested = false;
+        restartRequested = false;
         nativeSendRevision = 0;
         workflowContext = null;
         pendingBudgetRequest = null;
@@ -5530,7 +5530,7 @@ if (validSessionId && socketPath) {
     }
 
     function validatedModelSwitch(request) {
-        if (bounceRequested) return null;
+        if (restartRequested) return null;
         if (typeof request.modelId !== "string"
                 || request.modelId.length === 0
                 || request.modelId.length > 200
@@ -5575,7 +5575,7 @@ if (validSessionId && socketPath) {
         return runHandoff(setModelRequestPath, "set-model", (request) => {
             const params = validatedModelSwitch(request);
             if (!params) {
-                return { errorCode: bounceRequested ? "target-unavailable" : "invalid-request" };
+                return { errorCode: restartRequested ? "target-unavailable" : "invalid-request" };
             }
             return {
                 current: () => Boolean(validatedModelSwitch(request)),
@@ -5969,12 +5969,12 @@ if (validSessionId && socketPath) {
         processElicitationResponse();
         processSetModelRequest();
         processCloseSessionRequest();
-        // Replay receipts immediately, but let recovery settle before a new bounce
+        // Replay receipts immediately, but let recovery settle before a new restart
         // or a tracker reload.
-        for (const kind of workflowKinds) processWorkflowAction(kind, kind !== "session-bounce");
+        for (const kind of workflowKinds) processWorkflowAction(kind, kind !== "session-restart");
         questionRecovery.then(() => {
             if (shuttingDown || generation !== conversationGeneration) return;
-            processWorkflowAction("session-bounce");
+            processWorkflowAction("session-restart");
             reloadNewerTracker();
         });
         scheduleDurableReconcile(0);

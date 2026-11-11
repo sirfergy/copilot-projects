@@ -687,7 +687,7 @@ final class PullRequestsHostCommandTests: XCTestCase {
             let readyWorkflow = snapshot.workflow
             snapshot.workflow = RemoteSessionWorkflow(
                 observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
-                capabilities: [], sendReady: false, bounceRequested: true
+                capabilities: [], sendReady: false, restartRequested: true
             )
             try JSONEncoder().encode(snapshot).write(to: snapshotURL)
             XCTAssertEqual(send(UUID().uuidString).code, "busy")

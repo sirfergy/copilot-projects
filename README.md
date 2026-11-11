@@ -28,13 +28,13 @@ distribution rather than replacing it with the standalone download.
 ## Session restart
 
 Remote clients, **Restart Idle Sessions** and `copilot-projects restart-session`
-request `session-bounce`. The host and tracker require an idle session without
+request `session-restart`. The host and tracker require an idle session without
 pending questions or background agents. Waiting schedules do not block it: the
 CLI re-arms a persisted session's schedules when it resumes. The tracker
-must finish recovering questions for the current conversation before accepting a bounce;
+must finish recovering questions for the current conversation before accepting a restart;
 incomplete or unavailable recovery blocks it.
-Stalled question reads reject the bounce request without cancelling shared recovery.
-A native message submitted during preflight cancels the bounce rather than being overtaken by it.
+Stalled question reads reject the restart request without cancelling shared recovery.
+A native message submitted during preflight cancels the restart rather than being overtaken by it.
 Session-wide SDK activity must also report no active work, including child tasks;
 missing or unavailable activity status blocks a restart even after a tracker reload.
 Questions that are too large to display remotely still block a restart until they are
@@ -43,9 +43,9 @@ It rechecks readiness and question history, then queues Copilot's own `/restart`
 SDK for the identified session; it never types into the terminal or sends a
 model prompt. Copilot itself owns restarting and resuming.
 
-The tracker publishes an explicit pending-bounce marker with its accepted receipt.
+The tracker publishes an explicit pending-restart marker with its accepted receipt.
 This fences new model switches and prompt delivery. Older trackers without this
-marker must be reloaded before they can accept a bounce; ordinary commands remain
+marker must be reloaded before they can accept a restart; ordinary commands remain
 compatible.
 
 The correlated receipt confirms that the command was queued, not that the

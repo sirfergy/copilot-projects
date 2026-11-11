@@ -3,7 +3,7 @@ import Foundation
 public enum RemoteSessionActionKind: String, Codable, Sendable, CaseIterable {
     case send = "session-send"
     case abort = "session-abort"
-    case bounce = "session-bounce"
+    case restart = "session-restart"
     case setBudget = "set-session-budget"
     case answerBudget = "answer-session-budget"
 }
@@ -87,7 +87,7 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
             guard let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   prompt.utf8.count <= 8_192, mode != nil else { return false }
             return maxAiCredits == nil && requestId == nil && additionalAiCredits == nil
-        case .abort, .bounce:
+        case .abort, .restart:
             return prompt == nil && mode == nil && maxAiCredits == nil
                 && requestId == nil && additionalAiCredits == nil
         case .setBudget:
@@ -132,8 +132,8 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
     public var observedAtMilliseconds: Int64
     public var capabilities: [String]
     public let sendReady: Bool
-    /// Older trackers omit this field; only an explicit false admits a bounce.
-    public let bounceRequested: Bool?
+    /// Older trackers omit this field; only an explicit false admits a restart.
+    public let restartRequested: Bool?
     public let totalAiCredits: Double?
     public let contextTokens: Int?
     public let contextTokenLimit: Int?
@@ -158,7 +158,7 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
         observedAtMilliseconds: Int64,
         capabilities: [String],
         sendReady: Bool,
-        bounceRequested: Bool? = nil,
+        restartRequested: Bool? = nil,
         totalAiCredits: Double? = nil,
         contextTokens: Int? = nil,
         contextTokenLimit: Int? = nil,
@@ -176,7 +176,7 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
         self.observedAtMilliseconds = observedAtMilliseconds
         self.capabilities = capabilities
         self.sendReady = sendReady
-        self.bounceRequested = bounceRequested
+        self.restartRequested = restartRequested
         self.totalAiCredits = totalAiCredits
         self.contextTokens = contextTokens
         self.contextTokenLimit = contextTokenLimit
@@ -203,10 +203,10 @@ public struct RemoteSessionWorkflow: Codable, Equatable, Sendable {
     }
 
     /// Whether this workflow takes `kind`, freshness aside: the tracker offers
-    /// it and no bounce is pending, and for a bounce says so explicitly.
+    /// it and no restart is pending, and for a restart says so explicitly.
     public func admits(_ kind: RemoteSessionActionKind) -> Bool {
         capabilities.contains(kind.rawValue)
-            && bounceRequested != true && (kind != .bounce || bounceRequested == false)
+            && restartRequested != true && (kind != .restart || restartRequested == false)
     }
 }
 

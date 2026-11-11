@@ -9,10 +9,10 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertTrue(RemoteSessionAction(kind: .send, prompt: "hello", mode: .enqueue).isValid)
         XCTAssertFalse(RemoteSessionAction(kind: .send, prompt: "hello").isValid)
         XCTAssertFalse(RemoteSessionAction(kind: .abort, prompt: "unexpected").isValid)
-        XCTAssertTrue(RemoteSessionAction(kind: .bounce).isValid)
-        XCTAssertFalse(RemoteSessionAction(kind: .bounce, prompt: "/quit").isValid)
-        XCTAssertFalse(RemoteSessionAction(kind: .bounce, mode: .immediate).isValid)
-        XCTAssertFalse(RemoteSessionAction(kind: .bounce, attachmentIds: [UUID().uuidString]).isValid)
+        XCTAssertTrue(RemoteSessionAction(kind: .restart).isValid)
+        XCTAssertFalse(RemoteSessionAction(kind: .restart, prompt: "/quit").isValid)
+        XCTAssertFalse(RemoteSessionAction(kind: .restart, mode: .immediate).isValid)
+        XCTAssertFalse(RemoteSessionAction(kind: .restart, attachmentIds: [UUID().uuidString]).isValid)
         XCTAssertFalse(RemoteSessionAction(kind: .setBudget, maxAiCredits: 29).isValid)
         XCTAssertFalse(RemoteSessionAction(kind: .setBudget, maxAiCredits: .infinity).isValid)
         XCTAssertTrue(RemoteSessionAction(kind: .setBudget, maxAiCredits: 30).isValid)
@@ -74,7 +74,7 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertTrue(current.isFresh(servedAtMilliseconds: nil, receivedAt: .now))
     }
 
-    func testBounceRequiresExplicitStateAndPendingBounceDisablesAllActions() {
+    func testRestartRequiresExplicitStateAndPendingRestartDisablesAllActions() {
         let now = Date()
         let observed = Int64(now.timeIntervalSince1970 * 1_000)
         let received = ContinuousClock.now
@@ -82,10 +82,10 @@ final class SessionWorkflowTests: XCTestCase {
             let workflow = RemoteSessionWorkflow(
                 observedAtMilliseconds: observed,
                 capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
-                sendReady: true, bounceRequested: marker
+                sendReady: true, restartRequested: marker
             )
             for kind in RemoteSessionActionKind.allCases {
-                let expected = kind == .bounce ? marker == false : marker != true
+                let expected = kind == .restart ? marker == false : marker != true
                 XCTAssertEqual(workflow.supports(kind, at: now), expected)
                 XCTAssertEqual(workflow.supports(
                     kind, servedAtMilliseconds: observed, receivedAt: received, now: received, at: now
@@ -124,7 +124,7 @@ final class SessionWorkflowTests: XCTestCase {
             workflow: RemoteSessionWorkflow(
                 observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1000),
                 capabilities: RemoteSessionActionKind.allCases.map(\.rawValue), sendReady: true,
-                bounceRequested: false,
+                restartRequested: false,
                 limitsKnown: true
             )
         )
@@ -148,25 +148,25 @@ final class SessionWorkflowTests: XCTestCase {
             sessionId: session.id, action: send,
             operation: CLIOperationRequest(operationId: "old", conversationEpoch: "epoch-0")
         ), .epochMismatch)
-        let bounce = RemoteSessionAction(kind: .bounce)
-        let bounceID = CLIOperationRequest(operationId: "bounce", conversationEpoch: "epoch-1")
+        let restart = RemoteSessionAction(kind: .restart)
+        let restartID = CLIOperationRequest(operationId: "restart", conversationEpoch: "epoch-1")
         XCTAssertEqual(model.performSessionAction(
-            sessionId: session.id, action: bounce, operation: bounceID
+            sessionId: session.id, action: restart, operation: restartID
         ), .invalid)
         snapshot.runtimeActivity = RuntimeActivitySnapshot(
             processing: false, observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000)
         )
         try JSONEncoder().encode(snapshot).write(to: snapshotURL)
         XCTAssertEqual(model.performSessionAction(
-            sessionId: session.id, action: bounce, operation: bounceID
+            sessionId: session.id, action: restart, operation: restartID
         ), .accepted)
         XCTAssertTrue(FileManager.default.fileExists(
-            atPath: sessions.appendingPathComponent("\(session.id).session-bounce.json").path
+            atPath: sessions.appendingPathComponent("\(session.id).session-restart.json").path
         ))
         XCTAssertEqual(model.performSessionAction(
-            sessionId: session.id, action: bounce, operation: bounceID
+            sessionId: session.id, action: restart, operation: restartID
         ), .accepted)
-        try FileManager.default.removeItem(at: sessions.appendingPathComponent("\(session.id).session-bounce.json"))
+        try FileManager.default.removeItem(at: sessions.appendingPathComponent("\(session.id).session-restart.json"))
         // restart-session: a waiting schedule does not block a restart.
         snapshot.schedules = [TrackedSchedule(
             id: 1, intervalMs: 60_000, cron: nil, tz: nil, at: nil,
@@ -176,7 +176,7 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: "other").code, "conflict")
         XCTAssertEqual(model.restartAutomationSession(sessionId: "missing", projectId: nil).code, "gone")
         XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: project.id).code, "requested")
-        try FileManager.default.removeItem(at: sessions.appendingPathComponent("\(session.id).session-bounce.json"))
+        try FileManager.default.removeItem(at: sessions.appendingPathComponent("\(session.id).session-restart.json"))
         model.projects[0].sessions[0].parked = ParkedSession(state: .parked, sinceMilliseconds: 1)
         XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: nil).code, "busy")
         XCTAssertEqual(model.parkedState(session.id), .parked, "a refused restart must not resume a parked session")
@@ -200,7 +200,7 @@ final class SessionWorkflowTests: XCTestCase {
         )]
         snapshot.workflow = RemoteSessionWorkflow(
             observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
-            capabilities: [], sendReady: false, bounceRequested: true
+            capabilities: [], sendReady: false, restartRequested: true
         )
         try JSONEncoder().encode(snapshot).write(to: snapshotURL)
         XCTAssertEqual(model.setModel(
@@ -215,8 +215,8 @@ final class SessionWorkflowTests: XCTestCase {
         snapshot.scheduledTurnActive = true
         try JSONEncoder().encode(snapshot).write(to: snapshotURL)
         XCTAssertEqual(model.performSessionAction(
-            sessionId: session.id, action: bounce,
-            operation: CLIOperationRequest(operationId: "busy-bounce", conversationEpoch: "epoch-1")
+            sessionId: session.id, action: restart,
+            operation: CLIOperationRequest(operationId: "busy-restart", conversationEpoch: "epoch-1")
         ), .invalid)
         XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: nil).code, "busy")
         snapshot.scheduledTurnActive = false
