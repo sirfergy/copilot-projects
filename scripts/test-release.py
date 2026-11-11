@@ -1129,6 +1129,30 @@ class ReleaseVersionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(result.stdout.strip(), {before, today()})
 
+    def test_only_a_pull_request_merge_to_main_releases_its_commit(self):
+        # GitHub's pull requests for 119d39f and c488851, cut down to the fields the rule reads:
+        # an ordinary merge to main, and the top layer of a two-layer stack squash-merged to main.
+        merged = {"merged_at": "2026-11-11T09:55:55Z", "base": {"ref": "main"},
+                  "merge_commit_sha": "119d39facb7e0fc5dd060effef1e9a62baa10803"}
+        top = {"merged_at": "2026-11-11T17:03:20Z", "base": {"ref": "sirfergy/restart-through-tracker"},
+               "merge_commit_sha": "c488851689050d83a9e8fcf6da2ccd23da80673b",
+               "stack": {"base": {"ref": "main"}}}
+        for pulls, sha, releases in (
+            ([merged], merged["merge_commit_sha"], True),
+            ([top], top["merge_commit_sha"], True),
+            # GitHub also lists a pull request for the commits it holds, and before it merges.
+            ([top], "c7a42d41ef508b00ace496476374aa51f507ba99", False),
+            ([{**top, "merged_at": None}], top["merge_commit_sha"], False),
+            # Merged into a branch other than main, alone or in a stack, and then pushed to main.
+            ([{**top, "stack": None}], top["merge_commit_sha"], False),
+            ([{**top, "stack": {"base": {"ref": "release"}}}], top["merge_commit_sha"], False),
+            # A direct push to main has no pull request.
+            ([], top["merge_commit_sha"], False),
+        ):
+            with self.subTest(pulls=pulls):
+                result = self.call("is_pull_request_merge_to_main", sha, stdin=json.dumps(pulls))
+                self.assertEqual(result.returncode == 0, releases, result.stderr)
+
 
 class KeychainSearchTests(unittest.TestCase):
     def setUp(self):

@@ -105,3 +105,12 @@ next_release_version() {
   fi
   printf '%s.1\n' "$today"
 }
+
+# Succeed when GitHub's pull requests for commit sha, read as JSON from stdin, include a
+# merged one whose merge to main created sha. A stack lands every layer on the stack's
+# base, so a layer above the bottom still names the layer below it as its own base.
+is_pull_request_merge_to_main() {
+  jq -e --arg sha "$1" \
+    'any(.[]; .merged_at != null and .merge_commit_sha == $sha
+      and (.base.ref == "main" or .stack.base.ref == "main"))' >/dev/null
+}
