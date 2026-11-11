@@ -27,8 +27,9 @@ struct StatusShadow {
         /// False when the tracker-only value came from the footer: the heartbeat is
         /// stale, the connection is closed, or the snapshot is not the tab owner's.
         var alive: Bool?
-        /// The comparison stopped: the session closed, or (for `send`) the tracker's
-        /// own reading decides again, so the poll no longer reads the footer.
+        /// The comparison stopped: the session closed, the Mac slept, or (for `send`)
+        /// the tracker's own reading decides again, so the poll no longer reads the
+        /// footer.
         var over: Bool?
 
         // What decided `shown`.
@@ -64,6 +65,9 @@ struct StatusShadow {
     private let maximumBytes: Int
     /// The comparisons that currently disagree, and how.
     private var open: [Key: String] = [:]
+    /// The last pass, on the wall clock and on the uptime clock, which stops
+    /// while the Mac sleeps.
+    private var lastPass: (date: Date, uptime: TimeInterval)?
 
     init(directory: URL, maximumBytes: Int = StatusShadow.maximumBytes) {
         url = directory.appendingPathComponent("status-shadow.jsonl", isDirectory: false)
@@ -139,6 +143,17 @@ struct StatusShadow {
         }
     }
 
+    /// Ends every disagreement at the last pass before the Mac slept. No pass runs
+    /// during a sleep, so one left open was measured across it: in the Nov 11 run
+    /// 229 of the 231 lasting disagreements spanned a sleep, which was 60 h of
+    /// their 60 h 12 m. One that still holds after the wake starts again there.
+    mutating func endAcrossSleep(now: Date, uptime: TimeInterval) {
+        defer { lastPass = (now, uptime) }
+        guard let lastPass,
+              now.timeIntervalSince(lastPass.date) - (uptime - lastPass.uptime) > 1 else { return }
+        end(except: [], now: lastPass.date)
+    }
+
     private static func milliseconds(_ date: Date) -> Int64 {
         Int64(date.timeIntervalSince1970 * 1_000)
     }
@@ -170,8 +185,10 @@ extension AppModel {
     /// Compares what each session shows with its tracker-only status. `polled` holds
     /// the sessions whose footer this poll read, with today's reading of the tracker.
     func recordStatusShadow(
-        polled: [String: (runtime: ForegroundActivity?, footer: FooterActivity)], now: Date
+        polled: [String: (runtime: ForegroundActivity?, footer: FooterActivity)], now: Date,
+        uptime: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) {
+        statusShadow.endAcrossSleep(now: now, uptime: uptime)
         let nowMs = Int64(now.timeIntervalSince1970 * 1_000)
         let live = remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions
         var sessionIds: Set<String> = []
