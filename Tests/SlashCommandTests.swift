@@ -14,6 +14,8 @@ final class SlashCommandTests: XCTestCase {
     private final class Fixture {
         final class Copilot {
             var live: Set<String> = []
+            /// The sessions whose readiness for a prompt was judged, in order.
+            var judged: [String] = []
         }
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -51,7 +53,7 @@ final class SlashCommandTests: XCTestCase {
                 stateRepository: repository, persistPermissionStatus: { _, _, _, _ in },
                 isAppActive: { false }, agentActivityDirectory: root, resumeMarkerDirectory: root,
                 remotePromptLiveSessions: { _ in copilot.live },
-                remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) },
+                remotePromptTarget: { copilot.judged.append($0); return RemotePromptTarget(activity: .idle) },
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
             )
         }
@@ -175,6 +177,20 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertEqual(f.blocked, "This session's terminal is not taking input")
     }
 
+    /// The menu AppKit builds for a right-click at `point` in `window`, if one opens there.
+    private func contextMenu(in window: NSWindow, at point: NSPoint) throws -> NSMenu? {
+        let click = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .rightMouseDown, location: point, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+        ))
+        var view = window.contentView?.hitTest(point)
+        while let candidate = view {
+            if let menu = candidate.menu(for: click) { return menu }
+            view = candidate.superview
+        }
+        return nil
+    }
+
     /// A session row's Restart Session in the menu AppKit builds for a right-click,
     /// with the window that keeps it alive.
     private func rowMenu(for session: Session, in model: AppModel) throws -> (menu: NSMenu, window: NSWindow) {
@@ -187,16 +203,7 @@ final class SlashCommandTests: XCTestCase {
         })
         window.contentView = host
         host.layoutSubtreeIfNeeded()
-        let click = try XCTUnwrap(NSEvent.mouseEvent(
-            with: .rightMouseDown, location: NSPoint(x: 60, y: 20), modifierFlags: [], timestamp: 0,
-            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1
-        ))
-        var view = host.hitTest(click.locationInWindow)
-        while let candidate = view {
-            if let menu = candidate.menu(for: click) { return (menu, window) }
-            view = candidate.superview
-        }
-        throw CocoaError(.featureUnsupported, userInfo: [NSDebugDescriptionErrorKey: "no context menu was built"])
+        return (try XCTUnwrap(contextMenu(in: window, at: NSPoint(x: 60, y: 20))), window)
     }
 
     func testRestartSessionRunsInTheRowItWasChosenOnAndIsDisabledWhileItCannotRun() async throws {
@@ -237,6 +244,46 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertFalse(f.model.menuState.snapshot.selectedSessionCanRestart)
     }
 
+    /// The session list judges whether a row can restart only for a menu that is
+    /// opening. Doing it as the list renders would run for every row on every
+    /// change the model publishes.
+    func testTheSessionListJudgesARowForRestartOnlyWhenItsMenuOpens() async throws {
+        let f = try Fixture()
+        defer { f.close() }
+        try await f.attachTerminal(to: f.session)
+        try await f.attachTerminal(to: f.other)
+        var renders = 0
+        let window = NSWindow(
+            contentRect: NSRect(x: -20_000, y: -20_000, width: 320, height: 400),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        let host = NSHostingView(rootView: SessionBrowser(model: f.model, showsProjects: .constant(false))
+            .background(RenderProbe(model: f.model) { renders += 1 }))
+        window.contentView = host
+
+        for change in 1...20 {
+            f.model.setStatus(
+                sessionId: f.other.id, status: change.isMultiple(of: 2) ? .idle : .running, text: nil,
+                timestamp: Int64(change)
+            )
+            host.layoutSubtreeIfNeeded()
+        }
+        // Every change was rendered, and both rows have a terminal, so judging
+        // either of them as the list renders would be recorded.
+        XCTAssertGreaterThanOrEqual(renders, 20)
+        XCTAssertEqual(f.copilot.judged, [])
+
+        // A right-click publishes, then opens the menu of the row under it: the first one here.
+        f.model.objectWillChange.send()
+        host.layoutSubtreeIfNeeded()
+        var menu: NSMenu?
+        for y in stride(from: host.bounds.height, to: 0, by: -8) where menu == nil {
+            menu = try contextMenu(in: window, at: NSPoint(x: 160, y: y))
+        }
+        XCTAssertEqual(menu?.items.contains { $0.title == "Restart Session" && $0.isEnabled }, true)
+        XCTAssertEqual(f.copilot.judged, [f.session.id])
+    }
+
     func testSuggestionsAreOfferedWhileTheDraftCouldStillBecomeTheCommand() {
         XCTAssertEqual(ComposerSlashCommand.suggestions(for: "/").map(\.command), ["/restart"])
         XCTAssertEqual(ComposerSlashCommand.suggestions(for: " /RES").map(\.command), ["/restart"])
@@ -247,5 +294,16 @@ final class SlashCommandTests: XCTestCase {
             XCTAssertTrue(ComposerSlashCommand.suggestions(for: draft).isEmpty, draft)
         }
         XCTAssertNil(ComposerSlashCommand.parse("please /restart"))
+    }
+}
+
+/// Counts the renders of a view that observes the model, as the session list does.
+private struct RenderProbe: View {
+    @ObservedObject var model: AppModel
+    let rendered: () -> Void
+
+    var body: some View {
+        let _ = rendered()
+        Color.clear
     }
 }
