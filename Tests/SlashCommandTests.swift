@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import SwiftUI
 import XCTest
 import CopilotProjectsCore
 import CopilotProjectsProtocol
@@ -78,7 +79,8 @@ final class SlashCommandTests: XCTestCase {
             pipeEnds[session.id] = ends[0]
             let dtach = root.appendingPathComponent("dtach-\(session.id)")
             // The terminal's child inherits the pipe's write end.
-            let script = "#!/bin/sh\nstty raw -echo\nprintf '\\004' > /dev/fd/\(ends[1])\nexec /bin/cat > /dev/fd/\(ends[1])\n"
+            let script = "#!/bin/sh\nstty raw -echo\nprintf '\\004' > /dev/fd/\(ends[1])\n"
+                + "exec /bin/cat > /dev/fd/\(ends[1])\n"
             try Data(script.utf8).write(to: dtach)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dtach.path)
             model.controllers[session.id] = TerminalController(
@@ -173,6 +175,30 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertEqual(f.blocked, "This session's terminal is not taking input")
     }
 
+    /// A session row's Restart Session in the menu AppKit builds for a right-click,
+    /// with the window that keeps it alive.
+    private func rowMenu(for session: Session, in model: AppModel) throws -> (menu: NSMenu, window: NSWindow) {
+        let window = NSWindow(
+            contentRect: NSRect(x: -20_000, y: -20_000, width: 120, height: 40),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        let host = NSHostingView(rootView: Text("row").frame(width: 120, height: 40).contextMenu {
+            RestartSessionMenuItem(model: model, sessionId: session.id)
+        })
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let click = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .rightMouseDown, location: NSPoint(x: 60, y: 20), modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+        ))
+        var view = host.hitTest(click.locationInWindow)
+        while let candidate = view {
+            if let menu = candidate.menu(for: click) { return (menu, window) }
+            view = candidate.superview
+        }
+        throw CocoaError(.featureUnsupported, userInfo: [NSDebugDescriptionErrorKey: "no context menu was built"])
+    }
+
     func testRestartSessionRunsInTheRowItWasChosenOnAndIsDisabledWhileItCannotRun() async throws {
         let f = try Fixture()
         defer { f.close() }
@@ -186,19 +212,19 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertNil(f.model.controllers[f.other.id])
         try await f.attachTerminal(to: f.other)
 
-        // The other row's item is enabled and types into that row's terminal only.
-        XCTAssertNil(f.model.slashCommandBlockedReason(sessionId: f.other.id))
-        f.model.restartSession(f.other.id)
+        // The other row's item is enabled, and choosing it types into that row's terminal only.
+        let row = try rowMenu(for: f.other, in: f.model)
+        XCTAssertEqual(row.menu.items.map(\.title), ["Restart Session"])
+        XCTAssertTrue(row.menu.items[0].isEnabled)
+        row.menu.performActionForItem(at: 0)
         let typedInRow = await f.typed(in: f.other)
         XCTAssertEqual(typedInRow?.debugDescription, restartTyped)
         let typedOnScreen = await f.typed(in: f.session)
         XCTAssertEqual(typedOnScreen, "")
 
-        // With no Copilot in the row its item is disabled, and types nothing if chosen anyway.
+        // With no Copilot in the row its item is disabled, and running it anyway types nothing.
         f.copilot.live.remove(f.other.id)
-        XCTAssertEqual(
-            f.model.slashCommandBlockedReason(sessionId: f.other.id), "Copilot is not ready for slash commands"
-        )
+        XCTAssertFalse(try rowMenu(for: f.other, in: f.model).menu.items[0].isEnabled)
         f.model.restartSession(f.other.id)
         let refused = await f.typed(in: f.other)
         XCTAssertEqual(refused, "")

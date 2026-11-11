@@ -460,12 +460,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         case .rightMouseDown:
             // SwiftUI builds a context menu from the item views it last evaluated,
-            // and evaluates one again only once the model has published. A row's
-            // Restart Session stayed disabled after its session's shell command
-            // ended: only the terminal's footer had changed, which is not published.
+            // and evaluates one again only once the model has published. Without
+            // this, a row's Restart Session was still disabled on a right-click
+            // after its terminal went back to the idle footer, and still enabled
+            // on a Control-click after it opened the slash picker: only the
+            // footer had changed, which is not published.
             model.objectWillChange.send()
             return event
         case .leftMouseDown:
+            // A Control-click opens the same menu.
+            if event.modifierFlags.contains(.control) { model.objectWillChange.send() }
             // Double-click the top title strip (but not the traffic lights or interactive
             // FleetStatusBar pills) to run the user's title-bar double-click action;
             // .hiddenTitleBar + our SwiftUI strip otherwise swallows the native gesture.

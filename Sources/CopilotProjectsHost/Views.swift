@@ -1192,7 +1192,7 @@ struct SessionBrowser: View {
 /// A row's Restart Session, disabled while `/restart` can't run in that session.
 /// A view of its own, so that is judged when the row's menu is built rather
 /// than for every row each time the list renders.
-private struct RestartSessionMenuItem: View {
+struct RestartSessionMenuItem: View {
     @ObservedObject var model: AppModel
     let sessionId: String
 
