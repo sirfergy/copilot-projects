@@ -498,6 +498,23 @@ final class SessionParkingTests: XCTestCase {
         return json?["parkable"] as? Bool
     }
 
+    func testClientsAreShownNeitherOfTheHostsOwnRequestsNorTheirReceipts() throws {
+        let f = try Fixture()
+        try f.publish {
+            $0.workflow?.capabilities.append("session-reload-mcp")
+            $0.operationReceipts = ["session-send", SessionParking.checkKind, "session-reload-mcp"].map {
+                TrackedOperationReceipt(
+                    operationId: $0, conversationEpoch: "epoch-1", kind: $0, state: .applied,
+                    updatedAtMilliseconds: 1, payloadFingerprint: "fingerprint"
+                )
+            }
+        }
+        f.model.refreshAgentActivitySnapshots()
+        let wire = try f.wire
+        XCTAssertEqual(wire.workflow?.capabilities, ["session-send"])
+        XCTAssertEqual(wire.operationReceipts?.map(\.kind), ["session-send"])
+    }
+
     func testTheWireSnapshotCarriesNoParkedStateUntilASessionIsParked() throws {
         let f = try Fixture()
         f.model.refreshAgentActivitySnapshots()

@@ -520,6 +520,18 @@ is what shows that it restarted. A session that is parked or not idle, or whose
 tracker is not ready, is left alone and the command exits 8 (busy). The other
 exit codes are those of `close-session`.
 
+To reload an idle session's MCP servers from a script, use `reload-session-mcp`:
+
+```bash
+copilot-projects reload-session-mcp --session <id> --project <id>
+```
+
+It hands the session's tracker a request to queue Copilot's own `/mcp reload`,
+under the idle rules and with the exit codes of `restart-session`, so a running
+turn's MCP calls are never cut off. Copilot keeps running: the session's terminal
+says when the servers have restarted. The app has no menu item for it and remote
+clients are not offered it.
+
 Commands inside an app-managed terminal automatically target its current
 project and session. Hooks for other agents can use:
 

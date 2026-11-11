@@ -310,10 +310,13 @@ if (validSessionId && socketPath) {
     const setModelRequestName = `${appSessionId}.set-model-request.json`;
     // "session-park-check" is a question, not an action: it answers whether the
     // session is idle right now and never aborts, queues or changes anything.
+    // The host asks it and "session-reload-mcp" itself and offers neither to clients.
     const workflowKinds = [
         "session-send", "session-abort", "session-restart", "set-session-budget", "answer-session-budget",
-        "session-park-check",
+        "session-park-check", "session-reload-mcp",
     ];
+    // The kinds that queue one of Copilot's own slash commands for an idle session.
+    const queuedCommands = new Map([["session-restart", "/restart"], ["session-reload-mcp", "/mcp reload"]]);
     const workflowPaths = new Map(workflowKinds.map((kind) => [
         kind, join(sessionsDir, `${appSessionId}.${kind}.json`),
     ]));
@@ -2405,7 +2408,7 @@ if (validSessionId && socketPath) {
                 capabilities: [
                     "session-send", "session-abort", "answer-session-budget",
                     "image-attachments-v1", "file-attachments-v1", "pending-messages-v1",
-                    "session-park-check", "session-restart",
+                    "session-park-check", "session-restart", "session-reload-mcp",
                     ...(effectiveLimitsKnown ? ["set-session-budget"] : []),
                 ],
                 totalAiCredits,
@@ -2473,6 +2476,7 @@ if (validSessionId && socketPath) {
         case "session-abort":
         case "session-restart":
         case "session-park-check":
+        case "session-reload-mcp":
             return absent("prompt", "mode", "maxAiCredits", "requestId", "additionalAiCredits");
         case "set-session-budget":
             return absent("prompt", "mode", "requestId", "additionalAiCredits")
@@ -2656,11 +2660,17 @@ if (validSessionId && socketPath) {
         }
         case "session-abort":
             return rpcReceiptOutcome(await workflowRPC("session.abort", {}, context));
-        case "session-restart": {
-            const result = await workflowRPC("session.commands.enqueue", { command: "/restart" }, context);
+        case "session-restart":
+        case "session-reload-mcp": {
+            // The direct `session.mcp.reload` holds its request open for the whole
+            // reload (about 5 s with 22 servers), too close to the 10 s receipt timeout.
+            const restart = action.kind === "session-restart";
+            const result = await workflowRPC("session.commands.enqueue", {
+                command: queuedCommands.get(action.kind),
+            }, context);
             if (result?.queued === false) {
-                if (operationAuthorityCurrent(context)) restartRequested = false;
-                return { state: "rejected", errorCode: "restart-unavailable" };
+                if (restart && operationAuthorityCurrent(context)) restartRequested = false;
+                return { state: "rejected", errorCode: restart ? "restart-unavailable" : "reload-unavailable" };
             }
             return result?.queued === true
                 ? { state: "applied" } : { state: "indeterminate", errorCode: "rpc-indeterminate" };
@@ -2714,9 +2724,10 @@ if (validSessionId && socketPath) {
         if (activeOperationKeys.has(operationExecutionKey(context.conversationEpoch, context.operationId))) return;
         const workflow = workflowSnapshot();
         // Parking stops the CLI as a restart does, so it asks the same question,
-        // plus no waiting schedule and an empty message queue.
+        // plus no waiting schedule and an empty message queue. An MCP reload asks
+        // it too: restarting the servers would cut off a running turn's MCP calls.
         const parkCheck = kind === "session-park-check";
-        const needsIdle = kind === "session-restart" || parkCheck;
+        const needsIdle = queuedCommands.has(kind) || parkCheck;
         const valid = request.schemaVersion === 1 && validWorkflowAction(action, kind)
             && workflow.capabilities.includes(kind)
             && (kind !== "session-send" || workflow.sendReady)
@@ -5969,12 +5980,12 @@ if (validSessionId && socketPath) {
         processElicitationResponse();
         processSetModelRequest();
         processCloseSessionRequest();
-        // Replay receipts immediately, but let recovery settle before a new restart
-        // or a tracker reload.
-        for (const kind of workflowKinds) processWorkflowAction(kind, kind !== "session-restart");
+        // Replay receipts immediately, but let recovery settle before a new restart,
+        // MCP reload or tracker reload.
+        for (const kind of workflowKinds) processWorkflowAction(kind, !queuedCommands.has(kind));
         questionRecovery.then(() => {
             if (shuttingDown || generation !== conversationGeneration) return;
-            processWorkflowAction("session-restart");
+            for (const kind of queuedCommands.keys()) processWorkflowAction(kind);
             reloadNewerTracker();
         });
         scheduleDurableReconcile(0);

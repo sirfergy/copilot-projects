@@ -14,6 +14,11 @@ enum CLISDKOperationKind: String, Codable {
     case answerSessionBudget = "answer-session-budget"
     /// Asked by the host before parking; never offered to remote clients.
     case sessionParkCheck = "session-park-check"
+    /// Asked by `reload-session-mcp`; never offered to remote clients.
+    case sessionReloadMCP = "session-reload-mcp"
+
+    /// The kinds only the host asks for, left out of what clients are shown.
+    static let hostOnly: Set<String> = [sessionParkCheck.rawValue, sessionReloadMCP.rawValue]
 }
 
 public struct CLIOperationRequest: Equatable, Sendable {
@@ -85,6 +90,7 @@ struct CLIOperationAdapter {
         "set-session-budget.json",
         "answer-session-budget.json",
         "session-park-check.json",
+        "session-reload-mcp.json",
     ]
 
     /// Whether a host request is still waiting for the tracker to take it.
@@ -247,6 +253,34 @@ struct CLIOperationAdapter {
         case .failed:
             return .invalid
         }
+    }
+
+    /// Hands the tracker a request with no payload that only the host makes: the
+    /// park check or the MCP reload. The tracker must offer `kind`.
+    func submitHostRequest(
+        sessionId: String,
+        kind: CLISDKOperationKind,
+        operation: CLIOperationRequest,
+        validate: (AgentActivitySnapshot) -> Bool = { _ in true }
+    ) -> RemoteUserInputResult {
+        struct Handoff: Encodable {
+            let schemaVersion = 1
+            let copilotSessionId, operationId, conversationEpoch, kind, payloadFingerprint: String
+            let action: [String: String]
+        }
+        return submit(
+            sessionId: sessionId, kind: kind, operation: operation,
+            fingerprintPayload: [kind.rawValue], handoffSuffix: "\(kind.rawValue).json",
+            now: { Date() },
+            validate: { $0.workflow?.capabilities.contains(kind.rawValue) == true && validate($0) },
+            makeHandoff: {
+                Handoff(
+                    copilotSessionId: $0.copilotSessionId, operationId: $0.operationId,
+                    conversationEpoch: $0.conversationEpoch, kind: $0.kind,
+                    payloadFingerprint: $0.payloadFingerprint, action: ["kind": $0.kind]
+                )
+            }
+        )
     }
 
     /// The fresh snapshot a receipt-correlated operation would bind to right

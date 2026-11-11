@@ -696,6 +696,34 @@ extension AppModel {
     /// run `/restart`, under the idle rules of Restart Idle Sessions. Success means the
     /// request was handed over; the session coming back is what shows it restarted.
     func restartAutomationSession(sessionId: String, projectId: String?) -> ControlResponse {
+        handAutomationRequest(sessionId: sessionId, projectId: projectId) { operation, _ in
+            performSessionAction(
+                sessionId: sessionId, action: RemoteSessionAction(kind: .restart), operation: operation
+            )
+        }
+    }
+
+    /// Scripted MCP reload (`reload-session-mcp`): the same hand-over for `/mcp reload`,
+    /// under the same idle rules, so a running turn's MCP calls are never cut off.
+    func reloadAutomationSessionMCP(sessionId: String, projectId: String?) -> ControlResponse {
+        handAutomationRequest(sessionId: sessionId, projectId: projectId) { operation, adapter in
+            adapter.submitHostRequest(sessionId: sessionId, kind: .sessionReloadMCP, operation: operation) {
+                let now = Date()
+                guard let workflow = $0.workflow, $0.workflowIsFresh(at: now) else { return false }
+                return self.sessionIsSettledIdle(
+                    sessionId: sessionId, snapshot: $0, workflow: workflow, now: now, allowingSchedules: true
+                )
+            }
+        }
+    }
+
+    /// What the scripted requests share: their refusals, and handing one request
+    /// to the tracker of a session that is not parked and has a fresh snapshot.
+    private func handAutomationRequest(
+        sessionId: String,
+        projectId: String?,
+        submit: (CLIOperationRequest, CLIOperationAdapter) -> RemoteUserInputResult
+    ) -> ControlResponse {
         guard !isTerminating, !didFailToLoadWorkspaceState, stateLoadFailure == nil else {
             return Self.controlResponse(for: AutomationSessionCloseResult.unavailable)
         }
@@ -711,10 +739,8 @@ extension AppModel {
         guard projects[location.p].sessions[location.s].parked == nil,
               let epoch = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() })?
                   .remoteOperationProjection().conversationEpoch,
-              performSessionAction(
-                  sessionId: sessionId,
-                  action: RemoteSessionAction(kind: .restart),
-                  operation: CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: epoch)
+              submit(
+                  CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: epoch), adapter
               ) == .accepted else {
             return .failure("the session is parked or not idle, or its tracker is not ready", code: "busy")
         }
@@ -812,7 +838,9 @@ extension AppModel {
                                 .remoteAvailableModels(),
                             conversationEpoch: operation.conversationEpoch,
                             operationSupport: operation.support,
-                            operationReceipts: operation.receipts?.filter { $0.kind != SessionParking.checkKind },
+                            operationReceipts: operation.receipts?.filter {
+                                !CLISDKOperationKind.hostOnly.contains($0.kind)
+                            },
                             workflow: Self.wireWorkflow(session, at: promptNow),
                             lastError: status == .idle
                                 ? session.agentActivity?.remoteLastError()
@@ -852,13 +880,13 @@ extension AppModel {
         )
     }
 
-    /// The workflow as this Mac's own views see it: without the host's own park
-    /// question, and absent while the session's input is closed for parking. It
+    /// The workflow as this Mac's own views see it: without the host's own
+    /// requests, and absent while the session's input is closed for parking. It
     /// carries no `fresh`: the shared view follows one when it is there, and the
     /// Mac's views judge the observation on the Mac's clock each time they ask.
     static func localWorkflow(_ session: Session) -> RemoteSessionWorkflow? {
         guard session.parked == nil, var workflow = session.agentActivity?.workflow else { return nil }
-        workflow.capabilities.removeAll { $0 == SessionParking.checkKind }
+        workflow.capabilities.removeAll(where: CLISDKOperationKind.hostOnly.contains)
         return workflow
     }
 

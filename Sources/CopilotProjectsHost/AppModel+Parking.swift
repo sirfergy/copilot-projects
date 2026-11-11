@@ -239,27 +239,11 @@ extension AppModel {
     /// Asks the session's tracker whether it is idle right now. The question
     /// changes nothing in the session, and no answer counts as no.
     private func trackerConfirmsIdle(_ sessionId: String) async -> Bool {
-        struct Question: Encodable {
-            let schemaVersion = 1
-            let copilotSessionId: String
-            let operationId, conversationEpoch, kind, payloadFingerprint: String?
-            let action = ["kind": SessionParking.checkKind]
-        }
         guard let epoch = parkingAdapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() })?
             .remoteOperationProjection().conversationEpoch else { return false }
         let operation = CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: epoch)
-        guard parkingAdapter.submit(
-            sessionId: sessionId, kind: .sessionParkCheck, operation: operation,
-            fingerprintPayload: [SessionParking.checkKind], handoffSuffix: "\(SessionParking.checkKind).json",
-            now: { Date() },
-            validate: { $0.workflow?.capabilities.contains(SessionParking.checkKind) == true },
-            makeHandoff: {
-                Question(
-                    copilotSessionId: $0.copilotSessionId, operationId: $0.operationId,
-                    conversationEpoch: $0.conversationEpoch, kind: $0.kind,
-                    payloadFingerprint: $0.payloadFingerprint
-                )
-            }
+        guard parkingAdapter.submitHostRequest(
+            sessionId: sessionId, kind: .sessionParkCheck, operation: operation
         ) == .accepted else { return false }
         let state = await terminalReceiptState(
             sessionId: sessionId, operation: operation, kind: SessionParking.checkKind,

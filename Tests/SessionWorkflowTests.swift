@@ -123,8 +123,8 @@ final class SessionWorkflowTests: XCTestCase {
             conversationEpoch: "epoch-1", operationReceiptVersion: 1, operationReceipts: [],
             workflow: RemoteSessionWorkflow(
                 observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1000),
-                capabilities: RemoteSessionActionKind.allCases.map(\.rawValue), sendReady: true,
-                restartRequested: false,
+                capabilities: RemoteSessionActionKind.allCases.map(\.rawValue) + ["session-reload-mcp"],
+                sendReady: true, restartRequested: false,
                 limitsKnown: true
             )
         )
@@ -167,20 +167,30 @@ final class SessionWorkflowTests: XCTestCase {
             sessionId: session.id, action: restart, operation: restartID
         ), .accepted)
         try FileManager.default.removeItem(at: sessions.appendingPathComponent("\(session.id).session-restart.json"))
-        // restart-session: a waiting schedule does not block a restart.
+        // restart-session and reload-session-mcp: a waiting schedule blocks neither.
         snapshot.schedules = [TrackedSchedule(
             id: 1, intervalMs: 60_000, cron: nil, tz: nil, at: nil,
             prompt: "Later", recurring: true, displayPrompt: nil, nextRunAt: "later"
         )]
         try JSONEncoder().encode(snapshot).write(to: snapshotURL)
-        XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: "other").code, "conflict")
-        XCTAssertEqual(model.restartAutomationSession(sessionId: "missing", projectId: nil).code, "gone")
-        XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: project.id).code, "requested")
-        try FileManager.default.removeItem(at: sessions.appendingPathComponent("\(session.id).session-restart.json"))
-        model.projects[0].sessions[0].parked = ParkedSession(state: .parked, sinceMilliseconds: 1)
-        XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: nil).code, "busy")
-        XCTAssertEqual(model.parkedState(session.id), .parked, "a refused restart must not resume a parked session")
-        model.projects[0].sessions[0].parked = nil
+        let scripted: [(kind: String, request: (String, String?) -> ControlResponse)] = [
+            ("session-restart", model.restartAutomationSession),
+            ("session-reload-mcp", model.reloadAutomationSessionMCP),
+        ]
+        for (kind, request) in scripted {
+            XCTAssertEqual(request(session.id, "other").code, "conflict", kind)
+            XCTAssertEqual(request("missing", nil).code, "gone", kind)
+            XCTAssertEqual(request(session.id, project.id).code, "requested", kind)
+            let handoff = sessions.appendingPathComponent("\(session.id).\(kind).json")
+            let handed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: handoff)) as? [String: Any])
+            XCTAssertEqual(handed["kind"] as? String, kind)
+            XCTAssertEqual(handed["action"] as? [String: String], ["kind": kind])
+            try FileManager.default.removeItem(at: handoff)
+            model.projects[0].sessions[0].parked = ParkedSession(state: .parked, sinceMilliseconds: 1)
+            XCTAssertEqual(request(session.id, nil).code, "busy", kind)
+            XCTAssertEqual(model.parkedState(session.id), .parked, "a refused request must not resume a parked session")
+            model.projects[0].sessions[0].parked = nil
+        }
         snapshot.schedules = []
         let readyWorkflow = snapshot.workflow
         let selection = RemoteModelSelection(modelId: "gpt-5.6-sol")
@@ -219,6 +229,7 @@ final class SessionWorkflowTests: XCTestCase {
             operation: CLIOperationRequest(operationId: "busy-restart", conversationEpoch: "epoch-1")
         ), .invalid)
         XCTAssertEqual(model.restartAutomationSession(sessionId: session.id, projectId: nil).code, "busy")
+        XCTAssertEqual(model.reloadAutomationSessionMCP(sessionId: session.id, projectId: nil).code, "busy")
         snapshot.scheduledTurnActive = false
         snapshot.pendingPermissionRequestIds = ["pending"]
         try JSONEncoder().encode(snapshot).write(to: snapshotURL)
