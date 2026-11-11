@@ -696,6 +696,34 @@ extension AppModel {
     /// run `/restart`, under the idle rules of Restart Idle Sessions. Success means the
     /// request was handed over; the session coming back is what shows it restarted.
     func restartAutomationSession(sessionId: String, projectId: String?) -> ControlResponse {
+        handAutomationRequest(sessionId: sessionId, projectId: projectId) { operation, _ in
+            performSessionAction(
+                sessionId: sessionId, action: RemoteSessionAction(kind: .restart), operation: operation
+            )
+        }
+    }
+
+    /// Scripted MCP reload (`reload-session-mcp`): the same hand-over for `/mcp reload`,
+    /// under the same idle rules, so a running turn's MCP calls are never cut off.
+    func reloadAutomationSessionMCP(sessionId: String, projectId: String?) -> ControlResponse {
+        handAutomationRequest(sessionId: sessionId, projectId: projectId) { operation, adapter in
+            adapter.submitHostRequest(sessionId: sessionId, kind: .sessionReloadMCP, operation: operation) {
+                let now = Date()
+                guard let workflow = $0.workflow, $0.workflowIsFresh(at: now) else { return false }
+                return self.sessionIsSettledIdle(
+                    sessionId: sessionId, snapshot: $0, workflow: workflow, now: now, allowingSchedules: true
+                )
+            }
+        }
+    }
+
+    /// What the scripted requests share: their refusals, and handing one request
+    /// to the tracker of a session that is not parked and has a fresh snapshot.
+    private func handAutomationRequest(
+        sessionId: String,
+        projectId: String?,
+        submit: (CLIOperationRequest, CLIOperationAdapter) -> RemoteUserInputResult
+    ) -> ControlResponse {
         guard !isTerminating, !didFailToLoadWorkspaceState, stateLoadFailure == nil else {
             return Self.controlResponse(for: AutomationSessionCloseResult.unavailable)
         }
@@ -711,10 +739,8 @@ extension AppModel {
         guard projects[location.p].sessions[location.s].parked == nil,
               let epoch = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() })?
                   .remoteOperationProjection().conversationEpoch,
-              performSessionAction(
-                  sessionId: sessionId,
-                  action: RemoteSessionAction(kind: .restart),
-                  operation: CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: epoch)
+              submit(
+                  CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: epoch), adapter
               ) == .accepted else {
             return .failure("the session is parked or not idle, or its tracker is not ready", code: "busy")
         }
@@ -812,7 +838,9 @@ extension AppModel {
                                 .remoteAvailableModels(),
                             conversationEpoch: operation.conversationEpoch,
                             operationSupport: operation.support,
-                            operationReceipts: operation.receipts?.filter { $0.kind != SessionParking.checkKind },
+                            operationReceipts: operation.receipts?.filter {
+                                !CLISDKOperationKind.hostOnly.contains($0.kind)
+                            },
                             workflow: Self.wireWorkflow(session, at: promptNow),
                             lastError: status == .idle
                                 ? session.agentActivity?.remoteLastError()
@@ -852,13 +880,13 @@ extension AppModel {
         )
     }
 
-    /// The workflow as this Mac's own views see it: without the host's own park
-    /// question, and absent while the session's input is closed for parking. It
+    /// The workflow as this Mac's own views see it: without the host's own
+    /// requests, and absent while the session's input is closed for parking. It
     /// carries no `fresh`: the shared view follows one when it is there, and the
     /// Mac's views judge the observation on the Mac's clock each time they ask.
     static func localWorkflow(_ session: Session) -> RemoteSessionWorkflow? {
         guard session.parked == nil, var workflow = session.agentActivity?.workflow else { return nil }
-        workflow.capabilities.removeAll { $0 == SessionParking.checkKind }
+        workflow.capabilities.removeAll(where: CLISDKOperationKind.hostOnly.contains)
         return workflow
     }
 
@@ -1010,13 +1038,10 @@ extension AppModel {
     }
 
     private func remoteInputTerminal(sessionId: String) -> ProjectsTerminalView? {
-        guard locateIndex(sessionId) != nil, !isTerminating else { return nil }
-        return controller(for: sessionId).flatMap(inputTerminal)
-    }
-
-    /// A terminal's view while it takes input.
-    private func inputTerminal(_ controller: TerminalController) -> ProjectsTerminalView? {
-        guard !controller.exited,
+        guard locateIndex(sessionId) != nil,
+              !isTerminating,
+              let controller = controller(for: sessionId),
+              !controller.exited,
               controller.shellPID > 0,
               controller.terminalView.terminalInputStateSnapshot() != nil else { return nil }
         return controller.terminalView
@@ -1074,61 +1099,36 @@ extension AppModel {
         ) == .sent
     }
 
-    /// Why a slash command can't run in this session's terminal right now, for
-    /// its transcript composer and for Restart Session. These are the iOS
-    /// composer's `slashCommandBlockedReason` conditions in its order, read from
-    /// the same status and `promptable` the workspace snapshot gives it. iOS's
-    /// queued messages have no desktop counterpart: a composer here holds at
-    /// most one unconfirmed send.
-    ///
-    /// Only a terminal that already exists counts. `controller(for:)` starts one,
-    /// and with it a shell, for any session that has none, and this is asked of
-    /// rows that are not on screen.
-    func slashCommandBlockedReason(sessionId: String) -> String? {
-        guard let location = locateIndex(sessionId), !isTerminating,
-              controllers[sessionId].flatMap(inputTerminal) != nil else {
-            return "This session's terminal is not taking input"
-        }
-        let now = Date()
+    /// Why the app can't ask this session's tracker for a restart right now, for
+    /// its transcript composer and the Restart Session items; nil when it can.
+    /// It reads only what the model already holds, so a menu can ask as it opens;
+    /// `performSessionAction` decides when the request is made.
+    func restartBlockedReason(sessionId: String) -> String? {
+        guard let location = locateIndex(sessionId) else { return "This session is no longer open" }
         let session = projects[location.p].sessions[location.s]
-        let composer = sessionPromptComposers[sessionId]
-        let foreground = runtimeForegroundActivity(for: session, now: now)
-        let status = projectedStatus(for: session, foreground: foreground, now: now)
-        guard status != .running, composer?.isSending != true, composer?.pendingOperationId == nil else {
-            return "Wait for Copilot to finish before running a slash command"
+        if session.parked != nil { return "This session is parked" }
+        guard session.displayStatus == .idle, !session.hasBackgroundWork else {
+            return "Wait until Copilot is idle before restarting it"
         }
-        guard remotePromptable(
-            session, status: status, foreground: foreground,
-            liveSessions: remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions, now: now
-        ) else {
-            return "Copilot is not ready for slash commands"
+        guard session.agentActivity?.workflow?.supports(.restart) == true else {
+            return "This session can't be restarted from here. Run /restart in its terminal."
         }
         return nil
     }
 
-    /// Restart Session, from the Session menu or a session's row: runs `/restart`
-    /// in that session's terminal, as its transcript composer does.
-    func restartSession(_ sessionId: String) {
-        _ = sendSlashCommand(sessionId: sessionId, command: "/restart")
-    }
-
-    /// Types a slash command and Enter into the session's terminal, the way a
-    /// remote client's command is typed. Returns why it wasn't typed, or nil
-    /// once it was.
-    ///
-    /// Ctrl+C goes first because the CLI's input line can hold a draft typed in
-    /// the terminal. On 2026-11-10, with CLI 1.0.109, `/restart` typed after the
-    /// draft "zebra draft" left "zebra draft/restart" on the line, which Enter
-    /// sends to Copilot as a message. Ctrl+C discards the draft, every line of
-    /// it (Ctrl+U left the other lines). On an empty line it only shows "ctrl+c
-    /// again to exit", which the command's first character dismisses. It would
-    /// stop a running turn, so it is typed only once nothing above blocks, which
-    /// is also what lets both calls below succeed.
-    func sendSlashCommand(sessionId: String, command: String) -> String? {
-        if let reason = slashCommandBlockedReason(sessionId: sessionId) { return reason }
-        sendRemoteInput(sessionId: sessionId, value: "\u{3}")
-        _ = sendRemoteCommand(sessionId: sessionId, requestId: UUID().uuidString, value: command)
-        return nil
+    /// The app's one restart, for the composer's `/restart`, Restart Session and
+    /// Restart Idle Sessions: asks the session's tracker to queue Copilot's own
+    /// `/restart`, as `restart-session` does. Nothing is typed into the terminal.
+    @discardableResult
+    func restartSession(_ sessionId: String) async -> RemoteWorkflowActionResult {
+        if let reason = restartBlockedReason(sessionId: sessionId) {
+            return RemoteWorkflowActionResult(state: .rejected, message: reason)
+        }
+        // The request is for the conversation just judged, not one the tracker has moved to since.
+        return await performLocalSessionAction(
+            sessionId: sessionId, action: RemoteSessionAction(kind: .restart),
+            expectedConversationEpoch: sessionOperationProjection(sessionId: sessionId).conversationEpoch
+        )
     }
 
     private func remoteSessionHasLiveAgent(_ sessionId: String) -> Bool {
@@ -1676,11 +1676,11 @@ extension AppModel {
             sessionId: sessionId,
             attachmentStore: attachmentStore
         )
-        composer.slashCommandBlockedReason = { [weak self] in
-            self?.slashCommandBlockedReason(sessionId: sessionId)
+        composer.restartBlockedReason = { [weak self] in
+            self?.restartBlockedReason(sessionId: sessionId)
         }
-        composer.sendSlashCommand = { [weak self] command in
-            self?.sendSlashCommand(sessionId: sessionId, command: command)
+        composer.restart = { [weak self] in
+            await self?.restartSession(sessionId) ?? RemoteWorkflowActionResult(state: .rejected)
         }
         if locateIndex(sessionId) != nil {
             sessionPromptComposers[sessionId] = composer

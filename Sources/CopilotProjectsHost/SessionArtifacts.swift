@@ -333,6 +333,7 @@ enum SessionArtifacts {
             Paths.setModelRequestPath(sessionId: sessionId),
             Paths.closeSessionRequestPath(sessionId: sessionId),
             Paths.sessionsDir.appendingPathComponent("\(sessionId).session-park-check.json").path,
+            Paths.sessionsDir.appendingPathComponent("\(sessionId).session-reload-mcp.json").path,
             Paths.transcriptSnapshotPath(sessionId: sessionId),
             Paths.transcriptLivePath(sessionId: sessionId),
             Paths.transcriptOwnerPath(sessionId: sessionId),

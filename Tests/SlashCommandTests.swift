@@ -1,5 +1,4 @@
 import AppKit
-import Darwin
 import SwiftUI
 import XCTest
 import CopilotProjectsCore
@@ -8,14 +7,13 @@ import CopilotProjectsProtocol
 
 @MainActor
 final class SlashCommandTests: XCTestCase {
-    /// Two idle sessions whose Copilots are live and at their prompts: `session`
-    /// is the one on screen and `other` is another row of its project.
+    /// Two idle sessions whose Copilots are live and whose trackers offer a
+    /// restart: `session` is the one on screen and `other` is another row of
+    /// its project.
     @MainActor
     private final class Fixture {
         final class Copilot {
             var live: Set<String> = []
-            /// The sessions whose readiness for a prompt was judged, in order.
-            var judged: [String] = []
         }
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -30,10 +28,9 @@ final class SlashCommandTests: XCTestCase {
         )
         /// What the composer sent to Copilot as messages.
         var sent: [RemoteSessionAction] = []
-        private var pipeEnds: [String: Int32] = [:]
 
         var composer: DesktopSessionPromptComposer { model.sessionPromptComposer(sessionId: session.id) }
-        var blocked: String? { composer.slashCommandBlockedReason() }
+        var blocked: String? { composer.restartBlockedReason() }
 
         init() throws {
             _ = NSApplication.shared
@@ -53,132 +50,213 @@ final class SlashCommandTests: XCTestCase {
                 stateRepository: repository, persistPermissionStatus: { _, _, _, _ in },
                 isAppActive: { false }, agentActivityDirectory: root, resumeMarkerDirectory: root,
                 remotePromptLiveSessions: { _ in copilot.live },
-                remotePromptTarget: { copilot.judged.append($0); return RemotePromptTarget(activity: .idle) },
+                remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) },
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
             )
+            try heartbeat(session)
+            try heartbeat(other)
         }
 
         func close() {
             model.forcePendingSessionDestroys()
             model.detachAllClients()
-            pipeEnds.values.forEach { Darwin.close($0) }
             try? FileManager.default.removeItem(at: root)
         }
 
+        private func file(_ session: Session, _ suffix: String) -> URL {
+            root.appendingPathComponent("\(session.id).\(suffix)")
+        }
+
+        /// Publishes a session's tracker snapshot, as its heartbeat does, and has the model read it.
+        func heartbeat(
+            _ session: Session, offering capabilities: [String] = ["session-send", "session-restart"],
+            receipts: [TrackedOperationReceipt] = []
+        ) throws {
+            let now = Date()
+            let milliseconds = Int64(now.timeIntervalSince1970 * 1_000)
+            var snapshot = AgentActivitySnapshot(
+                schemaVersion: 1, updatedAt: now.ISO8601Format(.init(includingFractionalSeconds: true)),
+                foregroundTurnActive: false, scheduledTurnActive: false, activeSubagents: [], schedules: [],
+                idleGeneration: 0, lastIdleAborted: false, lastIdleTurnKind: nil, error: nil,
+                pendingPermissionRequestIds: [], copilotSessionId: session.id,
+                conversationEpoch: "epoch-1", operationReceiptVersion: 1, operationReceipts: receipts,
+                workflow: RemoteSessionWorkflow(
+                    observedAtMilliseconds: milliseconds, capabilities: capabilities, sendReady: true,
+                    restartRequested: false
+                )
+            )
+            snapshot.runtimeActivity = RuntimeActivitySnapshot(processing: false, observedAtMilliseconds: milliseconds)
+            try JSONEncoder().encode(snapshot).write(to: file(session, "agent-activity.json"))
+            try Data(session.id.utf8).write(to: file(session, "copilot-session"))
+            model.refreshAgentActivitySnapshots()
+        }
+
+        /// Plays the tracker: takes the restart request it was handed and says it queued `/restart`.
+        func confirmRestart(of session: Session) throws {
+            let handoff = file(session, "session-restart.json")
+            let asked = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: handoff)) as? [String: Any])
+            try FileManager.default.removeItem(at: handoff)
+            try heartbeat(session, receipts: [TrackedOperationReceipt(
+                operationId: asked["operationId"] as? String, conversationEpoch: "epoch-1",
+                kind: "session-restart", state: .applied,
+                updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+                payloadFingerprint: asked["payloadFingerprint"] as? String
+            )])
+        }
+
+        /// A tracker that exits removes its snapshot and any request it was handed.
+        func stopTracker(of session: Session) throws {
+            try FileManager.default.removeItem(at: file(session, "agent-activity.json"))
+            try? FileManager.default.removeItem(at: file(session, "session-restart.json"))
+            model.refreshAgentActivitySnapshots()
+        }
+
+        /// Whether the model has handed a session's tracker a restart request,
+        /// after giving a request that was just made the chance to be written.
+        func restartRequested(of session: Session) async -> Bool {
+            let path = file(session, "session-restart.json").path
+            for _ in 0..<20 where !FileManager.default.fileExists(atPath: path) {
+                await Task.yield()
+            }
+            return FileManager.default.fileExists(atPath: path)
+        }
+
         /// Presses Send, with the outcome a message gets from Copilot.
-        func submit(_ state: RemoteOperationState = .applied) async {
+        func submit() async {
             await composer.send(workflow: workflow, operation: operation) { action in
                 self.sent.append(action)
-                return RemoteWorkflowActionResult(state: state, operationId: "operation")
+                return RemoteWorkflowActionResult(state: .applied, operationId: "operation")
             }
-        }
-
-        /// Gives a session a terminal whose "dtach" hands everything typed into
-        /// it to a pipe, and returns once it is raw and reading.
-        func attachTerminal(to session: Session) async throws {
-            var ends: [Int32] = [0, 0]
-            XCTAssertEqual(pipe(&ends), 0)
-            pipeEnds[session.id] = ends[0]
-            let dtach = root.appendingPathComponent("dtach-\(session.id)")
-            // The terminal's child inherits the pipe's write end.
-            let script = "#!/bin/sh\nstty raw -echo\nprintf '\\004' > /dev/fd/\(ends[1])\n"
-                + "exec /bin/cat > /dev/fd/\(ends[1])\n"
-            try Data(script.utf8).write(to: dtach)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dtach.path)
-            model.controllers[session.id] = TerminalController(
-                sessionId: session.id, cwd: root.path, extraEnvironment: [:],
-                dtachExecutable: dtach.path, dtachSocket: root.appendingPathComponent(session.id).path,
-                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
-            )
-            Darwin.close(ends[1])
-            let started = await readToEndMark(of: session)
-            XCTAssertEqual(started, "")
-        }
-
-        /// What was typed into a session's terminal since the last call. An end mark
-        /// typed now bounds the read, so a missing byte fails instead of hanging.
-        func typed(in session: Session) async -> String? {
-            guard model.sendRemoteInput(sessionId: session.id, value: "\u{4}") == .sent else { return nil }
-            return await readToEndMark(of: session)
-        }
-
-        /// The pipe's bytes before the next end mark, or nil if it closed first.
-        private func readToEndMark(of session: Session) async -> String? {
-            guard let pipeEnd = pipeEnds[session.id] else { return nil }
-            return await Task.detached {
-                let handle = FileHandle(fileDescriptor: pipeEnd)
-                var data = Data()
-                while data.last != 4 {
-                    guard let byte = try? handle.read(upToCount: 1), !byte.isEmpty else { return nil }
-                    data.append(byte)
-                }
-                return String(decoding: data.dropLast(), as: UTF8.self)
-            }.value
         }
     }
 
-    /// Ctrl+C clears a draft left on the CLI's input line. The terminals here are
-    /// not focused, so the command and its Enter are typed between focus reports.
-    private let restartTyped = "\u{3}\u{1b}[I/restart\r\u{1b}[O".debugDescription
-
-    func testRestartOnItsOwnIsTypedIntoTheTerminalInsteadOfSentAsAMessage() async throws {
+    func testRestartOnItsOwnAsksTheTrackerInsteadOfBeingSentAsAMessage() async throws {
         let f = try Fixture()
         defer { f.close() }
-        try await f.attachTerminal(to: f.session)
 
         f.composer.prompt = "/restart now"
         await f.submit()
         XCTAssertEqual(f.sent.map(\.prompt), ["/restart now"])
-        let nothing = await f.typed(in: f.session)
-        XCTAssertEqual(nothing, "")
 
         f.composer.prompt = " /Restart\n"
         XCTAssertTrue(f.composer.canSend(workflow: f.workflow, operation: f.operation))
+        let run = Task { await f.submit() }
+        let requested = await f.restartRequested(of: f.session)
+        XCTAssertTrue(requested)
+        // Until the tracker answers, the draft stays and a second Run asks for nothing more.
         await f.submit()
-        XCTAssertEqual(f.sent.count, 1)
+        XCTAssertEqual(f.composer.prompt, " /Restart\n")
+        XCTAssertEqual(f.composer.statusMessage, "Waiting for Copilot to confirm...")
+        XCTAssertFalse(f.composer.canSend(workflow: f.workflow, operation: f.operation))
+
+        try f.confirmRestart(of: f.session)
+        await run.value
         XCTAssertNil(f.composer.statusMessage)
         XCTAssertEqual(f.composer.prompt, "")
-        let typed = await f.typed(in: f.session)
-        XCTAssertEqual(typed?.debugDescription, restartTyped)
+        // Nothing went to Copilot as a message, and no terminal was started to type into.
+        XCTAssertEqual(f.sent.count, 1)
+        XCTAssertNil(f.model.controllers[f.session.id])
+    }
+
+    func testAnUnconfirmedRestartSaysSoAndADraftWrittenWhileWaitingIsKept() async throws {
+        let f = try Fixture()
+        defer { f.close() }
+
+        // A tracker that stops before the app reads its answer leaves the outcome unknown.
+        f.composer.prompt = "/restart"
+        let unconfirmed = Task { await f.submit() }
+        let requested = await f.restartRequested(of: f.session)
+        XCTAssertTrue(requested)
+        try f.stopTracker(of: f.session)
+        await unconfirmed.value
+        XCTAssertEqual(
+            f.composer.statusMessage, "Couldn't confirm the outcome. Inspect the terminal before trying again."
+        )
+        XCTAssertEqual(f.composer.prompt, "/restart")
+
+        // The tracker's answer doesn't erase a draft written while it was awaited.
+        try f.heartbeat(f.session)
+        let confirmed = Task { await f.submit() }
+        let requestedAgain = await f.restartRequested(of: f.session)
+        XCTAssertTrue(requestedAgain)
+        f.composer.prompt = "next message"
+        try f.confirmRestart(of: f.session)
+        await confirmed.value
+        XCTAssertNil(f.composer.statusMessage)
+        XCTAssertEqual(f.composer.prompt, "next message")
     }
 
     func testBlockedStatesSayWhyAndKeepTheDraft() async throws {
         let f = try Fixture()
         defer { f.close() }
-        try await f.attachTerminal(to: f.session)
         let composer = f.composer
         composer.prompt = "/restart"
         XCTAssertNil(f.blocked)
 
+        let notIdle = "Wait until Copilot is idle before restarting it"
         f.model.setStatus(sessionId: f.session.id, status: .running, text: nil, timestamp: 1)
-        XCTAssertEqual(f.blocked, "Wait for Copilot to finish before running a slash command")
+        XCTAssertEqual(f.blocked, notIdle)
         XCTAssertFalse(composer.canSend(workflow: f.workflow, operation: f.operation))
         await f.submit()
-        XCTAssertEqual(composer.statusMessage, "Wait for Copilot to finish before running a slash command")
+        XCTAssertEqual(composer.statusMessage, notIdle)
         XCTAssertEqual(composer.prompt, "/restart")
         f.model.setStatus(sessionId: f.session.id, status: .idle, text: nil, timestamp: 2)
         XCTAssertNil(f.blocked)
 
+        f.model.projects[0].sessions[0].backgroundAgentsActive = true
+        XCTAssertEqual(f.blocked, notIdle)
+        f.model.projects[0].sessions[0].backgroundAgentsActive = false
+
+        f.model.projects[0].sessions[0].parked = ParkedSession(state: .parked, sinceMilliseconds: 1)
+        XCTAssertEqual(f.blocked, "This session is parked")
+        f.model.projects[0].sessions[0].parked = nil
+
+        // A tracker that offers no restart, or has stopped, leaves the terminal.
+        let useTerminal = "This session can't be restarted from here. Run /restart in its terminal."
+        try f.heartbeat(f.session, offering: ["session-send"])
+        XCTAssertEqual(f.blocked, useTerminal)
+        try f.stopTracker(of: f.session)
+        XCTAssertEqual(f.blocked, useTerminal)
+        try f.heartbeat(f.session)
+        XCTAssertNil(f.blocked)
+
+        // The tracker has moved to another conversation since the model read its snapshot.
+        f.model.projects[0].sessions[0].agentActivity?.conversationEpoch = "epoch-0"
+        await f.submit()
+        XCTAssertEqual(
+            composer.statusMessage, "The conversation changed. Review your message before sending again."
+        )
+        f.model.refreshAgentActivitySnapshots()
+
+        // The host's admission still decides: no Copilot is running in the session.
         f.copilot.live.remove(f.session.id)
-        XCTAssertEqual(f.blocked, "Copilot is not ready for slash commands")
-        f.copilot.live.insert(f.session.id)
+        XCTAssertNil(f.blocked)
+        await f.submit()
+        XCTAssertEqual(composer.statusMessage, "The session action was not accepted.")
+        XCTAssertEqual(composer.prompt, "/restart")
 
-        // A message whose outcome is unknown is still being sent.
-        composer.prompt = "hello"
-        await f.submit(.indeterminate)
-        XCTAssertEqual(f.sent.map(\.prompt), ["hello"])
-        composer.prompt = "/restart"
-        XCTAssertEqual(f.blocked, "Wait for Copilot to finish before running a slash command")
-
-        // None of that typed anything, and a quitting app's terminal takes no input.
-        let typed = await f.typed(in: f.session)
-        XCTAssertEqual(typed, "")
-        f.model.beginTermination()
-        XCTAssertEqual(f.blocked, "This session's terminal is not taking input")
+        // None of that asked the tracker or went to Copilot as a message.
+        let requested = await f.restartRequested(of: f.session)
+        XCTAssertFalse(requested)
+        XCTAssertEqual(f.sent.count, 0)
     }
 
-    /// The menu AppKit builds for a right-click at `point` in `window`, if one opens there.
-    private func contextMenu(in window: NSWindow, at point: NSPoint) throws -> NSMenu? {
+    /// A session row's Restart Session, in a window that stays open across the test.
+    private func rowWindow(for session: Session, in model: AppModel) -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: -20_000, y: -20_000, width: 120, height: 40),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.contentView = NSHostingView(rootView: Text("row").frame(width: 120, height: 40).contextMenu {
+            RestartSessionMenuItem(model: model, sessionId: session.id)
+        })
+        return window
+    }
+
+    /// The menu AppKit builds for a right-click on that row now.
+    private func rowMenu(in window: NSWindow) throws -> NSMenu {
+        window.contentView?.layoutSubtreeIfNeeded()
+        let point = NSPoint(x: 60, y: 20)
         let click = try XCTUnwrap(NSEvent.mouseEvent(
             with: .rightMouseDown, location: point, modifierFlags: [], timestamp: 0,
             windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1
@@ -188,100 +266,57 @@ final class SlashCommandTests: XCTestCase {
             if let menu = candidate.menu(for: click) { return menu }
             view = candidate.superview
         }
-        return nil
+        return try XCTUnwrap(nil as NSMenu?)
     }
 
-    /// A session row's Restart Session in the menu AppKit builds for a right-click,
-    /// with the window that keeps it alive.
-    private func rowMenu(for session: Session, in model: AppModel) throws -> (menu: NSMenu, window: NSWindow) {
-        let window = NSWindow(
-            contentRect: NSRect(x: -20_000, y: -20_000, width: 120, height: 40),
-            styleMask: [.borderless], backing: .buffered, defer: false
-        )
-        let host = NSHostingView(rootView: Text("row").frame(width: 120, height: 40).contextMenu {
-            RestartSessionMenuItem(model: model, sessionId: session.id)
-        })
-        window.contentView = host
-        host.layoutSubtreeIfNeeded()
-        return (try XCTUnwrap(contextMenu(in: window, at: NSPoint(x: 60, y: 20))), window)
-    }
-
-    func testRestartSessionRunsInTheRowItWasChosenOnAndIsDisabledWhileItCannotRun() async throws {
+    func testRestartSessionAsksTheRowItWasChosenOnAndIsDisabledWhileItCannotRestart() async throws {
         let f = try Fixture()
         defer { f.close() }
-        try await f.attachTerminal(to: f.session)
         XCTAssertEqual(f.model.globalSelectedSessionId, f.session.id)
+        let row = rowWindow(for: f.other, in: f.model)
 
-        // A row with no terminal is disabled, and asking didn't start one.
-        XCTAssertEqual(
-            f.model.slashCommandBlockedReason(sessionId: f.other.id), "This session's terminal is not taking input"
-        )
-        XCTAssertNil(f.model.controllers[f.other.id])
-        try await f.attachTerminal(to: f.other)
+        // The other row's item is enabled, and choosing it asks that row's tracker only.
+        let menu = try rowMenu(in: row)
+        XCTAssertEqual(menu.items.map(\.title), ["Restart Session"])
+        XCTAssertTrue(menu.items[0].isEnabled)
+        menu.performActionForItem(at: 0)
+        let requestedInRow = await f.restartRequested(of: f.other)
+        XCTAssertTrue(requestedInRow)
+        let requestedOnScreen = await f.restartRequested(of: f.session)
+        XCTAssertFalse(requestedOnScreen)
 
-        // The other row's item is enabled, and choosing it types into that row's terminal only.
-        let row = try rowMenu(for: f.other, in: f.model)
-        XCTAssertEqual(row.menu.items.map(\.title), ["Restart Session"])
-        XCTAssertTrue(row.menu.items[0].isEnabled)
-        row.menu.performActionForItem(at: 0)
-        let typedInRow = await f.typed(in: f.other)
-        XCTAssertEqual(typedInRow?.debugDescription, restartTyped)
-        let typedOnScreen = await f.typed(in: f.session)
-        XCTAssertEqual(typedOnScreen, "")
+        // The row's item follows what the model publishes about its session.
+        f.model.setStatus(sessionId: f.other.id, status: .running, text: nil, timestamp: 1)
+        XCTAssertFalse(try rowMenu(in: row).items[0].isEnabled)
+        f.model.setStatus(sessionId: f.other.id, status: .idle, text: nil, timestamp: 2)
+        XCTAssertTrue(try rowMenu(in: row).items[0].isEnabled)
 
-        // With no Copilot in the row its item is disabled, and running it anyway types nothing.
-        f.copilot.live.remove(f.other.id)
-        XCTAssertFalse(try rowMenu(for: f.other, in: f.model).menu.items[0].isEnabled)
-        f.model.restartSession(f.other.id)
-        let refused = await f.typed(in: f.other)
-        XCTAssertEqual(refused, "")
+        // A heartbeat that only refreshes the tracker's observation is not published, so an
+        // item judged while it was stale is judged again by the publish a right-click makes.
+        f.model.projects[0].sessions[1].agentActivity?.workflow?.observedAtMilliseconds -= 16_000
+        XCTAssertFalse(try rowMenu(in: row).items[0].isEnabled)
+        try f.heartbeat(f.other)
+        f.model.objectWillChange.send()
+        XCTAssertTrue(try rowMenu(in: row).items[0].isEnabled)
 
         // The Session menu's item follows the session on screen.
         f.model.syncMenuState(includeRuntimeAttention: true)
         XCTAssertTrue(f.model.menuState.snapshot.selectedSessionCanRestart)
-        f.copilot.live.remove(f.session.id)
+        f.model.setStatus(sessionId: f.session.id, status: .running, text: nil, timestamp: 3)
         f.model.syncMenuState(includeRuntimeAttention: true)
         XCTAssertFalse(f.model.menuState.snapshot.selectedSessionCanRestart)
     }
 
-    /// The session list judges whether a row can restart only for a menu that is
-    /// opening. Doing it as the list renders would run for every row on every
-    /// change the model publishes.
-    func testTheSessionListJudgesARowForRestartOnlyWhenItsMenuOpens() async throws {
+    func testRestartIdleSessionsAsksTheIdleSessionsAndLeavesABusyOneAlone() async throws {
         let f = try Fixture()
         defer { f.close() }
-        try await f.attachTerminal(to: f.session)
-        try await f.attachTerminal(to: f.other)
-        var renders = 0
-        let window = NSWindow(
-            contentRect: NSRect(x: -20_000, y: -20_000, width: 320, height: 400),
-            styleMask: [.borderless], backing: .buffered, defer: false
-        )
-        let host = NSHostingView(rootView: SessionBrowser(model: f.model, showsProjects: .constant(false))
-            .background(RenderProbe(model: f.model) { renders += 1 }))
-        window.contentView = host
+        f.model.setStatus(sessionId: f.session.id, status: .running, text: nil, timestamp: 1)
 
-        for change in 1...20 {
-            f.model.setStatus(
-                sessionId: f.other.id, status: change.isMultiple(of: 2) ? .idle : .running, text: nil,
-                timestamp: Int64(change)
-            )
-            host.layoutSubtreeIfNeeded()
-        }
-        // Every change was rendered, and both rows have a terminal, so judging
-        // either of them as the list renders would be recorded.
-        XCTAssertGreaterThanOrEqual(renders, 20)
-        XCTAssertEqual(f.copilot.judged, [])
-
-        // A right-click publishes, then opens the menu of the row under it: the first one here.
-        f.model.objectWillChange.send()
-        host.layoutSubtreeIfNeeded()
-        var menu: NSMenu?
-        for y in stride(from: host.bounds.height, to: 0, by: -8) where menu == nil {
-            menu = try contextMenu(in: window, at: NSPoint(x: 160, y: y))
-        }
-        XCTAssertEqual(menu?.items.contains { $0.title == "Restart Session" && $0.isEnabled }, true)
-        XCTAssertEqual(f.copilot.judged, [f.session.id])
+        f.model.restartIdleSessions(inProjectId: f.model.projects[0].id)
+        let requestedIdle = await f.restartRequested(of: f.other)
+        XCTAssertTrue(requestedIdle)
+        let requestedBusy = await f.restartRequested(of: f.session)
+        XCTAssertFalse(requestedBusy)
     }
 
     func testSuggestionsAreOfferedWhileTheDraftCouldStillBecomeTheCommand() {
@@ -294,16 +329,5 @@ final class SlashCommandTests: XCTestCase {
             XCTAssertTrue(ComposerSlashCommand.suggestions(for: draft).isEmpty, draft)
         }
         XCTAssertNil(ComposerSlashCommand.parse("please /restart"))
-    }
-}
-
-/// Counts the renders of a view that observes the model, as the session list does.
-private struct RenderProbe: View {
-    @ObservedObject var model: AppModel
-    let rendered: () -> Void
-
-    var body: some View {
-        let _ = rendered()
-        Color.clear
     }
 }

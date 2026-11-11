@@ -792,6 +792,27 @@ test("restart enqueues Copilot's /restart for its owner once without sending a p
   assert.equal(runtime.session.workflowCalls.length, 1);
 });
 
+test("an MCP reload enqueues Copilot's /mcp reload once and leaves the conversation usable", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  const capabilities = (await workflowReady(runtime)).capabilities;
+  assert.ok(capabilities.includes("session-reload-mcp"));
+  const invalid = workflowHandoff(runtime, "session-reload-mcp", { prompt: "/quit" });
+  await waitFor(() => receipt(runtime, invalid.operationId)?.state === "rejected", "payload not rejected");
+  const request = workflowHandoff(runtime, "session-reload-mcp", {});
+  await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "MCP reload not queued");
+  writeHandoff(runtime, request.path, request.payload);
+  trigger(runtime, `${runtime.appSessionId}.session-reload-mcp.json`);
+  await waitFor(() => !realExistsSync(request.path), "replayed MCP reload not answered");
+  assert.deepEqual(runtime.session.workflowCalls, [{
+    method: "session.commands.enqueue", sessionId: runtime.copilotSessionId, command: "/mcp reload",
+  }]);
+  // Copilot keeps running, so nothing is fenced as it is for a restart.
+  assert.deepEqual((await workflowReady(runtime)).capabilities, capabilities);
+  assert.equal(readSnapshot(runtime).workflow.restartRequested, false);
+});
+
 test("the park check answers idle or busy and never sends anything to the runtime", {
   concurrency: false,
 }, async (t) => {
@@ -967,10 +988,11 @@ test("restart waits for oversized questions that cannot be displayed remotely", 
   }
 });
 
-test("heartbeat restart waits for question recovery without delaying exact receipt replay", {
+test("a heartbeat restart or MCP reload waits for question recovery without delaying exact receipt replay", {
   concurrency: false,
 }, async (t) => {
-  for (const delayed of [false, true]) {
+  const kinds = ["session-restart", "session-reload-mcp"];
+  for (const [kind, delayed] of kinds.flatMap((kind) => [[kind, false], [kind, true]])) {
     const runtime = await createRuntime(t);
     await workflowReady(runtime);
     const emptyPage = { events: [], cursor: "tail", hasMore: false, cursorStatus: "ok" };
@@ -979,11 +1001,11 @@ test("heartbeat restart waits for question recovery without delaying exact recei
       ? Promise.resolve(emptyPage)
       : new Promise(resolve => { finish = resolve; });
     t.after(() => finish?.(emptyPage));
-    const fields = operationFields(runtime, "session-restart");
-    const path = join(runtime.sessions, `${runtime.appSessionId}.session-restart.json`);
+    const fields = operationFields(runtime, kind);
+    const path = join(runtime.sessions, `${runtime.appSessionId}.${kind}.json`);
     const payload = {
       schemaVersion: 1, copilotSessionId: runtime.copilotSessionId,
-      ...fields, action: { kind: "session-restart" },
+      ...fields, action: { kind },
     };
     writeHandoff(runtime, path, payload);
     runtime.intervalCallback();
@@ -994,7 +1016,7 @@ test("heartbeat restart waits for question recovery without delaying exact recei
       finish(emptyPage);
     }
     await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, fields.operationId)?.state),
-      "heartbeat did not dispatch restart after recovery");
+      `heartbeat did not dispatch ${kind} after recovery`);
     assert.equal(receipt(runtime, fields.operationId).state, "applied");
     assert.equal(runtime.session.workflowCalls.length, 1);
 
@@ -1164,25 +1186,27 @@ test("restart rejects unknown or unavailable session-wide activity", {
   }
 });
 
-test("restart rechecks live processing and questions before dispatch", {
+test("restart and MCP reload recheck live processing and questions before dispatch", {
   concurrency: false,
 }, async (t) => {
-  for (const change of ["processing", "question"]) {
-    const runtime = await createRuntime(t);
-    await workflowReady(runtime);
-    if (change === "processing") runtime.session.processing = true;
-    if (change === "question") {
-      const idleActivity = runtime.session.activityHandler;
-      runtime.session.activityHandler = async (params) => {
-        runtime.session.emit("session_limits_exhausted.requested", {
-          requestId: "budget", maxAiCredits: 30, usedAiCredits: 30,
-        });
-        return idleActivity(params);
-      };
+  for (const kind of ["session-restart", "session-reload-mcp"]) {
+    for (const change of ["processing", "question"]) {
+      const runtime = await createRuntime(t);
+      await workflowReady(runtime);
+      if (change === "processing") runtime.session.processing = true;
+      if (change === "question") {
+        const idleActivity = runtime.session.activityHandler;
+        runtime.session.activityHandler = async (params) => {
+          runtime.session.emit("session_limits_exhausted.requested", {
+            requestId: "budget", maxAiCredits: 30, usedAiCredits: 30,
+          });
+          return idleActivity(params);
+        };
+      }
+      const request = workflowHandoff(runtime, kind, {});
+      await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", `unsafe ${kind} not rejected`);
+      assert.deepEqual(runtime.session.workflowCalls, []);
     }
-    const request = workflowHandoff(runtime, "session-restart", {});
-    await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "unsafe restart not rejected");
-    assert.deepEqual(runtime.session.workflowCalls, []);
   }
 });
 
@@ -1203,17 +1227,19 @@ test("restart rejects payloads and keeps an ambiguous dispatch from executing ag
   assert.equal(runtime.session.workflowCalls.length, 1);
 });
 
-test("a definitive restart refusal leaves the conversation usable", {
+test("a definitive restart or MCP reload refusal leaves the conversation usable", {
   concurrency: false,
 }, async (t) => {
-  const runtime = await createRuntime(t, (session) => {
-    session.enqueueHandler = async () => ({ queued: false });
-  });
-  await workflowReady(runtime);
-  const request = workflowHandoff(runtime, "session-restart", {});
-  await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "restart refusal not reported");
-  assert.ok((await workflowReady(runtime)).capabilities.includes("session-restart"));
-  assert.equal(readSnapshot(runtime).workflow.restartRequested, false);
+  for (const kind of ["session-restart", "session-reload-mcp"]) {
+    const runtime = await createRuntime(t, (session) => {
+      session.enqueueHandler = async () => ({ queued: false });
+    });
+    await workflowReady(runtime);
+    const request = workflowHandoff(runtime, kind, {});
+    await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", `${kind} refusal not reported`);
+    assert.ok((await workflowReady(runtime)).capabilities.includes(kind));
+    assert.equal(readSnapshot(runtime).workflow.restartRequested, false);
+  }
 });
 
 test("duplicate restart watcher events during preflight neither reject nor execute twice", {
@@ -1269,18 +1295,20 @@ test("the park check waits for live schedules instead of trusting the empty star
   assert.deepEqual(runtime.session.workflowCalls, []);
 });
 
-test("a waiting schedule does not block a restart", {
+test("a waiting schedule does not block a restart or an MCP reload", {
   concurrency: false,
 }, async (t) => {
-  const runtime = await createRuntime(t, (session) => {
-    session.scheduleListHandler = async () => ({ entries: [{ id: "scheduled-work" }] });
-  });
-  await waitFor(() => (readSnapshot(runtime).workflow?.schedules ?? []).length === 1, "schedule not published");
-  const request = workflowHandoff(runtime, "session-restart", {});
-  await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", "scheduled restart not queued");
-  assert.deepEqual(runtime.session.workflowCalls, [{
-    method: "session.commands.enqueue", sessionId: runtime.copilotSessionId, command: "/restart",
-  }]);
+  for (const [kind, command] of [["session-restart", "/restart"], ["session-reload-mcp", "/mcp reload"]]) {
+    const runtime = await createRuntime(t, (session) => {
+      session.scheduleListHandler = async () => ({ entries: [{ id: "scheduled-work" }] });
+    });
+    await waitFor(() => (readSnapshot(runtime).workflow?.schedules ?? []).length === 1, "schedule not published");
+    const request = workflowHandoff(runtime, kind, {});
+    await waitFor(() => receipt(runtime, request.operationId)?.state === "applied", `scheduled ${kind} not queued`);
+    assert.deepEqual(runtime.session.workflowCalls, [{
+      method: "session.commands.enqueue", sessionId: runtime.copilotSessionId, command,
+    }]);
+  }
 });
 
 test("unavailable or malformed schedule observations cannot admit a park", {
