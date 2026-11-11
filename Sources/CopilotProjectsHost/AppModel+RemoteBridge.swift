@@ -692,6 +692,35 @@ extension AppModel {
         return destroySession(projectId: project.id, sessionId: sessionId) ? .closed : .unavailable
     }
 
+    /// Scripted restart (`restart-session`): hands the session's tracker a request to
+    /// run `/restart`, under the idle rules of Restart Idle Sessions. Success means the
+    /// request was handed over; the session coming back is what shows it restarted.
+    func restartAutomationSession(sessionId: String, projectId: String?) -> ControlResponse {
+        guard !isTerminating, !didFailToLoadWorkspaceState, stateLoadFailure == nil else {
+            return Self.controlResponse(for: AutomationSessionCloseResult.unavailable)
+        }
+        guard let location = locateIndex(sessionId) else { return Self.controlResponse(for: AutomationSessionCloseResult.gone) }
+        if let projectId, projects[location.p].id != projectId {
+            return Self.controlResponse(for: AutomationSessionCloseResult.conflict)
+        }
+        let adapter = CLIOperationAdapter(
+            activityDirectory: agentActivityDirectory,
+            resumeMarkerDirectory: resumeMarkerDirectory
+        )
+        // A parked session is refused here: submitting an action to one resumes it.
+        guard projects[location.p].sessions[location.s].parked == nil,
+              let epoch = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() })?
+                  .remoteOperationProjection().conversationEpoch,
+              performSessionAction(
+                  sessionId: sessionId,
+                  action: RemoteSessionAction(kind: .bounce),
+                  operation: CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: epoch)
+              ) == .accepted else {
+            return .failure("the session is parked or not idle, or its tracker is not ready", code: "busy")
+        }
+        return .success(code: "requested")
+    }
+
     nonisolated static func controlResponse(
         for outcome: AutomationSessionCloseResult
     ) -> ControlResponse {
@@ -1562,7 +1591,8 @@ extension AppModel {
                     return true
                 case .bounce:
                     return self.sessionIsSettledIdle(
-                        sessionId: sessionId, snapshot: snapshot, workflow: workflow, now: clock()
+                        sessionId: sessionId, snapshot: snapshot, workflow: workflow, now: clock(),
+                        allowingSchedules: true
                     )
                 case .setBudget:
                     return workflow.limitsKnown && workflow.budgetRequest == nil
@@ -1584,13 +1614,16 @@ extension AppModel {
         )
     }
 
-    /// A live Copilot with nothing running, waiting, scheduled or in the
-    /// background: the state in which a bounce or a park may stop the CLI.
+    /// A live Copilot with nothing running, waiting or in the background: the
+    /// state in which a bounce or a park may stop the CLI. Waiting schedules
+    /// block too unless `allowingSchedules`: a bounce may leave them, since the
+    /// CLI re-arms them when it resumes; a parked session would never run them.
     func sessionIsSettledIdle(
         sessionId: String,
         snapshot: AgentActivitySnapshot,
         workflow: RemoteSessionWorkflow,
-        now: Date
+        now: Date,
+        allowingSchedules: Bool = false
     ) -> Bool {
         guard let location = locateIndex(sessionId) else { return false }
         let session = projects[location.p].sessions[location.s]
@@ -1599,7 +1632,7 @@ extension AppModel {
             && !session.hasBackgroundWork && remoteSessionHasLiveAgent(sessionId)
             && projectedStatus(for: session, foreground: foreground, now: now) == .idle
             && !snapshot.foregroundTurnActive && !snapshot.scheduledTurnActive
-            && snapshot.activeSubagents.isEmpty && snapshot.schedules.isEmpty
+            && snapshot.activeSubagents.isEmpty && (allowingSchedules || snapshot.schedules.isEmpty)
             && snapshot.runtimeForegroundActivity(
                 expectedSessionId: snapshot.copilotSessionId,
                 now: now, minimumObservationMilliseconds: nil

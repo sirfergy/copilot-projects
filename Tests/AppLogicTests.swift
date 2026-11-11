@@ -5985,6 +5985,12 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(router.handle(closeRequest(session: "s1", project: nil)).ok)
         XCTAssertTrue(router.handle(closeRequest(session: "s2", project: "p1")).ok)
         XCTAssertEqual(closeRequests.map(\.sessionId), ["s1", "s2"])
+
+        var restart = ControlRequest(command: "restart-session")
+        XCTAssertEqual(router.handle(restart).code, "bad-request")
+        restart.sessionId = "s3"
+        XCTAssertEqual(router.handle(restart).code, "unavailable", "routed to the unconfigured restart action")
+        XCTAssertEqual(closeRequests.count, 2)
     }
 
     // MARK: - Desktop Copilot session creation
@@ -9774,6 +9780,13 @@ final class AppLogicTests: XCTestCase {
             nextResponse = .failure("failed", code: code)
             XCTAssertEqual(CLIMain.run(valid, environment: environment), status, code ?? "no code")
         }
+        XCTAssertTrue(CLIMain.isCommand("restart-session"))
+        nextResponse = .success(code: "requested")
+        XCTAssertEqual(CLIMain.run(["restart-session", "--session", "s3"], environment: environment), 0)
+        XCTAssertEqual(received.last?.command, "restart-session")
+        XCTAssertEqual(received.last?.sessionId, "s3")
+        nextResponse = .failure("failed", code: "busy")
+        XCTAssertEqual(CLIMain.run(["restart-session", "--session", "s3"], environment: environment), 8)
         let sent = received.count
 
         let rejected: [[String]] = [
@@ -9783,6 +9796,7 @@ final class AppLogicTests: XCTestCase {
             ["close-session", "--session", "s1", "--project"],
             ["close-session", "--session", "s1", "--force"],
             ["close-session", "s1"],
+            ["restart-session"],
             valid + ["--all"],
             valid + ["positional"],
         ]

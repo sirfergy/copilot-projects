@@ -525,7 +525,7 @@ The window does not cover the following, and their checks stay:
 
 - Copilot CLI versions, including the tracker's fallbacks for older CLI runtimes.
 - What a session can do now: `RemoteSessionWorkflow.capabilities` (for example
-  `session-bounce`, present only while a `bounce` command is loaded).
+  `set-session-budget`, present only while the session's limits are known).
 - A capability or field a current peer can still leave out, such as `workflow` for a
   session without a tracker.
 - Records a host stored from a client, such as a push registration, until that client

@@ -25,22 +25,23 @@ built separately; they are not included in the public desktop distribution.
 If you already use a remote-enabled installation, keep using its integrated
 distribution rather than replacing it with the standalone download.
 
-## Remote bounce
+## Session restart
 
-Remote clients can request `session-bounce` when the tracker discovers a loaded
-client/extension command named `bounce`. The host and tracker require an idle
-session without pending questions, background agents, or schedules. The tracker
+Remote clients, **Restart Idle Sessions** and `copilot-projects restart-session`
+request `session-bounce`. The host and tracker require an idle session without
+pending questions or background agents. Waiting schedules do not block it: the
+CLI re-arms a persisted session's schedules when it resumes. The tracker
 must finish recovering questions for the current conversation before accepting a bounce;
 incomplete or unavailable recovery blocks it.
 Stalled question reads reject the bounce request without cancelling shared recovery.
 A native message submitted during preflight cancels the bounce rather than being overtaken by it.
 Session-wide SDK activity must also report no active work, including child tasks;
-missing or unavailable activity status blocks bounce even after a tracker reload.
-Questions that are too large to display remotely still block bounce until they are
+missing or unavailable activity status blocks a restart even after a tracker reload.
+Questions that are too large to display remotely still block a restart until they are
 answered in Terminal.
-It rechecks readiness, question history, the live schedule list, and command availability, then queues `/bounce` through the
+It rechecks readiness and question history, then queues Copilot's own `/restart` through the
 SDK for the identified session; it never types into the terminal or sends a
-model prompt. The extension itself owns restarting and resuming.
+model prompt. Copilot itself owns restarting and resuming.
 
 The tracker publishes an explicit pending-bounce marker with its accepted receipt.
 This fences new model switches and prompt delivery. Older trackers without this
@@ -51,7 +52,8 @@ The correlated receipt confirms that the command was queued, not that the
 restart finished. An ambiguous dispatch blocks further native actions in that
 conversation rather than replaying the command. Check Terminal and recover on
 the Mac if it does not resume. Save unsent desktop text before restarting.
-Older clients remain compatible; the bounce extension is not installed by the host.
+A session whose tracker has stopped cannot be restarted this way; run `/restart`
+in its terminal.
 
 ## Remote screenshot attachments
 
@@ -504,6 +506,18 @@ exits 8 (busy); retry later. `--project` refuses (exit 3) a session that has sin
 been moved to another project. Exit 4 means the session no longer exists, 5 means
 the workspace state is unavailable (retry), 2 invalid arguments, and 1 anything
 else.
+
+To restart an idle session's Copilot from a script, use `restart-session`:
+
+```bash
+copilot-projects restart-session --session <id> --project <id>
+```
+
+It makes the request described under [Session restart](#session-restart) and
+exits 0 once the session's tracker has been handed it; the session coming back
+is what shows that it restarted. A session that is parked or not idle, or whose
+tracker is not ready, is left alone and the command exits 8 (busy). The other
+exit codes are those of `close-session`.
 
 Commands inside an app-managed terminal automatically target its current
 project and session. Hooks for other agents can use:
