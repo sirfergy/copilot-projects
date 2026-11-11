@@ -169,6 +169,40 @@ final class StatusShadowTests: XCTestCase {
             "a live tracker's disagreement does not depend on the footer")
     }
 
+    func testASleepEndsADisagreementAtTheLastPassBeforeIt() throws {
+        let session = Session(title: "sleep", cwd: root.path)
+        let sid = session.id
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(
+            projects: [Project(name: "sleep", cwd: root.path, sessions: [session])],
+            selectedProjectId: nil))
+        let model = AppModel(
+            stateRepository: repository, isAppActive: { false },
+            agentActivityDirectory: root, resumeMarkerDirectory: root,
+            remotePromptLiveSessions: { _ in [sid] }
+        )
+        // A hook says running, there is no tracker, and the footer reads idle.
+        model.setStatus(
+            sessionId: sid, status: .running, text: nil,
+            timestamp: SessionArtifacts.currentStatusTimestamp() - 10_000)
+        let start = Date()
+        let awake = ProcessInfo.processInfo.systemUptime
+        // Two passes a second apart, ten minutes with no pass while the Mac is
+        // awake, then a ten-minute sleep: only the uptime clock tells them apart.
+        let passes: [(wall: TimeInterval, uptime: TimeInterval)] = [(0, 0), (1, 1), (601, 601), (1_201, 602)]
+        for pass in passes {
+            model.recordStatusShadow(
+                polled: [sid: (nil, .idle)], now: start.addingTimeInterval(pass.wall),
+                uptime: awake + pass.uptime)
+        }
+        let status = try logged(model.statusShadow).filter { $0["what"] as? String == "status" }
+        XCTAssertEqual(status.map { $0["over"] as? Bool == true }, [false, true, false])
+        XCTAssertEqual(
+            status.map { $0["t"] as? Int64 },
+            [0, 601, 1_201].map { Int64(start.addingTimeInterval($0).timeIntervalSince1970 * 1_000) },
+            "the disagreement ends at the last pass before the sleep and starts again after it")
+    }
+
     func testAClosedSessionEndsItsDisagreementAndTheLogStaysBounded() throws {
         var shadow = StatusShadow(directory: root, maximumBytes: 2_000)
         let session = Session(title: "bounded", cwd: root.path)
