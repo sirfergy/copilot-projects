@@ -20,8 +20,12 @@ struct AgentActivityRead {
 }
 
 /// Reads sessions' `<id>.agent-activity.json` files. It touches no app state, so
-/// scans can run it off the main actor: an endpoint-security agent can hold each
-/// `open()` of a freshly rewritten heartbeat for tens of milliseconds.
+/// scans can run it off the main actor. An endpoint-security agent holds each
+/// `open()` of a freshly rewritten heartbeat: 0.2 to 0.86s a file on a loaded
+/// Mac, where reading 67 live sessions' files in turn took 8 to 11s. That is
+/// longer than the 5s between heartbeats, so every scan re-read every file and
+/// applied snapshots that were already going stale. Changed files are therefore
+/// read together, one per core at a time.
 enum AgentActivityReader {
     typealias Read = @Sendable (
         _ sessionIds: [String],
@@ -31,26 +35,43 @@ enum AgentActivityReader {
     ) -> [String: AgentActivityRead]
 
     static let read: Read = { sessionIds, directory, cached, clock in
+        read(sessionIds, directory, cached, clock) { try Data(contentsOf: $0) }
+    }
+
+    static func read(
+        _ sessionIds: [String],
+        _ directory: URL,
+        _ cached: [String: FileSignature],
+        _ clock: () -> Date,
+        load: (URL) throws -> Data
+    ) -> [String: AgentActivityRead] {
         let fm = FileManager.default
-        let decoder = JSONDecoder()
         var reads: [String: AgentActivityRead] = [:]
+        var changed: [(sessionId: String, signature: FileSignature, url: URL)] = []
         for sessionId in sessionIds {
-            let path = directory
-                .appendingPathComponent("\(sessionId).agent-activity.json", isDirectory: false).path
-            let outcome: AgentActivityRead.Outcome
-            if let attributes = try? fm.attributesOfItem(atPath: path) {
+            let url = directory
+                .appendingPathComponent("\(sessionId).agent-activity.json", isDirectory: false)
+            if let attributes = try? fm.attributesOfItem(atPath: url.path) {
                 let signature = FileSignature(attributes: attributes)
                 if cached[sessionId] == signature {
-                    outcome = .unchanged
-                } else if let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
-                    outcome = .read(signature, try? decoder.decode(AgentActivitySnapshot.self, from: data))
+                    reads[sessionId] = AgentActivityRead(outcome: .unchanged, readAt: clock())
                 } else {
-                    outcome = .unreadable
+                    changed.append((sessionId, signature, url))
                 }
             } else {
-                outcome = .missing
+                reads[sessionId] = AgentActivityRead(outcome: .missing, readAt: clock())
             }
-            reads[sessionId] = AgentActivityRead(outcome: outcome, readAt: clock())
+        }
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: changed.count) { index in
+            let (sessionId, signature, url) = changed[index]
+            let outcome: AgentActivityRead.Outcome
+            if let data = try? load(url) {
+                outcome = .read(signature, try? JSONDecoder().decode(AgentActivitySnapshot.self, from: data))
+            } else {
+                outcome = .unreadable
+            }
+            lock.withLock { reads[sessionId] = AgentActivityRead(outcome: outcome, readAt: clock()) }
         }
         return reads
     }
