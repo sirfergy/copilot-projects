@@ -71,7 +71,37 @@ struct TranscriptPromptComposerView: View {
 
     private func blockedMessage(now: Date) -> String? {
         composer.statusMessage
+            ?? (composer.slashCommand != nil ? composer.slashCommandBlockedReason() : nil)
             ?? composer.attachmentsBlockedReason(workflow: liveWorkflow, operation: liveOperation, now: now)
+    }
+
+    /// The slash commands the draft could become, as the iOS composer offers them:
+    /// choosing one puts it in the draft.
+    @ViewBuilder
+    private var slashCommandSuggestions: some View {
+        let suggestions = ComposerSlashCommand.suggestions(for: composer.prompt)
+        if !suggestions.isEmpty {
+            HStack(spacing: 8) {
+                ForEach(suggestions) { suggestion in
+                    Button {
+                        composer.prompt = suggestion.command
+                        promptFocused = true
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(suggestion.command)
+                                .font(.callout.monospaced())
+                            Text(suggestion.summary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel(suggestion.command)
+                    .accessibilityHint(suggestion.summary)
+                }
+            }
+            .accessibilityIdentifier("desktop-slash-suggestions")
+        }
     }
 
     @ViewBuilder
@@ -207,7 +237,10 @@ struct TranscriptPromptComposerView: View {
                     .fixedSize()
                 }
 
+                slashCommandSuggestions
+
                 let canSend = composer.canSend(workflow: currentWorkflow, operation: currentOperation, now: now)
+                let slashCommand = composer.slashCommand
                 let modeDisabled = isDeliveryModeDisabled
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("Message Copilot", text: $composer.prompt, axis: .vertical)
@@ -221,7 +254,7 @@ struct TranscriptPromptComposerView: View {
 
                     HStack(spacing: 1) {
                         Button(action: submitPrompt) {
-                            Text(composer.mode.sendButtonTitle)
+                            Text(slashCommand != nil ? "Run" : composer.mode.sendButtonTitle)
                                 .font(.body.weight(.medium))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 10)
@@ -231,8 +264,10 @@ struct TranscriptPromptComposerView: View {
                         .buttonStyle(.plain)
                         .disabled(!canSend)
                         .background(Color.accentColor.opacity(canSend ? 1 : 0.5))
-                        .help(composer.mode.title)
-                        .accessibilityLabel(composer.mode.sendAccessibilityLabel)
+                        .help(slashCommand?.summary ?? composer.mode.title)
+                        .accessibilityLabel(
+                            slashCommand.map { "Run \($0.command)" } ?? composer.mode.sendAccessibilityLabel
+                        )
                         .accessibilityIdentifier("desktop-send-prompt")
 
                         Menu {
