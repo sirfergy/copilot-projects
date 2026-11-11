@@ -713,7 +713,6 @@ extension AppModel {
     /// Built on every gateway poll, so time-dependent fields such as each
     /// workflow's `fresh` are judged at `promptNow`.
     func remoteWorkspaceSnapshot(now promptNow: Date = Date()) -> RemoteWorkspaceSnapshot {
-        let promptNowMs = Int64(promptNow.timeIntervalSince1970 * 1_000)
         let promptLiveSessions = remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions
         let hosts = availableHosts
         let resolvedHostHealth = hostHealthProvider?() ?? hostHealth
@@ -771,26 +770,10 @@ extension AppModel {
                             ready: session.finishedUnseen,
                             background: session.hasBackgroundWork,
                             scheduled: !session.schedules.isEmpty,
-                            promptable: session.parked == nil && Self.remotePromptEligibility(
-                                status: status,
-                                scheduledTurnActive: session.scheduledTurnActive,
-                                hasPendingQuestions: session.hasPendingInput,
-                                hasLiveAgent: promptLiveSessions.contains(session.id),
-                                backgroundOnly: Self.backgroundOnlyPromptEvidence(
-                                    status: session.status,
-                                    snapshot: session.agentActivity,
-                                    backgroundAgentsActive: session.backgroundAgentsActive,
-                                    now: promptNow,
-                                    nowMs: promptNowMs,
-                                    clockMs: sessionSemantics.promptSafetyClock.timestamp(
-                                        for: session.id
-                                    )
-                                ),
-                                footerActivity: remotePromptTarget?(session.id)?.activity
-                                    ?? controllers[session.id]?.agentActivity
-                                    ?? .unknown,
-                                foregroundActivity: foreground
-                            ) == .sent,
+                            promptable: remotePromptable(
+                                session, status: status, foreground: foreground,
+                                liveSessions: promptLiveSessions, now: promptNow
+                            ),
                             pendingUserInputs: session.agentActivity?
                                 .remoteUserInputRequests(),
                             pendingElicitations: session.agentActivity?
@@ -983,10 +966,13 @@ extension AppModel {
     }
 
     private func remoteInputTerminal(sessionId: String) -> ProjectsTerminalView? {
-        guard locateIndex(sessionId) != nil,
-              !isTerminating,
-              let controller = controller(for: sessionId),
-              !controller.exited,
+        guard locateIndex(sessionId) != nil, !isTerminating else { return nil }
+        return controller(for: sessionId).flatMap(inputTerminal)
+    }
+
+    /// A terminal's view while it takes input.
+    private func inputTerminal(_ controller: TerminalController) -> ProjectsTerminalView? {
+        guard !controller.exited,
               controller.shellPID > 0,
               controller.terminalView.terminalInputStateSnapshot() != nil else { return nil }
         return controller.terminalView
@@ -1014,6 +1000,91 @@ extension AppModel {
         }
         remoteCommandRequestLedger.record(ledgerId)
         return .sent
+    }
+
+    /// Whether `session` can take a prompt now, as the workspace snapshot says it.
+    func remotePromptable(
+        _ session: Session,
+        status: SessionStatus,
+        foreground: ForegroundActivity?,
+        liveSessions: Set<String>,
+        now: Date
+    ) -> Bool {
+        session.parked == nil && Self.remotePromptEligibility(
+            status: status,
+            scheduledTurnActive: session.scheduledTurnActive,
+            hasPendingQuestions: session.hasPendingInput,
+            hasLiveAgent: liveSessions.contains(session.id),
+            backgroundOnly: Self.backgroundOnlyPromptEvidence(
+                status: session.status,
+                snapshot: session.agentActivity,
+                backgroundAgentsActive: session.backgroundAgentsActive,
+                now: now,
+                nowMs: Int64(now.timeIntervalSince1970 * 1_000),
+                clockMs: sessionSemantics.promptSafetyClock.timestamp(for: session.id)
+            ),
+            footerActivity: remotePromptTarget?(session.id)?.activity
+                ?? controllers[session.id]?.agentActivity
+                ?? .unknown,
+            foregroundActivity: foreground
+        ) == .sent
+    }
+
+    /// Why a slash command can't run in this session's terminal right now, for
+    /// its transcript composer and for Restart Session. These are the iOS
+    /// composer's `slashCommandBlockedReason` conditions in its order, read from
+    /// the same status and `promptable` the workspace snapshot gives it. iOS's
+    /// queued messages have no desktop counterpart: a composer here holds at
+    /// most one unconfirmed send.
+    ///
+    /// Only a terminal that already exists counts. `controller(for:)` starts one,
+    /// and with it a shell, for any session that has none, and this is asked of
+    /// rows that are not on screen.
+    func slashCommandBlockedReason(sessionId: String) -> String? {
+        guard let location = locateIndex(sessionId), !isTerminating,
+              controllers[sessionId].flatMap(inputTerminal) != nil else {
+            return "This session's terminal is not taking input"
+        }
+        let now = Date()
+        let session = projects[location.p].sessions[location.s]
+        let composer = sessionPromptComposers[sessionId]
+        let foreground = runtimeForegroundActivity(for: session, now: now)
+        let status = projectedStatus(for: session, foreground: foreground, now: now)
+        guard status != .running, composer?.isSending != true, composer?.pendingOperationId == nil else {
+            return "Wait for Copilot to finish before running a slash command"
+        }
+        guard remotePromptable(
+            session, status: status, foreground: foreground,
+            liveSessions: remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions, now: now
+        ) else {
+            return "Copilot is not ready for slash commands"
+        }
+        return nil
+    }
+
+    /// Restart Session, from the Session menu or a session's row: runs `/restart`
+    /// in that session's terminal, as its transcript composer does.
+    func restartSession(_ sessionId: String) {
+        _ = sendSlashCommand(sessionId: sessionId, command: "/restart")
+    }
+
+    /// Types a slash command and Enter into the session's terminal, the way a
+    /// remote client's command is typed. Returns why it wasn't typed, or nil
+    /// once it was.
+    ///
+    /// Ctrl+C goes first because the CLI's input line can hold a draft typed in
+    /// the terminal. On 2026-11-10, with CLI 1.0.109, `/restart` typed after the
+    /// draft "zebra draft" left "zebra draft/restart" on the line, which Enter
+    /// sends to Copilot as a message. Ctrl+C discards the draft, every line of
+    /// it (Ctrl+U left the other lines). On an empty line it only shows "ctrl+c
+    /// again to exit", which the command's first character dismisses. It would
+    /// stop a running turn, so it is typed only once nothing above blocks, which
+    /// is also what lets both calls below succeed.
+    func sendSlashCommand(sessionId: String, command: String) -> String? {
+        if let reason = slashCommandBlockedReason(sessionId: sessionId) { return reason }
+        sendRemoteInput(sessionId: sessionId, value: "\u{3}")
+        _ = sendRemoteCommand(sessionId: sessionId, requestId: UUID().uuidString, value: command)
+        return nil
     }
 
     private func remoteSessionHasLiveAgent(_ sessionId: String) -> Bool {
@@ -1557,6 +1628,12 @@ extension AppModel {
             sessionId: sessionId,
             attachmentStore: attachmentStore
         )
+        composer.slashCommandBlockedReason = { [weak self] in
+            self?.slashCommandBlockedReason(sessionId: sessionId)
+        }
+        composer.sendSlashCommand = { [weak self] command in
+            self?.sendSlashCommand(sessionId: sessionId, command: command)
+        }
         if locateIndex(sessionId) != nil {
             sessionPromptComposers[sessionId] = composer
         }

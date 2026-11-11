@@ -386,6 +386,32 @@ enum DesktopScreenshotAttachmentImage {
     }
 }
 
+/// A slash command the transcript composer types into the session's terminal
+/// instead of sending to Copilot as a message, as the iOS composer does.
+struct ComposerSlashCommand: Identifiable {
+    let command: String
+    let summary: String
+
+    var id: String { command }
+
+    static let known = [
+        ComposerSlashCommand(command: "/restart", summary: "Restart Copilot and preserve this session"),
+    ]
+
+    /// The known command `draft` is on its own, whatever its case.
+    static func parse(_ draft: String) -> ComposerSlashCommand? {
+        let name = draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return known.first { $0.command == name }
+    }
+
+    /// The known commands a draft that starts with `/` could still become.
+    static func suggestions(for draft: String) -> [ComposerSlashCommand] {
+        let candidate = draft.drop(while: \.isWhitespace).lowercased()
+        guard candidate.hasPrefix("/"), !candidate.contains(where: \.isWhitespace) else { return [] }
+        return known.filter { $0.command.hasPrefix(candidate) }
+    }
+}
+
 @MainActor
 final class DesktopSessionPromptComposer: ObservableObject {
     struct StagedAttachment: Identifiable, Equatable, Sendable {
@@ -420,6 +446,16 @@ final class DesktopSessionPromptComposer: ObservableObject {
     private var pendingOperation: (epoch: String, followUpDraft: String)?
     private var previewSequence: UInt32 = 0
     private var attachGeneration: UInt64 = 0
+    /// Set by the model: why a slash command can't run in this session's terminal
+    /// right now, and the call that types one there (nil once typed, else why not).
+    var slashCommandBlockedReason: @MainActor () -> String? = { "Copilot is not ready for slash commands" }
+    var sendSlashCommand: @MainActor (String) -> String? = { _ in "Copilot is not ready for slash commands" }
+
+    /// The slash command the draft is on its own. Send types it into the session's
+    /// terminal rather than sending it to Copilot as a message.
+    var slashCommand: ComposerSlashCommand? {
+        ComposerSlashCommand.parse(prompt)
+    }
 
     init(
         sessionId: String,
@@ -542,6 +578,7 @@ final class DesktopSessionPromptComposer: ObservableObject {
         operation: AgentOperationProjection,
         now: Date = Date()
     ) -> Bool {
+        if slashCommand != nil { return slashCommandBlockedReason() == nil }
         guard !isSending, !isAttaching, pendingOperationId == nil,
               operation.support == .receipts,
               let epoch = operation.conversationEpoch,
@@ -830,6 +867,11 @@ final class DesktopSessionPromptComposer: ObservableObject {
         onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult,
         now: Date = Date()
     ) async {
+        if let slashCommand {
+            statusMessage = sendSlashCommand(slashCommand.command)
+            if statusMessage == nil { prompt = "" }
+            return
+        }
         syncConversationEpoch(operation.conversationEpoch)
         if let blocked = attachmentsBlockedReason(workflow: workflow, operation: operation, now: now) {
             statusMessage = blocked
