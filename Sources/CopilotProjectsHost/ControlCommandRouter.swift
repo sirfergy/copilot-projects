@@ -30,6 +30,9 @@ struct ControlCommandRouter {
         var restartSession: (ControlRequest) -> ControlResponse = { _ in
             .failure("restart-session is not configured", code: "unavailable")
         }
+        var reloadSessionMCP: (ControlRequest) -> ControlResponse = { _ in
+            .failure("reload-session-mcp is not configured", code: "unavailable")
+        }
         var listHosts: () -> String = { "" }
         var setDefaultHost: (ControlRequest) -> ControlResponse = { _ in
             .failure("set-default-host is not configured", code: "unavailable")
@@ -75,13 +78,16 @@ struct ControlCommandRouter {
                     code: "bad-request")
             }
             return actions.newCopilotSession(request)
-        case "close-session", "restart-session":
+        case "close-session", "restart-session", "reload-session-mcp":
             guard let sessionId = request.sessionId, !sessionId.isEmpty,
                   request.projectId.map({ !$0.isEmpty }) ?? true else {
                 return .failure("\(request.command) requires a session id", code: "bad-request")
             }
-            return request.command == "close-session"
-                ? actions.closeSession(request) : actions.restartSession(request)
+            switch request.command {
+            case "close-session": return actions.closeSession(request)
+            case "restart-session": return actions.restartSession(request)
+            default: return actions.reloadSessionMCP(request)
+            }
         case "set-parent-session":
             guard let sessionId = request.sessionId, !sessionId.isEmpty,
                   request.projectId.map({ !$0.isEmpty }) ?? true else {

@@ -292,6 +292,11 @@ final class AppModel: ObservableObject {
                 sessionId: request.sessionId ?? "", projectId: request.projectId
             )
         },
+        reloadSessionMCP: { [unowned self] request in
+            self.reloadAutomationSessionMCP(
+                sessionId: request.sessionId ?? "", projectId: request.projectId
+            )
+        },
         listHosts: { [unowned self] in self.renderHosts() },
         setDefaultHost: { [unowned self] request in
             guard let pid = self.resolveProject(request) else { return .failure("no project") }
