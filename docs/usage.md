@@ -242,7 +242,12 @@ is explicitly false). Each action's own conditions still apply, such as
 A session whose workflow state is missing, stale, or unsupported offers no composer
 send: a message is never typed into the terminal on the composer's behalf, and
 clients say to use Terminal instead. Raw terminal input is independent of these checks.
-The desktop transcript composer does type one thing there: `/restart` on its own
+Older trackers on a newer host remain blocked even with a fresh heartbeat:
+restart/reload the tracker to activate the updated workflow metadata, or use Terminal.
+Deploy the Mac host before clients using the new protocol.
+See [Supported versions](#supported-versions) for the window and when a gate may be removed.
+
+The desktop transcript composer does type one thing into the terminal: `/restart` on its own
 runs in the session's terminal instead of going to Copilot as a message, and is
 offered as a suggestion once the draft starts with `/`. Ctrl+C is typed first, so
 an unsent draft on the CLI's input line is discarded rather than sent with the
@@ -251,10 +256,6 @@ Copilot is working, one of its messages is unconfirmed, or the session can't tak
 a prompt. **Restart Session** in a session's context menu, and in the Session menu
 for the selected session, runs the same command under the same conditions and is
 disabled while they don't hold.
-Older trackers on a newer host remain blocked even with a fresh heartbeat:
-restart/reload the tracker to activate the updated workflow metadata, or use Terminal.
-Deploy the Mac host before clients using the new protocol.
-See [Supported versions](#supported-versions) for the window and when a gate may be removed.
 
 An optional offline integration test exercises the installed CLI/SDK pair against
 a loopback model fixture, without real model requests:
