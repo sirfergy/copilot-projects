@@ -27,7 +27,7 @@ final class ProtocolContractTests: XCTestCase {
         )
     }
 
-    private func catalogWorkspace(stamp: Int64? = 1_700_000_000_000) -> RemoteWorkspaceSnapshot {
+    private func catalogWorkspace() -> RemoteWorkspaceSnapshot {
         let catalog = [
             RemoteAvailableModel(id: "auto", name: "Auto"),
             RemoteAvailableModel(
@@ -47,8 +47,7 @@ final class ProtocolContractTests: XCTestCase {
                 ),
             ],
             selectedProjectId: "p1",
-            protocolInfo: .current,
-            servedAtMilliseconds: stamp
+            protocolInfo: .current
         )
     }
 
@@ -70,21 +69,19 @@ final class ProtocolContractTests: XCTestCase {
                 ),
             ],
             selectedProjectId: "p1",
-            protocolInfo: .current,
-            servedAtMilliseconds: full.servedAtMilliseconds
+            protocolInfo: .current
         )
         XCTAssertEqual(kept, expected)
         XCTAssertEqual(kept.projects[1].sessions[0].availableModels?.map(\.id), ["auto"])
     }
 
     func testKeepingAvailableModelsWithoutAKnownSessionKeepsNone() {
-        let full = catalogWorkspace(stamp: nil)
+        let full = catalogWorkspace()
         for sessionId in [nil, "missing"] {
             let kept = full.keepingAvailableModels(for: sessionId)
             XCTAssertTrue(kept.projects.flatMap(\.sessions).allSatisfy { $0.availableModels == nil })
             XCTAssertEqual(kept.projects.flatMap(\.sessions).map(\.id), ["a", "b", "c", "d"])
             XCTAssertEqual(kept.projects.flatMap(\.sessions).map(\.model), full.projects.flatMap(\.sessions).map(\.model))
-            XCTAssertNil(kept.servedAtMilliseconds)
         }
     }
 
@@ -157,118 +154,17 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertEqual(placement.contentVersionText, String(placement.contentVersion))
     }
 
-    // MARK: - Workspace serve time and workflow freshness
+    // MARK: - Served workspace
 
-    func testServedWorkspaceCarriesItsServeTimeThroughARoundTrip() throws {
+    func testServedWorkspaceCarriesFreshAndNoObservationTime() throws {
         let snapshot = try workspace("served-workspace")
-        XCTAssertEqual(snapshot.servedAtMilliseconds, 1_787_788_802_500)
         let workflow = try XCTUnwrap(snapshot.projects.first?.sessions.first?.workflow)
-        XCTAssertEqual(workflow.observedAtMilliseconds, 1_787_788_800_000)
         XCTAssertEqual(workflow.fresh, true)
+        XCTAssertEqual(workflow.observedAtMilliseconds, 0)
         XCTAssertEqual(
             try JSONDecoder().decode(RemoteWorkspaceSnapshot.self, from: JSONEncoder().encode(snapshot)),
             snapshot
         )
-        XCTAssertEqual(try jsonObject(snapshot)["servedAtMilliseconds"] as? Int64, 1_787_788_802_500)
-
-        // A client built before the field existed decodes the same payload.
-        struct OlderWorkspace: Decodable {
-            let projects: [RemoteProjectSnapshot]
-            let selectedProjectId: String?
-            let protocolInfo: RemoteProtocolInfo?
-        }
-        let older = try JSONDecoder().decode(
-            OlderWorkspace.self, from: ProtocolFixtures.data(named: "served-workspace")
-        )
-        XCTAssertEqual(older.projects, snapshot.projects)
-        XCTAssertEqual(older.selectedProjectId, "project")
-    }
-
-    func testWorkspacesWithoutServeTimeDecodeAndEncodeWithoutIt() throws {
-        for fixture in ["legacy-workspace", "receipt-workspace", "unavailable-workspace"] {
-            let snapshot = try workspace(fixture)
-            XCTAssertNil(snapshot.servedAtMilliseconds, fixture)
-            XCTAssertFalse(try jsonObject(snapshot).keys.contains("servedAtMilliseconds"), fixture)
-        }
-        let unserved = RemoteWorkspaceSnapshot(projects: [], selectedProjectId: nil)
-        XCTAssertNil(unserved.servedAtMilliseconds)
-        XCTAssertFalse(try jsonObject(unserved).keys.contains("servedAtMilliseconds"))
-        var served = unserved
-        served.servedAtMilliseconds = 42
-        XCTAssertEqual(
-            served,
-            RemoteWorkspaceSnapshot(projects: [], selectedProjectId: nil, servedAtMilliseconds: 42)
-        )
-        XCTAssertNotEqual(served, unserved)
-    }
-
-    private struct FreshnessCases: Decodable {
-        struct Case: Decodable {
-            let name: String
-            let version: Int
-            let observedAtMilliseconds: Int64
-            let servedAtMilliseconds: Int64?
-            let elapsedSinceReceiptMilliseconds: Int64
-            let clientNowMilliseconds: Int64
-            let expectedAgeMilliseconds: Double?
-            let expectedFresh: Bool
-        }
-        let freshnessLimitMilliseconds: Int64
-        let servedClockToleranceMilliseconds: Int64
-        let cases: [Case]
-    }
-
-    func testWorkflowFreshnessMatchesTheSharedCases() throws {
-        let fixture = try JSONDecoder().decode(
-            FreshnessCases.self, from: ProtocolFixtures.data(named: "workflow-freshness-cases")
-        )
-        XCTAssertEqual(fixture.freshnessLimitMilliseconds, RemoteSessionWorkflow.freshnessLimitMilliseconds)
-        XCTAssertEqual(
-            fixture.servedClockToleranceMilliseconds,
-            RemoteSessionWorkflow.servedClockToleranceMilliseconds
-        )
-        XCTAssertGreaterThanOrEqual(fixture.cases.count, 20)
-        let receivedAt = ContinuousClock.now
-        for entry in fixture.cases {
-            let workflow = RemoteSessionWorkflow(
-                version: entry.version,
-                observedAtMilliseconds: entry.observedAtMilliseconds,
-                capabilities: [RemoteSessionActionKind.send.rawValue],
-                sendReady: true
-            )
-            let now = receivedAt.advanced(by: .milliseconds(entry.elapsedSinceReceiptMilliseconds))
-            let clientNow = Date(timeIntervalSince1970: Double(entry.clientNowMilliseconds) / 1_000)
-            let age = workflow.ageMilliseconds(
-                servedAtMilliseconds: entry.servedAtMilliseconds,
-                receivedAt: receivedAt, now: now, at: clientNow
-            )
-            if let expected = entry.expectedAgeMilliseconds {
-                // Only the wall-clock fallback goes through `Date`'s seconds.
-                XCTAssertEqual(try XCTUnwrap(age, entry.name), expected, accuracy: 0.01, entry.name)
-            } else {
-                XCTAssertNil(age, entry.name)
-            }
-            let fresh = workflow.isFresh(
-                servedAtMilliseconds: entry.servedAtMilliseconds,
-                receivedAt: receivedAt, now: now, at: clientNow
-            )
-            XCTAssertEqual(fresh, entry.expectedFresh, entry.name)
-            XCTAssertEqual(
-                workflow.supports(
-                    .send, servedAtMilliseconds: entry.servedAtMilliseconds,
-                    receivedAt: receivedAt, now: now, at: clientNow
-                ),
-                entry.expectedFresh,
-                entry.name
-            )
-            XCTAssertFalse(workflow.supports(
-                .abort, servedAtMilliseconds: entry.servedAtMilliseconds,
-                receivedAt: receivedAt, now: now, at: clientNow
-            ), entry.name)
-            if entry.servedAtMilliseconds == nil {
-                XCTAssertEqual(fresh, workflow.isFresh(at: clientNow), "\(entry.name): fallback")
-            }
-        }
     }
 
     func testWindowedTranscriptKeepsEmptyImageSnapshotAndTotalCount() throws {
@@ -1787,8 +1683,7 @@ final class ProtocolContractTests: XCTestCase {
             projects: catalogWorkspace().projects,
             selectedProjectId: "p1",
             protocolInfo: .current,
-            quickRepliesDigest: customDigest,
-            servedAtMilliseconds: 123
+            quickRepliesDigest: customDigest
         )
         XCTAssertEqual(workspaceWithDigest.keepingAvailableModels(for: "a").quickRepliesDigest, customDigest)
         XCTAssertEqual(

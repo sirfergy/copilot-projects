@@ -225,20 +225,19 @@ call. A new budget request sends a Mac notification and an event to any installe
 
 Capabilities require fresh runtime evidence; unsupported or unavailable operations
 stay disabled. Evidence is fresh for 15 seconds after the tracker observes it, and
-the tracker publishes each heartbeat's observation as soon as it is taken. When a
-workspace snapshot carries `servedAtMilliseconds` (the Mac's clock when it was
-served), clients age the evidence from that time plus their own monotonic time
-since receipt, so Mac and phone clocks never need to agree; without it, they
-compare wall clocks.
-The Mac also judges this itself every time it builds a snapshot for a client
+the tracker publishes each heartbeat's observation as soon as it is taken.
+The Mac judges this on its own clock every time it builds a snapshot for a client
 (each gateway poll, every two seconds) and publishes the answer as the workflow's
 `fresh`, which turns false within a poll of the evidence passing 15 seconds. It
-makes the same judgement before taking any session action, so clients can use
-`fresh` instead of aging the evidence: offer an action when `fresh` is true, the
+makes the same judgement before taking any session action, and clients have no age
+check of their own: offer an action when `fresh` is true, the
 session's `operationSupport` is `receipts`, and `admits(kind)` holds (the
 capability is listed, no restart is pending, and for a restart `restartRequested`
 is explicitly false). Each action's own conditions still apply, such as
 `sendReady` for a send.
+The observation time stays on the Mac. A snapshot sends each workflow's
+`observedAtMilliseconds` as 0, so a heartbeat that changes nothing else leaves the
+snapshot equal to the last one and the gateway sends clients nothing.
 A session whose workflow state is missing, stale, or unsupported offers no composer
 send: a message is never typed into the terminal on the composer's behalf, and
 clients say to use Terminal instead. Raw terminal input is independent of these checks.

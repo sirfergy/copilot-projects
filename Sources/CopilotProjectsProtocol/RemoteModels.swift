@@ -53,17 +53,6 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
     /// Clients compare this token across workspace updates and fetch
     /// `RemoteQuickRepliesContract.path` only when it changes to a new non-nil value.
     public var quickRepliesDigest: String?
-    /// When the gateway served this snapshot, in Unix milliseconds on the Mac's
-    /// clock: the same clock as each session's `workflow.observedAtMilliseconds`.
-    /// Clients pass it with their own monotonic receipt time to
-    /// `RemoteSessionWorkflow.isFresh(servedAtMilliseconds:receivedAt:now:at:)`,
-    /// so a Mac/phone clock skew cannot change a workflow's age.
-    ///
-    /// Optional and omitted when absent: the host leaves it `nil` and older
-    /// gateways never send it, so clients fall back to wall-clock freshness. Code
-    /// that rebuilds a served snapshot must carry it forward. It is part of `==`,
-    /// so a producer that diffs snapshots should compare them before stamping.
-    public var servedAtMilliseconds: Int64?
 
     public init(
         projects: [RemoteProjectSnapshot],
@@ -72,8 +61,7 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
         availableHosts: [RemoteHostInfo]? = nil,
         hostHealth: [RemoteHostHealth]? = nil,
         recentlyClosedSessions: [RemoteRecentlyClosedSession]? = nil,
-        quickRepliesDigest: String? = nil,
-        servedAtMilliseconds: Int64? = nil
+        quickRepliesDigest: String? = nil
     ) {
         self.projects = projects
         self.selectedProjectId = selectedProjectId
@@ -82,7 +70,6 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
         self.hostHealth = hostHealth
         self.recentlyClosedSessions = recentlyClosedSessions
         self.quickRepliesDigest = quickRepliesDigest
-        self.servedAtMilliseconds = servedAtMilliseconds
     }
 
     public func withProtocolInfo(_ protocolInfo: RemoteProtocolInfo?) -> RemoteWorkspaceSnapshot {
@@ -93,8 +80,7 @@ public struct RemoteWorkspaceSnapshot: Codable, Equatable, Sendable {
             availableHosts: availableHosts,
             hostHealth: hostHealth,
             recentlyClosedSessions: recentlyClosedSessions,
-            quickRepliesDigest: quickRepliesDigest,
-            servedAtMilliseconds: servedAtMilliseconds
+            quickRepliesDigest: quickRepliesDigest
         )
     }
 }
@@ -204,8 +190,7 @@ extension RemoteWorkspaceSnapshot {
     /// event stream whose client selected that session. Clients only read the
     /// selected session's catalog, and every session otherwise repeats a list of
     /// dozens of models in each streamed workspace. A `nil` or unknown
-    /// `sessionId` keeps none. Everything else, including
-    /// `servedAtMilliseconds`, is unchanged.
+    /// `sessionId` keeps none. Everything else is unchanged.
     public func keepingAvailableModels(for sessionId: String?) -> RemoteWorkspaceSnapshot {
         var snapshot = self
         for projectIndex in snapshot.projects.indices {

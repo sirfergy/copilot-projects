@@ -863,11 +863,18 @@ extension AppModel {
     }
 
     /// The workflow as clients see it: the same, with `fresh` set to whether
-    /// the host would act on it at `now`.
+    /// the host would act on it at `now`, which is all they judge it by, and
+    /// no observation time. That time moves with every heartbeat, so carrying
+    /// it would make every snapshot differ and the gateway would push one to
+    /// every client every few seconds per session. It is sent as 0, the
+    /// tracker's own "never observed", rather than left out: the iOS build
+    /// that reads `fresh` (sirfergy/copilot-projects-ios#243) decodes the
+    /// field as required.
     static func wireWorkflow(_ session: Session, at now: Date) -> RemoteSessionWorkflow? {
         guard let activity = session.agentActivity,
               var workflow = localWorkflow(session) else { return nil }
         workflow.fresh = activity.workflowIsFresh(at: now)
+        workflow.observedAtMilliseconds = 0
         return workflow
     }
 
