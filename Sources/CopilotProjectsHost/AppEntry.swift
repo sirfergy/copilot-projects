@@ -66,7 +66,7 @@ final class WorkspaceMenuState: ObservableObject {
         var canNavigateSessionForward = false
         /// Set when the selected session is parked, or being parked or resumed.
         var selectedSessionParked: ParkedSession.State?
-        /// Whether `/restart` can run in the selected session, judged when the menu bar opens.
+        /// Whether the selected session can be restarted, judged when the menu bar opens.
         var selectedSessionCanRestart = false
         var recentlyClosedSessionItems: [RemoteRecentlyClosedSession] = []
         var autoDiscoverSSHHosts = true
@@ -208,8 +208,11 @@ private struct WorkspaceCommands: Commands {
                 }
                 .keyboardShortcut("u", modifiers: [.command, .shift])
                 Divider()
-                Button("Restart Session") { model.globalSelectedSessionId.map(model.restartSession) }
-                    .disabled(!menu.snapshot.selectedSessionCanRestart)
+                Button("Restart Session") {
+                    guard let sessionId = model.globalSelectedSessionId else { return }
+                    Task { await model.restartSession(sessionId) }
+                }
+                .disabled(!menu.snapshot.selectedSessionCanRestart)
                 Button("End Session") { model.closeSelectedSession() }
                     .keyboardShortcut("w", modifiers: .command)
                 Button("Reopen Closed Session") {

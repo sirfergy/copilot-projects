@@ -27,8 +27,9 @@ distribution rather than replacing it with the standalone download.
 
 ## Session restart
 
-Remote clients, **Restart Idle Sessions** and `copilot-projects restart-session`
-request `session-restart`. The host and tracker require an idle session without
+Remote clients, the desktop transcript composer's `/restart`, **Restart Session**,
+**Restart Idle Sessions** and `copilot-projects restart-session` request
+`session-restart`. The host and tracker require an idle session without
 pending questions or background agents. Waiting schedules do not block it: the
 CLI re-arms a persisted session's schedules when it resumes. The tracker
 must finish recovering questions for the current conversation before accepting a restart;

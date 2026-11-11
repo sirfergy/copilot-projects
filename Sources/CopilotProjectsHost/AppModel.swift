@@ -1181,7 +1181,7 @@ final class AppModel: ObservableObject {
             next.selectedSessionOffersMarkAsRead = selectedSessionOffersMarkAsRead
             next.hasAttentionSessions = hasAttentionSessions
             next.selectedSessionCanRestart = globalSelectedSessionId.map {
-                slashCommandBlockedReason(sessionId: $0) == nil
+                restartBlockedReason(sessionId: $0) == nil
             } == true
         }
         next.canNavigateSessionBack = canNavigateSessionBack
@@ -2988,22 +2988,8 @@ final class AppModel: ObservableObject {
 
     func restartIdleSessions(inProjectId pid: String) {
         guard let pi = projectIndex(pid) else { return }
-        let sessionIds = projects[pi].sessions
-            .filter { $0.displayStatus == .idle && !$0.hasBackgroundWork }
-            .map(\.id)
-        for sessionId in sessionIds where sessionWorkflow(sessionId: sessionId)?.supports(.restart) == true {
-            let epoch = sessionOperationProjection(sessionId: sessionId).conversationEpoch
-            Task { @MainActor in
-                guard let loc = self.locateIndex(sessionId),
-                      self.projects[loc.p].sessions[loc.s].displayStatus == .idle,
-                      !self.projects[loc.p].sessions[loc.s].hasBackgroundWork,
-                      self.sessionWorkflow(sessionId: sessionId)?.supports(.restart) == true else { return }
-                _ = await performLocalSessionAction(
-                    sessionId: sessionId,
-                    action: RemoteSessionAction(kind: .restart),
-                    expectedConversationEpoch: epoch
-                )
-            }
+        for sessionId in projects[pi].sessions.map(\.id) where restartBlockedReason(sessionId: sessionId) == nil {
+            Task { await restartSession(sessionId) }
         }
     }
 

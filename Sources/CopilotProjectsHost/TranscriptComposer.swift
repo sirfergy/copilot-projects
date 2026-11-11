@@ -71,7 +71,7 @@ struct TranscriptPromptComposerView: View {
 
     private func blockedMessage(now: Date) -> String? {
         if let message = composer.statusMessage { return message }
-        if composer.slashCommand != nil { return composer.slashCommandBlockedReason() }
+        if composer.slashCommand != nil { return composer.restartBlockedReason() }
         return composer.attachmentsBlockedReason(workflow: liveWorkflow, operation: liveOperation, now: now)
     }
 
