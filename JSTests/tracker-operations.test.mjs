@@ -763,7 +763,7 @@ function workflowHandoff(runtime, kind, action, fields = operationFields(runtime
   return { path, payload, operationId: fields.operationId };
 }
 
-test("bounce enqueues the registered command for its owner once without sending a prompt", {
+test("bounce enqueues Copilot's /restart for its owner once without sending a prompt", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);

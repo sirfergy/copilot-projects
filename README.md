@@ -515,9 +515,9 @@ copilot-projects restart-session --session <id> --project <id>
 
 It makes the request described under [Session restart](#session-restart) and
 exits 0 once the session's tracker has been handed it; the session coming back
-is what shows that it restarted. A session that is not idle, or whose tracker is
-not ready, is left alone and the command exits 8 (busy). The other exit codes
-are those of `close-session`.
+is what shows that it restarted. A session that is parked or not idle, or whose
+tracker is not ready, is left alone and the command exits 8 (busy). The other
+exit codes are those of `close-session`.
 
 Commands inside an app-managed terminal automatically target its current
 project and session. Hooks for other agents can use:

@@ -272,6 +272,10 @@ final class SessionParkingTests: XCTestCase {
             ("another Copilot session", { try $0.publish { $0.copilotSessionId = UUID().uuidString } }),
             ("turn running", { try $0.publish { $0.foregroundTurnActive = true } }),
             ("scheduled turn", { try $0.publish { $0.scheduledTurnActive = true } }),
+            ("waiting schedule", { try $0.publish { $0.schedules = [TrackedSchedule(
+                id: 1, intervalMs: 60_000, cron: nil, tz: nil, at: nil,
+                prompt: "Later", recurring: true, displayPrompt: nil, nextRunAt: "later"
+            )] } }),
             ("permission request", { try $0.publish { $0.pendingPermissionRequestIds = ["p"] } }),
             ("queued message", { try $0.publish {
                 $0.workflow = RemoteSessionWorkflow(

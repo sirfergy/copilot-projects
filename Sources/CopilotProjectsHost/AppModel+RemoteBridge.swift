@@ -716,7 +716,7 @@ extension AppModel {
                   action: RemoteSessionAction(kind: .bounce),
                   operation: CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: epoch)
               ) == .accepted else {
-            return .failure("the session is not idle or its tracker is not ready; retry later", code: "busy")
+            return .failure("the session is parked or not idle, or its tracker is not ready", code: "busy")
         }
         return .success(code: "requested")
     }
@@ -1614,10 +1614,10 @@ extension AppModel {
         )
     }
 
-    /// A live Copilot with nothing running, waiting, scheduled or in the
-    /// background: the state in which a bounce or a park may stop the CLI.
-    /// A restart allows waiting schedules, which the CLI re-arms when it
-    /// resumes; a parked session would never run them.
+    /// A live Copilot with nothing running, waiting or in the background: the
+    /// state in which a bounce or a park may stop the CLI. Waiting schedules
+    /// block too unless `allowingSchedules`: a bounce may leave them, since the
+    /// CLI re-arms them when it resumes; a parked session would never run them.
     func sessionIsSettledIdle(
         sessionId: String,
         snapshot: AgentActivitySnapshot,
