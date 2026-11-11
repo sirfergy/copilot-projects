@@ -386,8 +386,8 @@ enum DesktopScreenshotAttachmentImage {
     }
 }
 
-/// A slash command the transcript composer types into the session's terminal
-/// instead of sending to Copilot as a message, as the iOS composer does.
+/// A slash command the transcript composer acts on itself instead of sending it
+/// to Copilot as a message. `/restart` is the only one: it restarts the session.
 struct ComposerSlashCommand: Identifiable {
     let command: String
     let summary: String
@@ -446,13 +446,13 @@ final class DesktopSessionPromptComposer: ObservableObject {
     private var pendingOperation: (epoch: String, followUpDraft: String)?
     private var previewSequence: UInt32 = 0
     private var attachGeneration: UInt64 = 0
-    /// Set by the model: why a slash command can't run in this session's terminal
-    /// right now, and the call that types one there (nil once typed, else why not).
-    var slashCommandBlockedReason: @MainActor () -> String? = { "Copilot is not ready for slash commands" }
-    var sendSlashCommand: @MainActor (String) -> String? = { _ in "Copilot is not ready for slash commands" }
+    /// Set by the model: why this session can't be restarted right now, and the
+    /// call that asks its tracker to restart it.
+    var restartBlockedReason: @MainActor () -> String? = { "Copilot is not ready to restart" }
+    var restart: @MainActor () async -> RemoteWorkflowActionResult = { RemoteWorkflowActionResult(state: .rejected) }
 
-    /// The slash command the draft is on its own. Send types it into the session's
-    /// terminal rather than sending it to Copilot as a message.
+    /// The slash command the draft is on its own. Send restarts the session
+    /// rather than sending the draft to Copilot as a message.
     var slashCommand: ComposerSlashCommand? {
         ComposerSlashCommand.parse(prompt)
     }
@@ -578,8 +578,9 @@ final class DesktopSessionPromptComposer: ObservableObject {
         operation: AgentOperationProjection,
         now: Date = Date()
     ) -> Bool {
-        if slashCommand != nil { return slashCommandBlockedReason() == nil }
-        guard !isSending, !isAttaching, pendingOperationId == nil,
+        guard !isSending else { return false }
+        if slashCommand != nil { return restartBlockedReason() == nil }
+        guard !isAttaching, pendingOperationId == nil,
               operation.support == .receipts,
               let epoch = operation.conversationEpoch,
               !epoch.isEmpty,
@@ -867,9 +868,18 @@ final class DesktopSessionPromptComposer: ObservableObject {
         onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult,
         now: Date = Date()
     ) async {
-        if let slashCommand {
-            statusMessage = sendSlashCommand(slashCommand.command)
-            if statusMessage == nil { prompt = "" }
+        if slashCommand != nil {
+            // The request waits for the tracker's answer: a second Run in that time
+            // was refused and re-enabled Run, and the answer erased a newer draft.
+            guard !isSending else { return }
+            let command = prompt
+            isSending = true
+            statusMessage = "Waiting for Copilot to confirm..."
+            let result = await restart()
+            isSending = false
+            // Restarting stops the tracker that would confirm it, so only a refusal is reported.
+            statusMessage = result.state == .rejected ? result.message ?? "Copilot did not restart." : nil
+            if statusMessage == nil, prompt == command { prompt = "" }
             return
         }
         syncConversationEpoch(operation.conversationEpoch)

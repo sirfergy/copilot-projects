@@ -1189,7 +1189,7 @@ struct SessionBrowser: View {
     }
 }
 
-/// A row's Restart Session, disabled while `/restart` can't run in that session.
+/// A row's Restart Session, disabled while that session can't be restarted.
 /// A view of its own, so that is judged when the row's menu is built rather
 /// than for every row each time the list renders.
 struct RestartSessionMenuItem: View {
@@ -1197,8 +1197,8 @@ struct RestartSessionMenuItem: View {
     let sessionId: String
 
     var body: some View {
-        Button("Restart Session") { model.restartSession(sessionId) }
-            .disabled(model.slashCommandBlockedReason(sessionId: sessionId) != nil)
+        Button("Restart Session") { Task { await model.restartSession(sessionId) } }
+            .disabled(model.restartBlockedReason(sessionId: sessionId) != nil)
     }
 }
 
