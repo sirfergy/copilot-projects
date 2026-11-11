@@ -6,16 +6,18 @@ import CopilotProjectsProtocol
 @testable import CopilotProjectsHost
 
 @MainActor
-final class ComposerSlashCommandTests: XCTestCase {
-    /// One idle session whose Copilot is live and at its prompt.
+final class SlashCommandTests: XCTestCase {
+    /// Two idle sessions whose Copilots are live and at their prompts: `session`
+    /// is the one on screen and `other` is another row of its project.
     @MainActor
     private final class Fixture {
         final class Copilot {
-            var live = true
+            var live: Set<String> = []
         }
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let session: Session
+        let other: Session
         let model: AppModel
         let copilot = Copilot()
         let operation = AgentOperationProjection(conversationEpoch: "epoch-1", support: .receipts, receipts: [])
@@ -25,7 +27,7 @@ final class ComposerSlashCommandTests: XCTestCase {
         )
         /// What the composer sent to Copilot as messages.
         var sent: [RemoteSessionAction] = []
-        private var pipeEnd: Int32 = -1
+        private var pipeEnds: [String: Int32] = [:]
 
         var composer: DesktopSessionPromptComposer { model.sessionPromptComposer(sessionId: session.id) }
         var blocked: String? { composer.slashCommandBlockedReason() }
@@ -34,15 +36,20 @@ final class ComposerSlashCommandTests: XCTestCase {
             _ = NSApplication.shared
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let session = Session(title: "Slash", cwd: root.path)
+            let other = Session(title: "Other", cwd: root.path)
             self.session = session
+            self.other = other
             let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-            let project = Project(name: "Slash", cwd: root.path, sessions: [session], selectedSessionId: session.id)
+            let project = Project(
+                name: "Slash", cwd: root.path, sessions: [session, other], selectedSessionId: session.id
+            )
             try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
             let copilot = copilot
+            copilot.live = [session.id, other.id]
             model = AppModel(
                 stateRepository: repository, persistPermissionStatus: { _, _, _, _ in },
                 isAppActive: { false }, agentActivityDirectory: root, resumeMarkerDirectory: root,
-                remotePromptLiveSessions: { _ in copilot.live ? [session.id] : [] },
+                remotePromptLiveSessions: { _ in copilot.live },
                 remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) },
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
             )
@@ -51,7 +58,7 @@ final class ComposerSlashCommandTests: XCTestCase {
         func close() {
             model.forcePendingSessionDestroys()
             model.detachAllClients()
-            if pipeEnd >= 0 { Darwin.close(pipeEnd) }
+            pipeEnds.values.forEach { Darwin.close($0) }
             try? FileManager.default.removeItem(at: root)
         }
 
@@ -63,37 +70,37 @@ final class ComposerSlashCommandTests: XCTestCase {
             }
         }
 
-        /// Gives the session a terminal whose "dtach" hands everything typed
-        /// into it to a pipe, and returns once it is raw and reading.
-        func attachTerminal() async throws {
+        /// Gives a session a terminal whose "dtach" hands everything typed into
+        /// it to a pipe, and returns once it is raw and reading.
+        func attachTerminal(to session: Session) async throws {
             var ends: [Int32] = [0, 0]
             XCTAssertEqual(pipe(&ends), 0)
-            pipeEnd = ends[0]
-            let dtach = root.appendingPathComponent("dtach")
+            pipeEnds[session.id] = ends[0]
+            let dtach = root.appendingPathComponent("dtach-\(session.id)")
             // The terminal's child inherits the pipe's write end.
             let script = "#!/bin/sh\nstty raw -echo\nprintf '\\004' > /dev/fd/\(ends[1])\nexec /bin/cat > /dev/fd/\(ends[1])\n"
             try Data(script.utf8).write(to: dtach)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dtach.path)
             model.controllers[session.id] = TerminalController(
                 sessionId: session.id, cwd: root.path, extraEnvironment: [:],
-                dtachExecutable: dtach.path, dtachSocket: root.appendingPathComponent("socket").path,
+                dtachExecutable: dtach.path, dtachSocket: root.appendingPathComponent(session.id).path,
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
             )
             Darwin.close(ends[1])
-            let started = await readToEndMark()
+            let started = await readToEndMark(of: session)
             XCTAssertEqual(started, "")
         }
 
-        /// What was typed into the terminal since the last call. An end mark
+        /// What was typed into a session's terminal since the last call. An end mark
         /// typed now bounds the read, so a missing byte fails instead of hanging.
-        func typed() async -> String? {
+        func typed(in session: Session) async -> String? {
             guard model.sendRemoteInput(sessionId: session.id, value: "\u{4}") == .sent else { return nil }
-            return await readToEndMark()
+            return await readToEndMark(of: session)
         }
 
         /// The pipe's bytes before the next end mark, or nil if it closed first.
-        private func readToEndMark() async -> String? {
-            let pipeEnd = pipeEnd
+        private func readToEndMark(of session: Session) async -> String? {
+            guard let pipeEnd = pipeEnds[session.id] else { return nil }
             return await Task.detached {
                 let handle = FileHandle(fileDescriptor: pipeEnd)
                 var data = Data()
@@ -106,15 +113,19 @@ final class ComposerSlashCommandTests: XCTestCase {
         }
     }
 
+    /// Ctrl+C clears a draft left on the CLI's input line. The terminals here are
+    /// not focused, so the command and its Enter are typed between focus reports.
+    private let restartTyped = "\u{3}\u{1b}[I/restart\r\u{1b}[O".debugDescription
+
     func testRestartOnItsOwnIsTypedIntoTheTerminalInsteadOfSentAsAMessage() async throws {
         let f = try Fixture()
         defer { f.close() }
-        try await f.attachTerminal()
+        try await f.attachTerminal(to: f.session)
 
         f.composer.prompt = "/restart now"
         await f.submit()
         XCTAssertEqual(f.sent.map(\.prompt), ["/restart now"])
-        let nothing = await f.typed()
+        let nothing = await f.typed(in: f.session)
         XCTAssertEqual(nothing, "")
 
         f.composer.prompt = " /Restart\n"
@@ -123,16 +134,14 @@ final class ComposerSlashCommandTests: XCTestCase {
         XCTAssertEqual(f.sent.count, 1)
         XCTAssertNil(f.composer.statusMessage)
         XCTAssertEqual(f.composer.prompt, "")
-        // Ctrl+C clears a draft left on the CLI's input line. The terminal is not
-        // focused, so the command and its Enter are typed between focus reports.
-        let typed = await f.typed()
-        XCTAssertEqual(typed?.debugDescription, "\u{3}\u{1b}[I/restart\r\u{1b}[O".debugDescription)
+        let typed = await f.typed(in: f.session)
+        XCTAssertEqual(typed?.debugDescription, restartTyped)
     }
 
     func testBlockedStatesSayWhyAndKeepTheDraft() async throws {
         let f = try Fixture()
         defer { f.close() }
-        try await f.attachTerminal()
+        try await f.attachTerminal(to: f.session)
         let composer = f.composer
         composer.prompt = "/restart"
         XCTAssertNil(f.blocked)
@@ -146,9 +155,9 @@ final class ComposerSlashCommandTests: XCTestCase {
         f.model.setStatus(sessionId: f.session.id, status: .idle, text: nil, timestamp: 2)
         XCTAssertNil(f.blocked)
 
-        f.copilot.live = false
+        f.copilot.live.remove(f.session.id)
         XCTAssertEqual(f.blocked, "Copilot is not ready for slash commands")
-        f.copilot.live = true
+        f.copilot.live.insert(f.session.id)
 
         // A message whose outcome is unknown is still being sent.
         composer.prompt = "hello"
@@ -158,10 +167,48 @@ final class ComposerSlashCommandTests: XCTestCase {
         XCTAssertEqual(f.blocked, "Wait for Copilot to finish before running a slash command")
 
         // None of that typed anything, and a quitting app's terminal takes no input.
-        let typed = await f.typed()
+        let typed = await f.typed(in: f.session)
         XCTAssertEqual(typed, "")
         f.model.beginTermination()
         XCTAssertEqual(f.blocked, "This session's terminal is not taking input")
+    }
+
+    func testRestartSessionRunsInTheRowItWasChosenOnAndIsDisabledWhileItCannotRun() async throws {
+        let f = try Fixture()
+        defer { f.close() }
+        try await f.attachTerminal(to: f.session)
+        XCTAssertEqual(f.model.globalSelectedSessionId, f.session.id)
+
+        // A row with no terminal is disabled, and asking didn't start one.
+        XCTAssertEqual(
+            f.model.slashCommandBlockedReason(sessionId: f.other.id), "This session's terminal is not taking input"
+        )
+        XCTAssertNil(f.model.controllers[f.other.id])
+        try await f.attachTerminal(to: f.other)
+
+        // The other row's item is enabled and types into that row's terminal only.
+        XCTAssertNil(f.model.slashCommandBlockedReason(sessionId: f.other.id))
+        f.model.restartSession(f.other.id)
+        let typedInRow = await f.typed(in: f.other)
+        XCTAssertEqual(typedInRow?.debugDescription, restartTyped)
+        let typedOnScreen = await f.typed(in: f.session)
+        XCTAssertEqual(typedOnScreen, "")
+
+        // With no Copilot in the row its item is disabled, and types nothing if chosen anyway.
+        f.copilot.live.remove(f.other.id)
+        XCTAssertEqual(
+            f.model.slashCommandBlockedReason(sessionId: f.other.id), "Copilot is not ready for slash commands"
+        )
+        f.model.restartSession(f.other.id)
+        let refused = await f.typed(in: f.other)
+        XCTAssertEqual(refused, "")
+
+        // The Session menu's item follows the session on screen.
+        f.model.syncMenuState(includeRuntimeAttention: true)
+        XCTAssertTrue(f.model.menuState.snapshot.selectedSessionCanRestart)
+        f.copilot.live.remove(f.session.id)
+        f.model.syncMenuState(includeRuntimeAttention: true)
+        XCTAssertFalse(f.model.menuState.snapshot.selectedSessionCanRestart)
     }
 
     func testSuggestionsAreOfferedWhileTheDraftCouldStillBecomeTheCommand() {

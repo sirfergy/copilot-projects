@@ -1175,6 +1175,9 @@ final class AppModel: ObservableObject {
             menuState.selectionUnreadKey = key
             next.selectedSessionOffersMarkAsRead = selectedSessionOffersMarkAsRead
             next.hasAttentionSessions = hasAttentionSessions
+            next.selectedSessionCanRestart = globalSelectedSessionId.map {
+                slashCommandBlockedReason(sessionId: $0) == nil
+            } == true
         }
         next.canNavigateSessionBack = canNavigateSessionBack
         next.canNavigateSessionForward = canNavigateSessionForward

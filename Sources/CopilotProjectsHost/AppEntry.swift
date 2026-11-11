@@ -66,6 +66,8 @@ final class WorkspaceMenuState: ObservableObject {
         var canNavigateSessionForward = false
         /// Set when the selected session is parked, or being parked or resumed.
         var selectedSessionParked: ParkedSession.State?
+        /// Whether `/restart` can run in the selected session, judged when the menu bar opens.
+        var selectedSessionCanRestart = false
         var recentlyClosedSessionItems: [RemoteRecentlyClosedSession] = []
         var autoDiscoverSSHHosts = true
         var manualSSHHosts: [RemoteHostInfo] = []
@@ -206,6 +208,8 @@ private struct WorkspaceCommands: Commands {
                 }
                 .keyboardShortcut("u", modifiers: [.command, .shift])
                 Divider()
+                Button("Restart Session") { model.globalSelectedSessionId.map(model.restartSession) }
+                    .disabled(!menu.snapshot.selectedSessionCanRestart)
                 Button("End Session") { model.closeSelectedSession() }
                     .keyboardShortcut("w", modifiers: .command)
                 Button("Reopen Closed Session") {
@@ -351,7 +355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ⌘/⌃ + number navigation, the modifier-hold number overlay, double-click
         // title-bar zoom, link-vs-selection disambiguation, mouse Back/Forward,
         // and scroll-wheel forwarding into mouse-reporting TUIs.
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown, .scrollWheel, .leftMouseDown, .leftMouseUp, .otherMouseDown, .otherMouseUp]) { [weak self] event in
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown, .scrollWheel, .leftMouseDown, .leftMouseUp, .rightMouseDown, .otherMouseDown, .otherMouseUp]) { [weak self] event in
             guard let self else { return event }
             return self.handleKeyEvent(event)
         }
@@ -453,6 +457,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         case .flagsChanged:
             updateNumberHint(event.modifierFlags)
+            return event
+        case .rightMouseDown:
+            // SwiftUI builds a context menu from the item views it last evaluated,
+            // and evaluates one again only once the model has published. A row's
+            // Restart Session stayed disabled after its session's shell command
+            // ended: only the terminal's footer had changed, which is not published.
+            model.objectWillChange.send()
             return event
         case .leftMouseDown:
             // Double-click the top title strip (but not the traffic lights or interactive

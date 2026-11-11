@@ -966,10 +966,13 @@ extension AppModel {
     }
 
     private func remoteInputTerminal(sessionId: String) -> ProjectsTerminalView? {
-        guard locateIndex(sessionId) != nil,
-              !isTerminating,
-              let controller = controller(for: sessionId),
-              !controller.exited,
+        guard locateIndex(sessionId) != nil, !isTerminating else { return nil }
+        return controller(for: sessionId).flatMap(inputTerminal)
+    }
+
+    /// A terminal's view while it takes input.
+    private func inputTerminal(_ controller: TerminalController) -> ProjectsTerminalView? {
+        guard !controller.exited,
               controller.shellPID > 0,
               controller.terminalView.terminalInputStateSnapshot() != nil else { return nil }
         return controller.terminalView
@@ -1027,13 +1030,19 @@ extension AppModel {
         ) == .sent
     }
 
-    /// Why the transcript composer can't run a slash command in this session's
-    /// terminal right now. These are the iOS composer's `slashCommandBlockedReason`
-    /// conditions in its order, read from the same status and `promptable` the
-    /// workspace snapshot gives it. iOS's queued messages have no desktop
-    /// counterpart: this composer holds at most one unconfirmed send.
+    /// Why a slash command can't run in this session's terminal right now, for
+    /// its transcript composer and for Restart Session. These are the iOS
+    /// composer's `slashCommandBlockedReason` conditions in its order, read from
+    /// the same status and `promptable` the workspace snapshot gives it. iOS's
+    /// queued messages have no desktop counterpart: a composer here holds at
+    /// most one unconfirmed send.
+    ///
+    /// Only a terminal that already exists counts. `controller(for:)` starts one,
+    /// and with it a shell, for any session that has none, and this is asked of
+    /// rows that are not on screen.
     func slashCommandBlockedReason(sessionId: String) -> String? {
-        guard let location = locateIndex(sessionId), remoteInputTerminal(sessionId: sessionId) != nil else {
+        guard let location = locateIndex(sessionId), !isTerminating,
+              controllers[sessionId].flatMap(inputTerminal) != nil else {
             return "This session's terminal is not taking input"
         }
         let now = Date()
@@ -1053,9 +1062,15 @@ extension AppModel {
         return nil
     }
 
-    /// Types a slash command and Enter into the session's terminal for its
-    /// transcript composer, the way a remote client's command is typed. Returns
-    /// why it wasn't typed, or nil once it was.
+    /// Restart Session, from the Session menu or a session's row: runs `/restart`
+    /// in that session's terminal, as its transcript composer does.
+    func restartSession(_ sessionId: String) {
+        _ = sendSlashCommand(sessionId: sessionId, command: "/restart")
+    }
+
+    /// Types a slash command and Enter into the session's terminal, the way a
+    /// remote client's command is typed. Returns why it wasn't typed, or nil
+    /// once it was.
     ///
     /// Ctrl+C goes first because the CLI's input line can hold a draft typed in
     /// the terminal. On 2026-11-10, with CLI 1.0.109, `/restart` typed after the

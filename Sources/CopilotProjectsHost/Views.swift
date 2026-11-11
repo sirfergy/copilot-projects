@@ -1189,6 +1189,19 @@ struct SessionBrowser: View {
     }
 }
 
+/// A row's Restart Session, disabled while `/restart` can't run in that session.
+/// A view of its own, so that is judged when the row's menu is built rather
+/// than for every row each time the list renders.
+private struct RestartSessionMenuItem: View {
+    @ObservedObject var model: AppModel
+    let sessionId: String
+
+    var body: some View {
+        Button("Restart Session") { model.restartSession(sessionId) }
+            .disabled(model.slashCommandBlockedReason(sessionId: sessionId) != nil)
+    }
+}
+
 private struct SessionList: View {
     let model: AppModel
     let project: Project
@@ -1296,7 +1309,8 @@ private struct SessionList: View {
                                 Button("Mark as Unread") { model.markSessionUnread(sessionId: session.id) }
                             }
                             Divider()
-                            // The Session menu's item, for this row rather than the selected one.
+                            // The Session menu's items, for this row rather than the selected one.
+                            RestartSessionMenuItem(model: model, sessionId: session.id)
                             if parkIdleSessions != SessionParking.off {
                                 Button("Park Session") { model.requestParkSession(session) }
                                     .disabled(session.parked != nil)

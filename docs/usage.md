@@ -248,7 +248,9 @@ offered as a suggestion once the draft starts with `/`. Ctrl+C is typed first, s
 an unsent draft on the CLI's input line is discarded rather than sent with the
 command. The composer refuses, and says why, while the terminal takes no input,
 Copilot is working, one of its messages is unconfirmed, or the session can't take
-a prompt.
+a prompt. **Restart Session** in a session's context menu, and in the Session menu
+for the selected session, runs the same command under the same conditions and is
+disabled while they don't hold.
 Older trackers on a newer host remain blocked even with a fresh heartbeat:
 restart/reload the tracker to activate the updated workflow metadata, or use Terminal.
 Deploy the Mac host before clients using the new protocol.
