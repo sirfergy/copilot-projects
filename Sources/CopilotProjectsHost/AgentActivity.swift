@@ -28,8 +28,9 @@ struct AgentActivitySnapshot: Codable, Equatable {
     /// not at each model iteration's turn_end or each heartbeat. Carries
     /// the CLI event's causal timestamp (`normalizedTimestamp(event.timestamp)`),
     /// the same time base the status hooks use, so it's directly comparable to
-    /// the status-event clock. Optional (nil default) so snapshots written before
-    /// this field still decode.
+    /// the status-event clock. A turn the tracker ends from two idle heartbeat
+    /// readings, because no idle event arrived, keeps its start time here.
+    /// Optional (nil default) so snapshots written before this field still decode.
     var foregroundTransitionAt: String? = nil
     var scheduledTurnActive: Bool
     var activeSubagents: [TrackedSubagent]

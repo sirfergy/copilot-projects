@@ -4018,7 +4018,7 @@ test("two idle heartbeats end a foreground turn whose idle events never arrive",
   await waitForActivity(runtime, (activity) => activity?.processing === false);
   assert.equal(turnActive(), true, "one idle reading can fall between two turns");
 
-  // A turn that starts between two idle readings is not ended by the second.
+  // A turn that starts between two idle readings reads busy, so the second does not end it.
   await runtime.session.emit("assistant.turn_start", { turnId: "1" });
   await waitForActivity(runtime, (activity) => activity?.processing === true);
   runtime.session.processing = false;

@@ -358,7 +358,8 @@ if (validSessionId && socketPath) {
     // base the status hooks use (`payload_timestamp` reads the same event
     // `timestamp`), so it's directly comparable to the status-event clock.
     // The initial value predates any turn and never seeds a clock (recovery/
-    // demotion require a real transition first).
+    // demotion require a real transition first). A turn that two idle heartbeat
+    // readings end keeps its start time here: no event says when it ended.
     let foregroundTransitionAt = null;
     let runtimeActivity = {
         processing: null, observedAtMilliseconds: null,
