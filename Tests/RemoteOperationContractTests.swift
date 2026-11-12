@@ -350,6 +350,60 @@ final class RemoteOperationContractTests: XCTestCase {
         XCTAssertNil(try publish("parked", at: start))
     }
 
+    /// The gateway sends a snapshot only when it differs from the last one, so
+    /// a heartbeat that changes nothing else must leave the snapshot equal.
+    @MainActor
+    func testAHeartbeatAloneLeavesTheWorkspaceSnapshotEqual() throws {
+        let harness = try makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        try writeMarker("sdk-session", to: harness)
+        let start = Date()
+        let startMs = Int64(start.timeIntervalSince1970 * 1_000)
+        func heartbeat(at date: Date) throws -> Int64 {
+            let observed = Int64(date.timeIntervalSince1970 * 1_000)
+            var tracked = snapshot(
+                at: date, copilotSessionId: "sdk-session",
+                conversationEpoch: "epoch-1", operationReceiptVersion: 1, operationReceipts: []
+            )
+            tracked.runtimeActivity = RuntimeActivitySnapshot(
+                processing: false, observedAtMilliseconds: observed, idleAtMilliseconds: startMs
+            )
+            tracked.workflow = RemoteSessionWorkflow(
+                observedAtMilliseconds: observed,
+                capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+                sendReady: true, restartRequested: false, totalAiCredits: 12.5, limitsKnown: true
+            )
+            try JSONEncoder().encode(tracked).write(
+                to: harness.sessions.appendingPathComponent("\(harness.session.id).agent-activity.json"),
+                options: .atomic
+            )
+            harness.model.refreshAgentActivitySnapshots(now: date)
+            return observed
+        }
+
+        _ = try heartbeat(at: start)
+        let before = harness.model.remoteWorkspaceSnapshot(now: start)
+        let later = start.addingTimeInterval(5)
+        let observed = try heartbeat(at: later)
+        let after = harness.model.remoteWorkspaceSnapshot(now: later)
+        XCTAssertEqual(after, before)
+        let sent = try XCTUnwrap(after.projects.first?.sessions.first?.workflow)
+        XCTAssertEqual(sent.fresh, true)
+        XCTAssertEqual(sent.observedAtMilliseconds, 0)
+
+        // The heartbeat did reach the Mac, whose own views keep the observation
+        // time and judge it on the Mac's clock.
+        let local = try XCTUnwrap(harness.model.sessionWorkflow(sessionId: harness.session.id))
+        XCTAssertEqual(local.observedAtMilliseconds, observed)
+        XCTAssertTrue(local.isFresh(at: later))
+        XCTAssertFalse(local.isFresh(at: later.addingTimeInterval(16)))
+
+        // The tracker going quiet is a change: the next poll flips `fresh`.
+        let quiet = harness.model.remoteWorkspaceSnapshot(now: later.addingTimeInterval(16))
+        XCTAssertNotEqual(quiet, after)
+        XCTAssertEqual(quiet.projects.first?.sessions.first?.workflow?.fresh, false)
+    }
+
     @MainActor
     func testSDKOperationsRefuseAMissingIdentityAndWriteCorrelatedMetadata() throws {
         let harness = try makeHarness()

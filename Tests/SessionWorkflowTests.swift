@@ -36,48 +36,9 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertFalse(workflow.supports(.send, at: date.addingTimeInterval(-1)))
     }
 
-    func testRemoteFreshnessAgesFromServeTimeOnTheClientsOwnClock() {
-        let observedAt: Int64 = 1_787_788_800_000
-        let workflow = RemoteSessionWorkflow(
-            observedAtMilliseconds: observedAt,
-            capabilities: ["session-send"], sendReady: true
-        )
-        let receivedAt = ContinuousClock.now
-        // The phone's wall clock is a minute behind the Mac, which the wall-clock
-        // rule reads as an observation from the future.
-        let skewedPhone = Date(timeIntervalSince1970: Double(observedAt - 60_000) / 1_000)
-        XCTAssertFalse(workflow.isFresh(at: skewedPhone))
-        XCTAssertTrue(workflow.supports(
-            .send, servedAtMilliseconds: observedAt + 4_000, receivedAt: receivedAt,
-            now: receivedAt.advanced(by: .seconds(11)), at: skewedPhone
-        ))
-        XCTAssertFalse(workflow.supports(
-            .send, servedAtMilliseconds: observedAt + 4_000, receivedAt: receivedAt,
-            now: receivedAt.advanced(by: .milliseconds(11_001)), at: skewedPhone
-        ))
-        // Sub-millisecond monotonic time still counts toward the limit.
-        XCTAssertEqual(
-            workflow.ageMilliseconds(
-                servedAtMilliseconds: observedAt + 4_000, receivedAt: receivedAt,
-                now: receivedAt.advanced(by: .microseconds(10_999_500))
-            ),
-            14_999.5
-        )
-        // Defaults read the current clocks: a just-received snapshot is fresh.
-        XCTAssertTrue(workflow.isFresh(
-            servedAtMilliseconds: observedAt, receivedAt: .now
-        ))
-        let current = RemoteSessionWorkflow(
-            observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
-            capabilities: ["session-send"], sendReady: true
-        )
-        XCTAssertTrue(current.isFresh(servedAtMilliseconds: nil, receivedAt: .now))
-    }
-
     func testRestartRequiresExplicitStateAndPendingRestartDisablesAllActions() {
         let now = Date()
         let observed = Int64(now.timeIntervalSince1970 * 1_000)
-        let received = ContinuousClock.now
         for marker in [nil, false, true] as [Bool?] {
             let workflow = RemoteSessionWorkflow(
                 observedAtMilliseconds: observed,
@@ -87,9 +48,6 @@ final class SessionWorkflowTests: XCTestCase {
             for kind in RemoteSessionActionKind.allCases {
                 let expected = kind == .restart ? marker == false : marker != true
                 XCTAssertEqual(workflow.supports(kind, at: now), expected)
-                XCTAssertEqual(workflow.supports(
-                    kind, servedAtMilliseconds: observed, receivedAt: received, now: received, at: now
-                ), expected)
             }
         }
     }
