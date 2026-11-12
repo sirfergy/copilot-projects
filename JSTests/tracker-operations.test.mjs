@@ -602,6 +602,20 @@ test("scheduled activity does not accept late intents while its agents drain", a
   assert.equal(readSnapshot(runtime).currentIntent, "Checking new results");
 });
 
+test("a message marks the snapshot scheduled or not before its turn starts", async (t) => {
+  const runtime = await createRuntime(t);
+  const emit = (...args) => runtime.session.emit(...args);
+  // Nov 11: a schedule's message landed in the middle of a foreground turn.
+  await emit("assistant.turn_start", { turnId: "0" });
+  await emit("user.message", { content: "Scheduled check", source: "schedule-check" });
+  assert.equal(readSnapshot(runtime).scheduledTurnActive, true);
+  assert.equal(readSnapshot(runtime).foregroundTurnActive, false);
+  // A foreground message that arrives before the next turn start takes it back.
+  await emit("user.message", { content: "Now do this" });
+  assert.equal(readSnapshot(runtime).scheduledTurnActive, false);
+  assert.equal(readSnapshot(runtime).foregroundTurnActive, true);
+});
+
 test("live activity follows root intents and clears at work boundaries", async (t) => {
   const runtime = await createRuntime(t);
   const emit = (...args) => runtime.session.emit(...args);
@@ -3981,6 +3995,47 @@ test("a child's idle event cannot idle the coordinator", {
   await runtime.session.emit("assistant.idle", {}, { agentId: uuid() });
   assert.equal(readSnapshot(runtime).foregroundTurnActive, true);
   assert.equal(readSnapshot(runtime).runtimeActivity.processing, true);
+});
+
+test("two idle heartbeats end a foreground turn whose idle events never arrive", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  const turnActive = () => readSnapshot(runtime).foregroundTurnActive;
+  // What the CLI logged for one session on Nov 11: the root starts a background
+  // agent and ends its turn, and the agent works on for 3.5 hours. The tracker
+  // showed the root's turn active for all of it.
+  const child = uuid();
+  await runtime.session.emit("user.message", { content: "Watch the checks" });
+  await runtime.session.emit("assistant.turn_start", { turnId: "0" });
+  await waitForActivity(runtime, (activity) => activity?.processing === true);
+  await runtime.session.emit("subagent.started", { agentDisplayName: "watcher" }, { agentId: child });
+  await runtime.session.emit("assistant.turn_end", { turnId: "0" });
+  await runtime.session.emit("user.message", { content: "Watch them" }, { agentId: child });
+  await runtime.session.emit("assistant.turn_start", { turnId: "0" }, { agentId: child });
+  runtime.session.processing = false;
+  await heartbeat(runtime);
+  await waitForActivity(runtime, (activity) => activity?.processing === false);
+  assert.equal(turnActive(), true, "one idle reading can fall between two turns");
+
+  // A turn that starts between two idle readings is not ended by the second.
+  await runtime.session.emit("assistant.turn_start", { turnId: "1" });
+  await waitForActivity(runtime, (activity) => activity?.processing === true);
+  runtime.session.processing = false;
+  await heartbeat(runtime);
+  await waitForActivity(runtime, (activity) => activity?.processing === false);
+  assert.equal(turnActive(), true);
+
+  const beforeSecondReading = new Date().toISOString();
+  await heartbeat(runtime);
+  await waitFor(() => turnActive() === false, "the turn stayed active without an idle event");
+  assert.equal(readSnapshot(runtime).runtimeActivity.processing, false);
+  assert.equal(readSnapshot(runtime).activeSubagents.length, 1, "the background agent still shows");
+
+  // An idle event the CLI sent before that reading, delivered after it, still counts.
+  const generation = readSnapshot(runtime).idleGeneration;
+  await runtime.session.emit("session.idle", {}, { timestamp: beforeSecondReading });
+  assert.equal(readSnapshot(runtime).idleGeneration, generation + 1);
 });
 
 test("late idle query cannot overwrite a new foreground turn", {
