@@ -84,7 +84,7 @@ def main():
     if older:
         print(f"Left out {len(read) - len(log)} lines logged before tracker-only status held a stale reading.")
     if not log:
-        print(f"No lines in {current}: no disagreement has been logged.")
+        print(f"Nothing to report from {current}: no disagreement has been logged under the current rule.")
         return
     ended = collections.defaultdict(list)
     open_ended = collections.defaultdict(list)
