@@ -833,7 +833,10 @@ completion marker or advances its clocks.
 and background activity. The tracker observes the local coordinator's processing state over the
 SDK, fenced to its current conversation and to the query's start time. Root `assistant.idle`
 refreshes that observation; an individual model iteration's `assistant.turn_end` is not proof
-the coordinator finished. Background agents do not make an idle coordinator busy.
+the coordinator finished. If no root idle event arrives, a heartbeat observation that finds the
+coordinator idle for the second observation running, with no message or turn start in between,
+ends the tracker's foreground turn.
+Background agents do not make an idle coordinator busy.
 Permission completions delivered during tracker startup retain their sender certificate even
 when SDK history includes the same events; historical-only completions do not create certificates.
 

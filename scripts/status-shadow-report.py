@@ -53,11 +53,7 @@ def disagreements(log, now):
 
 
 def kind(entry):
-    source = "tracker alive"
-    if not entry["alive"]:
-        footer = f'footer {entry["footer"]}' if "footer" in entry else "no footer read"
-        source = f"tracker dead, {footer}"
-    return f'{entry["what"]}: shown {entry["shown"]}, tracker-only {entry["tracker"]} ({source})'
+    return f'{entry["what"]}: shown {entry["shown"]}, tracker-only {entry["tracker"]} (tracker {entry["state"]})'
 
 
 def span(milliseconds):
@@ -80,9 +76,15 @@ def main():
 
     current = args.state_dir / "status-shadow.jsonl"
     paths = [path for path in (current.with_name(current.name + ".1"), current) if path.exists()]
-    log = list(entries(paths))
+    read = list(entries(paths))
+    # A line with `alive` was logged when the footer stood in for a stale tracker.
+    # That is another rule, so the app launches that logged one are left out.
+    older = {entry["run"] for entry, _ in read if "alive" in entry}
+    log = [item for item in read if item[0]["run"] not in older]
+    if older:
+        print(f"Left out {len(read) - len(log)} lines logged before tracker-only status held a stale reading.")
     if not log:
-        print(f"No lines in {current}: no disagreement has been logged.")
+        print(f"Nothing to report from {current}: no disagreement has been logged under the current rule.")
         return
     ended = collections.defaultdict(list)
     open_ended = collections.defaultdict(list)

@@ -358,7 +358,8 @@ if (validSessionId && socketPath) {
     // base the status hooks use (`payload_timestamp` reads the same event
     // `timestamp`), so it's directly comparable to the status-event clock.
     // The initial value predates any turn and never seeds a clock (recovery/
-    // demotion require a real transition first).
+    // demotion require a real transition first). A turn that two idle heartbeat
+    // readings end keeps its start time here: no event says when it ended.
     let foregroundTransitionAt = null;
     let runtimeActivity = {
         processing: null, observedAtMilliseconds: null,
@@ -2043,6 +2044,22 @@ if (validSessionId && socketPath) {
             }
             const changed = runtimeActivity?.processing !== processing.processing
                 || runtimeActivity?.error != null;
+            // A turn can end with no idle event taking effect here. On Nov 10 and
+            // 11 that left the turn active after 13 turns that ended with a
+            // background agent or an async shell still running (12 for up to 50
+            // minutes, until the next message, and one for 3.5 hours) and after
+            // two that ended in "session event delivery failed" (25 and 37 hours,
+            // never cleared), so those sessions did not count as idle. A heartbeat
+            // reading that finds the loop idle for the second reading running,
+            // with no message or turn start in between, is the idle that never
+            // came. The transition time stays, so a late idle event is still
+            // taken.
+            const missedIdle = token.heartbeat && !changed
+                && processing.processing === false && foregroundTurnActive;
+            if (missedIdle) {
+                foregroundTurnActive = false;
+                currentIntent = null;
+            }
             runtimeActivity = {
                 processing: processing.processing,
                 observedAtMilliseconds,
@@ -2053,7 +2070,7 @@ if (validSessionId && socketPath) {
             // heartbeat's own observation: remote clients only act on an
             // observation younger than 15s, and riding the next tick would make
             // every published one ~5s old before it even left this machine.
-            if (changed || token.forcePublish
+            if (changed || missedIdle || token.forcePublish
                 || (token.heartbeat && observationAdvanced)) publish();
         } catch (error) {
             querySettled = true;
@@ -5618,6 +5635,10 @@ if (validSessionId && socketPath) {
             }
         }
         setScheduledTurnMarker(currentTurnKind === "scheduled");
+        // The snapshot says what the marker says, as soon as it does. Waiting for
+        // the next turn start left them apart for up to 45 s, 44 times on Nov 11,
+        // when a schedule's message landed in the middle of a turn.
+        scheduledTurnActive = currentTurnKind === "scheduled";
         foregroundTurnActive = currentTurnKind !== "scheduled";
         foregroundTransitionAt = normalizedTimestamp(event.timestamp);
         publish();
