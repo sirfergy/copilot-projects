@@ -287,9 +287,9 @@ public enum CLIMain {
 
     private static func sendSessionPrompt(_ args: [String], environment: [String: String]) -> Int32 {
         let usage = "usage: copilot-projects send-session-prompt --session ID [--project ID] "
-            + "[--request-id UUID] (--prompt TEXT | --prompt-file PATH)"
+            + "[--request-id UUID] [--steer] (--prompt TEXT | --prompt-file PATH)"
         let parsed = parseFlags(args)
-        let allowed: Set<String> = ["session", "project", "request-id", "prompt", "prompt-file"]
+        let allowed: Set<String> = ["session", "project", "request-id", "prompt", "prompt-file", "steer"]
         let unknown = parsed.flags.keys.filter { !allowed.contains($0) }.sorted()
         guard unknown.isEmpty, parsed.positionals.isEmpty else {
             let extras = unknown.map { "--\($0)" } + parsed.positionals
@@ -338,6 +338,7 @@ public enum CLIMain {
         req.projectId = parsed.flags["project"]
         req.requestId = requestId.uuidString
         req.prompt = prompt
+        if parsed.flags["steer"] != nil { req.promptMode = .immediate }
         return sendAutomationRequest(req, environment: environment)
     }
 
@@ -673,8 +674,8 @@ public enum CLIMain {
           copilot-projects new-session             Add a session to a project [--cwd DIR] [--project ID] [--host HOST]
           copilot-projects new-copilot-session     Start Copilot with a prompt, idempotent by request id
               --project ID --request-id UUID --prompt-file PATH [--title T] [--host HOST] [--parent-session ID | --no-parent]
-          copilot-projects send-session-prompt     Send or queue a prompt into an existing session
-              --session ID [--project ID] [--request-id UUID] (--prompt TEXT | --prompt-file PATH)
+          copilot-projects send-session-prompt     Queue a prompt into an existing session, or steer its current task
+              --session ID [--project ID] [--request-id UUID] [--steer] (--prompt TEXT | --prompt-file PATH)
           copilot-projects set-parent-session      Group a session under a parent or ungroup it
               --session ID [--parent-session ID | --no-parent] [--project ID]
           copilot-projects set-default-host [host] Set default host for a project [--project ID]

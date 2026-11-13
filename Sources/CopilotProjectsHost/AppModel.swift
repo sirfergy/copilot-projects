@@ -264,7 +264,8 @@ final class AppModel: ObservableObject {
                 requestId: requestId,
                 projectId: request.projectId,
                 sessionId: sessionId,
-                prompt: prompt
+                prompt: prompt,
+                mode: request.promptMode ?? .enqueue
             )
         },
         setParentSession: { [unowned self] request in

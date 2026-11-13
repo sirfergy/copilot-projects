@@ -458,6 +458,7 @@ copilot-projects new-project myapp                # name only; --cwd and --defau
 copilot-projects set-default-host woodhaven --project <id>
 copilot-projects new-session --project <id> --cwd /tmp --host woodhaven
 copilot-projects focus --session <id>             # bring app forward + select
+copilot-projects send-session-prompt --session <id> --prompt "…"   # queue; add --steer to reach a running task
 copilot-projects doctor                           # diagnose state/session/runtime health
 copilot-projects version                          # print installed version
 copilot-projects install-hooks                    # install the Copilot CLI hook and the tracker

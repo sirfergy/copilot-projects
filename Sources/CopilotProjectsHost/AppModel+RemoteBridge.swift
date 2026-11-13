@@ -2783,14 +2783,16 @@ extension AppModel {
         }
     }
 
-    /// Sends or queues a prompt into an existing live session for Copilot Pull Requests.
-    /// Replaying the same `requestId` for the same session and prompt resolves its prior
-    /// outcome without delivering the prompt twice.
+    /// Queues a prompt into an existing live session for Copilot Pull Requests, or with
+    /// `.immediate` steers its current task as the composer's Steer does.
+    /// Replaying the same `requestId` for the same session, prompt and mode resolves its
+    /// prior outcome without delivering the prompt twice.
     func sendPullRequestsSessionPrompt(
         requestId: UUID,
         projectId: String?,
         sessionId: String,
         prompt: String,
+        mode: RemotePromptMode = .enqueue,
         now: Date = Date()
     ) -> ControlResponse {
         let clock = advancingClock(from: now)
@@ -2803,7 +2805,7 @@ extension AppModel {
         let normalizedPrompt = prompt
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
-        let action = RemoteSessionAction(kind: .send, prompt: normalizedPrompt, mode: .enqueue)
+        let action = RemoteSessionAction(kind: .send, prompt: normalizedPrompt, mode: mode)
         guard let payloadFingerprint = CLIOperationAdapter.payloadFingerprint(
             kind: .sessionSend,
             payload: action
@@ -2849,7 +2851,7 @@ extension AppModel {
         if let previous {
             guard previous.sessionId == sessionId,
                   previous.payloadFingerprint == payloadFingerprint else {
-                return .failure("request id is bound to a different session or prompt", code: "conflict")
+                return .failure("request id is bound to a different session, prompt or delivery mode", code: "conflict")
             }
             guard let loc = locateIndex(sessionId) else {
                 return .failure("The session has ended.", code: "gone")
@@ -2923,7 +2925,7 @@ extension AppModel {
             return .failure("The session is waiting for your input in the terminal.", code: "busy")
         }
 
-        // Queue through the SDK; a session whose tracker offers no native send is refused.
+        // Hand off through the SDK; a session whose tracker offers no native send is refused.
         if let snapshot = freshSnapshot,
            let epoch = snapshot.remoteOperationProjection(at: clock()).conversationEpoch,
            let workflow = snapshot.workflow,
@@ -3055,7 +3057,7 @@ extension AppModel {
                 code: "indeterminate"
             )
         case .conflict:
-            return .failure("request id is bound to a different session or prompt", code: "conflict")
+            return .failure("request id is bound to a different session, prompt or delivery mode", code: "conflict")
         }
     }
 
