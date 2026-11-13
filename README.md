@@ -123,13 +123,13 @@ discards it. Closing the drawer or switching sessions dismisses that preview.
   **SSH Hosts**. Set a default host per project or choose a host when starting a
   session.
 
-Copilot CLI hooks and a local tracker supply automatic status and session
-details. Other command-line tools work as ordinary terminal sessions and can
-report status through the CLI.
-Tracker-backed session details and resuming Copilot conversations after a
-reboot require Copilot CLI experimental extensions; enable them with
-`/experimental on` and restart existing Copilot sessions. Terminal
-reattach after an app relaunch remains available without them.
+A local tracker supplies automatic status and session details. Other
+command-line tools work as ordinary terminal sessions.
+Status, alerts, tracker-backed session details and resuming Copilot
+conversations after a reboot require Copilot CLI experimental
+extensions; enable them with `/experimental on` and restart existing
+Copilot sessions. Terminal reattach after an app relaunch remains
+available without them.
 
 ### Compact project navigation
 
@@ -533,13 +533,10 @@ says when the servers have restarted. The app has no menu item for it and remote
 clients are not offered it.
 
 Commands inside an app-managed terminal automatically target its current
-project and session. Hooks for other agents can use:
+project and session. Hooks for other tools can post a notification:
 
 ```bash
-copilot-projects set-status running
-copilot-projects set-status waiting --text "needs approval"
 copilot-projects notify "Build finished"
-copilot-projects set-status idle
 ```
 
 For SSH reattachment:

@@ -773,13 +773,8 @@ extension AppModel {
                         let operation = session.agentActivity?
                             .remoteOperationProjection(at: promptNow)
                             ?? .unavailable
-                        let foreground = runtimeForegroundActivity(
-                            for: session, now: promptNow
-                        )
                         // A parked session has no Copilot: it reads as idle and takes no input.
-                        let status = session.parked != nil ? .idle : projectedStatus(
-                            for: session, foreground: foreground, now: promptNow
-                        )
+                        let status = session.parked != nil ? .idle : session.status
                         let remoteHost = resolvedRemoteHost(for: session, in: hosts)
                         let resolvedStartingPrompt = startingPrompt(for: session.id)
                         var effectiveSession = session
@@ -788,14 +783,6 @@ extension AppModel {
                             effectiveSession.startingPrompt = resolvedStartingPrompt
                         }
                         let effectivePRKeys = effectiveSession.effectivePullRequestKeys
-                        let runningStartedAt: Int64? = status == .running
-                            ? (effectiveSession.effectiveRunningStartedAtMilliseconds
-                                ?? trustedForegroundTransitionMilliseconds(
-                                    sessionId: session.id,
-                                    snapshot: effectiveSession.agentActivity
-                                )
-                                ?? sessionSemantics.statusClock.timestamp(for: session.id))
-                            : nil
                         return RemoteSessionSnapshot(
                             id: session.id,
                             title: session.title,
@@ -807,7 +794,7 @@ extension AppModel {
                                     ),
                                     at: promptNow
                                 )
-                                : session.statusText,
+                                : nil,
                             unread: session.isUnread,
                             ready: session.finishedUnseen,
                             background: session.hasBackgroundWork,
@@ -841,7 +828,8 @@ extension AppModel {
                                 ProcessTree.quantizeSessionMemoryBytes($0[session.id])
                             } ?? session.memoryUsageBytes,
                             startingPrompt: resolvedStartingPrompt,
-                            runningStartedAtMilliseconds: runningStartedAt,
+                            runningStartedAtMilliseconds:
+                                effectiveSession.effectiveRunningStartedAtMilliseconds,
                             pullRequestKeys: effectivePRKeys.isEmpty ? nil : effectivePRKeys,
                             trackerWarning: session.trackerWarning,
                             parked: session.parked.map {
@@ -1072,7 +1060,7 @@ extension AppModel {
         guard let location = locateIndex(sessionId) else { return "This session is no longer open" }
         let session = projects[location.p].sessions[location.s]
         if session.parked != nil { return "This session is parked" }
-        guard session.displayStatus == .idle, !session.hasBackgroundWork else {
+        guard session.status == .idle, !session.hasBackgroundWork else {
             return "Wait until Copilot is idle before restarting it"
         }
         guard session.agentActivity?.workflow?.supports(.restart) == true else {
@@ -1542,15 +1530,14 @@ extension AppModel {
     ) -> Bool {
         guard let location = locateIndex(sessionId) else { return false }
         let session = projects[location.p].sessions[location.s]
-        let foreground = runtimeForegroundActivity(for: session, now: now)
         return workflow.sendReady && !snapshot.hasPendingInput
             && !session.hasBackgroundWork && remoteSessionHasLiveAgent(sessionId)
-            && projectedStatus(for: session, foreground: foreground, now: now) == .idle
+            && session.status == .idle
             && !snapshot.foregroundTurnActive && !snapshot.scheduledTurnActive
             && snapshot.activeSubagents.isEmpty && (allowingSchedules || snapshot.schedules.isEmpty)
             && snapshot.runtimeForegroundActivity(
                 expectedSessionId: snapshot.copilotSessionId,
-                now: now, minimumObservationMilliseconds: nil
+                now: now
             ) == .idle
     }
 
@@ -1654,56 +1641,17 @@ extension AppModel {
     ) -> TranscriptWorkingIndicator? {
         guard let location = locateIndex(sessionId) else { return nil }
         let session = projects[location.p].sessions[location.s]
-        guard session.parked == nil else { return nil }
-        let snapshot = session.agentActivity
-        let latestSnapshot = snapshot ?? agentActivitySnapshotCache[session.id]?.snapshot
-        let owner = verifiedCopilotOwners[session.id]
-            ?? (snapshot == nil ? runtimeTrackedOwners[session.id] : nil)
-        let isOwnedSnapshot = snapshot?.copilotSessionId == nil
-            || snapshot?.copilotSessionId?.lowercased() == owner?.lowercased()
-        let disconnectTimestamp = latestSnapshot?.updatedAtMilliseconds
-        let isOwnedDisconnect = latestSnapshot?.schemaVersion == AgentActivitySnapshot.currentSchemaVersion
-            && disconnectTimestamp.map { $0 <= Int64(now.timeIntervalSince1970 * 1_000) } == true
-            && (latestSnapshot?.copilotSessionId == nil
-                || latestSnapshot?.copilotSessionId?.lowercased() == owner?.lowercased())
-            && latestSnapshot?.reportsTerminalDisconnect == true
-        let isSnapshotActive = isOwnedSnapshot
-            && snapshot?.isFresh(at: now) == true
-            && snapshot?.reportsTerminalDisconnect == false
-
-        let foreground = runtimeForegroundActivity(for: session, now: now, resolvedOwner: .some(owner))
-        let projected = projectedStatus(
-            for: session,
-            foreground: foreground,
-            now: now,
-            resolvedOwner: .some(owner)
-        )
-        guard projected != .waiting else { return nil }
-        let hasIndependentRunningOnDisconnect =
-            (sessionSemantics.statusClock.timestamp(for: session.id) ?? .min)
-                > (disconnectTimestamp ?? .max)
-        let status: SessionStatus = isOwnedDisconnect
-            ? (hasIndependentRunningOnDisconnect ? projected : .idle)
-            : (session.statusIsRuntimeDerived
-                && (foreground == .unknown || !isSnapshotActive)
-                ? .idle : projected)
-
-        let hasFreshSubagents = isSnapshotActive && snapshot?.activeSubagents.isEmpty == false
-        let hasFreshScheduledTurn = isSnapshotActive && session.scheduledTurnActive
-        let hasBackgroundWork = (!isOwnedDisconnect && session.backgroundAgentsActive
-            && (runtimeTrackedOwners[session.id] == nil || isSnapshotActive))
-            || hasFreshScheduledTurn
-            || hasFreshSubagents
-        guard status == .running || hasBackgroundWork else { return nil }
-
-        let activityText = snapshot?.remoteActivityText(
-            expectedSessionId: owner,
-            at: now
-        ) ?? (status == .running ? session.statusText : nil)
+        guard session.parked == nil, session.status != .waiting else { return nil }
+        // Background work shows only while the tab owner's tracker vouches for it.
+        let snapshot = ownedActivity(session)
+        let hasBackgroundWork = session.hasBackgroundWork
+            && snapshot?.isFresh(at: now) == true && snapshot?.reportsTerminalDisconnect == false
+        guard session.status == .running || hasBackgroundWork else { return nil }
         return TranscriptWorkingIndicator.resolve(
-            status: status,
+            status: session.status,
             hasBackgroundWork: hasBackgroundWork,
-            activityText: activityText
+            activityText: snapshot?.remoteActivityText(
+                expectedSessionId: snapshot?.copilotSessionId, at: now)
         )
     }
 
@@ -2965,7 +2913,7 @@ extension AppModel {
             || session.agentActivity?.workflow?.restartRequested == true {
             return .failure("The session is restarting. Check the terminal before sending more work.", code: "busy")
         }
-        if session.displayStatus == .waiting || session.hasPendingInput {
+        if session.status == .waiting || session.hasPendingInput {
             return .failure("The session is waiting for your input in the terminal.", code: "busy")
         }
 
@@ -3167,7 +3115,7 @@ extension AppModel {
             projects: projects.map { project in
                 WorkspaceSnapshot.Project(id: project.id, name: project.name, sessions: project.sessions.map {
                     WorkspaceSnapshot.Session(
-                        id: $0.id, title: $0.title, status: $0.displayStatus, finishedUnseen: $0.finishedUnseen,
+                        id: $0.id, title: $0.title, status: $0.status, finishedUnseen: $0.finishedUnseen,
                         hasPendingInput: $0.hasPendingInput, pullRequestKeys: $0.pullRequestKeys
                     )
                 })

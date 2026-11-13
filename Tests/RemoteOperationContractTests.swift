@@ -74,7 +74,6 @@ final class RemoteOperationContractTests: XCTestCase {
         ))
         let model = AppModel(
             stateRepository: repository,
-            persistPermissionStatus: { _, _, _, _ in },
             isAppActive: { false },
             agentActivityDirectory: sessions,
             resumeMarkerDirectory: sessions,
@@ -847,12 +846,7 @@ final class RemoteOperationContractTests: XCTestCase {
             operationReceiptVersion: 1,
             operationReceipts: []
         ), to: harness)
-        harness.model.setStatus(
-            sessionId: sessionId,
-            status: .waiting,
-            text: nil,
-            timestamp: 1
-        )
+        harness.model.setStatus(.waiting, sessionId: sessionId)
 
         XCTAssertEqual(
             harness.model.answerElicitation(

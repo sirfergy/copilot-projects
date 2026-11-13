@@ -154,7 +154,6 @@ final class SessionRowInteractionTests: XCTestCase {
         try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
         let model = AppModel(
             stateRepository: repository,
-            persistPermissionStatus: { _, _, _, _ in },
             isAppActive: { false },
             agentActivityDirectory: root,
             resumeMarkerDirectory: root,

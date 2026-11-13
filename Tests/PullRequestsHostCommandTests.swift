@@ -179,9 +179,7 @@ final class PullRequestsHostCommandTests: XCTestCase {
         try withHost(projects: twoProjects) { host in
             try Data("  0f1e2d3c-4b5a-4000-8000-000000000001\n".utf8)
                 .write(to: host.root.appendingPathComponent("a1.copilot-session"))
-            var waiting = request("set-status", session: "b1")
-            waiting.status = "waiting"
-            XCTAssertTrue(host.model.handle(waiting).ok)
+            host.model.setStatus(.waiting, sessionId: "b1")
 
             let response = host.model.handle(request("list-sessions"))
             XCTAssertTrue(response.ok)
@@ -644,9 +642,7 @@ final class PullRequestsHostCommandTests: XCTestCase {
             // Mismatched project, ended session, or waiting session are refused.
             XCTAssertEqual(send(UUID().uuidString, project: "B", session: "a1").code, "conflict")
             XCTAssertEqual(send(UUID().uuidString, project: "A", session: "gone").code, "gone")
-            var waiting = request("set-status", session: "b1")
-            waiting.status = "waiting"
-            XCTAssertTrue(model.handle(waiting).ok)
+            model.setStatus(.waiting, sessionId: "b1")
             XCTAssertEqual(send(UUID().uuidString, project: "B", session: "b1").code, "busy")
 
             // A fresh on-disk pending-input snapshot blocks sending even when the in-memory

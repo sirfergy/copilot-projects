@@ -88,14 +88,12 @@ final class NotificationIndicatorTests: XCTestCase {
             projects: [project, otherProject], selectedProjectId: project.id
         ))
         var appIsActive = false
-        let model = AppModel(stateRepository: repository, isAppActive: { appIsActive })
+        let model = AppModel(
+            stateRepository: repository, isAppActive: { appIsActive },
+            agentActivityDirectory: root, resumeMarkerDirectory: root
+        )
         for session in [selected, otherTab, otherSession] {
-            model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 100)
-            model.setStatus(
-                sessionId: session.id, status: .idle, text: nil, timestamp: 200,
-                source: "agent-stop"
-            )
-            model.postCompletionIfReady(sessionId: session.id)
+            try model.finishTurn(sessionId: session.id)
         }
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
         XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
@@ -126,7 +124,7 @@ final class NotificationIndicatorTests: XCTestCase {
         model.markActiveSessionSeen()
         XCTAssertEqual(NSApp.dockTile.badgeLabel, "2")
 
-        model.setStatus(sessionId: otherTab.id, status: .running, text: nil, timestamp: 300)
+        try model.publishTracker(.tracker(processing: true), sessionId: otherTab.id)
         let runningSession = model.projects[0].sessions[1]
         XCTAssertFalse(runningSession.finishedUnseen)
         XCTAssertTrue(runningSession.hasUnread)
@@ -222,34 +220,24 @@ final class NotificationIndicatorTests: XCTestCase {
         model.attach(notifications: spy)
 
         // 1. Child finishing a turn stays quiet (no completed notification, unread, or ready dot).
-        model.setStatus(
-            sessionId: child.id, status: .running, text: nil, timestamp: 100,
-            copilotSessionId: "conv"
-        )
-        model.setStatus(
-            sessionId: child.id, status: .idle, text: nil, timestamp: 200,
-            source: "agent-stop", copilotSessionId: "conv"
-        )
-        model.postCompletionIfReady(sessionId: child.id)
+        try model.finishTurn(sessionId: child.id)
         XCTAssertTrue(spy.posted.isEmpty)
         XCTAssertFalse(model.projects[0].sessions[1].hasUnread)
         XCTAssertFalse(model.projects[0].sessions[1].finishedUnseen)
         XCTAssertNil(NSApp.dockTile.badgeLabel)
 
-        // 2. Child aborting/ending without a completion signal also stays quiet.
-        model.setStatus(sessionId: child.id, status: .running, text: nil, timestamp: 300)
-        model.setStatus(sessionId: child.id, status: .idle, text: nil, timestamp: 400, source: "session-end")
+        // 2. A child whose Copilot exits mid-turn also stays quiet.
+        try model.publishTracker(.tracker(processing: true), sessionId: child.id)
+        try model.removeTracker(sessionId: child.id)
+        XCTAssertEqual(model.projects[0].sessions[1].status, .idle)
         XCTAssertTrue(spy.posted.isEmpty)
         XCTAssertFalse(model.projects[0].sessions[1].hasUnread)
         XCTAssertFalse(model.projects[0].sessions[1].finishedUnseen)
 
 
         // 3. Child asking a question still notifies and marks unread.
-        let questionTimestamp = SessionArtifacts.currentStatusTimestamp() + 10
-        model.setStatus(
-            sessionId: child.id, status: .waiting, text: "Ask user", timestamp: questionTimestamp,
-            notification: .elicitation
-        )
+        try model.publishTracker(
+            .tracker(processing: true, question: "Ask user"), sessionId: child.id)
         XCTAssertEqual(spy.posted.map(\.kind), [.elicitation])
         XCTAssertEqual(spy.posted.first?.sessionId, child.id)
         XCTAssertTrue(model.projects[0].sessions[1].hasUnread)
@@ -266,16 +254,7 @@ final class NotificationIndicatorTests: XCTestCase {
                 completed.fulfill()
             }
         }
-        let finishStart = SessionArtifacts.currentStatusTimestamp() + 1_000
-        model.setStatus(
-            sessionId: child.id, status: .running, text: nil, timestamp: finishStart,
-            copilotSessionId: "conv"
-        )
-        model.setStatus(
-            sessionId: child.id, status: .idle, text: nil, timestamp: finishStart + 100,
-            source: "agent-stop", copilotSessionId: "conv"
-        )
-        model.postCompletionIfReady(sessionId: child.id)
+        try model.finishTurn(sessionId: child.id)
         await fulfillment(of: [completed], timeout: 1.0)
         XCTAssertEqual(spy.posted.map(\.kind), [.completed])
         XCTAssertTrue(model.projects[0].sessions[1].hasUnread)

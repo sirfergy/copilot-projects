@@ -293,7 +293,7 @@ final class NotificationSummaryTests: XCTestCase {
         let posted = expectation(description: "summary posted")
         spy.onPost = { posted.fulfill() }
         model.attach(notifications: spy)
-        complete(model, session: session)
+        try complete(model, session: session)
         XCTAssertTrue(model.projects[0].sessions[0].turnCompleted)
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
         await fulfillment(of: [posted], timeout: 3)
@@ -324,9 +324,9 @@ final class NotificationSummaryTests: XCTestCase {
         let posted = expectation(description: "original alert posted once")
         spy.onPost = { posted.fulfill() }
         model.attach(notifications: spy)
-        complete(model, session: session)
+        try complete(model, session: session)
         await fulfillment(of: [entered], timeout: 3)
-        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 5_000)
+        try model.publishTracker(.tracker(processing: true), sessionId: session.id)
         gate.signal()
         await fulfillment(of: [posted], timeout: 3)
         XCTAssertEqual(spy.events.count, 1)
@@ -350,7 +350,7 @@ final class NotificationSummaryTests: XCTestCase {
         let posted = expectation(description: "claimed alert preserved")
         spy.onPost = { posted.fulfill() }
         model.attach(notifications: spy)
-        complete(model, session: session)
+        try complete(model, session: session)
         await fulfillment(of: [entered], timeout: 3)
         model.closeSession(projectId: model.projects[0].id, sessionId: session.id)
         gate.signal()
@@ -379,16 +379,16 @@ final class NotificationSummaryTests: XCTestCase {
             stateRepository: repository,
             completionNotificationDelayNanoseconds: 10_000_000,
             completionTranscriptLoader: loader,
-            isAppActive: { false }
+            isAppActive: { false },
+            agentActivityDirectory: root, resumeMarkerDirectory: root
         )
     }
 
+    /// Leaves a turn ended over the window these transcripts are written for.
     @MainActor
-    private func complete(_ model: AppModel, session: Session) {
-        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 2_000)
-        model.setStatus(sessionId: session.id, status: .idle, text: nil,
-                        timestamp: 4_500, source: "agent-stop",
-                        copilotSessionId: copilotSessionId)
+    private func complete(_ model: AppModel, session: Session) throws {
+        model.completionSummaryContexts[session.id] = try context()
+        model.completionPending.insert(session.id)
         model.postCompletionIfReady(sessionId: session.id)
     }
 

@@ -97,7 +97,7 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   next session in that state across all projects, and **Session ▸ Next Session Needing
   Attention** (`⇧⌘A`) cycles across projects in urgency order (`waiting` → `failed` →
   `unread` / `finished`). When the session it went to no longer needs you, it carries
-  on from there instead of starting over. With the Copilot CLI hooks installed (below), this is driven automatically.
+  on from there instead of starting over. The session's tracker (below) drives this automatically.
 - **Completed-turn drawer:** Copilot CLI remains the native interactive terminal, while a
   collapsible drawer overlays its right edge with independently scrollable completed turns
   rendered as Markdown. Live work, permissions, shortcuts, and input stay entirely in the CLI.
@@ -450,8 +450,6 @@ Inside a copilot-projects terminal, `COPILOT_PROJECTS_PROJECT` / `COPILOT_PROJEC
 `COPILOT_PROJECTS_SOCKET` are set, so commands auto-target the current session.
 
 ```bash
-copilot-projects set-status running               # set the current session's status
-copilot-projects set-status waiting --text "review my diff"
 copilot-projects notify "Build finished" "All tests green"
 copilot-projects list-projects
 copilot-projects list-hosts                       # list This Mac + ~/.ssh/config hosts
@@ -462,7 +460,7 @@ copilot-projects new-session --project <id> --cwd /tmp --host woodhaven
 copilot-projects focus --session <id>             # bring app forward + select
 copilot-projects doctor                           # diagnose state/session/runtime health
 copilot-projects version                          # print installed version
-copilot-projects install-hooks                    # wire up Copilot CLI status hooks
+copilot-projects install-hooks                    # install the Copilot CLI hook and the tracker
 copilot-projects help
 ```
 
@@ -740,24 +738,19 @@ deep-link helper.
 
 ## Copilot CLI integration (automatic status)
 
-So the status dot tracks a coding agent without any manual calls, copilot-projects installs a
-[Copilot CLI hook](https://docs.github.com/copilot) bridge into `~/.copilot/hooks/`
-(`copilot-projects-hook.sh` + `copilot-projects.json`) the first time the app launches. It maps the
-agent lifecycle to status:
+The status dot tracks Copilot without any manual calls: each session's tracker (the extension
+described below) publishes what the coordinator is doing, and the app shows it.
 
-| Copilot CLI event | status |
-| --- | --- |
-| `sessionStart` | `idle` |
-| `userPromptSubmitted` | Known non-owner: ignored. Owner or unknown identity: `running` (scheduled prompt: `idle`). |
-| `preToolUse` / `postToolUse` | Known non-owner: ignored. Owner or unknown identity: `running` (scheduled activity: `idle`). |
-| `notification` (`elicitation_dialog` / `permission_prompt`) | `waiting`, including prompts from children; accepts current `notificationType` and legacy `notification_type`. |
-| `agentStop` / `sessionEnd` | Owner or unknown identity: `idle`. Known non-owner: ignored. |
+copilot-projects also installs a [Copilot CLI hook](https://docs.github.com/copilot) bridge into
+`~/.copilot/hooks/` (`copilot-projects-hook.sh` + `copilot-projects.json`) the first time the app
+launches. The app does not take status from it. It acts on one event, `sessionEnd`: when the
+tab's own Copilot exits while the app is running, the app forgets which conversation that tab
+resumes. A known non-owner's `sessionEnd` is ignored.
 
 The hook no-ops outside a copilot-projects terminal (it checks `COPILOT_PROJECTS_SESSION`), so it
 coexists with other integrations (e.g. cmux) and is safe to leave installed globally. Manage
 it with `copilot-projects install-hooks` / `uninstall-hooks`. Changing hook registration requires
 a new CLI session; an existing registration reads script-only updates on its next invocation.
-The `agent_idle` notification describes a child agent and is never treated as foreground idle.
 
 App-managed Copilot launches and recorded-session resumes use a Ghostty-compatible profile so
 Copilot CLI emits inline images through SwiftTerm's Kitty graphics support. The profile is scoped
@@ -803,8 +796,9 @@ The app also installs a read-only Copilot extension at
 stream and SDK metadata queries to report queued schedules, coordinator activity, and active
 subagents. Copilot CLI currently loads extensions only when experimental features are enabled.
 Run `/experimental on` once before starting app-managed sessions, or pass
-`--experimental` when launching Copilot manually. Without it, hook-based status and terminal
-reattach still work, but the completed-turn drawer, tracker-backed session details, native session
+`--experimental` when launching Copilot manually. Without it, terminal reattach still works, but
+a session shows Idle whatever it is doing, posts no alerts, and takes no prompt from the app or a
+remote client, and the completed-turn drawer, tracker-backed session details, native session
 controls, and reboot conversation resume are unavailable. Existing CLI sessions must use
 `/restart` after enabling experimental features. When the app upgrades the tracker, a session
 already running a tracker with hot reload asks Copilot to reload its extensions once it is idle
@@ -820,54 +814,63 @@ started. The tracker retries that race for up to 20 seconds. Any other join fail
 outlasts that window, leaves the session without tracker metadata until you reload the extension or
 use `/restart`.
 
-While the app is running, the first elicitation or permission prompt and each successfully
-completed turn also post a native macOS banner. The banner includes the project and session name,
-and clicking it focuses the originating session. Repeated waiting events are suppressed, as are
-completion alerts for aborted turns. The owner's `agentStop` signals completion; the app holds
-both the banner and the Finished/blue-dot indicator while background agents remain active,
-even when the main agent is idle. The SDK's root `session.idle` clears the
-background indication once that work drains. A child's stop never consumes the foreground's
-completion marker or advances its clocks.
+While the app is running, a session that starts waiting on a question or a permission prompt,
+and each completed turn, post a native macOS banner. The banner includes the project and session
+name, and clicking it focuses the originating session. A question's banner posts as soon as the
+tracker lists it. A permission prompt's banner posts once the prompt has stayed up for a second,
+so one that is approved automatically posts nothing. Further prompts within the same wait post
+nothing, and neither does an aborted turn. A turn is complete when the tracker ends it, so one
+that starts and ends between two reads of the snapshot (under half a second) posts nothing. The app
+holds both the banner and the Finished/blue-dot indicator while background agents remain active,
+even when the main agent is idle. The SDK's root `session.idle` clears the background indication
+once that work drains. A scheduled turn completes without a banner.
 
-**Status precedence.** Pending questions and permissions block sending independently of foreground
-and background activity. The tracker observes the local coordinator's processing state over the
-SDK, fenced to its current conversation and to the query's start time. Root `assistant.idle`
-refreshes that observation; an individual model iteration's `assistant.turn_end` is not proof
-the coordinator finished. If no root idle event arrives, a heartbeat observation that finds the
-coordinator idle for the second observation running, with no message or turn start in between,
-ends the tracker's foreground turn.
-Background agents do not make an idle coordinator busy.
+**Where status comes from.** A session's status, and whether it takes a prompt, come from its
+tracker alone:
+
+- A fresh snapshot from the tab's owner with a usable reading decides. The reading is the
+  coordinator's processing state, which the tracker observes over the SDK, fenced to its current
+  conversation and to the query's start time. On a CLI that has no such reading (an unsupported
+  or remote runtime), the tracker's turn events stand in. A working coordinator is Running, an
+  idle one is Idle, and a scheduled turn shows as Idle (it can read Running for a heartbeat
+  first, until the tracker has marked it scheduled). A session takes a prompt when its
+  coordinator is idle with nothing pending. Background agents do not make an idle coordinator
+  busy.
+- A fresh snapshot of the tab's owner that lists a question, a permission request or a budget
+  request shows Waiting for input, whatever its reading.
+- A stale snapshot, a reading older than 15 seconds or one the tracker withdrew as a turn began,
+  a failed query, and a snapshot written by another Copilot in the tab all leave the last status
+  showing and offer no send.
+- The tracker counts as gone when the agent process has exited, when the tracker reports that it
+  lost its connection to the CLI, or when the missing-tracker warning has been up (45 seconds
+  with a Copilot running and no healthy tracker). The session then shows Idle and offers no
+  send; when the tracker died under a running Copilot, that lasts until the session is
+  restarted. A turn that was running leaves the Finished dot without a banner. A gone
+  tracker's listed questions are not shown as waiting or answered from the app.
+
+Root `assistant.idle` refreshes the tracker's observation; an individual model iteration's
+`assistant.turn_end` is not proof the coordinator finished. If no root idle event arrives, a
+heartbeat observation that finds the coordinator idle for the second observation running, with
+no message or turn start in between, ends the tracker's foreground turn. One idle reading while
+the turn is still active reads Idle and takes a prompt for as long as it lasts, but the turn's
+timer keeps running and nothing is marked finished.
 Permission completions delivered during tracker startup retain their sender certificate even
 when SDK history includes the same events; historical-only completions do not create certificates.
 
-The host uses fresh runtime observations for status and prompt eligibility without rewriting
-ordering clocks to heartbeat time. Input waits are released only by matching, same-conversation
-completion evidence after the wait, with no other input pending. Suppressed permission
-notifications use the same sender-scoped completion check before restoring status.
-A session takes a prompt only on its tracker's own reading: a fresh snapshot from the tab's
-owner that finds the coordinator idle with nothing pending. A stale or unusable reading, or no
-tracker, offers no send. The terminal footer is not read for status or for sending.
+The elapsed-turn timer starts at the tracker's turn start and survives a relaunch while the
+snapshot on disk still shows the same request. Status is not saved: after a relaunch every
+session reads Idle until its tracker's next snapshot is read, and a question or permission
+prompt still pending then posts its banner again.
 
-Confirmed input-wait resolution is persisted at the existing ordering clocks before runtime
-reconciliation clears the live wait. Notification debounce controls banner timing, not whether a
-completed wait can be saved; suppressed repeat notifications still refresh the retained clocks.
+The terminal footer and the Copilot CLI hooks are not read for status or for sending. Tune the
+process names the agent-process check looks for with `COPILOT_PROJECTS_AGENT_PROCESSES`
+(comma-separated, default `copilot`) or disable the check with `COPILOT_PROJECTS_LIVENESS=0`;
+with it disabled, a missing agent process is never taken as a gone tracker.
 
-A session whose tracker has no processing observation (an older tracker, or an unsupported
-or remote CLI runtime) takes its status from the hooks alone.
-During a mixed-version upgrade, same-conversation snapshots with all pending-input fields
-known empty can release legacy waits; missing fields or a changed conversation do not.
-A failed or expired observation from a supported tracker is unknown, not idle. The process-tree
-check remains a crash fallback. Tune detected process names with
-`COPILOT_PROJECTS_AGENT_PROCESSES` (comma-separated, default `copilot`) or disable the liveness
-check with `COPILOT_PROJECTS_LIVENESS=0`.
-
-For other agents, call the CLI from their hooks directly:
+Other tools' hooks can still post a banner for the current session:
 
 ```bash
-copilot-projects set-status running
-copilot-projects set-status waiting --text "needs approval"
 copilot-projects notify "Agent needs input"
-copilot-projects set-status idle
 ```
 
 ## Resumability & SSH reattach

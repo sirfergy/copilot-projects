@@ -817,7 +817,7 @@ final class AppLogicTests: XCTestCase {
             lastIdleTurnKind: nil,
             error: nil
         )
-        // The transition timestamp is used for the status clock; `updatedAt` (which
+        // The transition timestamp starts the elapsed-turn timer; `updatedAt` (which
         // unrelated republishes bump) must not be conflated with it.
         XCTAssertEqual(snapshot.foregroundTransitionMilliseconds, 1_704_145_732_123)
     }
@@ -836,64 +836,6 @@ final class AppLogicTests: XCTestCase {
             error: nil
         )
         XCTAssertNil(snapshot.foregroundTransitionMilliseconds)
-    }
-
-    func testStatusEventClockRejectsLateHookEvents() {
-        let sessionId = UUID().uuidString
-        var clock = StatusEventClock()
-        XCTAssertTrue(clock.shouldApply(sessionId: sessionId, timestamp: 200))
-        XCTAssertFalse(clock.shouldApply(sessionId: sessionId, timestamp: 100))
-        XCTAssertTrue(clock.shouldApply(sessionId: sessionId, timestamp: 300))
-        XCTAssertTrue(clock.shouldApply(sessionId: sessionId, timestamp: nil))
-    }
-
-    func testPromptSafetyClockIgnoresScheduledActivityReaffirmations() {
-        XCTAssertFalse(AppModel.advancesPromptSafetyClock(source: "scheduled-active"))
-        XCTAssertTrue(AppModel.advancesPromptSafetyClock(source: "scheduled-start"))
-        XCTAssertTrue(AppModel.advancesPromptSafetyClock(source: "scheduled-idle"))
-        XCTAssertTrue(AppModel.advancesPromptSafetyClock(source: nil))
-    }
-
-    @MainActor
-    func testActiveStatusClearsStaleReadyMarker() throws {
-        _ = NSApplication.shared
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let targetSession = Session(title: "target", cwd: "/tmp")
-        let targetProject = Project(name: "target", cwd: "/tmp", sessions: [targetSession])
-        let selectedProject = Project(name: "selected", cwd: "/tmp")
-        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(
-            projects: [targetProject, selectedProject],
-            selectedProjectId: selectedProject.id
-        ))
-
-        let model = AppModel(
-            stateRepository: repository,
-            completionNotificationDelayNanoseconds: 10_000_000
-        )
-        model.setStatus(sessionId: targetSession.id, status: .running, text: nil, timestamp: 100)
-        model.setStatus(sessionId: targetSession.id, status: .idle, text: nil, timestamp: 200)
-
-        XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
-        XCTAssertFalse(model.projects[0].sessions[0].hasUnread)
-        XCTAssertEqual(model.totalReady, 1)
-
-        model.setStatus(sessionId: targetSession.id, status: .running, text: nil, timestamp: 300)
-
-        XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
-        XCTAssertEqual(model.totalReady, 0)
-
-        model.setStatus(sessionId: targetSession.id, status: .idle, text: nil, timestamp: 400)
-        XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
-
-        model.setStatus(sessionId: targetSession.id, status: .waiting, text: nil, timestamp: 500)
-
-        XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
-        XCTAssertEqual(model.totalReady, 0)
     }
 
     @MainActor
@@ -923,43 +865,22 @@ final class AppLogicTests: XCTestCase {
         )
         let firstCopilotSession = UUID().uuidString
         try Data(firstCopilotSession.utf8).write(to: marker)
-        model.setStatus(
-            sessionId: session.id,
-            status: .idle,
-            text: nil,
-            timestamp: 100,
-            source: "session-end",
-            copilotSessionId: firstCopilotSession
-        )
+        model.sessionEnded(sessionId: session.id, copilotSessionId: firstCopilotSession)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
 
         let powerOffCopilotSession = UUID().uuidString
         try Data(powerOffCopilotSession.utf8).write(to: marker)
         model.prepareForSystemPowerOff()
-        model.setStatus(
-            sessionId: session.id,
-            status: .idle,
-            text: nil,
-            timestamp: 150,
-            source: "session-end",
-            copilotSessionId: powerOffCopilotSession
-        )
+        model.sessionEnded(sessionId: session.id, copilotSessionId: powerOffCopilotSession)
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
 
         model.beginTermination()
-        model.setStatus(
-            sessionId: session.id,
-            status: .idle,
-            text: nil,
-            timestamp: 200,
-            source: "session-end",
-            copilotSessionId: powerOffCopilotSession
-        )
+        model.sessionEnded(sessionId: session.id, copilotSessionId: powerOffCopilotSession)
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
     }
 
     @MainActor
-    func testStaleSessionEndDoesNotClearResumeMarkers() throws {
+    func testSessionEndFromAnotherCopilotDoesNotClearTheResumeMarker() throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -973,44 +894,15 @@ final class AppLogicTests: XCTestCase {
 
         let sessions = root.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
-        let markers = ["copilot-session"].map {
-            sessions.appendingPathComponent("\(session.id).\($0)")
-        }
-        let ownerCopilotSession = UUID().uuidString
-        for marker in markers {
-            try Data(ownerCopilotSession.utf8).write(to: marker)
-        }
+        let marker = sessions.appendingPathComponent("\(session.id).copilot-session")
+        try Data(UUID().uuidString.utf8).write(to: marker)
 
         let model = AppModel(
             stateRepository: repository,
             resumeMarkerDirectory: sessions
         )
-        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 200)
-        model.setStatus(
-            sessionId: session.id,
-            status: .idle,
-            text: nil,
-            timestamp: 100,
-            source: "session-end",
-            copilotSessionId: ownerCopilotSession
-        )
-
-        for marker in markers {
-            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-        }
-
-        model.setStatus(
-            sessionId: session.id,
-            status: .idle,
-            text: nil,
-            timestamp: 300,
-            source: "session-end",
-            copilotSessionId: UUID().uuidString
-        )
-
-        for marker in markers {
-            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-        }
+        model.sessionEnded(sessionId: session.id, copilotSessionId: UUID().uuidString)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
     }
 
     @MainActor
@@ -1043,7 +935,7 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
-    func testCompletionNotificationUsesAgentStopAndWaitsForBackgroundAgents() async throws {
+    func testCompletionNotificationWaitsForBackgroundAgents() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1066,29 +958,19 @@ final class AppLogicTests: XCTestCase {
 
         let model = AppModel(
             stateRepository: repository,
-            completionNotificationDelayNanoseconds: 10_000_000
+            completionNotificationDelayNanoseconds: 10_000_000,
+            agentActivityDirectory: root, resumeMarkerDirectory: root
         )
         let notifications = NotificationSpy()
-        let immediateCompletion = expectation(description: "agentStop posts completion")
+        let immediateCompletion = expectation(description: "the turn's end posts completion")
         notifications.onPost = { call in
             if call.sessionId == immediateSession.id {
                 immediateCompletion.fulfill()
             }
         }
         model.attach(notifications: notifications)
-        model.setStatus(
-            sessionId: immediateSession.id,
-            status: .running,
-            text: nil,
-            timestamp: 100
-        )
-        model.setStatus(
-            sessionId: immediateSession.id,
-            status: .idle,
-            text: nil,
-            timestamp: 200,
-            source: "agent-stop"
-        )
+        try model.publishTracker(.tracker(processing: true), sessionId: immediateSession.id)
+        try model.publishTracker(.tracker(processing: false), sessionId: immediateSession.id)
         await fulfillment(of: [immediateCompletion], timeout: 1)
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
         XCTAssertEqual(notifications.calls, [
@@ -1114,19 +996,8 @@ final class AppLogicTests: XCTestCase {
             }
         }
         model.setBackgroundAgentsActive(sessionId: backgroundSession.id, active: true)
-        model.setStatus(
-            sessionId: backgroundSession.id,
-            status: .running,
-            text: nil,
-            timestamp: 300
-        )
-        model.setStatus(
-            sessionId: backgroundSession.id,
-            status: .idle,
-            text: nil,
-            timestamp: 400,
-            source: "agent-stop"
-        )
+        try model.publishTracker(.tracker(processing: true), sessionId: backgroundSession.id)
+        try model.publishTracker(.tracker(processing: false), sessionId: backgroundSession.id)
         await fulfillment(of: [prematureCompletion], timeout: 0.1)
         XCTAssertFalse(model.projects[0].sessions[1].hasUnread)
         XCTAssertFalse(model.projects[0].sessions[1].finishedUnseen)
@@ -1159,7 +1030,7 @@ final class AppLogicTests: XCTestCase {
     }
 
     @MainActor
-    func testCompletionIndicatorWaitsForLateSubagentSnapshot() async throws {
+    func testCompletionIndicatorWaitsForSubagents() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1183,19 +1054,10 @@ final class AppLogicTests: XCTestCase {
         )
         let notifications = NotificationSpy()
         model.attach(notifications: notifications)
-        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 100)
-        model.setStatus(
-            sessionId: session.id, status: .idle, text: nil,
-            timestamp: 200, source: "agent-stop"
-        )
-        XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
-        XCTAssertEqual(model.totalReady, 0)
-        XCTAssertFalse(model.remoteWorkspaceSnapshot().projects[0].sessions[0].ready)
-
         var snapshot = AgentActivitySnapshot(
             schemaVersion: 1,
             updatedAt: ISO8601DateFormatter().string(from: Date()),
-            foregroundTurnActive: false,
+            foregroundTurnActive: true,
             scheduledTurnActive: false,
             activeSubagents: [
                 TrackedSubagent(id: "reviewer", name: "reviewer", description: "", model: nil),
@@ -1208,6 +1070,12 @@ final class AppLogicTests: XCTestCase {
         )
         let snapshotURL = activityDirectory
             .appendingPathComponent("\(session.id).agent-activity.json")
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
+        model.refreshAgentActivitySnapshots()
+        XCTAssertEqual(model.projects[0].sessions[0].status, .running)
+
+        // The turn ends with its subagent still running.
+        snapshot.foregroundTurnActive = false
         try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
         model.refreshAgentActivitySnapshots()
         let prematureCompletion = expectation(description: "subagents suppress completion")
@@ -1261,17 +1129,10 @@ final class AppLogicTests: XCTestCase {
 
         let model = AppModel(
             stateRepository: repository,
-            completionNotificationDelayNanoseconds: 10_000_000
+            completionNotificationDelayNanoseconds: 10_000_000,
+            agentActivityDirectory: root, resumeMarkerDirectory: root
         )
-        model.setStatus(sessionId: target.id, status: .running, text: nil, timestamp: 100)
-        model.setStatus(
-            sessionId: target.id,
-            status: .idle,
-            text: nil,
-            timestamp: 111,
-            source: "agent-stop"
-        )
-        model.postCompletionIfReady(sessionId: target.id)
+        try model.finishTurn(sessionId: target.id)
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
         XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
 
@@ -1311,19 +1172,12 @@ final class AppLogicTests: XCTestCase {
 
         let model = AppModel(
             stateRepository: repository,
-            isAppActive: { true }
+            isAppActive: { true },
+            agentActivityDirectory: root, resumeMarkerDirectory: root
         )
         let notifications = NotificationSpy()
         model.attach(notifications: notifications)
-        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 100)
-        model.setStatus(
-            sessionId: session.id,
-            status: .idle,
-            text: nil,
-            timestamp: 110,
-            source: "agent-stop"
-        )
-        model.postCompletionIfReady(sessionId: session.id)
+        try model.finishTurn(sessionId: session.id)
 
         XCTAssertTrue(model.projects[0].sessions[0].turnCompleted)
         XCTAssertFalse(model.projects[0].sessions[0].hasUnread)
@@ -1355,359 +1209,22 @@ final class AppLogicTests: XCTestCase {
         var appIsActive = true
         let model = AppModel(
             stateRepository: repository,
-            isAppActive: { appIsActive }
+            isAppActive: { appIsActive },
+            agentActivityDirectory: root, resumeMarkerDirectory: root
         )
         let notifications = NotificationSpy()
         model.attach(notifications: notifications)
 
-        model.setStatus(
-            sessionId: session.id,
-            status: .waiting,
-            text: nil,
-            timestamp: 100,
-            notification: .elicitation
-        )
+        try model.publishTracker(.tracker(processing: true, question: "First?"), sessionId: session.id)
         XCTAssertTrue(try XCTUnwrap(notifications.events.first).isTargetVisible)
         XCTAssertFalse(model.projects[0].sessions[0].hasUnread)
 
         appIsActive = false
-        model.setStatus(
-            sessionId: session.id,
-            status: .waiting,
-            text: nil,
-            timestamp: 101,
-            notification: .elicitation
-        )
+        try model.publishTracker(.tracker(processing: true), sessionId: session.id)
+        try model.publishTracker(.tracker(processing: true, question: "Second?"), sessionId: session.id)
         XCTAssertFalse(try XCTUnwrap(notifications.events.last).isTargetVisible)
         XCTAssertEqual(notifications.events.count, 2)
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
-    }
-
-    func testPermissionNotificationDecisionUsesAuthoritativePendingState() {
-        XCTAssertEqual(
-            AppModel.permissionNotificationDecision(
-                status: .waiting,
-                hasPendingQuestions: false,
-                pendingPermissionRequestIds: ["request"]
-            ),
-            .post
-        )
-        XCTAssertEqual(
-            AppModel.permissionNotificationDecision(
-                status: .waiting,
-                hasPendingQuestions: false,
-                pendingPermissionRequestIds: []
-            ),
-            .suppress
-        )
-        XCTAssertEqual(
-            AppModel.permissionNotificationDecision(
-                status: .waiting,
-                hasPendingQuestions: false,
-                pendingPermissionRequestIds: nil
-            ),
-            .post
-        )
-        XCTAssertEqual(
-            AppModel.permissionNotificationDecision(
-                status: .running,
-                hasPendingQuestions: false,
-                pendingPermissionRequestIds: ["request"]
-            ),
-            .cancel
-        )
-        XCTAssertEqual(
-            AppModel.permissionNotificationDecision(
-                status: .waiting,
-                hasPendingQuestions: true,
-                pendingPermissionRequestIds: []
-            ),
-            .cancel
-        )
-        XCTAssertEqual(
-            AppModel.permissionNotificationDecision(
-                status: .waiting,
-                hasPendingQuestions: true,
-                pendingPermissionRequestIds: ["permission"]
-            ),
-            .post
-        )
-    }
-
-    @MainActor
-    func testAutoApprovedPermissionIsSuppressedAndRestoresScheduledStatus() async throws {
-        _ = NSApplication.shared
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        var session = Session(title: "scheduled", cwd: "/tmp")
-        session.scheduledTurnActive = true
-        let project = Project(
-            name: "selected",
-            cwd: "/tmp",
-            sessions: [session],
-            selectedSessionId: session.id
-        )
-        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(
-            projects: [project],
-            selectedProjectId: project.id
-        ))
-        try writePermissionSnapshot(
-            sessionId: session.id,
-            pendingIds: [],
-            directory: root
-        )
-
-        var persisted: [(SessionStatus, Int64, Int64)] = []
-        let model = AppModel(
-            stateRepository: repository,
-            permissionNotificationDelayNanoseconds: 5_000_000,
-            persistPermissionStatus: { _, status, timestamp, promptTimestamp in
-                persisted.append((status, timestamp, promptTimestamp))
-            },
-            agentActivityDirectory: root
-        )
-        let notifications = NotificationSpy()
-        let unexpected = expectation(description: "auto-approved prompt does not notify")
-        unexpected.isInverted = true
-        notifications.onPost = { _ in unexpected.fulfill() }
-        model.attach(notifications: notifications)
-        model.setStatus(
-            sessionId: session.id,
-            status: .idle,
-            text: nil,
-            timestamp: 90,
-            source: "scheduled-active"
-        )
-
-        model.setStatus(
-            sessionId: session.id,
-            status: .waiting,
-            text: nil,
-            timestamp: 100,
-            notification: .permission
-        )
-
-        await fulfillment(of: [unexpected], timeout: 0.05)
-        XCTAssertEqual(model.projects[0].sessions[0].status, .idle)
-        XCTAssertTrue(model.projects[0].sessions[0].scheduledTurnActive)
-        XCTAssertTrue(notifications.events.isEmpty)
-        XCTAssertEqual(persisted.count, 1)
-        XCTAssertEqual(persisted.first?.0, .idle)
-        XCTAssertEqual(persisted.first?.1, 100)
-        XCTAssertEqual(persisted.first?.2, 100)
-    }
-
-    @MainActor
-    func testReadReceiptHoldsAcrossAnAutoApprovedPermissionWait() async throws {
-        _ = NSApplication.shared
-        let originalDockBadge = NSApp.dockTile.badgeLabel
-        defer { NSApp.dockTile.badgeLabel = originalDockBadge }
-        try await assertReadReceiptHolds(sentDuringPermissionWait: true)
-        try await assertReadReceiptHolds(sentDuringPermissionWait: false)
-    }
-
-    @MainActor
-    private func assertReadReceiptHolds(sentDuringPermissionWait: Bool) async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let shown = Session(title: "shown", cwd: "/tmp")
-        let session = Session(title: "finished", cwd: "/tmp")
-        let project = Project(
-            name: "selected", cwd: "/tmp", sessions: [shown, session], selectedSessionId: shown.id
-        )
-        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
-        try writePermissionSnapshot(sessionId: session.id, pendingIds: [], directory: root)
-        let restored = expectation(description: "the auto-approved wait is undone")
-        let model = AppModel(
-            stateRepository: repository,
-            permissionNotificationDelayNanoseconds: 0,
-            persistPermissionStatus: { _, _, _, _ in restored.fulfill() },
-            agentActivityDirectory: root,
-            resumeMarkerDirectory: root
-        )
-        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 100)
-        model.setStatus(sessionId: session.id, status: .idle, text: nil, timestamp: 200, source: "session-end")
-        model.postNotification(projectId: project.id, sessionId: session.id, title: "Update", body: nil)
-        let seen = model.remoteWorkspaceSnapshot().projects[0].sessions[1]
-        XCTAssertTrue(seen.unread && seen.ready)
-        let marker = try XCTUnwrap(seen.unreadMarker)
-
-        model.setStatus(
-            sessionId: session.id, status: .waiting, text: nil, timestamp: 300, notification: .permission
-        )
-        XCTAssertFalse(model.projects[0].sessions[1].finishedUnseen, "The wait hides the finished dot")
-        if sentDuringPermissionWait {
-            model.markSessionRead(sessionId: session.id, unreadMarker: marker)
-        }
-        await fulfillment(of: [restored], timeout: 5)
-        if !sentDuringPermissionWait {
-            XCTAssertTrue(model.projects[0].sessions[1].finishedUnseen, "The dot is back once the wait ends")
-            model.markSessionRead(sessionId: session.id, unreadMarker: marker)
-        }
-
-        let current = model.remoteWorkspaceSnapshot().projects[0].sessions[1]
-        XCTAssertFalse(
-            current.unread || current.ready,
-            "Nothing newer happened, so the receipt applies (sent during the wait: \(sentDuringPermissionWait))"
-        )
-    }
-
-    @MainActor
-    func testPendingPermissionPostsOnceAndLaterStatusCancels() async throws {
-        _ = NSApplication.shared
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let session = Session(title: "permission", cwd: "/tmp")
-        let project = Project(
-            name: "selected",
-            cwd: "/tmp",
-            sessions: [session],
-            selectedSessionId: session.id
-        )
-        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(
-            projects: [project],
-            selectedProjectId: project.id
-        ))
-        try writePermissionSnapshot(
-            sessionId: session.id,
-            pendingIds: ["request"],
-            directory: root
-        )
-
-        let model = AppModel(
-            stateRepository: repository,
-            permissionNotificationDelayNanoseconds: 10_000_000,
-            agentActivityDirectory: root
-        )
-        let notifications = NotificationSpy()
-        let posted = expectation(description: "pending permission posts")
-        notifications.onPost = { _ in posted.fulfill() }
-        model.attach(notifications: notifications)
-        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 90)
-        model.setStatus(
-            sessionId: session.id,
-            status: .waiting,
-            text: nil,
-            timestamp: 100,
-            notification: .permission
-        )
-        model.setStatus(
-            sessionId: session.id,
-            status: .waiting,
-            text: nil,
-            timestamp: 101,
-            notification: .permission
-        )
-        await fulfillment(of: [posted], timeout: 0.2)
-        XCTAssertEqual(notifications.events.count, 1)
-
-        notifications.onPost = nil
-        model.setStatus(
-            sessionId: session.id,
-            status: .waiting,
-            text: nil,
-            timestamp: 102,
-            notification: .permission
-        )
-        model.setStatus(
-            sessionId: session.id,
-            status: .running,
-            text: nil,
-            timestamp: 103
-        )
-        try? await Task.sleep(nanoseconds: 30_000_000)
-        XCTAssertEqual(notifications.events.count, 1)
-    }
-
-    @MainActor
-    func testPermissionDecisionReadsSnapshotAtFireTime() async throws {
-        _ = NSApplication.shared
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let session = Session(title: "late permission", cwd: "/tmp")
-        let project = Project(
-            name: "selected",
-            cwd: "/tmp",
-            sessions: [session],
-            selectedSessionId: session.id
-        )
-        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(
-            projects: [project],
-            selectedProjectId: project.id
-        ))
-        try writePermissionSnapshot(
-            sessionId: session.id,
-            pendingIds: [],
-            directory: root
-        )
-
-        let model = AppModel(
-            stateRepository: repository,
-            permissionNotificationDelayNanoseconds: 50_000_000,
-            agentActivityDirectory: root
-        )
-        let notifications = NotificationSpy()
-        let posted = expectation(description: "late permission snapshot posts")
-        notifications.onPost = { _ in posted.fulfill() }
-        model.attach(notifications: notifications)
-        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 90)
-        model.setStatus(
-            sessionId: session.id,
-            status: .waiting,
-            text: nil,
-            timestamp: 100,
-            notification: .permission
-        )
-        try? await Task.sleep(nanoseconds: 10_000_000)
-        try writePermissionSnapshot(
-            sessionId: session.id,
-            pendingIds: ["late-request"],
-            directory: root
-        )
-
-        await fulfillment(of: [posted], timeout: 0.2)
-        XCTAssertEqual(notifications.events.count, 1)
-        XCTAssertEqual(model.projects[0].sessions[0].status, .waiting)
-    }
-
-    private func writePermissionSnapshot(
-        sessionId: String,
-        pendingIds: [String]?,
-        directory: URL
-    ) throws {
-        let snapshot = AgentActivitySnapshot(
-            schemaVersion: AgentActivitySnapshot.currentSchemaVersion,
-            updatedAt: ISO8601DateFormatter().string(from: Date()),
-            foregroundTurnActive: true,
-            scheduledTurnActive: false,
-            activeSubagents: [],
-            schedules: [],
-            idleGeneration: 0,
-            lastIdleAborted: false,
-            lastIdleTurnKind: nil,
-            error: nil,
-            pendingPermissionRequestIds: pendingIds
-        )
-        try JSONEncoder().encode(snapshot).write(
-            to: directory.appendingPathComponent("\(sessionId).agent-activity.json"),
-            options: .atomic
-        )
     }
 
     @MainActor
@@ -3878,34 +3395,7 @@ final class AppLogicTests: XCTestCase {
         let responseURL = directory
             .appendingPathComponent("\(session.id).elicitation-response.json")
         var snapshotWrite = 0
-        func writeSnapshot(
-            updatedAt: Date,
-            pendingPermissionRequestIds: [String]?
-        ) throws {
-            let snapshot = AgentActivitySnapshot(
-                schemaVersion: 1,
-                updatedAt: ISO8601DateFormatter().string(from: updatedAt),
-                foregroundTurnActive: false,
-                scheduledTurnActive: false,
-                activeSubagents: [],
-                schedules: [],
-                idleGeneration: 0,
-                lastIdleAborted: false,
-                lastIdleTurnKind: nil,
-                error: "Error: Connection is closed.",
-                trackedUserInputs: nil,
-                trackedElicitations: [request],
-                pendingPermissionRequestIds: pendingPermissionRequestIds
-            )
-            try JSONEncoder().encode(snapshot).write(to: snapshotURL)
-            snapshotWrite += 1
-            try FileManager.default.setAttributes(
-                [.modificationDate: Date(timeIntervalSince1970: 2_000_000_000
-                    + Double(snapshotWrite))],
-                ofItemAtPath: snapshotURL.path
-            )
-        }
-
+        let now = Date()
         var hasTarget = true
         var hasLiveAgent = true
         var isAtLiveBottom = true
@@ -3914,7 +3404,6 @@ final class AppLogicTests: XCTestCase {
         var sendSucceeds = true
         let model = AppModel(
             stateRepository: repository,
-            persistPermissionStatus: { _, _, _, _ in },
             agentActivityDirectory: directory,
             resumeMarkerDirectory: directory,
             remotePromptLiveSessions: { _ in
@@ -3933,6 +3422,37 @@ final class AppLogicTests: XCTestCase {
                 )
             }
         )
+        func writeSnapshot(
+            updatedAt: Date,
+            pendingPermissionRequestIds: [String]?,
+            error: String? = nil
+        ) throws {
+            let snapshot = AgentActivitySnapshot(
+                schemaVersion: 1,
+                updatedAt: ISO8601DateFormatter().string(from: updatedAt),
+                foregroundTurnActive: false,
+                scheduledTurnActive: false,
+                activeSubagents: [],
+                schedules: [],
+                idleGeneration: 0,
+                lastIdleAborted: false,
+                lastIdleTurnKind: nil,
+                error: error,
+                trackedUserInputs: nil,
+                trackedElicitations: [request],
+                pendingPermissionRequestIds: pendingPermissionRequestIds
+            )
+            try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+            snapshotWrite += 1
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: 2_000_000_000
+                    + Double(snapshotWrite))],
+                ofItemAtPath: snapshotURL.path
+            )
+            // The listed question is what makes the session wait.
+            model.refreshAgentActivitySnapshots(now: now)
+        }
+
         XCTAssertTrue(
             AppModel.durableElicitationIsAtLiveBottom(
                 canScroll: false,
@@ -3951,14 +3471,6 @@ final class AppLogicTests: XCTestCase {
                 scrollPosition: 0.99
             )
         )
-        model.setStatus(
-            sessionId: session.id,
-            status: .waiting,
-            text: nil,
-            timestamp: 1
-        )
-        let now = Date()
-
         try writeSnapshot(
             updatedAt: now.addingTimeInterval(-11),
             pendingPermissionRequestIds: []
@@ -3980,23 +3492,18 @@ final class AppLogicTests: XCTestCase {
             .invalid
         )
 
-        try writeSnapshot(updatedAt: now, pendingPermissionRequestIds: [])
-        model.setStatus(
-            sessionId: session.id,
-            status: .running,
-            text: nil,
-            timestamp: 2
+        // A tracker that lost its connection to the CLI counts as gone, so its
+        // session is not waiting and its question takes no answer from here.
+        try writeSnapshot(
+            updatedAt: now, pendingPermissionRequestIds: [], error: "Error: Connection is closed."
         )
+        XCTAssertEqual(model.projects[0].sessions[0].status, .idle)
         XCTAssertEqual(
             model.answerElicitation(sessionId: session.id, answer: answer, now: now),
             .invalid
         )
-        model.setStatus(
-            sessionId: session.id,
-            status: .waiting,
-            text: nil,
-            timestamp: 3
-        )
+        try writeSnapshot(updatedAt: now, pendingPermissionRequestIds: [])
+        XCTAssertEqual(model.projects[0].sessions[0].status, .waiting)
 
         hasTarget = false
         XCTAssertEqual(
@@ -4059,140 +3566,6 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertEqual(enterCount, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: responseURL.path))
-    }
-
-    @MainActor
-    func testScheduledIdleTurnDoesNotPostCompletionNotification() async throws {
-        _ = NSApplication.shared
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let activityDirectory = root.appendingPathComponent("sessions", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: activityDirectory,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let targetSession = Session(title: "scheduled", cwd: "/tmp")
-        let targetProject = Project(name: "target", cwd: "/tmp", sessions: [targetSession])
-        let selectedProject = Project(name: "selected", cwd: "/tmp")
-        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(
-            projects: [targetProject, selectedProject],
-            selectedProjectId: selectedProject.id
-        ))
-
-        let snapshot = AgentActivitySnapshot(
-            schemaVersion: 1,
-            updatedAt: ISO8601DateFormatter().string(from: Date()),
-            foregroundTurnActive: false,
-            scheduledTurnActive: false,
-            activeSubagents: [],
-            schedules: [],
-            idleGeneration: 1,
-            lastIdleAborted: false,
-            lastIdleTurnKind: "scheduled",
-            error: nil
-        )
-        let path = activityDirectory
-            .appendingPathComponent("\(targetSession.id).agent-activity.json")
-        try JSONEncoder().encode(snapshot).write(to: path)
-
-        let model = AppModel(
-            stateRepository: repository,
-            completionNotificationDelayNanoseconds: 10_000_000,
-            agentActivityDirectory: activityDirectory
-        )
-        let notifications = NotificationSpy()
-        model.attach(notifications: notifications)
-        model.refreshAgentActivitySnapshots()
-        model.setStatus(
-            sessionId: targetSession.id,
-            status: .idle,
-            text: nil,
-            timestamp: 100,
-            source: "scheduled-start"
-        )
-        model.setStatus(
-            sessionId: targetSession.id,
-            status: .idle,
-            text: nil,
-            timestamp: 200,
-            source: "agent-stop"
-        )
-        try await Task.sleep(nanoseconds: 50_000_000)
-
-        XCTAssertTrue(notifications.calls.isEmpty)
-    }
-
-    @MainActor
-    func testStaleScheduledIdleDoesNotSuppressNextForegroundCompletion() async throws {
-        _ = NSApplication.shared
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let activityDirectory = root.appendingPathComponent("sessions", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: activityDirectory,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let targetSession = Session(title: "foreground", cwd: "/tmp")
-        let targetProject = Project(name: "target", cwd: "/tmp", sessions: [targetSession])
-        let selectedProject = Project(name: "selected", cwd: "/tmp")
-        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(
-            projects: [targetProject, selectedProject],
-            selectedProjectId: selectedProject.id
-        ))
-
-        let snapshot = AgentActivitySnapshot(
-            schemaVersion: 1,
-            updatedAt: ISO8601DateFormatter().string(from: Date()),
-            foregroundTurnActive: false,
-            scheduledTurnActive: false,
-            activeSubagents: [],
-            schedules: [],
-            idleGeneration: 1,
-            lastIdleAborted: false,
-            lastIdleTurnKind: "scheduled",
-            error: nil
-        )
-        let path = activityDirectory
-            .appendingPathComponent("\(targetSession.id).agent-activity.json")
-        try JSONEncoder().encode(snapshot).write(to: path)
-
-        let model = AppModel(
-            stateRepository: repository,
-            completionNotificationDelayNanoseconds: 10_000_000,
-            agentActivityDirectory: activityDirectory
-        )
-        let notifications = NotificationSpy()
-        model.attach(notifications: notifications)
-        model.refreshAgentActivitySnapshots()
-        model.setStatus(
-            sessionId: targetSession.id,
-            status: .running,
-            text: nil,
-            timestamp: 100
-        )
-        model.setStatus(
-            sessionId: targetSession.id,
-            status: .idle,
-            text: nil,
-            timestamp: 200,
-            source: "agent-stop"
-        )
-        for _ in 0 ..< 50 {
-            if notifications.calls.count == 1 { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-
-        XCTAssertEqual(notifications.calls.count, 1)
-        XCTAssertEqual(
-            notifications.calls.first?.title,
-            StatusNotificationKind.completed.title
-        )
     }
 
     func testStatusNotificationTitlesDescribeWhyCopilotNeedsAttention() {
@@ -4576,52 +3949,6 @@ final class AppLogicTests: XCTestCase {
             sessionId: UUID().uuidString,
             createdAt: Date()
         )))
-    }
-
-    func testSessionStatusMarkersPersistAsAtomicRecord() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let sessionId = UUID().uuidString
-
-        XCTAssertTrue(SessionArtifacts.persistStatus(
-            sessionId: sessionId,
-            status: .running,
-            timestamp: 123_456,
-            promptStatusTimestamp: 123_400,
-            sessionsDirectory: root
-        ))
-        let record = try JSONDecoder().decode(
-            SessionStatusRecord.self,
-            from: Data(contentsOf: root
-                .appendingPathComponent("\(sessionId).status-record.json"))
-        )
-        XCTAssertEqual(
-            record,
-            SessionStatusRecord(
-                status: .running,
-                statusTimestamp: 123_456,
-                promptStatusTimestamp: 123_400
-            )
-        )
-    }
-
-    func testInvalidAtomicStatusRecordLoadsAsInvalid() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let sessionId = UUID().uuidString
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try Data(#"{"schemaVersion":1,"status":"running"}"#.utf8).write(
-            to: root.appendingPathComponent("\(sessionId).status-record.json"))
-
-        XCTAssertEqual(
-            SessionArtifacts.loadStatusRecord(
-                sessionId: sessionId,
-                sessionsDirectory: root
-            ),
-            .invalid
-        )
     }
 
     func testBackgroundAgentMarkerLifecycle() throws {
@@ -5340,60 +4667,36 @@ final class AppLogicTests: XCTestCase {
             selectedSessionId: sessions[0].id
         )
         try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
-        let model = AppModel(stateRepository: repository, agentActivityDirectory: root)
-        let savesBeforeTurns = saves.value
-        // One finished turn, then the start of the next.
-        let turnStart: Int64 = 1_788_000_000_000
-        for session in sessions {
-            model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: turnStart - 2_000)
-            model.setStatus(
-                sessionId: session.id, status: .idle, text: nil,
-                timestamp: turnStart - 1_000, source: "agent-stop"
+        func launch() -> AppModel {
+            AppModel(
+                stateRepository: repository, agentActivityDirectory: root, resumeMarkerDirectory: root
             )
-            model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: turnStart)
         }
-        model.flushScheduledSaveForTesting()
-
-        // Pre/post tool hooks, with one permission wait, each followed by the save debounce.
-        let lastHook: Int64 = turnStart + 20_000
-        for step in Int64(1)...20 {
-            for session in sessions {
-                if step == 10 {
-                    model.setStatus(
-                        sessionId: session.id, status: .waiting, text: nil,
-                        timestamp: turnStart + step * 1_000, notification: .permission
-                    )
-                } else {
-                    model.setStatus(
-                        sessionId: session.id, status: .running, text: nil,
-                        timestamp: turnStart + step * 1_000
-                    )
-                }
+        let model = launch()
+        let savesBeforeTurns = saves.value
+        // One finished turn, then the next under way with a permission wait in it,
+        // each step followed by the save debounce.
+        for session in sessions {
+            try model.finishTurn(sessionId: session.id)
+            for permissions in [[], ["permission"], []] {
+                try model.publishTracker(
+                    .tracker(processing: true, permissions: permissions), sessionId: session.id)
                 model.flushScheduledSaveForTesting()
             }
         }
         XCTAssertEqual(saves.value, savesBeforeTurns)
+        let starts = model.projects[0].sessions.map(\.runningStartedAtMilliseconds)
+        XCTAssertFalse(starts.contains(nil))
 
-        for session in sessions {
-            SessionArtifacts.persistStatus(
-                sessionId: session.id, status: .running, timestamp: lastHook,
-                promptStatusTimestamp: lastHook, sessionsDirectory: root
-            )
-        }
-        // A crash skips the quit save, so each turn's timer restarts at its last hook.
-        let crashed = AppModel(stateRepository: repository, agentActivityDirectory: root)
+        // A crash skips the quit save, so no turn's start is on disk.
         XCTAssertEqual(
-            crashed.projects[0].sessions.map(\.runningStartedAtMilliseconds),
-            Array(repeating: lastHook, count: sessions.count)
+            launch().projects[0].sessions.map(\.runningStartedAtMilliseconds),
+            Array(repeating: nil, count: sessions.count)
         )
 
         // Quitting saves the timer, so a relaunch keeps each turn's start.
         model.save()
-        let relaunched = AppModel(stateRepository: repository, agentActivityDirectory: root)
-        XCTAssertEqual(
-            relaunched.projects[0].sessions.map(\.runningStartedAtMilliseconds),
-            Array(repeating: turnStart, count: sessions.count)
-        )
+        XCTAssertEqual(launch().projects[0].sessions.map(\.runningStartedAtMilliseconds), starts)
     }
 
     func testControlCommandRouterValidatesBeforeDispatch() {
@@ -7345,25 +6648,9 @@ final class AppLogicTests: XCTestCase {
             isAppActive: { false },
             agentActivityDirectory: root
         )
-        model.setStatus(
-            sessionId: waiting.id,
-            status: .waiting,
-            text: "needs input",
-            timestamp: 100,
-            source: "scheduled-start"
-        )
-        model.setStatus(
-            sessionId: completed.id,
-            status: .running,
-            text: "working",
-            timestamp: 100
-        )
-        model.setStatus(
-            sessionId: completed.id,
-            status: .idle,
-            text: nil,
-            timestamp: 200
-        )
+        model.setStatus(.waiting, sessionId: waiting.id)
+        model.projects[0].sessions[0].scheduledTurnActive = true
+        model.setFinishedUnseen(sessionId: completed.id)
 
         XCTAssertEqual(model.remoteWorkspaceSnapshot(), RemoteWorkspaceSnapshot(
             projects: [
@@ -7376,7 +6663,7 @@ final class AppLogicTests: XCTestCase {
                             id: waiting.id,
                             title: waiting.title,
                             status: SessionStatus.waiting.rawValue,
-                            statusText: "needs input",
+                            statusText: nil,
                             unread: false,
                             ready: false,
                             background: true,
@@ -14190,8 +13477,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(collapsedItems[0].isExpanded)
 
         // Auto-peek when a child is waiting for input, and update childSummary counts.
-        model.setStatus(sessionId: child1Id.uuidString, status: .running, text: nil, timestamp: 100)
-        model.setStatus(sessionId: child2Id.uuidString, status: .waiting, text: "Approve?", timestamp: 200)
+        model.setStatus(.running, sessionId: child1Id.uuidString)
+        model.setStatus(.waiting, sessionId: child2Id.uuidString)
         let waitingPeekItems = try XCTUnwrap(model.project("p1")).sessionDisplayItems(
             expandedParentIds: model.expandedParentSessionIds
         )
@@ -14203,7 +13490,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(waitingPeekItems[0].childSummary?.label, "2 children · 1 running, 1 waiting")
 
         // Auto-peek when a child is selected even if not waiting.
-        model.setStatus(sessionId: child2Id.uuidString, status: .idle, text: nil, timestamp: 300)
+        model.setStatus(.idle, sessionId: child2Id.uuidString)
         model.selectSession(projectId: "p1", sessionId: child1Id.uuidString)
         let selectedPeekItems = try XCTUnwrap(model.project("p1")).sessionDisplayItems(
             expandedParentIds: model.expandedParentSessionIds
@@ -16665,8 +15952,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === s1Terminal)
         window.resignKey()
         model.projects[0].sessions[0].agentActivity = makeActivity(withWorkflow: true, questionId: "q-1")
-        model.setStatus(sessionId: s2.id, status: .running, text: "Working", timestamp: 10, source: "test")
-        model.setStatus(sessionId: s2.id, status: .idle, text: nil, timestamp: 20, source: "test")
+        model.setFinishedUnseen(sessionId: s2.id)
         model.selectSession(projectId: project.id, sessionId: s1.id)
         model.focusActiveTerminal()
         await pump(host)
@@ -18118,7 +17404,8 @@ final class AppLogicTests: XCTestCase {
             stateRepository: repository,
             isAppActive: { false },
             agentActivityDirectory: directory,
-            resumeMarkerDirectory: directory
+            resumeMarkerDirectory: directory,
+            remotePromptLiveSessions: { _ in [session.id] }
         )
 
         let base = Date()
@@ -18192,8 +17479,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(workingModel.indicator, .working("Running tests"))
         XCTAssertEqual(modelPublications, 0)
 
-        // Foreign copilotSessionId (even if disconnected) rejects activity text without hiding a hook-running session.
-        model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: baseMs)
+        // Another Copilot's snapshot (even a disconnected one) is not this tab's: the status holds
+        // and its activity text is dropped.
         var foreign = makeSnapshot(
             at: base.addingTimeInterval(3),
             processing: true,
@@ -18272,7 +17559,8 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertEqual(workingModel.indicator, .backgroundWork(nil))
 
-        // Terminal disconnect and snapshot expiry clear runtime-only, hook-driven, background-agent, or scheduled indicators so dead sessions never spin forever.
+        // Terminal disconnect and snapshot expiry clear the working, background-agent and scheduled
+        // indicators, so dead sessions never spin forever.
         try publish(makeSnapshot(at: base.addingTimeInterval(9.2), processing: true, intent: "Before disconnect"), at: base.addingTimeInterval(9.2))
         try publish(
             makeSnapshot(
@@ -18286,7 +17574,6 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertNil(workingModel.indicator)
 
-        model.setStatus(sessionId: session.id, status: .running, text: "Stuck hook", timestamp: baseMs + 9_500)
         model.setBackgroundAgentsActive(sessionId: session.id, active: true)
         try publish(
             makeSnapshot(
@@ -18303,8 +17590,6 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(workingModel.indicator)
         model.setBackgroundAgentsActive(sessionId: session.id, active: false)
 
-        let scheduledMarkerURL = directory.appendingPathComponent("\(session.id).scheduled-turn")
-        try Data("1".utf8).write(to: scheduledMarkerURL, options: .atomic)
         try publish(
             makeSnapshot(at: base.addingTimeInterval(10.5), processing: true, intent: "Scheduled tick", scheduled: true),
             at: base.addingTimeInterval(10.5)
@@ -18312,45 +17597,35 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(workingModel.indicator, .backgroundWork("Scheduled tick"))
         model.refreshAgentActivitySnapshots(now: base.addingTimeInterval(30))
         XCTAssertNil(workingModel.indicator)
-        try? FileManager.default.removeItem(at: scheduledMarkerURL)
 
         try publish(
             makeSnapshot(at: base.addingTimeInterval(31), processing: true, intent: "Active before expiry"),
             at: base.addingTimeInterval(31)
         )
         XCTAssertEqual(workingModel.indicator, .working("Active before expiry"))
-        model.setBackgroundAgentsActive(sessionId: session.id, active: true)
-        XCTAssertNil(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(50)))
-        model.setBackgroundAgentsActive(sessionId: session.id, active: false)
 
-        // Turn end clears the indicator; closing the drawer removes the cached workingModel.
+        // A tracker that goes quiet while its Copilot is still running holds Running, without the
+        // text it can no longer vouch for.
+        model.refreshAgentActivitySnapshots(now: base.addingTimeInterval(50))
+        XCTAssertEqual(workingModel.indicator, .working(nil))
+
+        // Turn end clears the indicator.
         try publish(
-            makeSnapshot(at: base.addingTimeInterval(32), processing: false, intent: nil),
-            at: base.addingTimeInterval(32)
+            makeSnapshot(at: base.addingTimeInterval(51), processing: false, intent: nil),
+            at: base.addingTimeInterval(51)
         )
         XCTAssertNil(workingModel.indicator)
 
-        // Legacy snapshots (without runtimeActivity) that resolve an input wait retain .running.
-        model.setStatus(
-            sessionId: session.id,
-            status: .waiting,
-            text: "Waiting",
-            timestamp: baseMs + 33_000,
-            source: "ask_user",
-            copilotSessionId: owner,
-            notification: .elicitation
-        )
-        var legacyResolved = makeSnapshot(at: base.addingTimeInterval(34), processing: true, intent: "Legacy working")
-        legacyResolved.runtimeActivity = nil
-        try publish(legacyResolved, at: base.addingTimeInterval(34))
+        // A snapshot with no `isProcessing` reading shows what its turn events say.
+        var turnEventsOnly = makeSnapshot(at: base.addingTimeInterval(52), processing: true, intent: "Legacy working")
+        turnEventsOnly.runtimeActivity = nil
+        try publish(turnEventsOnly, at: base.addingTimeInterval(52))
         XCTAssertEqual(workingModel.indicator, .working("Legacy working"))
 
-        model.setStatus(sessionId: session.id, status: .running, text: "Hook status", timestamp: baseMs + 35_000)
-        try publish(makeSnapshot(at: base.addingTimeInterval(35), processing: true, intent: "   "), at: base.addingTimeInterval(35))
-        XCTAssertEqual(workingModel.indicator, .working("Hook status"))
-        try? FileManager.default.removeItem(at: snapshotURL)
-        model.refreshAgentActivitySnapshots(now: base.addingTimeInterval(35.5))
-        XCTAssertEqual(workingModel.indicator, .working("Hook status"))
+        // Blank activity text falls back to the plain label; closing the drawer removes the cached
+        // workingModel.
+        try publish(makeSnapshot(at: base.addingTimeInterval(53), processing: true, intent: "   "), at: base.addingTimeInterval(53))
+        XCTAssertEqual(workingModel.indicator, .working(nil))
 
         model.closeTranscriptDrawer(sessionId: session.id)
         XCTAssertNil(workingModel.indicator)

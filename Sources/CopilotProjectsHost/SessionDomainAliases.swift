@@ -2,6 +2,3 @@ import SessionDomain
 
 typealias FooterActivity = SessionDomain.FooterActivity
 typealias ForegroundActivity = SessionDomain.ForegroundActivity
-typealias StatusEventClock = SessionDomain.StatusEventClock
-typealias SessionSemanticsState = SessionDomain.SessionSemanticsState
-typealias SessionSemantics = SessionDomain.SessionSemantics

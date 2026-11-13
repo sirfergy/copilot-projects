@@ -44,14 +44,6 @@ struct Session: Identifiable, Codable, Equatable {
     private(set) var unreadMarker = Session.launchUnreadMarker
     private static let launchUnreadMarker = UUID().uuidString
 
-    /// Puts back the finished dot a permission wait hid. Nothing new happened, so
-    /// a read receipt for the marker clients already have still applies.
-    mutating func restoreFinishedUnseen(_ value: Bool) {
-        let marker = unreadMarker
-        finishedUnseen = value
-        unreadMarker = marker
-    }
-
     /// Either an unseen notification or a manual mark. Drives the unread dot,
     /// project bell, Dock count, and the `unread` flag mirrored to remotes.
     var isUnread: Bool { hasUnread || markedUnread }
@@ -65,13 +57,12 @@ struct Session: Identifiable, Codable, Equatable {
     // rewrote state.json at four times macOS's disk-write limit. The quit save, or a
     // save made for another reason, records them.
     var runningStartedAtMilliseconds: Int64? = nil
-    var runningStatusTimestampMilliseconds: Int64? = nil
     var runningRequestIdentity: String? = nil
 
     // Transient (not persisted): reset on load.
+    /// What the session's tracker says it is doing, written only by
+    /// `AppModel.reconcileStatus`. Waiting means its tracker lists pending input.
     var status: SessionStatus = .idle
-    var statusIsRuntimeDerived = false
-    var statusText: String? = nil
     var hasUnread: Bool = false {
         didSet { if hasUnread { unreadMarker = UUID().uuidString } }
     }
@@ -104,12 +95,8 @@ struct Session: Identifiable, Codable, Equatable {
     }
     var hasPendingInput: Bool { agentActivity?.hasPendingInput == true }
 
-    /// Activity hooks can report running while a question is still unanswered.
-    /// Keep that lifecycle state separate from the attention shown to the user.
-    var displayStatus: SessionStatus { hasPendingInput ? .waiting : status }
-
     var effectiveRunningStartedAtMilliseconds: Int64? {
-        displayStatus == .running ? runningStartedAtMilliseconds : nil
+        status == .running ? runningStartedAtMilliseconds : nil
     }
 
     static let activityPullRequestPolicyToken = "policy:strict-v1"
@@ -290,7 +277,7 @@ struct Session: Identifiable, Codable, Equatable {
 
     /// The latest request failed and the session has been idle since.
     var failedRequest: TranscriptTurnError? {
-        displayStatus == .idle ? agentActivity?.remoteLastError() : nil
+        status == .idle ? agentActivity?.remoteLastError() : nil
     }
 
     var requiresEndConfirmation: Bool {
@@ -304,23 +291,23 @@ struct Session: Identifiable, Codable, Equatable {
         case .waiting: return "Waiting for input"
         case .failed: return "Request failed"
         case .ready: return "Finished"
-        case .unread, nil: return displayStatus == .running ? "Running" : "Idle"
+        case .unread, nil: return status == .running ? "Running" : "Idle"
         }
     }
 
     /// What this session needs from the user. Remote snapshots publish it, and
     /// the sidebar and Next Session Needing Attention read it.
     var attention: RemoteSessionAttention.Kind? {
-        if displayStatus == .waiting { return .waiting }
+        if status == .waiting { return .waiting }
         if failedRequest != nil { return .failed }
-        if displayStatus == .idle && finishedUnseen { return .ready }
+        if status == .idle && finishedUnseen { return .ready }
         return isUnread ? .unread : nil
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, title, cwd, hostId, creationFingerprint, pullRequestKeys, verifiedPullRequestKeys
         case pendingLedgerPullRequestKeys, parentSessionId, startingPrompt, parked
-        case runningStartedAtMilliseconds, runningStatusTimestampMilliseconds, runningRequestIdentity
+        case runningStartedAtMilliseconds, runningRequestIdentity
         case manuallyMarkedUnread = "markedUnread"
     }
 
@@ -380,7 +367,6 @@ struct Session: Identifiable, Codable, Equatable {
         // An unreadable record leaves an ordinary tab, which resumes when shown.
         self.parked = try? container.decodeIfPresent(ParkedSession.self, forKey: .parked)
         self.runningStartedAtMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .runningStartedAtMilliseconds)
-        self.runningStatusTimestampMilliseconds = try container.decodeIfPresent(Int64.self, forKey: .runningStatusTimestampMilliseconds)
         self.runningRequestIdentity = try container.decodeIfPresent(String.self, forKey: .runningRequestIdentity)
     }
 
@@ -402,7 +388,6 @@ struct Session: Identifiable, Codable, Equatable {
         try container.encodeIfPresent(manuallyMarkedUnread, forKey: .manuallyMarkedUnread)
         try container.encodeIfPresent(parked, forKey: .parked)
         try container.encodeIfPresent(runningStartedAtMilliseconds, forKey: .runningStartedAtMilliseconds)
-        try container.encodeIfPresent(runningStatusTimestampMilliseconds, forKey: .runningStatusTimestampMilliseconds)
         try container.encodeIfPresent(runningRequestIdentity, forKey: .runningRequestIdentity)
     }
 }
@@ -439,8 +424,8 @@ struct SessionChildSummary: Equatable, Sendable {
 
     init(children: [Session]) {
         self.totalCount = children.count
-        self.runningCount = children.filter { $0.displayStatus == .running }.count
-        self.waitingCount = children.filter { $0.displayStatus == .waiting }.count
+        self.runningCount = children.filter { $0.status == .running }.count
+        self.waitingCount = children.filter { $0.status == .waiting }.count
         self.failedCount = children.filter { $0.failedRequest != nil }.count
     }
 
@@ -512,13 +497,13 @@ struct Project: Identifiable, Codable, Equatable {
 extension Project {
     /// Project-level rollup for the CLI/status text (idle | running | waiting).
     var aggregateStatus: SessionStatus {
-        if sessions.contains(where: { $0.displayStatus == .waiting }) { return .waiting }
-        if sessions.contains(where: { $0.displayStatus == .running }) { return .running }
+        if sessions.contains(where: { $0.status == .waiting }) { return .waiting }
+        if sessions.contains(where: { $0.status == .running }) { return .running }
         return .idle
     }
 
-    var runningCount: Int { sessions.filter { $0.displayStatus == .running }.count }
-    var waitingCount: Int { sessions.filter { $0.displayStatus == .waiting }.count }
+    var runningCount: Int { sessions.filter { $0.status == .running }.count }
+    var waitingCount: Int { sessions.filter { $0.status == .waiting }.count }
     var backgroundWorkCount: Int { sessions.filter(\.hasBackgroundWork).count }
     var scheduledCount: Int { sessions.filter { !$0.schedules.isEmpty }.count }
     var failedCount: Int { sessions.filter { $0.failedRequest != nil }.count }
@@ -631,7 +616,7 @@ extension Project {
 
     /// Whether a child session should auto-peek while its parent is collapsed.
     func shouldAutoPeekChild(_ child: Session) -> Bool {
-        child.id == selectedSessionId || child.displayStatus == .waiting
+        child.id == selectedSessionId || child.status == .waiting
     }
 
     /// Ordered rows to render in `SessionList`: top-level sessions in project order,
@@ -699,10 +684,10 @@ enum FleetActivityKind: String, CaseIterable, Equatable, Sendable {
 
     func matches(_ session: Session) -> Bool {
         switch self {
-        case .running: return session.displayStatus == .running
+        case .running: return session.status == .running
         case .background: return session.hasBackgroundWork
         case .scheduled: return !session.schedules.isEmpty
-        case .waiting: return session.displayStatus == .waiting
+        case .waiting: return session.status == .waiting
         case .failed: return session.failedRequest != nil
         case .ready: return session.finishedUnseen
         }

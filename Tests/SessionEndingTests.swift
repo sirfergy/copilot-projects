@@ -68,7 +68,7 @@ final class SessionEndingTests: XCTestCase {
         }
         defer { f.clean() }
         let id = f.project.sessions[0].id
-        f.model.setStatus(sessionId: id, status: .running, text: nil, timestamp: 100)
+        f.model.setStatus(.running, sessionId: id)
         f.model.closeSelectedSession()
         XCTAssertTrue(f.calls.batches.isEmpty)
         XCTAssertEqual(alerts[0].buttons.map(\.title), ["Cancel", "End Session"])
@@ -89,7 +89,7 @@ final class SessionEndingTests: XCTestCase {
             return .alertFirstButtonReturn
         }
         defer { f.clean() }
-        f.model.setStatus(sessionId: f.other.sessions[0].id, status: .running, text: nil, timestamp: 100)
+        f.model.setStatus(.running, sessionId: f.other.sessions[0].id)
         f.model.requestCloseProject(f.other.id)
         XCTAssertTrue(message.contains("This ends 1 session: Other session."))
         XCTAssertTrue(message.contains("One session has active or pending work."))
@@ -156,7 +156,7 @@ final class SessionEndingTests: XCTestCase {
         }
         defer { f.clean() }
         let id = f.project.sessions[0].id
-        f.model.setStatus(sessionId: id, status: .waiting, text: nil, timestamp: 100)
+        f.model.setStatus(.waiting, sessionId: id)
         duringConfirmation = { [weak model = f.model, other = f.other] in
             _ = model?.moveSession(toProjectId: other.id, draggedId: id, selectInTarget: false)
         }
@@ -182,11 +182,11 @@ final class SessionEndingTests: XCTestCase {
         XCTAssertEqual(
             f.model.closeAutomationSession(sessionId: first, projectId: f.project.id), .busy,
             "the selected tab of the selected project stays even while the app is in the background")
-        f.model.setStatus(sessionId: second, status: .running, text: nil, timestamp: 100)
+        f.model.setStatus(.running, sessionId: second)
         XCTAssertEqual(f.model.closeAutomationSession(sessionId: second, projectId: f.project.id), .busy)
         XCTAssertTrue(f.calls.batches.isEmpty)
 
-        f.model.setStatus(sessionId: second, status: .idle, text: nil, timestamp: 101)
+        f.model.setStatus(.idle, sessionId: second)
         XCTAssertEqual(f.model.closeAutomationSession(sessionId: second, projectId: f.project.id), .closed)
         f.model.selectProject(f.other.id)
         XCTAssertEqual(f.model.closeAutomationSession(sessionId: first, projectId: f.project.id), .closed)

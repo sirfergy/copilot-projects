@@ -10,12 +10,6 @@ private struct WorkspacePersistenceError: LocalizedError {
     let errorDescription: String?
 }
 
-enum PermissionNotificationDecision: Equatable {
-    case cancel
-    case post
-    case suppress
-}
-
 struct RecentlyClosedSession: Equatable, Sendable {
     var originalSessionId: String
     var projectId: String
@@ -121,17 +115,14 @@ final class AppModel: ObservableObject {
     private lazy var controlRouter = ControlCommandRouter(actions: .init(
         listProjects: { [unowned self] in self.renderProjects() },
         listStatus: { [unowned self] in self.renderStatus() },
-        setStatus: { [unowned self] status, text, request in
+        // A hook's status is not taken: the tracker decides it. Only the
+        // `sessionEnd` hook's report of an exit is acted on.
+        setStatus: { [unowned self] _, _, request in
             guard let target = self.resolve(request) else { return .failure("no target session") }
-            self.setStatus(
-                sessionId: target.sessionId,
-                status: status,
-                text: text,
-                timestamp: request.timestamp,
-                source: request.source,
-                copilotSessionId: request.copilotSessionId,
-                notification: request.notification
-            )
+            if request.source == "session-end" {
+                self.sessionEnded(
+                    sessionId: target.sessionId, copilotSessionId: request.copilotSessionId)
+            }
             return .success()
         },
         notify: { [unowned self] title, body, request in
@@ -420,11 +411,10 @@ final class AppModel: ObservableObject {
     )
     var agentActivityReadInFlight = false
     var agentActivityReadQueued = false
-    // Counts each session's main-actor observations of its snapshot file (applied
-    // scan reads and single-session loads, whatever they found) and the status
-    // hooks that change its scheduling, so a background read applies only to
-    // sessions nothing observed or changed after it began. The cached signature
-    // can't tell: a later scan that finds the file gone leaves an empty cache empty.
+    // Counts the scan reads applied to each session, whatever they found, so a
+    // background read applies only to sessions no later scan observed after it
+    // began. The cached signature can't tell: a later scan that finds the file gone
+    // leaves an empty cache empty.
     var agentActivityObservations: [String: Int] = [:]
     // Per-session decoded-snapshot cache keyed by a file signature (inode+size+
     // mtime). Every live session heartbeats a write to its
@@ -438,50 +428,24 @@ final class AppModel: ObservableObject {
     var agentActivitySnapshotCache:
         [String: (signature: FileSignature, snapshot: AgentActivitySnapshot?)] = [:]
 
-    var sessionSemantics = SessionSemanticsState()
     /// Temporary shadow-run log; see StatusShadow.swift.
     lazy var statusShadow = StatusShadow(directory: stateRepository.path.deletingLastPathComponent())
     var backgroundAgentsSuppressed: Set<String> = []
     var completionPending: Set<String> = []
     var completionSummaryContexts: [String: CompletionSummaryContext] = [:]
     let completionTranscriptLoader: @Sendable (String) -> TranscriptSnapshot
-    var scheduledSnapshotsSuppressed: Set<String> = []
     var foregroundIdleGenerationBaselines: [String: Int] = [:]
     let completionNotificationDelayNanoseconds: UInt64
     private let permissionNotificationDelayNanoseconds: UInt64
     private let elicitationReplyRetryDelaysNanoseconds: [UInt64]
-    let persistPermissionStatus:
-        (_ sessionId: String, _ status: SessionStatus, _ timestamp: Int64,
-         _ promptStatusTimestamp: Int64) -> Void
-    struct InputWaitState {
-        let context: InputWaitContext
-        let timestamp: Int64
-    }
     private struct ElicitationConversation: Equatable {
         let rootSessionId: String
         let conversationEpoch: String
     }
-    var inputWaits: [String: InputWaitState] = [:]
-    var runtimeTrackedOwners: [String: String] = [:]
     var verifiedCopilotOwners: [String: String] = [:]
     var trackerMissingSince: [String: Date] = [:]
     var copilotTrackerWarningMessage: @Sendable () -> String = {
         CopilotSessionStore().trackerWarningMessage()
-    }
-    struct PermissionStatusRestore {
-        let status: SessionStatus
-        let statusText: String?
-        let scheduledTurnActive: Bool
-        var finishedUnseen: Bool
-        let turnCompleted: Bool
-        let backgroundAgentsSuppressed: Bool
-        let completionPending: Bool
-        let foregroundIdleGenerationBaseline: Int?
-        var statusTimestamp: Int64
-        var promptStatusTimestamp: Int64
-        var observedRootSessionId: String? = nil
-        var observedConversationEpoch: String? = nil
-        var observedPendingRequestIds: Set<String> = []
     }
     private struct PendingSessionDestroy {
         let task: Task<Void, Never>
@@ -493,7 +457,6 @@ final class AppModel: ObservableObject {
     /// withdrawn once their question is answered anywhere.
     private var questionNotifications: [String: [PostedQuestionNotification]] = [:]
     var budgetNotificationKeys: [String: String] = [:]
-    var permissionStatusRestores: [String: PermissionStatusRestore] = [:]
     private let isAppActive: @MainActor () -> Bool
     let agentActivityDirectory: URL
     nonisolated let resumeMarkerDirectory: URL
@@ -580,17 +543,6 @@ final class AppModel: ObservableObject {
         elicitationReplyRetryDelaysNanoseconds: [UInt64] = [
             250_000_000, 500_000_000, 1_000_000_000, 2_000_000_000,
         ],
-        persistPermissionStatus: @escaping (
-            _ sessionId: String, _ status: SessionStatus, _ timestamp: Int64,
-            _ promptStatusTimestamp: Int64
-        ) -> Void = { sessionId, status, timestamp, promptStatusTimestamp in
-            SessionArtifacts.persistStatus(
-                sessionId: sessionId,
-                status: status,
-                timestamp: timestamp,
-                promptStatusTimestamp: promptStatusTimestamp
-            )
-        },
         isAppActive: @escaping @MainActor () -> Bool = { NSApp?.isActive ?? false },
         agentActivityDirectory: URL = Paths.sessionsDir,
         resumeMarkerDirectory: URL = Paths.sessionsDir,
@@ -649,7 +601,6 @@ final class AppModel: ObservableObject {
         self.completionTranscriptLoader = completionTranscriptLoader
         self.permissionNotificationDelayNanoseconds = permissionNotificationDelayNanoseconds
         self.elicitationReplyRetryDelaysNanoseconds = elicitationReplyRetryDelaysNanoseconds
-        self.persistPermissionStatus = persistPermissionStatus
         self.isAppActive = isAppActive
         self.agentActivityDirectory = agentActivityDirectory
         self.resumeMarkerDirectory = resumeMarkerDirectory
@@ -1654,26 +1605,11 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    func trustedForegroundTransitionMilliseconds(
-        sessionId: String,
-        snapshot: AgentActivitySnapshot?
-    ) -> Int64? {
-        guard snapshot?.foregroundTurnActive == true,
-              snapshot?.reportsTerminalDisconnect == false,
-              isActivitySnapshotTrustedForSessionMetadata(sessionId: sessionId, snapshot: snapshot) else {
-            return nil
-        }
-        return snapshot?.foregroundTransitionMilliseconds
-    }
-
-    func trustedRunningRequestIdentity(
-        sessionId: String,
-        snapshot: AgentActivitySnapshot?
-    ) -> String? {
+    /// The request a snapshot's foreground turn belongs to.
+    nonisolated static func runningRequestIdentity(_ snapshot: AgentActivitySnapshot?) -> String? {
         guard let snapshot,
               snapshot.foregroundTurnActive,
               !snapshot.reportsTerminalDisconnect,
-              isActivitySnapshotTrustedForSessionMetadata(sessionId: sessionId, snapshot: snapshot),
               let epoch = snapshot.conversationEpoch?.trimmingCharacters(in: .whitespacesAndNewlines),
               !epoch.isEmpty else {
             return nil
@@ -2003,18 +1939,13 @@ final class AppModel: ObservableObject {
         }
         transcriptOpenSessions.remove(sid)
         defaultViewAppliedSessions.remove(sid)
-        sessionSemantics.reset(sessionId: sid)
         backgroundAgentsSuppressed.remove(sid)
         completionPending.remove(sid)
         completionSummaryContexts[sid] = nil
         permissionNotificationTokens[sid] = nil
         elicitationNotificationTokens[sid] = nil
-        permissionStatusRestores[sid] = nil
-        inputWaits[sid] = nil
         remoteOpenSessions[sid] = nil
-        runtimeTrackedOwners[sid] = nil
         verifiedCopilotOwners[sid] = nil
-        scheduledSnapshotsSuppressed.remove(sid)
         foregroundIdleGenerationBaselines.removeValue(forKey: sid)
         checkedTranscriptStartingPromptSessions.remove(sid)
         checkedTranscriptStartingPromptRevisions.removeValue(forKey: sid)
@@ -2692,7 +2623,6 @@ final class AppModel: ObservableObject {
             backgroundAgentsSuppressed.remove(session.id)
             completionPending.remove(session.id)
             completionSummaryContexts[session.id] = nil
-            scheduledSnapshotsSuppressed.remove(session.id)
             foregroundIdleGenerationBaselines.removeValue(forKey: session.id)
         }
         let closedSessionIds = projects[pi].sessions.map(\.id)
@@ -3050,307 +2980,26 @@ final class AppModel: ObservableObject {
         return (projectId, target.sessionId)
     }
 
-    // MARK: - status / notifications (driven by the CLI)
+    // MARK: - alerts for a waiting session, and an explicit exit
 
-    func setStatus(
-        sessionId: String,
-        status: SessionStatus,
-        text: String?,
-        timestamp: Int64? = nil,
-        source: String? = nil,
-        copilotSessionId: String? = nil,
-        notification: StatusNotificationKind? = nil
-    ) {
-        guard let loc = locateIndex(sessionId) else { return }
-        // Runs after any status change below, including early exits that
-        // leave the status as it was.
-        defer { dismissAnsweredQuestionNotifications(sessionId: sessionId) }
-        let previousTimestamp = sessionSemantics.statusClock.timestamp(for: sessionId)
-        guard sessionSemantics.shouldApplyStatusEvent(
-            sessionId: sessionId,
-            timestamp: timestamp,
-            source: source
-        ) else { return }
-        projectStorage[loc.p].sessions[loc.s].statusIsRuntimeDerived = false
-        // Every tool hook advances this clock. Saving state.json for each one made macOS
-        // report excessive disk writes, so the next save records it, at the latest on quit.
-        if status != .idle,
-           projectStorage[loc.p].sessions[loc.s].runningStartedAtMilliseconds != nil,
-           let timestamp {
-            projectStorage[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = timestamp
-        }
-        withCoalescedProjectPublications {
-        if status == .waiting {
-            if case .loaded(let record) = SessionArtifacts.loadStatusRecord(
-                sessionId: sessionId, sessionsDirectory: agentActivityDirectory
-            ), record.status == .waiting, record.statusTimestamp == timestamp,
-               let context = record.inputWait {
-                inputWaits[sessionId] = InputWaitState(
-                    context: context, timestamp: record.statusTimestamp
-                )
-            } else if let copilotSessionId, let timestamp,
-                      let snapshot = projects[loc.p].sessions[loc.s].agentActivity,
-                      let root = snapshot.copilotSessionId,
-                      let epoch = snapshot.conversationEpoch,
-                      root.lowercased() == resumeMarkerValue(
-                        sessionId: sessionId, suffix: "copilot-session"
-                      )?.lowercased() {
-                inputWaits[sessionId] = InputWaitState(
-                    context: InputWaitContext(
-                        senderSessionId: copilotSessionId,
-                        rootSessionId: root,
-                        conversationEpoch: epoch
-                    ),
-                    timestamp: timestamp
-                )
-            } else {
-                inputWaits[sessionId] = nil
-            }
-        } else {
-            inputWaits[sessionId] = nil
-        }
-        // sessionEnd is also emitted during graceful macOS shutdown. Only a live,
-        // non-terminating app can treat it as an explicit user exit. A park stops
-        // the CLI too, and its marker is what the session resumes from.
-        if source == "session-end", !isTerminating, !isPoweringOff,
-           projects[loc.p].sessions[loc.s].parked == nil,
-           shouldClearResumeMarkers(sessionId: sessionId, copilotSessionId: copilotSessionId) {
-            try? FileManager.default.removeItem(
-                at: resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session")
-            )
-        }
-        let previous = projects[loc.p].sessions[loc.s].status
-        if status == .waiting, previous == .waiting, notification == nil {
-            refreshRetainedPermissionClocks(sessionId: sessionId, previousTimestamp: previousTimestamp)
-        }
-        var permissionRestoreState: (
-            status: SessionStatus,
-            statusText: String?,
-            scheduledTurnActive: Bool,
-            finishedUnseen: Bool,
-            turnCompleted: Bool,
-            backgroundAgentsSuppressed: Bool,
-            completionPending: Bool,
-            foregroundIdleGenerationBaseline: Int?
-        )? = notification == .permission
-            ? (
-                previous,
-                projects[loc.p].sessions[loc.s].statusText,
-                projects[loc.p].sessions[loc.s].scheduledTurnActive,
-                projects[loc.p].sessions[loc.s].finishedUnseen,
-                projects[loc.p].sessions[loc.s].turnCompleted,
-                backgroundAgentsSuppressed.contains(sessionId),
-                completionPending.contains(sessionId),
-                foregroundIdleGenerationBaselines[sessionId]
-            )
-            : nil
-        if permissionRestoreState != nil,
-           previous == .waiting,
-           let retained = permissionStatusRestores[sessionId],
-           retained.statusTimestamp == previousTimestamp,
-           retained.status != .waiting {
-            permissionRestoreState = (
-                retained.status, retained.statusText, retained.scheduledTurnActive,
-                retained.finishedUnseen, retained.turnCompleted,
-                retained.backgroundAgentsSuppressed, retained.completionPending,
-                retained.foregroundIdleGenerationBaseline
-            )
-        }
-        let startsScheduledTurn = source == "scheduled-start" || source == "scheduled-active"
-        let endsScheduledTurn = source == "scheduled-idle"
-        let scheduledStateChanges = startsScheduledTurn
-            ? !projects[loc.p].sessions[loc.s].scheduledTurnActive
-            : endsScheduledTurn && projects[loc.p].sessions[loc.s].scheduledTurnActive
-        if startsScheduledTurn {
-            projects[loc.p].sessions[loc.s].scheduledTurnActive = true
-            scheduledSnapshotsSuppressed.remove(sessionId)
-            foregroundIdleGenerationBaselines.removeValue(forKey: sessionId)
-        } else if endsScheduledTurn {
-            projects[loc.p].sessions[loc.s].scheduledTurnActive = false
-            scheduledSnapshotsSuppressed.insert(sessionId)
-        }
-        if startsScheduledTurn || endsScheduledTurn {
-            // A scan read that began before this hook would undo it.
-            agentActivityObservations[sessionId, default: 0] += 1
-        }
-        let hasCompletionSignal = SessionSemantics.isCompletionSignal(
-            status: status,
-            source: source,
-            scheduledTurnActive: projects[loc.p].sessions[loc.s].scheduledTurnActive
-        )
-        let clearsFinishedUnseen = (status == .running || status == .waiting)
-            && projects[loc.p].sessions[loc.s].finishedUnseen
-        let resumesBackgroundTracking = (status == .running || status == .waiting)
-            && backgroundAgentsSuppressed.contains(sessionId)
-        guard previous != status
-                || projects[loc.p].sessions[loc.s].statusText != text
-                || clearsFinishedUnseen
-                || resumesBackgroundTracking
-                || notification != nil
-                || hasCompletionSignal
-                || scheduledStateChanges
+    /// The session's Copilot reported that it is exiting (the `sessionEnd` hook).
+    /// It reports an explicit exit and a graceful macOS shutdown alike, so only a
+    /// live app that is not terminating takes it as the user's exit and forgets
+    /// which conversation to resume. A park stops the CLI too, and its marker is
+    /// what the session resumes from.
+    func sessionEnded(sessionId: String, copilotSessionId: String?) {
+        guard let loc = locateIndex(sessionId), !isTerminating, !isPoweringOff,
+              projects[loc.p].sessions[loc.s].parked == nil,
+              shouldClearResumeMarkers(sessionId: sessionId, copilotSessionId: copilotSessionId)
         else { return }
-        if status != .waiting {
-            cancelWaitingNotifications(sessionId: sessionId)
-        } else if let notification, notification != .elicitation {
-            elicitationNotificationTokens[sessionId] = nil
-        }
-        projects[loc.p].sessions[loc.s].status = status
-        projects[loc.p].sessions[loc.s].statusText = text
-        if status == .running {
-            if projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds == nil {
-                let activeTransitionMs: Int64? = {
-                    guard let transitionMs = trustedForegroundTransitionMilliseconds(
-                        sessionId: sessionId,
-                        snapshot: projects[loc.p].sessions[loc.s].agentActivity
-                    ),
-                    transitionMs >= (previousTimestamp ?? .min) else {
-                        return nil
-                    }
-                    return transitionMs
-                }()
-                projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds =
-                    [timestamp, activeTransitionMs].compactMap { $0 }.min()
-                    ?? SessionArtifacts.currentStatusTimestamp()
-                if activeTransitionMs != nil {
-                    projects[loc.p].sessions[loc.s].runningRequestIdentity = trustedRunningRequestIdentity(
-                        sessionId: sessionId,
-                        snapshot: projects[loc.p].sessions[loc.s].agentActivity
-                    )
-                }
-            }
-            if let timestamp {
-                projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = timestamp
-            }
-        } else if status == .waiting, let timestamp {
-            projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = timestamp
-        } else if status == .idle {
-            projects[loc.p].sessions[loc.s].runningStartedAtMilliseconds = nil
-            projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = nil
-            projects[loc.p].sessions[loc.s].runningRequestIdentity = nil
-        }
-        if status == .running || status == .waiting {
-            if status == .running {
-                projects[loc.p].sessions[loc.s].scheduledTurnActive = false
-                agentActivityObservations[sessionId, default: 0] += 1
-                foregroundIdleGenerationBaselines[sessionId] =
-                    projects[loc.p].sessions[loc.s].agentActivity?.idleGeneration ?? -1
-            }
-            projects[loc.p].sessions[loc.s].finishedUnseen = false
-            projects[loc.p].sessions[loc.s].turnCompleted = false
-            backgroundAgentsSuppressed.remove(sessionId)
-            completionPending.remove(sessionId)
-        }
-        if hasCompletionSignal {
-            if !completionPending.contains(sessionId) {
-                completionSummaryContexts[sessionId] = CompletionSummaryContext(
-                    copilotSessionId: copilotSessionId,
-                    activeTimestamp: previousTimestamp,
-                    completionTimestamp: timestamp
-                )
-            }
-            completionPending.insert(sessionId)
-        }
-        if timestamp == nil {
-            let now = SessionArtifacts.currentStatusTimestamp()
-            let clocks = sessionSemantics.recordLocalStatusEvent(
-                sessionId: sessionId,
-                nowMilliseconds: now,
-                source: source
-            )
-            SessionArtifacts.persistStatus(
-                sessionId: sessionId,
-                status: status,
-                timestamp: clocks.status,
-                promptStatusTimestamp: clocks.promptSafety,
-                sessionsDirectory: agentActivityDirectory
-            )
-            if status != .idle {
-                projects[loc.p].sessions[loc.s].runningStatusTimestampMilliseconds = clocks.status
-            }
-            if status == .waiting, previous == .waiting, notification == nil {
-                refreshRetainedPermissionClocks(sessionId: sessionId, previousTimestamp: previousTimestamp)
-            }
-        }
-
-        // Completion signals mark ready through postCompletionIfReady, after background
-        // work drains. Idle events without one (aborts, session end) need attention now.
-        if status == .idle, previous == .running || previous == .waiting,
-           !hasCompletionSignal, !startsScheduledTurn, !endsScheduledTurn,
-           projects[loc.p].effectiveParentSessionId(for: sessionId) == nil,
-           !isVisible(projectIndex: loc.p, sessionIndex: loc.s) {
-            projects[loc.p].sessions[loc.s].finishedUnseen = true
-        }
-        if hasCompletionSignal {
-            let delay = completionNotificationDelayNanoseconds
-            Task { @MainActor [weak self] in
-                // Allow a moment for the background-agent OSC title to arrive.
-                try? await Task.sleep(nanoseconds: delay)
-                self?.postCompletionIfReady(sessionId: sessionId)
-            }
-        } else if notification == .permission {
-            if let permissionRestoreState {
-                let now = SessionArtifacts.currentStatusTimestamp()
-                let statusTimestamp = timestamp
-                    ?? sessionSemantics.statusClock.timestamp(for: sessionId)
-                    ?? now
-                let promptTimestamp = sessionSemantics.promptSafetyClock.timestamp(
-                    for: sessionId
-                )
-                    ?? statusTimestamp
-                schedulePermissionNotification(
-                    sessionId: sessionId,
-                    restore: PermissionStatusRestore(
-                        status: permissionRestoreState.status,
-                        statusText: permissionRestoreState.statusText,
-                        scheduledTurnActive: permissionRestoreState.scheduledTurnActive,
-                        finishedUnseen: permissionRestoreState.finishedUnseen,
-                        turnCompleted: permissionRestoreState.turnCompleted,
-                        backgroundAgentsSuppressed:
-                            permissionRestoreState.backgroundAgentsSuppressed,
-                        completionPending: permissionRestoreState.completionPending,
-                        foregroundIdleGenerationBaseline:
-                            permissionRestoreState.foregroundIdleGenerationBaseline,
-                        statusTimestamp: statusTimestamp,
-                        promptStatusTimestamp: promptTimestamp
-                    )
-                )
-            }
-        } else if notification == .elicitation {
-            scheduleElicitationNotification(sessionId: sessionId)
-        }
-        }
-    }
-
-    nonisolated static func permissionNotificationDecision(
-        status: SessionStatus,
-        hasPendingQuestions: Bool,
-        pendingPermissionRequestIds: [String]?
-    ) -> PermissionNotificationDecision {
-        SessionSemanticsAdapter.permissionDecision(
-            status: status,
-            hasPendingQuestions: hasPendingQuestions,
-            hasPendingPermissionRequests: pendingPermissionRequestIds.map { !$0.isEmpty }
+        try? FileManager.default.removeItem(
+            at: resumeMarkerDirectory.appendingPathComponent("\(sessionId).copilot-session")
         )
     }
 
-    private func refreshRetainedPermissionClocks(sessionId: String, previousTimestamp: Int64?) {
-        guard var restore = permissionStatusRestores[sessionId],
-              restore.statusTimestamp == previousTimestamp,
-              let statusTimestamp = sessionSemantics.statusClock.timestamp(for: sessionId),
-              let promptTimestamp = sessionSemantics.promptSafetyClock.timestamp(for: sessionId) else {
-            return
-        }
-        restore.statusTimestamp = statusTimestamp
-        restore.promptStatusTimestamp = promptTimestamp
-        permissionStatusRestores[sessionId] = restore
-    }
-
-    private func schedulePermissionNotification(
-        sessionId: String,
-        restore: PermissionStatusRestore
-    ) {
-        permissionStatusRestores[sessionId] = restore
+    /// Posts a permission alert once the prompt has stayed up for the delay: one
+    /// that is approved automatically comes and goes within it.
+    func schedulePermissionNotification(sessionId: String) {
         guard permissionNotificationTokens[sessionId] == nil else { return }
         let token = UUID()
         permissionNotificationTokens[sessionId] = token
@@ -3365,87 +3014,47 @@ final class AppModel: ObservableObject {
     /// alert scheduled for that wait may still post.
     func cancelWaitingNotifications(sessionId: String) {
         permissionNotificationTokens[sessionId] = nil
-        permissionStatusRestores[sessionId] = nil
         elicitationNotificationTokens[sessionId] = nil
     }
 
     private func resolvePermissionNotification(sessionId: String, token: UUID) {
         guard permissionNotificationTokens[sessionId] == token else { return }
         permissionNotificationTokens[sessionId] = nil
-        guard let restore = permissionStatusRestores[sessionId] else { return }
         guard let loc = locateIndex(sessionId) else { return }
-
-        let fm = FileManager.default
-        let decoder = JSONDecoder()
-        let path = agentActivityDirectory
-            .appendingPathComponent("\(sessionId).agent-activity.json").path
-        let loaded = loadAgentActivitySnapshot(
-            sessionId: sessionId,
-            path: path,
-            decoder: decoder,
-            fm: fm
-        )
-        var snapshot = loaded?.isFresh() == true ? loaded : nil
-        if let wait = inputWaits[sessionId],
-           (snapshot?.copilotSessionId?.lowercased() != wait.context.rootSessionId.lowercased()
-            || snapshot?.conversationEpoch != wait.context.conversationEpoch
-            || (snapshot?.updatedAtMilliseconds ?? .min) < wait.timestamp) {
-            snapshot = nil
-        }
-        let session = projects[loc.p].sessions[loc.s]
-        let hasPendingQuestions = snapshot.map {
-            $0.trackedUserInputs?.isEmpty == false
-                || $0.trackedElicitations?.isEmpty == false
-        } ?? session.hasPendingQuestions
-        switch Self.permissionNotificationDecision(
-            status: session.status,
-            hasPendingQuestions: hasPendingQuestions,
-            pendingPermissionRequestIds: snapshot?.pendingPermissionRequestIds
-        ) {
-        case .cancel:
-            permissionStatusRestores[sessionId] = nil
-            return
-        case .post:
-            if let snapshot,
-               let root = snapshot.copilotSessionId,
-               let epoch = snapshot.conversationEpoch,
-               let pending = snapshot.pendingPermissionRequestIds, !pending.isEmpty {
-                var retained = restore
-                retained.observedRootSessionId = root
-                retained.observedConversationEpoch = epoch
-                retained.observedPendingRequestIds = Set(pending)
-                permissionStatusRestores[sessionId] = retained
+        // A scan can trail the tracker's write, so the snapshot is read again now: a
+        // prompt answered within the delay has already gone from it.
+        var session = projects[loc.p].sessions[loc.s]
+        session.agentActivity = CLIOperationAdapter(
+            activityDirectory: agentActivityDirectory,
+            resumeMarkerDirectory: resumeMarkerDirectory
+        ).loadFreshSnapshot(sessionId: sessionId, now: { Date() })
+        guard session.status == .waiting, let snapshot = ownedActivity(session) else { return }
+        guard snapshot.pendingPermissionRequestIds?.isEmpty == false else {
+            // The wait goes on with a question that no scan saw it start with, so
+            // this is the question's alert.
+            if snapshot.trackedUserInputs?.isEmpty == false
+                || snapshot.trackedElicitations?.isEmpty == false {
+                scheduleElicitationNotification(sessionId: sessionId)
             }
-            postNotification(
-                projectId: projects[loc.p].id,
-                sessionId: sessionId,
-                kind: .permission,
-                title: StatusNotificationKind.permission.title,
-                body: nil
-            )
-        case .suppress:
-            restoreStatusAfterTransientPermission(
-                sessionId: sessionId,
-                location: loc,
-                restore: restore,
-                now: Date()
-            )
+            return
         }
+        postNotification(
+            projectId: projects[loc.p].id,
+            sessionId: sessionId,
+            kind: .permission,
+            title: StatusNotificationKind.permission.title,
+            body: nil
+        )
     }
 
-    /// Posts a question notification for one elicitation hook. The hook can
-    /// beat the tracker's snapshot of the question, so a session whose tracker
-    /// could accept a reply is re-read with backoff before posting without one.
-    private func scheduleElicitationNotification(sessionId: String) {
+    /// Posts a question notification for a session that began waiting on one.
+    /// The tracker can list a question first under an id that takes no reply, so
+    /// it is re-read with backoff before posting without one.
+    func scheduleElicitationNotification(sessionId: String) {
         let token = UUID()
         elicitationNotificationTokens[sessionId] = token
         let delays = elicitationReplyRetryDelaysNanoseconds
-        var conversation = inputWaits[sessionId].map {
-            ElicitationConversation(
-                rootSessionId: $0.context.rootSessionId,
-                conversationEpoch: $0.context.conversationEpoch
-            )
-        }
+        var conversation: ElicitationConversation?
         guard !resolveElicitationNotification(
             sessionId: sessionId,
             token: token,
@@ -3500,15 +3109,15 @@ final class AppModel: ObservableObject {
                 conversationEpoch: epoch
             )
             conversation = observed
-            // A different conversation can't own this hook's question; post
+            // A different conversation can't own this wait's question; post
             // without a reply rather than keep waiting for it.
             if observed.rootSessionId.lowercased() == root.lowercased(),
                observed.conversationEpoch == epoch {
                 question = NotificationReplyResolver.pendingQuestion(in: snapshot, now: clock())
                 questionObservedAt = snapshot.updatedAtMilliseconds
                 questionListWasFull = AnsweredQuestionNotifications.mayOmitQuestions(snapshot)
-                // Only an empty snapshot can still be missing this hook's
-                // question; one that can't be answered here won't improve.
+                // Only a snapshot with no replyable question can still gain one;
+                // one that can't be answered here won't improve.
                 if question == nil, !isFinalAttempt { return false }
             }
         }
@@ -3582,125 +3191,6 @@ final class AppModel: ObservableObject {
         for notification in posted {
             notifications?.dismiss(id: notification.id)
         }
-    }
-
-    func restoreCompletedPermissionWaits(now: Date) {
-        for (sessionId, restore) in permissionStatusRestores {
-            guard let loc = locateIndex(sessionId),
-                  projects[loc.p].sessions[loc.s].status == .waiting,
-                  sessionSemantics.statusClock.timestamp(for: sessionId) == restore.statusTimestamp else {
-                continue
-            }
-            if inputWaits[sessionId] == nil {
-                guard permissionNotificationTokens[sessionId] == nil,
-                      restore.status != .waiting,
-                      !restore.observedPendingRequestIds.isEmpty,
-                      let snapshot = projects[loc.p].sessions[loc.s].agentActivity,
-                      snapshot.isFresh(at: now),
-                      snapshot.copilotSessionId?.lowercased() == restore.observedRootSessionId?.lowercased(),
-                      snapshot.conversationEpoch == restore.observedConversationEpoch,
-                      snapshot.copilotSessionId?.lowercased() == resumeMarkerValue(
-                        sessionId: sessionId, suffix: "copilot-session"
-                      )?.lowercased(),
-                      (snapshot.updatedAtMilliseconds ?? .min) > restore.statusTimestamp,
-                      snapshot.pendingPermissionRequestIds?.isEmpty == true,
-                      snapshot.trackedUserInputs?.isEmpty == true,
-                      snapshot.trackedElicitations?.isEmpty == true else {
-                    continue
-                }
-            }
-            restoreStatusAfterTransientPermission(
-                sessionId: sessionId, location: loc, restore: restore, now: now
-            )
-        }
-    }
-
-    private func restoreStatusAfterTransientPermission(
-        sessionId: String,
-        location: (p: Int, s: Int),
-        restore: PermissionStatusRestore,
-        now: Date
-    ) {
-        guard sessionSemantics.statusClock.timestamp(for: sessionId) == restore.statusTimestamp else {
-            return
-        }
-        var session = projects[location.p].sessions[location.s]
-        let foreground = runtimeForegroundActivity(for: session, now: now)
-        if inputWaits[sessionId] != nil {
-            guard inputWaitWasResolved(
-                for: session,
-                foreground: foreground,
-                now: now
-            ) else { return }
-        }
-        let crossEpoch = inputWaits[sessionId].map {
-            session.agentActivity?.conversationEpoch != $0.context.conversationEpoch
-        } ?? false
-        let useProjectedStatus = restore.status == .waiting || crossEpoch
-        let restoredStatus = useProjectedStatus
-            ? projectedStatus(for: session, foreground: foreground, now: now)
-            : restore.status
-        guard restoredStatus != .waiting else { return }
-        session.status = restoredStatus
-        session.statusIsRuntimeDerived = useProjectedStatus
-        session.statusText = crossEpoch ? nil : restore.statusText
-        session.runningStartedAtMilliseconds = restoredStatus == .running
-            ? (session.runningStartedAtMilliseconds
-                ?? trustedForegroundTransitionMilliseconds(sessionId: sessionId, snapshot: session.agentActivity)
-                ?? restore.statusTimestamp)
-            : nil
-        if restoredStatus == .idle {
-            session.runningStatusTimestampMilliseconds = nil
-            session.runningRequestIdentity = nil
-        }
-        session.scheduledTurnActive = restore.scheduledTurnActive
-        session.restoreFinishedUnseen(restore.finishedUnseen)
-        session.turnCompleted = restore.turnCompleted
-        projects[location.p].sessions[location.s] = session
-
-        if restore.backgroundAgentsSuppressed {
-            backgroundAgentsSuppressed.insert(sessionId)
-        } else {
-            backgroundAgentsSuppressed.remove(sessionId)
-        }
-        if restore.completionPending {
-            completionPending.insert(sessionId)
-        } else {
-            completionPending.remove(sessionId)
-        }
-        if let baseline = restore.foregroundIdleGenerationBaseline {
-            foregroundIdleGenerationBaselines[sessionId] = baseline
-        } else {
-            foregroundIdleGenerationBaselines.removeValue(forKey: sessionId)
-        }
-
-        sessionSemantics.statusClock.seed(
-            sessionId: sessionId,
-            timestamp: restore.statusTimestamp
-        )
-        sessionSemantics.promptSafetyClock.seed(
-            sessionId: sessionId,
-            timestamp: restore.promptStatusTimestamp
-        )
-        persistPermissionStatus(
-            sessionId,
-            restoredStatus,
-            restore.statusTimestamp,
-            restore.promptStatusTimestamp
-        )
-        cancelWaitingNotifications(sessionId: sessionId)
-        dismissAnsweredQuestionNotifications(sessionId: sessionId, now: now)
-        updateDockBadge()
-        if restore.completionPending {
-            postCompletionIfReady(sessionId: sessionId)
-        }
-    }
-
-    /// Scheduled pre/post hooks reaffirm background activity but do not describe
-    /// foreground ownership. Keep them out of the prompt-safety clock so they cannot
-    /// invalidate an already-settled foreground snapshot.
-    nonisolated static func advancesPromptSafetyClock(source: String?) -> Bool {
-        SessionSemantics.advancesPromptSafetyClock(source: source)
     }
 
     private func shouldClearResumeMarkers(
@@ -3783,8 +3273,6 @@ final class AppModel: ObservableObject {
         if let unreadMarker {
             guard let loc = locateIndex(sessionId),
                   projects[loc.p].sessions[loc.s].unreadMarker == unreadMarker else { return }
-            // A permission wait may be hiding the finished dot this read covers.
-            permissionStatusRestores[sessionId]?.finishedUnseen = false
         }
         clearUnread(sessionId: sessionId, includingManualMark: true)
     }
@@ -4037,9 +3525,9 @@ final class AppModel: ObservableObject {
         var lines: [String] = []
         for p in projects {
             for s in p.sessions {
-                let extra = (s.parked?.label ?? s.statusText).map { " — \($0)" } ?? ""
+                let extra = s.parked.map { " — \($0.label)" } ?? ""
                 let unread = s.isUnread ? " [unread]" : ""
-                lines.append("\(p.name)/\(s.title)  \(s.displayStatus.rawValue)\(unread)\(extra)  \(s.id)")
+                lines.append("\(p.name)/\(s.title)  \(s.status.rawValue)\(unread)\(extra)  \(s.id)")
             }
         }
         return lines.isEmpty ? "(no sessions)" : lines.joined(separator: "\n")
@@ -4109,53 +3597,26 @@ final class AppModel: ObservableObject {
                     copilotSessionId: resumeMarkerValue(sessionId: sid, suffix: "copilot-session"),
                     ledgerRecords: ledgerRecords.map { records in records.filter { $0.sessionId == sid } }
                 )
-                let restored = restoredStatusState(forSession: sid)
-                let status = restored.status
-                let statusTimestamp = restored.statusTimestamp
+                // Status starts idle and the first scan applies the tracker's reading. A
+                // running turn's start is kept only for the request a live tracker
+                // still shows on disk.
                 let diskSnapshot: AgentActivitySnapshot? = {
                     let url = agentActivityDirectory.appendingPathComponent("\(sid).agent-activity.json")
                     guard let data = try? Data(contentsOf: url),
-                          let decoded = try? JSONDecoder().decode(AgentActivitySnapshot.self, from: data) else {
+                          let decoded = try? JSONDecoder().decode(AgentActivitySnapshot.self, from: data),
+                          decoded.isFresh() else {
                         return nil
                     }
                     return decoded
                 }()
-                let diskRequestIdentity = trustedRunningRequestIdentity(sessionId: sid, snapshot: diskSnapshot)
-                let matchesRequestIdentity = diskRequestIdentity != nil
-                    && diskRequestIdentity == projects[pi].sessions[si].runningRequestIdentity
-                let matchesPersistedRequest = statusTimestamp != nil
-                    && (projects[pi].sessions[si].runningStatusTimestampMilliseconds == statusTimestamp
-                        || matchesRequestIdentity)
-                let persistedStart = matchesPersistedRequest
-                    ? projects[pi].sessions[si].runningStartedAtMilliseconds.flatMap {
-                        $0 <= (statusTimestamp ?? .max) ? $0 : nil
-                    }
-                    : nil
-                projects[pi].sessions[si].status = status
-                projects[pi].sessions[si].runningStartedAtMilliseconds = status == .idle
-                    ? nil
-                    : (persistedStart ?? statusTimestamp ?? SessionArtifacts.currentStatusTimestamp())
-                projects[pi].sessions[si].runningStatusTimestampMilliseconds = status == .idle
-                    ? nil
-                    : statusTimestamp
-                if status == .idle {
+                let diskRequestIdentity = isActivitySnapshotTrustedForSessionMetadata(
+                    sessionId: sid, snapshot: diskSnapshot
+                ) ? Self.runningRequestIdentity(diskSnapshot) : nil
+                if diskRequestIdentity == nil
+                    || diskRequestIdentity != projects[pi].sessions[si].runningRequestIdentity {
+                    projects[pi].sessions[si].runningStartedAtMilliseconds = nil
                     projects[pi].sessions[si].runningRequestIdentity = nil
-                } else if persistedStart == nil {
-                    projects[pi].sessions[si].runningRequestIdentity = diskRequestIdentity
                 }
-                if let context = restored.inputWait, let timestamp = statusTimestamp,
-                   status == .waiting {
-                    inputWaits[sid] = InputWaitState(context: context, timestamp: timestamp)
-                }
-                sessionSemantics.statusClock.seed(
-                    sessionId: sid,
-                    timestamp: statusTimestamp
-                )
-                sessionSemantics.promptSafetyClock.seed(
-                    sessionId: sid,
-                    timestamp: restored.promptStatusTimestamp ?? statusTimestamp
-                )
-                projects[pi].sessions[si].statusText = nil
                 projects[pi].sessions[si].hasUnread = false
                 projects[pi].sessions[si].backgroundAgentsActive = FileManager.default.fileExists(
                     atPath: Paths.backgroundAgentsMarkerPath(sessionId: sid)
@@ -4163,30 +3624,6 @@ final class AppModel: ObservableObject {
             }
         }
         syncSessionNavigationHistory()
-    }
-
-    private func restoredStatusState(
-        forSession sessionId: String
-    ) -> (
-        status: SessionStatus, statusTimestamp: Int64?,
-        promptStatusTimestamp: Int64?, inputWait: InputWaitContext?
-    ) {
-        switch SessionArtifacts.loadStatusRecord(
-            sessionId: sessionId, sessionsDirectory: agentActivityDirectory
-        ) {
-        case .loaded(let record):
-            return (
-                record.status, record.statusTimestamp,
-                record.promptStatusTimestamp, record.inputWait
-            )
-        case .invalid:
-            // Restore busy and put the prompt clock at app startup time, so only fresh
-            // post-recovery background evidence can bypass an unreadable record.
-            NSLog("copilot-projects: invalid status record for \(sessionId); restoring busy")
-            return (.running, nil, SessionArtifacts.currentStatusTimestamp(), nil)
-        case .missing:
-            return (.idle, nil, nil, nil)
-        }
     }
 
     func scheduleSave() {

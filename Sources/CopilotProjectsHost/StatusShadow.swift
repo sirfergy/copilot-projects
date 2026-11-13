@@ -32,8 +32,6 @@ struct StatusShadow {
 
         // What decided `shown`.
         var status: SessionStatus?
-        var runtimeDerived: Bool?
-        var statusAt: Int64?
         var pending: Bool?
         var live: Bool?
 
@@ -73,7 +71,7 @@ struct StatusShadow {
     /// Logs a line when this comparison differs from the last one for the session.
     mutating func note(
         _ what: String, session: Session, shown: String, tracker: String, state: TrackerState,
-        live: Bool, statusAt: Int64?, now: Date
+        live: Bool, now: Date
     ) {
         let key = Key(what: what, sid: session.id)
         let kind = shown == tracker ? nil : "\(shown)|\(tracker)|\(state)"
@@ -83,8 +81,7 @@ struct StatusShadow {
         write(Line(
             t: Self.milliseconds(now), run: run, sid: session.id, what: what,
             shown: shown, tracker: tracker, state: state,
-            status: session.status, runtimeDerived: session.statusIsRuntimeDerived,
-            statusAt: statusAt, pending: session.hasPendingInput, live: live,
+            status: session.status, pending: session.hasPendingInput, live: live,
             updatedAt: snapshot?.updatedAt, turn: snapshot?.foregroundTurnActive,
             scheduled: snapshot?.scheduledTurnActive, error: snapshot?.error,
             runtime: snapshot?.runtimeActivity
@@ -157,18 +154,18 @@ extension AppModel {
             // The first pass has no tracker-only status to hold, so it starts from
             // the one shown.
             let tracker = Self.trackerOnly(
-                snapshot, held: statusShadow.held[session.id] ?? session.displayStatus,
+                snapshot, held: statusShadow.held[session.id] ?? session.status,
                 gone: !isLive || session.trackerWarning != nil, now: now)
             // The same label code, with only the status source swapped. The finished
             // and unread flags are set by past transitions, so they are carried over.
             var trackerOnly = session
-            trackerOnly.status = tracker.status
+            trackerOnly.status = tracker.state != .gone && snapshot?.hasPendingInput == true
+                ? .waiting : tracker.status
             trackerOnly.agentActivity = tracker.state == .gone ? nil : snapshot
-            statusShadow.held[session.id] = trackerOnly.displayStatus
+            statusShadow.held[session.id] = trackerOnly.status
             statusShadow.note(
                 "status", session: session, shown: session.attentionLabel,
-                tracker: trackerOnly.attentionLabel, state: tracker.state, live: isLive,
-                statusAt: sessionSemantics.statusClock.timestamp(for: session.id), now: now
+                tracker: trackerOnly.attentionLabel, state: tracker.state, live: isLive, now: now
             )
         }
         statusShadow.end(except: sessionIds, now: now)

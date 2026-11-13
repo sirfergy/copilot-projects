@@ -55,7 +55,7 @@ final class SessionParkingTests: XCTestCase {
             let live = session.id
             let processes = processes
             model = AppModel(
-                stateRepository: repository, persistPermissionStatus: { _, _, _, _ in },
+                stateRepository: repository,
                 isAppActive: { false }, agentActivityDirectory: sessions, resumeMarkerDirectory: sessions,
                 remotePromptLiveSessions: { _ in [live] },
                 remoteSessionBackendAvailable: { true },
@@ -211,9 +211,7 @@ final class SessionParkingTests: XCTestCase {
 
         // The row, its marker and its place on the wire all outlive the stop.
         f.model.handleExit(sessionId: id)
-        f.model.setStatus(
-            sessionId: id, status: .idle, text: nil, source: "session-end", copilotSessionId: f.copilotId
-        )
+        f.model.sessionEnded(sessionId: id, copilotSessionId: f.copilotId)
         XCTAssertEqual(f.model.parkedState(id), .parked)
         XCTAssertTrue(FileManager.default.fileExists(atPath: f.marker.path))
         XCTAssertNil(f.model.controller(for: id), "a parked session must not get a terminal")

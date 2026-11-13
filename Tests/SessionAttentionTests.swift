@@ -74,6 +74,10 @@ final class SessionAttentionTests: XCTestCase {
         for (index, entry) in cases.enumerated() {
             entry.apply(&model.projects[0].sessions[index])
         }
+        // A listed question or budget request is what makes its session wait. The
+        // others have a running Copilot and no tracker reading, so they hold.
+        model.setLiveAgentSessionsForTesting(Set(project.sessions.map(\.id)))
+        model.reconcileStatus(now: Date())
 
         let published = model.remoteWorkspaceSnapshot().projects[0].sessions
         for (index, entry) in cases.enumerated() {

@@ -18,119 +18,11 @@ final class StatusShadowTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    private func snapshot(
-        processing: Bool?, turn: Bool = false, scheduled: Bool = false, age: TimeInterval = 1,
-        error: String? = nil, permissions: [String] = [], at now: Date
-    ) -> AgentActivitySnapshot {
-        let updated = now.addingTimeInterval(-age)
-        return AgentActivitySnapshot(
-            schemaVersion: 1,
-            updatedAt: updated.formatted(Date.ISO8601FormatStyle(includingFractionalSeconds: true)),
-            foregroundTurnActive: turn, scheduledTurnActive: scheduled, activeSubagents: [],
-            schedules: [], idleGeneration: 1, lastIdleAborted: false, error: error,
-            pendingPermissionRequestIds: permissions, copilotSessionId: "owner",
-            conversationEpoch: "epoch",
-            runtimeActivity: processing.map {
-                RuntimeActivitySnapshot(
-                    processing: $0,
-                    observedAtMilliseconds: Int64(updated.timeIntervalSince1970 * 1_000),
-                    idleAtMilliseconds: nil, error: nil)
-            }
-        )
-    }
-
     private func logged(_ shadow: StatusShadow) throws -> [[String: Any]] {
         shadow.queue.sync {}
         return try String(contentsOf: shadow.url, encoding: .utf8).split(separator: "\n").map {
             try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
         }
-    }
-
-    func testThePassLogsHeldAliveAndGone() throws {
-        let session = Session(title: "shadow", cwd: root.path)
-        let sid = session.id
-        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(
-            projects: [Project(name: "shadow", cwd: root.path, sessions: [session])],
-            selectedProjectId: nil))
-        var live: Set<String> = [sid]
-        let model = AppModel(
-            stateRepository: repository, isAppActive: { false },
-            agentActivityDirectory: root, resumeMarkerDirectory: root,
-            remotePromptLiveSessions: { _ in live }
-        )
-        func lines(_ what: String) throws -> [[String: Any]] {
-            try logged(model.statusShadow).filter { $0["what"] as? String == what }
-        }
-        func publish(_ snapshot: AgentActivitySnapshot) throws {
-            try Data("owner".utf8).write(to: root.appendingPathComponent("\(sid).copilot-session"))
-            try JSONEncoder().encode(snapshot)
-                .write(to: root.appendingPathComponent("\(sid).agent-activity.json"), options: .atomic)
-            model.refreshAgentActivitySnapshots()
-        }
-        let hook = SessionArtifacts.currentStatusTimestamp() - 10_000
-
-        // A hook says running and there is no tracker: tracker-only holds the running
-        // it first saw. Then a hook says idle, which tracker-only never hears.
-        model.setStatus(sessionId: sid, status: .running, text: nil, timestamp: hook)
-        model.reconcileStatus()
-        model.setStatus(sessionId: sid, status: .idle, text: nil, timestamp: hook + 1)
-        for _ in 0..<3 { model.reconcileStatus() }
-        XCTAssertEqual(model.projects[0].sessions[0].displayStatus, .idle, "the shadow changes nothing shown")
-        var status = try lines("status")
-        XCTAssertEqual(status.count, 1, "polls that find the same disagreement log nothing")
-        XCTAssertEqual(status[0]["tracker"] as? String, "Running")
-        XCTAssertEqual(status[0]["state"] as? String, "held")
-        XCTAssertEqual(status[0]["status"] as? String, "idle")
-        XCTAssertEqual(status[0]["statusAt"] as? Int64, hook + 1)
-
-        // The tracker reports idle: its reading decides.
-        try publish(snapshot(processing: false, at: Date()))
-        model.reconcileStatus()
-        status = try lines("status")
-        XCTAssertEqual(status.count, 2)
-        XCTAssertEqual(status[1]["shown"] as? String, status[1]["tracker"] as? String)
-
-        // The tracker lists a pending permission, then another Copilot takes the tab:
-        // tracker-only keeps the waiting it last showed.
-        try publish(snapshot(processing: false, permissions: ["permission"], at: Date()))
-        model.reconcileStatus()
-        try Data("another".utf8).write(to: root.appendingPathComponent("\(sid).copilot-session"))
-        model.refreshAgentActivitySnapshots()
-        model.reconcileStatus()
-        XCTAssertEqual(model.projects[0].sessions[0].attentionLabel, "Waiting for input")
-        XCTAssertEqual(try lines("status").count, 2, "a held status keeps a pending question's waiting")
-
-        // A hook says waiting for a permission the live tracker doesn't list.
-        model.setStatus(sessionId: sid, status: .waiting, text: nil, timestamp: hook + 2)
-        try publish(snapshot(processing: true, turn: true, at: Date()))
-        model.reconcileStatus()
-        XCTAssertEqual(model.projects[0].sessions[0].displayStatus, .waiting)
-        status = try lines("status")
-        XCTAssertEqual(status.count, 3)
-        XCTAssertEqual(status[2]["shown"] as? String, "Waiting for input")
-        XCTAssertEqual(status[2]["tracker"] as? String, "Running")
-        XCTAssertEqual(status[2]["state"] as? String, "alive")
-        XCTAssertEqual((status[2]["runtime"] as? [String: Any])?["processing"] as? Bool, true)
-
-        // Another Copilot now owns the tab, so that snapshot no longer speaks for it;
-        // then the agent process exits, comes back, and the 45 s warning goes up.
-        try Data("another".utf8).write(to: root.appendingPathComponent("\(sid).copilot-session"))
-        model.refreshAgentActivitySnapshots()
-        model.reconcileStatus()
-        live = []
-        model.reconcileStatus()
-        live = [sid]
-        model.reconcileStatus()
-        model.projects[0].sessions[0].trackerWarning = "missing"
-        model.reconcileStatus()
-        var gone = model.projects[0].sessions[0]
-        gone.status = .idle
-        gone.agentActivity = nil
-        XCTAssertEqual(
-            try lines("status").dropFirst(3).map { "\($0["state"]!) \($0["tracker"]!)" },
-            ["held Running", "gone \(gone.attentionLabel)", "held \(gone.attentionLabel)",
-             "gone \(gone.attentionLabel)"])
     }
 
     func testASleepEndsADisagreementAtTheLastPassBeforeIt() throws {
@@ -150,12 +42,10 @@ final class StatusShadowTests: XCTestCase {
         func pass(_ wall: TimeInterval, _ uptime: TimeInterval) {
             model.recordStatusShadow(now: start.addingTimeInterval(wall), uptime: awake + uptime)
         }
-        // There is no tracker, so tracker-only holds the idle it first saw. Then a
-        // hook says running.
+        // There is no tracker, so tracker-only holds the idle it first saw. Then
+        // the status shown says running.
         pass(0, 0)
-        model.setStatus(
-            sessionId: sid, status: .running, text: nil,
-            timestamp: SessionArtifacts.currentStatusTimestamp() - 10_000)
+        model.setStatus(.running, sessionId: sid)
         // Two passes a second apart, ten minutes with no pass while the Mac is
         // awake, then a ten-minute sleep: only the uptime clock tells them apart.
         pass(1, 1)
@@ -176,7 +66,7 @@ final class StatusShadowTests: XCTestCase {
         for index in 0...40 {
             shadow.note(
                 "status", session: session, shown: index.isMultiple(of: 2) ? "Running" : "Idle",
-                tracker: "Idle", state: .held, live: true, statusAt: nil, now: Date())
+                tracker: "Idle", state: .held, live: true, now: Date())
         }
         shadow.end(except: [], now: Date())
         shadow.end(except: [], now: Date())

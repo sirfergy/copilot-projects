@@ -26,10 +26,9 @@ struct AgentActivitySnapshot: Codable, Equatable {
     /// Wall-clock time (ISO8601) of the most recent `foregroundTurnActive`
     /// transition — set at root user input/turn_start/assistant.idle/session.idle,
     /// not at each model iteration's turn_end or each heartbeat. Carries
-    /// the CLI event's causal timestamp (`normalizedTimestamp(event.timestamp)`),
-    /// the same time base the status hooks use, so it's directly comparable to
-    /// the status-event clock. A turn the tracker ends from two idle heartbeat
-    /// readings, because no idle event arrived, keeps its start time here.
+    /// the CLI event's causal timestamp (`normalizedTimestamp(event.timestamp)`).
+    /// A turn the tracker ends from two idle heartbeat readings, because no idle
+    /// event arrived, keeps its start time here.
     /// Optional (nil default) so snapshots written before this field still decode.
     var foregroundTransitionAt: String? = nil
     var scheduledTurnActive: Bool
@@ -46,8 +45,7 @@ struct AgentActivitySnapshot: Codable, Equatable {
     /// (nil default) for backward-compatible decoding of older heartbeats.
     var trackedElicitations: [TrackedElicitation]? = nil
     /// Permission requests currently awaiting a CLI response. Always present in
-    /// new extension snapshots (including `[]`); nil identifies an older
-    /// extension that cannot validate permission-notification hooks.
+    /// new extension snapshots (including `[]`).
     var pendingPermissionRequestIds: [String]? = nil
     /// The session's effective model (name + reasoning effort + context tier).
     /// Optional (nil default) so older heartbeats without it still decode.
@@ -71,7 +69,6 @@ struct AgentActivitySnapshot: Codable, Equatable {
     /// Absent for older trackers; a present but incomplete observation
     /// is unknown, not evidence that the foreground is idle.
     var runtimeActivity: RuntimeActivitySnapshot? = nil
-    var inputCompletions: [String: Int64]? = nil
     var sessionIdleAtMilliseconds: Int64? = nil
     var workflow: RemoteSessionWorkflow? = nil
     var currentIntent: String? = nil
@@ -83,8 +80,8 @@ struct AgentActivitySnapshot: Codable, Equatable {
     var lastTurnError: TrackedTurnError? = nil
 
     func remoteLastError() -> TranscriptTurnError? {
-        // A disconnected tracker can't see newer requests the status hooks
-        // still report, so its last failure may be stale.
+        // A disconnected tracker can't see newer requests, so its last failure
+        // may be stale.
         guard !reportsTerminalDisconnect,
               let lastTurnError,
               let message = lastTurnError.message?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -110,8 +107,7 @@ struct AgentActivitySnapshot: Codable, Equatable {
 
     func runtimeForegroundActivity(
         expectedSessionId: String?,
-        now: Date,
-        minimumObservationMilliseconds: Int64?
+        now: Date
     ) -> ForegroundActivity? {
         guard let runtimeActivity else { return nil }
         let nowMs = Int64(now.timeIntervalSince1970 * 1_000)
@@ -126,8 +122,7 @@ struct AgentActivitySnapshot: Codable, Equatable {
         guard runtimeActivity.error == nil,
               let processing = runtimeActivity.processing,
               let observed = runtimeActivity.observedAtMilliseconds,
-              observed <= nowMs, nowMs - observed <= 15_000,
-              observed > (minimumObservationMilliseconds ?? .min) else {
+              observed <= nowMs, nowMs - observed <= 15_000 else {
             return .unknown
         }
         return processing ? .working : .idle
@@ -157,12 +152,10 @@ struct AgentActivitySnapshot: Codable, Equatable {
     }
 
     /// True when the last heartbeat carried a terminal RPC-connection error
-    /// (closed/disposed). A disconnected extension can no longer observe
-    /// `assistant.idle`/`session.idle`, so its `foregroundTurnActive` (and
-    /// other in-flight) claims are stale and must not be treated as authoritative
-    /// evidence that a foreground turn is still running — otherwise the 5s
-    /// heartbeat republishes the stuck snapshot fresh and the tab reads "working"
-    /// forever. Matches the vscode-jsonrpc terminal wordings.
+    /// (closed/disposed). A disconnected extension can no longer observe the CLI,
+    /// yet its 5s heartbeat republishes its last state as fresh, so the status
+    /// rule takes such a tracker as gone. Matches the vscode-jsonrpc terminal
+    /// wordings.
     var reportsTerminalDisconnect: Bool {
         guard let error else { return false }
         let lowered = error.lowercased()
@@ -170,24 +163,16 @@ struct AgentActivitySnapshot: Codable, Equatable {
             || lowered.contains("connection is disposed")
     }
 
-    /// `foregroundTransitionAt` as epoch milliseconds, matching the status-event
-    /// clock's units. This is the causal time of the current foreground state
-    /// (turn_start → active, assistant.idle/session.idle → inactive), so recovery and
-    /// demotion seed the status clock from it rather than `updatedAt` — otherwise
-    /// an unrelated republish (heartbeat, question, model/subagent event) could
-    /// advance the clock past a delayed status hook and silently drop it. Older
-    /// snapshots predating the field return nil and cannot drive reconciliation.
+    /// `foregroundTransitionAt` as epoch milliseconds: the causal time of the
+    /// current foreground state (turn_start → active, assistant.idle/session.idle
+    /// → inactive), which starts the elapsed-turn timer.
     var foregroundTransitionMilliseconds: Int64? {
         guard let value = foregroundTransitionAt,
               let transition = AgentTimestamp.parse(value) else { return nil }
         return Int64(transition.timeIntervalSince1970 * 1_000)
     }
 
-    /// `updatedAt` as epoch milliseconds. Every `publish()` rewrites `updatedAt`,
-    /// so for a disconnected session the 5s heartbeat keeps this ~current; it is
-    /// the freshest evidence time available when a snapshot only carries a
-    /// terminal-disconnect error (no clean turn transition), used to order the
-    /// disconnect demotion against the status-event clock.
+    /// `updatedAt` as epoch milliseconds. Every `publish()` rewrites `updatedAt`.
     var updatedAtMilliseconds: Int64? {
         guard let updated = AgentTimestamp.parse(updatedAt) else { return nil }
         return Int64(updated.timeIntervalSince1970 * 1_000)

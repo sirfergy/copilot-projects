@@ -473,6 +473,7 @@ final class NotificationReplyWiringTests: XCTestCase {
     private func makeHarness(
         retryDelays: [UInt64] = [5_000_000, 5_000_000],
         permissionDelay: UInt64 = 1_000_000_000,
+        live: Bool = true,
         loader: @escaping @Sendable (String) -> TranscriptSnapshot = { _ in
             TranscriptSnapshot(schemaVersion: 3, updatedAt: Date(), copilotSessionId: "other", turns: [])
         }
@@ -493,10 +494,10 @@ final class NotificationReplyWiringTests: XCTestCase {
             completionTranscriptLoader: loader,
             permissionNotificationDelayNanoseconds: permissionDelay,
             elicitationReplyRetryDelaysNanoseconds: retryDelays,
-            persistPermissionStatus: { _, _, _, _ in },
             isAppActive: { false },
             agentActivityDirectory: sessions,
             resumeMarkerDirectory: sessions,
+            remotePromptLiveSessions: { _ in live ? [session.id] : [] },
             kittyImageDiskStore: RemoteKittyImageDiskStore(
                 root: root.appendingPathComponent("kitty-images", isDirectory: true)
             )
@@ -514,6 +515,7 @@ final class NotificationReplyWiringTests: XCTestCase {
         at date: Date = Date(),
         receipts: Bool = true,
         epoch: String? = nil,
+        turn: Bool = false,
         userInputs: [TrackedUserInput] = [],
         elicitations: [TrackedElicitation] = [],
         pendingPermissionRequestIds: [String] = [],
@@ -523,7 +525,7 @@ final class NotificationReplyWiringTests: XCTestCase {
         var snapshot = AgentActivitySnapshot(
             schemaVersion: AgentActivitySnapshot.currentSchemaVersion,
             updatedAt: date.ISO8601Format(.init(includingFractionalSeconds: true)),
-            foregroundTurnActive: false,
+            foregroundTurnActive: turn,
             scheduledTurnActive: false,
             activeSubagents: [],
             schedules: [],
@@ -548,23 +550,6 @@ final class NotificationReplyWiringTests: XCTestCase {
         )
     }
 
-    private func writeInputWait(_ harness: Harness, epoch: String, timestamp: Int64) throws {
-        let record = SessionStatusRecord(
-            status: .waiting,
-            statusTimestamp: timestamp,
-            promptStatusTimestamp: timestamp,
-            inputWait: InputWaitContext(
-                senderSessionId: copilotSessionId,
-                rootSessionId: copilotSessionId,
-                conversationEpoch: epoch
-            )
-        )
-        try JSONEncoder().encode(record).write(
-            to: harness.sessions.appendingPathComponent("\(harness.session.id).status-record.json"),
-            options: .atomic
-        )
-    }
-
     private let question = TrackedUserInput(
         requestId: "ask-1",
         question: "Use **Postgres** or SQLite?",
@@ -574,16 +559,32 @@ final class NotificationReplyWiringTests: XCTestCase {
         agentId: nil
     )
 
+    /// How the tracker lists an `ask_user` before it has the request's real id.
+    private let placeholder = TrackedUserInput(
+        requestId: "\(NotificationReplyResolver.syntheticRequestPrefix)call",
+        question: "Use **Postgres** or SQLite?",
+        choices: ["Postgres", "SQLite"],
+        allowFreeform: false,
+        requestedAt: "2026-10-05T10:00:00.000Z",
+        agentId: nil
+    )
+
+    /// Publishes a tracker snapshot and has the app read it.
     @MainActor
-    private func ask(_ harness: Harness, timestamp: Int64 = 100) {
-        harness.model.setStatus(
-            sessionId: harness.session.id,
-            status: .waiting,
-            text: nil,
-            timestamp: timestamp,
-            copilotSessionId: copilotSessionId,
-            notification: .elicitation
+    private func publish(
+        _ harness: Harness,
+        at date: Date = Date(),
+        epoch: String? = nil,
+        turn: Bool = false,
+        userInputs: [TrackedUserInput] = [],
+        elicitations: [TrackedElicitation] = [],
+        pendingPermissionRequestIds: [String] = []
+    ) throws {
+        try write(
+            harness, at: date, epoch: epoch, turn: turn, userInputs: userInputs,
+            elicitations: elicitations, pendingPermissionRequestIds: pendingPermissionRequestIds
         )
+        harness.model.refreshAgentActivitySnapshots()
     }
 
     private func settle(_ nanoseconds: UInt64 = 60_000_000) async {
@@ -595,9 +596,7 @@ final class NotificationReplyWiringTests: XCTestCase {
     @MainActor
     func testQuestionAlreadyInTheSnapshotPostsImmediatelyWithReply() throws {
         let harness = try makeHarness()
-        try writeInputWait(harness, epoch: epoch, timestamp: 100)
-        try write(harness, userInputs: [question])
-        ask(harness)
+        try publish(harness, userInputs: [question])
 
         let event = try XCTUnwrap(harness.spy.events.first)
         XCTAssertEqual(harness.spy.events.count, 1)
@@ -612,28 +611,22 @@ final class NotificationReplyWiringTests: XCTestCase {
     }
 
     @MainActor
-    func testSessionsWithoutAReplyCapableTrackerPostImmediatelyAsBefore() throws {
-        let missing = try makeHarness()
-        ask(missing)
-        XCTAssertEqual(missing.spy.events.count, 1)
-        XCTAssertNil(missing.spy.events.first?.reply)
-        XCTAssertNil(missing.spy.events.first?.body)
-
-        let legacy = try makeHarness()
-        try write(legacy, receipts: false, userInputs: [question])
-        ask(legacy)
-        XCTAssertEqual(legacy.spy.events.count, 1)
-        XCTAssertNil(legacy.spy.events.first?.reply)
-        XCTAssertNil(legacy.spy.events.first?.body)
+    func testQuestionWithoutAReceiptBoundSnapshotPostsWithoutAReply() throws {
+        let harness = try makeHarness()
+        try write(harness, receipts: false, userInputs: [question])
+        harness.model.refreshAgentActivitySnapshots()
+        XCTAssertEqual(harness.spy.events.count, 1)
+        XCTAssertNil(harness.spy.events.first?.reply)
+        XCTAssertNil(harness.spy.events.first?.body)
     }
 
     @MainActor
-    func testQuestionPublishedAfterTheHookIsFoundByRetry() async throws {
+    func testQuestionListedFirstUnderASyntheticIdIsFoundByRetry() async throws {
         let harness = try makeHarness(retryDelays: [30_000_000, 30_000_000, 30_000_000])
-        try write(harness)
         let posted = expectation(description: "question posted")
         harness.spy.onPost = { _ in posted.fulfill() }
-        ask(harness)
+        try publish(harness, userInputs: [placeholder])
+        XCTAssertEqual(harness.model.projects[0].sessions[0].status, .waiting)
         XCTAssertTrue(harness.spy.events.isEmpty)
 
         try write(harness, userInputs: [question])
@@ -646,10 +639,9 @@ final class NotificationReplyWiringTests: XCTestCase {
     @MainActor
     func testRetriesEndWithOnePlainNotification() async throws {
         let harness = try makeHarness(retryDelays: [5_000_000, 5_000_000, 5_000_000])
-        try write(harness)
         let posted = expectation(description: "fallback posted")
         harness.spy.onPost = { _ in posted.fulfill() }
-        ask(harness)
+        try publish(harness, userInputs: [placeholder])
         await fulfillment(of: [posted], timeout: 2)
         await settle()
         XCTAssertEqual(harness.spy.events.count, 1)
@@ -660,27 +652,21 @@ final class NotificationReplyWiringTests: XCTestCase {
     @MainActor
     func testLeavingWaitingCancelsThePendingNotification() async throws {
         let harness = try makeHarness(retryDelays: [20_000_000, 20_000_000])
-        try write(harness)
-        ask(harness)
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .running, text: nil, timestamp: 101
-        )
+        try publish(harness, userInputs: [placeholder])
+        try publish(harness)
+        XCTAssertEqual(harness.model.projects[0].sessions[0].status, .idle)
         try write(harness, userInputs: [question])
         await settle(120_000_000)
         XCTAssertTrue(harness.spy.events.isEmpty)
     }
 
     @MainActor
-    func testLaterWaitingStatusDoesNotDropTheNotification() async throws {
+    func testAnotherPromptWithinTheWaitDoesNotDropTheNotification() async throws {
         let harness = try makeHarness(retryDelays: [20_000_000, 20_000_000])
-        try write(harness)
         let posted = expectation(description: "question posted")
         harness.spy.onPost = { _ in posted.fulfill() }
-        ask(harness)
-        // A second question while already waiting arrives without a notification.
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .waiting, text: nil, timestamp: 101
-        )
+        try publish(harness, userInputs: [placeholder])
+        try publish(harness, userInputs: [placeholder], pendingPermissionRequestIds: ["permission"])
         try write(harness, userInputs: [question])
         await fulfillment(of: [posted], timeout: 2)
         await settle()
@@ -689,24 +675,27 @@ final class NotificationReplyWiringTests: XCTestCase {
     }
 
     @MainActor
-    func testNewerHookSupersedesAnEarlierPendingOne() async throws {
+    func testANewWaitSupersedesAnEarlierPendingOne() async throws {
         let harness = try makeHarness(retryDelays: [20_000_000, 20_000_000])
-        try write(harness)
-        let posted = expectation(description: "one notification for the newer hook")
+        let posted = expectation(description: "one notification for the newer wait")
         harness.spy.onPost = { _ in posted.fulfill() }
-        ask(harness, timestamp: 100)
-        ask(harness, timestamp: 101)
+        try publish(harness, userInputs: [placeholder])
+        try publish(harness)
+        try publish(harness, userInputs: [placeholder])
         await fulfillment(of: [posted], timeout: 2)
         await settle(100_000_000)
         XCTAssertEqual(harness.spy.events.count, 1)
     }
 
     @MainActor
-    func testChangedConversationPostsWithoutReply() throws {
-        let harness = try makeHarness(retryDelays: [1_000_000_000])
-        try writeInputWait(harness, epoch: "\(copilotSessionId):0", timestamp: 100)
-        try write(harness, userInputs: [question])
-        ask(harness)
+    func testChangedConversationPostsWithoutReply() async throws {
+        let harness = try makeHarness(retryDelays: [20_000_000, 20_000_000])
+        let posted = expectation(description: "question posted")
+        harness.spy.onPost = { _ in posted.fulfill() }
+        try publish(harness, userInputs: [placeholder])
+        // The question that turns up belongs to another conversation, not to this wait.
+        try write(harness, epoch: "\(copilotSessionId):2", userInputs: [question])
+        await fulfillment(of: [posted], timeout: 2)
         XCTAssertEqual(harness.spy.events.count, 1)
         XCTAssertNil(harness.spy.events[0].reply)
         XCTAssertNil(harness.spy.events[0].body)
@@ -715,7 +704,7 @@ final class NotificationReplyWiringTests: XCTestCase {
     @MainActor
     func testUnanswerableQuestionPostsImmediatelyWithoutRetrying() throws {
         let harness = try makeHarness(retryDelays: [1_000_000_000])
-        try write(harness, userInputs: [TrackedUserInput(
+        try publish(harness, userInputs: [TrackedUserInput(
             requestId: "ask-many",
             question: "Which **region**?",
             choices: ["a", "b", "c", "d", "e"],
@@ -723,7 +712,6 @@ final class NotificationReplyWiringTests: XCTestCase {
             requestedAt: "2026-10-05T10:00:00.000Z",
             agentId: nil
         )])
-        ask(harness)
         XCTAssertEqual(harness.spy.events.count, 1)
         let event = try XCTUnwrap(harness.spy.events.first)
         XCTAssertEqual(event.kind, .elicitation)
@@ -731,78 +719,16 @@ final class NotificationReplyWiringTests: XCTestCase {
         XCTAssertNil(event.reply)
     }
 
-    @MainActor
-    func testWaitResolvedByReconciliationCancelsThePendingQuestion() async throws {
-        for reentry in [nil, StatusNotificationKind.permission] {
-            let harness = try makeHarness(retryDelays: [50_000_000, 50_000_000])
-            try writeInputWait(harness, epoch: epoch, timestamp: 100)
-            try write(harness)
-            ask(harness)
-            XCTAssertTrue(harness.spy.events.isEmpty)
-
-            // The tracker shows nothing pending, so the wait resolves to idle.
-            harness.model.refreshAgentActivitySnapshots()
-            XCTAssertEqual(harness.model.projects[0].sessions[0].status, .idle)
-            harness.model.setStatus(
-                sessionId: harness.session.id, status: .waiting, text: nil, timestamp: 102,
-                copilotSessionId: copilotSessionId, notification: reentry
-            )
-            try write(harness, userInputs: [question])
-            await settle(200_000_000)
-            XCTAssertFalse(
-                harness.spy.events.contains { $0.kind == .elicitation },
-                "re-entered with \(String(describing: reentry))"
-            )
-        }
-    }
-
-    @MainActor
-    func testPermissionHookCancelsThePendingQuestion() async throws {
-        let harness = try makeHarness(retryDelays: [30_000_000, 30_000_000])
-        try write(harness)
-        ask(harness)
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .waiting, text: nil, timestamp: 101,
-            copilotSessionId: copilotSessionId, notification: .permission
-        )
-        try write(harness, userInputs: [question])
-        await settle(150_000_000)
-        XCTAssertFalse(harness.spy.events.contains { $0.kind == .elicitation })
-    }
-
     // MARK: answered elsewhere
 
-    private let form = TrackedElicitation(
-        requestId: "form-1",
-        message: "Ship it?",
-        mode: nil,
-        url: nil,
-        schema: .object([
-            "type": .string("object"),
-            "properties": .object(["ok": .object(["type": .string("boolean")])]),
-        ]),
-        elicitationSource: nil,
-        requestedAt: "2026-10-05T10:00:01.000Z",
-        agentId: nil
-    )
-
-    /// A question alert posted from a tracker snapshot taken at `start`,
-    /// with status timestamps on the same clock.
+    /// The alert for a question the tracker listed in its snapshot at `start`.
     @MainActor
     private func postTrackedQuestion(_ harness: Harness, start: Date) throws -> NotificationEvent {
-        let waitAt = Int64(start.timeIntervalSince1970 * 1_000)
-        try writeInputWait(harness, epoch: epoch, timestamp: waitAt)
-        try write(harness, at: start, userInputs: [question])
-        harness.model.refreshAgentActivitySnapshots()
-        ask(harness, timestamp: waitAt)
+        try publish(harness, at: start, userInputs: [question])
         let alert = try XCTUnwrap(harness.spy.events.last)
         XCTAssertEqual(alert.kind, .elicitation)
         XCTAssertEqual(alert.reply?.requestId, "ask-1")
         return alert
-    }
-
-    private func milliseconds(_ date: Date) -> Int64 {
-        Int64(date.timeIntervalSince1970 * 1_000)
     }
 
     @MainActor
@@ -810,69 +736,23 @@ final class NotificationReplyWiringTests: XCTestCase {
         let harness = try makeHarness()
         let start = Date().addingTimeInterval(-8)
         let alert = try postTrackedQuestion(harness, start: start)
-
-        // The answer's running hook can arrive before the tracker drops the question.
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .running, text: nil,
-            timestamp: milliseconds(start) + 500
-        )
         XCTAssertTrue(harness.spy.dismissed.isEmpty)
 
-        try write(harness, at: start.addingTimeInterval(1))
-        harness.model.refreshAgentActivitySnapshots()
+        try publish(harness, at: start.addingTimeInterval(1))
         XCTAssertEqual(harness.spy.dismissed, [alert.id])
 
-        try write(harness, at: start.addingTimeInterval(2))
-        harness.model.refreshAgentActivitySnapshots()
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .idle, text: nil,
-            timestamp: milliseconds(start) + 2_500
-        )
+        try publish(harness, at: start.addingTimeInterval(2))
         XCTAssertEqual(harness.spy.dismissed, [alert.id])
     }
 
     @MainActor
-    func testSessionWithoutATrackerWithdrawsTheAlertWhenItStopsWaiting() throws {
-        let harness = try makeHarness()
-        ask(harness)
-        let alert = try XCTUnwrap(harness.spy.events.first)
-        XCTAssertNil(alert.reply)
-        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+    func testTrackerThatGoesWithItsCopilotWithdrawsTheAlert() throws {
+        let harness = try makeHarness(live: false)
+        let alert = try postTrackedQuestion(harness, start: Date().addingTimeInterval(-8))
 
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .running, text: nil, timestamp: 101
-        )
+        try harness.model.removeTracker(sessionId: harness.session.id)
+        XCTAssertEqual(harness.model.projects[0].sessions[0].status, .idle)
         XCTAssertEqual(harness.spy.dismissed, [alert.id])
-    }
-
-    @MainActor
-    func testAnsweringOneOfTwoQuestionsWithdrawsOnlyItsAlert() throws {
-        let harness = try makeHarness()
-        let start = Date().addingTimeInterval(-8)
-        let waitAt = milliseconds(start)
-        try writeInputWait(harness, epoch: epoch, timestamp: waitAt)
-        try write(harness, at: start, elicitations: [form])
-        harness.model.refreshAgentActivitySnapshots()
-        ask(harness, timestamp: waitAt)
-        let formAlert = try XCTUnwrap(harness.spy.events.last)
-        XCTAssertEqual(formAlert.reply?.requestId, "form-1")
-
-        try write(harness, at: start.addingTimeInterval(1), userInputs: [question], elicitations: [form])
-        harness.model.refreshAgentActivitySnapshots()
-        ask(harness, timestamp: waitAt + 1_000)
-        let askAlert = try XCTUnwrap(harness.spy.events.last)
-        XCTAssertEqual(askAlert.reply?.requestId, "ask-1")
-        XCTAssertTrue(harness.spy.dismissed.isEmpty)
-
-        // The ask_user is answered from the watch while the form still waits.
-        try write(harness, at: start.addingTimeInterval(2), elicitations: [form])
-        harness.model.refreshAgentActivitySnapshots()
-        XCTAssertEqual(harness.spy.dismissed, [askAlert.id])
-        XCTAssertEqual(harness.model.projects[0].sessions[0].status, .waiting)
-
-        try write(harness, at: start.addingTimeInterval(3))
-        harness.model.refreshAgentActivitySnapshots()
-        XCTAssertEqual(harness.spy.dismissed, [askAlert.id, formAlert.id])
     }
 
     @MainActor
@@ -881,56 +761,36 @@ final class NotificationReplyWiringTests: XCTestCase {
         let start = Date().addingTimeInterval(-8)
         let alert = try postTrackedQuestion(harness, start: start)
 
-        // Expired, older than the alert, or from a restarted tracker that
-        // hasn't recovered its questions yet.
+        // Expired, or from a restarted tracker that hasn't recovered its questions yet.
         let restarted = "\(copilotSessionId):restarted"
-        for (date, snapshotEpoch) in [
-            (start.addingTimeInterval(-30), epoch),
-            (start.addingTimeInterval(-1), epoch),
-            (start.addingTimeInterval(1), restarted),
-        ] {
-            try write(harness, at: date, epoch: snapshotEpoch)
-            harness.model.refreshAgentActivitySnapshots()
-            XCTAssertTrue(harness.spy.dismissed.isEmpty, "\(date) \(snapshotEpoch)")
-            XCTAssertEqual(harness.model.projects[0].sessions[0].status, .waiting)
-        }
-
-        try write(harness, at: start.addingTimeInterval(2), epoch: restarted, userInputs: [question])
-        harness.model.refreshAgentActivitySnapshots()
+        try publish(harness, at: start.addingTimeInterval(-30))
+        XCTAssertEqual(harness.model.projects[0].sessions[0].status, .waiting)
         XCTAssertTrue(harness.spy.dismissed.isEmpty)
-        try write(harness, at: start.addingTimeInterval(3), epoch: restarted)
-        harness.model.refreshAgentActivitySnapshots()
-        XCTAssertEqual(harness.spy.dismissed, [alert.id])
+        try publish(harness, at: start.addingTimeInterval(1), epoch: restarted)
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+
+        try publish(harness, at: start.addingTimeInterval(2), epoch: restarted, userInputs: [question])
+        XCTAssertTrue(harness.spy.dismissed.isEmpty)
+        try publish(harness, at: start.addingTimeInterval(3), epoch: restarted)
+        XCTAssertTrue(harness.spy.dismissed.contains(alert.id))
     }
 
     @MainActor
-    func testPermissionWaitDuringAPendingQuestionKeepsItsAlert() async throws {
+    func testPermissionPromptDuringAPendingQuestionKeepsItsAlert() async throws {
         let harness = try makeHarness(permissionDelay: 5_000_000)
         let start = Date().addingTimeInterval(-8)
-        let waitAt = milliseconds(start)
         let alert = try postTrackedQuestion(harness, start: start)
 
-        try write(
+        try publish(
             harness, at: start.addingTimeInterval(1),
             userInputs: [question], pendingPermissionRequestIds: ["permission"]
         )
-        harness.model.refreshAgentActivitySnapshots()
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .waiting, text: nil, timestamp: waitAt + 1_000,
-            copilotSessionId: copilotSessionId, notification: .permission
-        )
         await settle()
-        try write(harness, at: start.addingTimeInterval(2), userInputs: [question])
-        harness.model.refreshAgentActivitySnapshots()
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .running, text: nil, timestamp: waitAt + 2_000
-        )
-        await settle()
-        harness.model.refreshAgentActivitySnapshots()
+        try publish(harness, at: start.addingTimeInterval(2), userInputs: [question])
         XCTAssertTrue(harness.spy.dismissed.isEmpty)
+        XCTAssertEqual(harness.spy.events.count, 1, "a prompt within the same wait posts no alert of its own")
 
-        try write(harness, at: start.addingTimeInterval(3))
-        harness.model.refreshAgentActivitySnapshots()
+        try publish(harness, at: start.addingTimeInterval(3))
         XCTAssertEqual(harness.spy.dismissed, [alert.id])
     }
 
@@ -949,24 +809,9 @@ final class NotificationReplyWiringTests: XCTestCase {
     }
 
     @MainActor
-    func testClosingTheSessionWithdrawsEveryOutstandingQuestionAlert() throws {
-        let harness = try makeHarness()
-        for timestamp in Int64(100)..<120 { ask(harness, timestamp: timestamp) }
-        let alerts = harness.spy.events.filter { $0.kind == .elicitation }.map(\.id)
-        XCTAssertEqual(alerts.count, 20)
-        XCTAssertTrue(harness.spy.dismissed.isEmpty)
-
-        harness.model.closeSession(
-            projectId: harness.model.projects[0].id, sessionId: harness.session.id
-        )
-        XCTAssertEqual(harness.spy.dismissed, alerts)
-    }
-
-    @MainActor
     func testSyntheticQuestionAlertWaitsForTheTurnToEnd() throws {
         let harness = try makeHarness()
         let start = Date().addingTimeInterval(-8)
-        let waitAt = milliseconds(start)
         let synthetic = TrackedElicitation(
             requestId: "synthetic::durable-ask-user::call",
             message: "Continue?",
@@ -977,27 +822,18 @@ final class NotificationReplyWiringTests: XCTestCase {
             requestedAt: "2026-10-05T10:00:00.000Z",
             agentId: nil
         )
-        try writeInputWait(harness, epoch: epoch, timestamp: waitAt)
-        try write(harness, at: start, elicitations: [synthetic])
-        harness.model.refreshAgentActivitySnapshots()
-        ask(harness, timestamp: waitAt)
+        try publish(harness, at: start, turn: true, elicitations: [synthetic])
         let alert = try XCTUnwrap(harness.spy.events.last)
         XCTAssertEqual(alert.kind, .elicitation)
 
-        // Another root event drops the synthetic entry and a parallel tool's
-        // hook reports activity while the ask_user still blocks the turn.
+        // Another root event drops the synthetic entry while the ask_user still
+        // blocks the turn.
         Thread.sleep(forTimeInterval: 0.01)
-        try write(harness, runtimeActivity: RuntimeActivitySnapshot(error: "unsupported"))
-        harness.model.refreshAgentActivitySnapshots()
-        XCTAssertEqual(harness.model.projects[0].sessions[0].status, .waiting)
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .running, text: nil, timestamp: waitAt + 1_000
-        )
+        try publish(harness, turn: true)
+        XCTAssertEqual(harness.model.projects[0].sessions[0].status, .running)
         XCTAssertTrue(harness.spy.dismissed.isEmpty)
 
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .idle, text: nil, timestamp: waitAt + 2_000
-        )
+        try publish(harness)
         XCTAssertEqual(harness.spy.dismissed, [alert.id])
     }
 
@@ -1007,24 +843,15 @@ final class NotificationReplyWiringTests: XCTestCase {
         complete(harness, summaryContext: false)
         let permission = expectation(description: "permission posted")
         harness.spy.onPost = { if $0.kind == .permission { permission.fulfill() } }
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .waiting, text: nil, timestamp: 5_000,
-            copilotSessionId: copilotSessionId, notification: .permission
-        )
+        try publish(harness, pendingPermissionRequestIds: ["permission"])
         await fulfillment(of: [permission], timeout: 2)
-        ask(harness, timestamp: 5_001)
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .running, text: nil, timestamp: 5_002
-        )
-        ask(harness, timestamp: 5_003)
+        try publish(harness)
+        try publish(harness, userInputs: [question])
         harness.model.closeSession(
             projectId: harness.model.projects[0].id, sessionId: harness.session.id
         )
 
-        XCTAssertEqual(
-            harness.spy.events.compactMap(\.kind),
-            [.completed, .permission, .elicitation, .elicitation]
-        )
+        XCTAssertEqual(harness.spy.events.compactMap(\.kind), [.completed, .permission, .elicitation])
         XCTAssertEqual(
             harness.spy.dismissed,
             harness.spy.events.filter { $0.kind == .elicitation }.map(\.id)
@@ -1033,16 +860,15 @@ final class NotificationReplyWiringTests: XCTestCase {
 
     // MARK: completion
 
+    /// Leaves a turn ended, with or without what its summary is loaded from.
     @MainActor
     private func complete(_ harness: Harness, summaryContext: Bool) {
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .running, text: nil, timestamp: 2_000
-        )
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .idle, text: nil, timestamp: 4_500,
-            source: "agent-stop",
-            copilotSessionId: summaryContext ? copilotSessionId : nil
-        )
+        if summaryContext {
+            harness.model.completionSummaryContexts[harness.session.id] = CompletionSummaryContext(
+                copilotSessionId: copilotSessionId, activeTimestamp: 2_000, completionTimestamp: 4_500
+            )
+        }
+        harness.model.completionPending.insert(harness.session.id)
         harness.model.postCompletionIfReady(sessionId: harness.session.id)
     }
 
@@ -1098,9 +924,8 @@ final class NotificationReplyWiringTests: XCTestCase {
         harness.spy.onPost = { _ in posted.fulfill() }
         complete(harness, summaryContext: true)
         await fulfillment(of: [entered], timeout: 3)
-        harness.model.setStatus(
-            sessionId: harness.session.id, status: .running, text: nil, timestamp: 5_000
-        )
+        try write(harness, turn: true, workflow: readyWorkflow())
+        harness.model.refreshAgentActivitySnapshots()
         // The summary loader retries; release every attempt.
         for _ in 0..<3 { gate.signal() }
         await fulfillment(of: [posted], timeout: 3)
