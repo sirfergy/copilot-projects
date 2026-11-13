@@ -378,7 +378,6 @@ final class AppModel: ObservableObject {
     private var isNavigatingSessionHistory = false
 
     var livenessTimer: Timer?
-    var statusTimer: Timer?
     var agentActivityTimer: Timer?
     var hostHealthTimer: Timer?
     private var hostHealthRefreshTask: Task<Void, Never>?
@@ -424,8 +423,6 @@ final class AppModel: ObservableObject {
     var agentActivitySnapshotCache:
         [String: (signature: FileSignature, snapshot: AgentActivitySnapshot?)] = [:]
 
-    /// Temporary shadow-run log; see StatusShadow.swift.
-    lazy var statusShadow = StatusShadow(directory: stateRepository.path.deletingLastPathComponent())
     var backgroundAgentsSuppressed: Set<String> = []
     /// True from launch until the first snapshot scan is applied. A prompt already
     /// pending then counts as alerted: the app is relaunched at every install, and
@@ -2351,7 +2348,6 @@ final class AppModel: ObservableObject {
         guard !isTerminating else { return }
         isTerminating = true
         powerOffProtectionGeneration += 1
-        statusTimer?.invalidate()
         livenessTimer?.invalidate()
         agentActivityTimer?.invalidate()
         hostHealthTimer?.invalidate()

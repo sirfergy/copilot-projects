@@ -1096,14 +1096,14 @@ final class AppLogicTests: XCTestCase {
         snapshot.activeSubagents = []
         try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
         model.refreshAgentActivitySnapshots()
-        model.reconcileStatus()
+        model.reconcileStatus(now: Date())
         XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
         XCTAssertEqual(model.totalReady, 1)
         XCTAssertTrue(model.remoteWorkspaceSnapshot().projects[0].sessions[0].ready)
         XCTAssertEqual(notifications.calls.count, 1)
 
-        model.reconcileStatus()
+        model.reconcileStatus(now: Date())
         XCTAssertEqual(notifications.calls.count, 1)
     }
 
