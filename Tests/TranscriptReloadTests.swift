@@ -343,6 +343,12 @@ final class TranscriptReloadTests: XCTestCase {
                     )
                     .id(harness.sessionId)
                 }
+                // Framed like the workspace pane in RootView, so the window's minimum width is the
+                // pane's. Unframed it was the transcript's: the width the transcript was last laid
+                // out at, plus a scroll bar's 17 pt once one showed. On a Mac that always shows
+                // scroll bars, each session switch widened the window by that, and sizing it back
+                // to 1100 pt below rewrapped the transcript, so its bottom never came into view.
+                .frame(minWidth: 420, idealWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
             }
         }
 
