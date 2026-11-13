@@ -439,6 +439,7 @@ if (validSessionId && socketPath) {
     let transcriptPublishTimer = null;
     let transcriptDeltaPublishTimer = null;
     let durableReconcileTimer = null;
+    let heartbeatTimer = null;
     let durableReconcileRun = null;
     let durableReconcileQueued = false;
     let durableFailureStreak = 0;
@@ -2945,6 +2946,7 @@ if (validSessionId && socketPath) {
             // Mode 0600 because the snapshot now carries question text.
             writeFileSync(temporaryPath, JSON.stringify(snapshot), { mode: 0o600 });
             renameSync(temporaryPath, snapshotPath);
+            clearTimeout(heartbeatTimer);
             return true;
         } catch {
             removeFile(temporaryPath);
@@ -4737,7 +4739,7 @@ if (validSessionId && socketPath) {
                 || !isDeepStrictEqual(entries, schedules);
             schedules = entries;
             terminalDisconnectError = null;
-            // The poll's own heartbeat already refreshed `updatedAt` this
+            // The poll's own heartbeat refreshes `updatedAt` this
             // tick; republishing an identical snapshot would only double the
             // background write rate.
             if (changed) publish();
@@ -5477,7 +5479,7 @@ if (validSessionId && socketPath) {
                 const changed = !isDeepStrictEqual(normalized, availableModels);
                 availableModels = normalized;
                 // Identical catalogs are the steady state; the poll's
-                // heartbeat already published this tick.
+                // heartbeat publishes this tick.
                 if (changed) publish();
             }
         } catch {
@@ -5820,6 +5822,7 @@ if (validSessionId && socketPath) {
         clearTimeout(transcriptPublishTimer);
         clearTimeout(transcriptDeltaPublishTimer);
         clearTimeout(durableReconcileTimer);
+        clearTimeout(heartbeatTimer);
         if (userInputWatcher) {
             try { userInputWatcher.close(); } catch {}
             userInputWatcher = null;
@@ -5912,12 +5915,14 @@ if (validSessionId && socketPath) {
         // still alive (its staleness thresholds are 10s/15s), so liveness
         // must not ride on an RPC: `schedule.list` can hang, and either
         // refresh can be suppressed outright by its single-flight guard
-        // while a previous call is still outstanding. Publishing here and
-        // letting the refreshes publish only on an actual change keeps the
-        // heartbeat exact. The one exception is the runtime observation this
-        // tick takes: when it succeeds it publishes once more (at most one
-        // extra write per tick), so the workflow it certifies is current.
-        publish();
+        // while a previous call is still outstanding. The runtime observation
+        // this tick takes publishes when it succeeds, so the workflow it
+        // certifies is current, and that write is the heartbeat. This timer
+        // writes the heartbeat when nothing has published within a twentieth
+        // of the poll. Publishing here as well wrote every idle session's
+        // snapshot twice a tick: 21.7 writes a second across 56 sessions on
+        // Nov 13, nine in ten of them changing nothing but timestamps.
+        heartbeatTimer = setTimeout(publish, DURABLE_RECONCILE_POLL_MS / 20);
         const generation = conversationGeneration;
         const questionRecovery = recoverQuestionsBounded();
         refreshRuntimeActivity(false, { heartbeat: true });
