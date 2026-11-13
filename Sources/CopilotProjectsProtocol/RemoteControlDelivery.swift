@@ -21,7 +21,6 @@ public struct RemoteControlDelivery: Codable, Equatable, Sendable {
 }
 
 public enum RemoteControlDeliverySupport: Equatable, Sendable {
-    case legacy
     case replaySafe(epoch: String)
     case unavailable
 }
@@ -30,8 +29,8 @@ public extension RemoteProtocolInfo {
     static let replaySafeControl = "replay-safe-control"
 
     var controlDeliverySupport: RemoteControlDeliverySupport {
-        guard supports(Self.replaySafeControl) else { return .legacy }
-        guard let rawEpoch = controlDeliveryEpoch,
+        guard supports(Self.replaySafeControl),
+              let rawEpoch = controlDeliveryEpoch,
               let epoch = UUID(uuidString: rawEpoch) else {
             return .unavailable
         }

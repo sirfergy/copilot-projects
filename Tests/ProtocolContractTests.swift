@@ -93,13 +93,13 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertEqual(decoded, kept)
     }
 
-    func testLegacyWorkspaceRetainsItsAbsentFieldsAndBehavior() throws {
+    func testLegacyWorkspaceRetainsItsAbsentFieldsAndReadsAsUnavailable() throws {
         let snapshot = try workspace("legacy-workspace")
         let session = try XCTUnwrap(snapshot.projects.first?.sessions.first)
         XCTAssertNil(snapshot.protocolInfo)
         XCTAssertNil(session.conversationEpoch)
         XCTAssertNil(session.operationReceipts)
-        XCTAssertEqual(session.negotiatedOperationSupport(protocolInfo: nil), .legacy)
+        XCTAssertEqual(session.negotiatedOperationSupport(protocolInfo: nil), .unavailable)
         let encoded = try XCTUnwrap(
             JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any]
         )
@@ -129,16 +129,18 @@ final class ProtocolContractTests: XCTestCase {
         XCTAssertTrue(decoded.supports(RemoteProtocolInfo.configuredSessionCreation))
     }
 
-    func testUnavailableAndUnknownSupportNeverDowngradeToLegacy() throws {
+    func testUnavailableUnknownAndRetiredSupportFailClosed() throws {
         let unavailable = try workspace("unavailable-workspace")
         let session = try XCTUnwrap(unavailable.projects.first?.sessions.first)
         XCTAssertEqual(session.negotiatedOperationSupport(protocolInfo: unavailable.protocolInfo), .unavailable)
         let legacy = try XCTUnwrap(workspace("legacy-workspace").projects.first?.sessions.first)
         XCTAssertEqual(legacy.negotiatedOperationSupport(protocolInfo: .current), .unavailable)
-        XCTAssertEqual(
-            try JSONDecoder().decode(RemoteOperationSupport.self, from: Data("\"future-mode\"".utf8)),
-            .unavailable
-        )
+        for mode in ["future-mode", "legacy"] {
+            XCTAssertEqual(
+                try JSONDecoder().decode(RemoteOperationSupport.self, from: Data("\"\(mode)\"".utf8)),
+                .unavailable
+            )
+        }
         XCTAssertEqual(
             try JSONDecoder().decode(RemoteOperationState.self, from: Data("\"future-state\"".utf8)),
             .indeterminate
