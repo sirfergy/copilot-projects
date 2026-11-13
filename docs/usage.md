@@ -78,7 +78,7 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   menu offer **Start with Prompt…**. Compose multiple lines, then use `⌘Return` to launch
   an interactive session (not a one-shot/headless command). Cancel creates no session.
   Startup checks retain the draft on failure; after a session opens, **Copy Starting Prompt**
-  in its context menu recovers the prompt until that session ends or the app quits.
+  in its context menu recovers the prompt, including after a restart or a reopened tab.
   Prompts are never retried automatically. New and restored Copilot sessions never pass
   `--allow-all`; tool approvals follow your normal Copilot CLI permission settings.
 - **Local PR reviews:** choose **Review Pull Request…** from the **+** split button's
