@@ -13,12 +13,8 @@ public struct ControlRequest: Codable, Sendable {
     public var command: String
     public var projectId: String?
     public var sessionId: String?
-    public var status: String?
-    public var timestamp: Int64?
-    public var source: String?
     public var copilotSessionId: String?
     public var text: String?
-    public var notification: StatusNotificationKind?
     public var title: String?
     public var body: String?
     public var name: String?

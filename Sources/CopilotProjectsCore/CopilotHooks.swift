@@ -1,10 +1,10 @@
 import Foundation
 
-/// Installs a Copilot CLI hook bridge that reports a coding agent's lifecycle to
-/// the app. The app takes status from the session's tracker and acts only on
-/// this bridge's `sessionEnd` report. The hook no-ops unless it runs inside a
-/// Copilot Projects terminal (where the per-session env is set), so it is safe to
-/// have configured globally and coexists with other integrations (e.g. cmux).
+/// Installs a Copilot CLI hook that tells the running app when a tab's Copilot
+/// exits, so the app forgets which conversation that tab resumes. Status comes
+/// from the session's tracker, not from here. The hook no-ops unless it runs
+/// inside a Copilot Projects terminal (where the per-session env is set), so it is
+/// safe to have configured globally and coexists with other integrations (e.g. cmux).
 public enum CopilotHooks {
     public static var hooksDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -19,14 +19,18 @@ public enum CopilotHooks {
         FileManager.default.fileExists(atPath: hooksDir.path)
     }
 
-    /// Maps agent lifecycle events to `copilot-projects set-status`.
+    /// Reports `sessionEnd` to the app with `copilot-projects session-ended`.
     public static let script = #"""
     #!/usr/bin/env bash
-    # Copilot Projects <-> Copilot CLI status bridge (managed by Copilot Projects; safe to delete).
+    # Copilot Projects <-> Copilot CLI bridge (managed by Copilot Projects; safe to delete).
     # No-ops unless invoked inside a Copilot Projects terminal.
     set -u
 
     emit() { printf '{}\n'; }   # neutral hook result
+
+    # A Copilot session started before this script was installed keeps calling it
+    # for the events it registered then, until that session restarts.
+    [ "${1:-}" = "end" ] || { emit; exit 0; }
 
     environment_session_id="${COPILOT_PROJECTS_SESSION:-}"
     socket="${COPILOT_PROJECTS_SOCKET:-}"
@@ -61,120 +65,6 @@ public enum CopilotHooks {
     cli="$(command -v copilot-projects 2>/dev/null || true)"
     [ -z "$cli" ] && [ -x "$HOME/.local/bin/copilot-projects" ] && cli="$HOME/.local/bin/copilot-projects"
 
-    status_record_prompt_timestamp() {
-      local record value
-      record="$state_dir/sessions/$session_id.status-record.json"
-      value="$(sed -n \
-        's/.*"promptStatusTimestamp":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
-        "$record" 2>/dev/null | head -1)"
-      case "$value" in
-        ""|*[!0-9]*) printf '' ;;
-        *) printf '%s' "$value" ;;
-      esac
-    }
-    persist_status_record() {
-      local timestamp prompt_timestamp record record_tmp waiting_context
-      timestamp="$2"
-      [ -n "$timestamp" ] || return 1
-      prompt_timestamp="$timestamp"
-      if [ "${3:-}" = "scheduled-active" ]; then
-        prompt_timestamp="$(status_record_prompt_timestamp)"
-        # No prior foreground clock is unusual, but advancing is the safe fallback:
-        # it blocks background-only prompt injection rather than trusting no clock.
-        [ -n "$prompt_timestamp" ] || prompt_timestamp="$timestamp"
-      fi
-      record="$state_dir/sessions/$session_id.status-record.json"
-      record_tmp="$record.$$"
-      waiting_context=null
-      if [ "$1" = "waiting" ]; then
-        waiting_context="$(input_wait_context "${4:-}")"
-      fi
-      case "$waiting_context" in
-        null|\{*\}) ;;
-        *) waiting_context=null ;;
-      esac
-      (
-        umask 077
-        printf '{"schemaVersion":1,"status":"%s","statusTimestamp":%s,"promptStatusTimestamp":%s,"inputWait":%s}\n' \
-          "$1" "$timestamp" "$prompt_timestamp" "$waiting_context" > "$record_tmp"
-      ) || { rm -f "$record_tmp" 2>/dev/null || true; return 1; }
-      mv -f "$record_tmp" "$record" 2>/dev/null \
-        || { rm -f "$record_tmp" 2>/dev/null || true; return 1; }
-    }
-    # Persist status and both ordering clocks as one atomic record (survives an app
-    # restart and stays current even while the app isn't running), then notify the
-    # live app.
-    status() {
-      mkdir -p "$state_dir/sessions" 2>/dev/null || true
-      if [ -n "${2:-}" ]; then
-        persist_status_record "$1" "$2" "${3:-}" "${5:-}" || true
-      fi
-      # Synchronous (not backgrounded) so rapid transitions — e.g. running→waiting —
-      # reach the app in order; backgrounding let them race and the "waiting" dot get
-      # overwritten by a late "running". The CLI bounds this call with a socket
-      # timeout, so a hung app can't block the hook past its deny-triggering timeout.
-      if [ -n "$cli" ]; then
-        args=(set-status "$1" --session "$session_id")
-        [ -z "${2:-}" ] || args+=(--timestamp "$2")
-        [ -z "${3:-}" ] || args+=(--source "$3")
-        [ -z "${4:-}" ] || args+=(--notification "$4")
-        [ -z "${5:-}" ] || args+=(--copilot-session "$5")
-        "$cli" "${args[@]}" >/dev/null 2>&1 || true
-      fi
-    }
-    current_status() {
-      local record value
-      record="$state_dir/sessions/$session_id.status-record.json"
-      value="$(sed -n 's/.*"status":[[:space:]]*"\([^"]*\)".*/\1/p' \
-        "$record" 2>/dev/null | head -1)"
-      printf '%s' "$value"
-    }
-    mark_turn_active() {
-      mkdir -p "$state_dir/sessions" 2>/dev/null || true
-      : > "$state_dir/sessions/$session_id.active-turn"
-    }
-    consume_active_turn() {
-      rm "$state_dir/sessions/$session_id.active-turn" 2>/dev/null
-    }
-    payload_timestamp() {
-      local value kind
-      kind="$(printf '%s' "$1" \
-        | /usr/bin/plutil -type timestamp - 2>/dev/null)" || return 0
-      [ "$kind" = "integer" ] || return 0
-      value="$(printf '%s' "$1" \
-        | /usr/bin/plutil -extract timestamp raw -o - - 2>/dev/null)" || value=""
-      case "$value" in
-        ""|*[!0-9]*) printf '' ;;
-        *) printf '%s' "$value" ;;
-      esac
-    }
-    payload_notification_type() {
-      local value kind key
-      key=notificationType
-      kind="$(printf '%s' "$1" \
-        | /usr/bin/plutil -type "$key" - 2>/dev/null)" || {
-          key=notification_type
-          kind="$(printf '%s' "$1" \
-            | /usr/bin/plutil -type "$key" - 2>/dev/null)" || return 0
-        }
-      [ "$kind" = "string" ] || return 0
-      value="$(printf '%s' "$1" \
-        | /usr/bin/plutil -extract "$key" raw -o - - 2>/dev/null)" || value=""
-      printf '%s' "$value"
-    }
-    input_notification_kind() {
-      case "$(payload_notification_type "$1")" in
-        elicitation_dialog) printf 'elicitation' ;;
-        permission_prompt) printf 'permission' ;;
-      esac
-    }
-    is_aborted() {
-      printf '%s' "$1" | grep -qE '"aborted"[[:space:]]*:[[:space:]]*true'
-    }
-    is_scheduled_prompt() {
-      printf '%s' "$1" | grep -qE '\[Scheduled prompt #[0-9]+\]'
-    }
-    scheduled_turn="$state_dir/sessions/$session_id.scheduled-turn"
     # Extract the Copilot CLI session id (carried by hook payloads as "sessionId")
     # so sessionEnd can only clear resume markers for the process that owns them.
     payload_session_id() {
@@ -184,28 +74,6 @@ public enum CopilotHooks {
         | /usr/bin/plutil -extract sessionId raw -o - - 2>/dev/null)" || return 0
       [[ "$cid" =~ $uuid ]] && printf '%s' "$cid"
       return 0
-    }
-
-    input_wait_context() {
-      local caller owner snapshot_owner epoch snapshot uuid
-      uuid='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
-      caller="$1"
-      owner="$(cat "$state_dir/sessions/$session_id.copilot-session" 2>/dev/null \
-        | tr -d '[:space:]')"
-      snapshot="$state_dir/sessions/$session_id.agent-activity.json"
-      snapshot_owner="$(/usr/bin/plutil -extract copilotSessionId raw -o - "$snapshot" 2>/dev/null)" \
-        || snapshot_owner=""
-      epoch="$(/usr/bin/plutil -extract conversationEpoch raw -o - "$snapshot" 2>/dev/null)" \
-        || epoch=""
-      if [[ "$caller" =~ $uuid ]] && [[ "$owner" =~ $uuid ]] \
-        && [ "$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')" \
-          = "$(printf '%s' "$snapshot_owner" | tr '[:upper:]' '[:lower:]')" ] \
-        && [[ "$epoch" =~ ^[0-9A-Fa-f-]{36}:[0-9]+$ ]]; then
-        printf '{"senderSessionId":"%s","rootSessionId":"%s","conversationEpoch":"%s"}' \
-          "$caller" "$owner" "$epoch"
-      else
-        printf 'null'
-      fi
     }
 
     hook_has_other_owner() {
@@ -291,111 +159,28 @@ public enum CopilotHooks {
 
     if hook_has_other_owner_process; then emit; exit 0; fi
 
-    case "${1:-}" in
-      start)
-        payload="$(cat 2>/dev/null || true)"
-        rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
-        rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
-        rm -f "$scheduled_turn" 2>/dev/null || true
-        status idle "$(payload_timestamp "$payload")"
-        ;;
-      running)
-        payload="$(cat 2>/dev/null || true)"
-        # Child prompts must not start a foreground turn or advance its clock.
-        if hook_has_other_owner "$payload"; then emit; exit 0; fi
-        if is_scheduled_prompt "$payload"; then
-          mkdir -p "$state_dir/sessions" 2>/dev/null || true
-          : > "$scheduled_turn"
-          rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
-          status idle "$(payload_timestamp "$payload")" scheduled-start
-        else
-          rm -f "$scheduled_turn" 2>/dev/null || true
-          mark_turn_active
-          status running "$(payload_timestamp "$payload")"
-        fi
-        ;;
-      idle)
-        payload="$(cat 2>/dev/null || true)"
-        if hook_has_other_owner "$payload"; then emit; exit 0; fi
-        if [ -f "$scheduled_turn" ]; then
-          : > "$scheduled_turn"
-          status idle "$(payload_timestamp "$payload")" scheduled-idle
-          rm -f "$scheduled_turn" 2>/dev/null || true
-          emit
-          exit 0
-        fi
-        source=""
-        if consume_active_turn && ! is_aborted "$payload"; then
-          source="agent-stop"
-        fi
-        status idle "$(payload_timestamp "$payload")" "$source" "" "$(payload_session_id "$payload")"
-        ;;
-      pre|post)
-        payload="$(cat 2>/dev/null || true)"
-        # A child shares the terminal, not its foreground prompt or status clock.
-        if hook_has_other_owner "$payload"; then emit; exit 0; fi
-        if [ -f "$scheduled_turn" ]; then
-          : > "$scheduled_turn"
-          status idle "$(payload_timestamp "$payload")" scheduled-active
-        else
-          mark_turn_active
-          status running "$(payload_timestamp "$payload")"
-        fi
-        ;;
-      notify)
-        payload="$(cat 2>/dev/null || true)"
-        timestamp="$(payload_timestamp "$payload")"
-        notification="$(input_notification_kind "$payload")"
-        [ -n "$notification" ] || { emit; exit 0; }
-        previous_status="$(current_status)"
-        if [ "$previous_status" = "waiting" ]; then
-          status waiting "$timestamp" "" "" "$(payload_session_id "$payload")"
-        else
-          status waiting "$timestamp" "" "$notification" "$(payload_session_id "$payload")"
-        fi
-        ;;
-      end)
-        payload="$(cat 2>/dev/null || true)"
-        if hook_has_other_owner "$payload"; then emit; exit 0; fi
-        # Copilot reports both an explicit exit and a graceful macOS shutdown as
-        # sessionEnd(reason=user_exit). Let the live app clear the resume marker only
-        # when it is not terminating; if the app is shutting down or unreachable, the
-        # marker survives for post-reboot resume.
-        rm -f "$state_dir/sessions/$session_id.background-agents" 2>/dev/null || true
-        rm -f "$state_dir/sessions/$session_id.active-turn" 2>/dev/null || true
-        rm -f "$scheduled_turn" 2>/dev/null || true
-        status idle "$(payload_timestamp "$payload")" session-end "" "$(payload_session_id "$payload")"
-        ;;
-    esac
+    payload="$(cat 2>/dev/null || true)"
+    if hook_has_other_owner "$payload"; then emit; exit 0; fi
+    # Copilot reports both an explicit exit and a graceful macOS shutdown as
+    # sessionEnd(reason=user_exit). Let the live app clear the resume marker only
+    # when it is not terminating; if the app is shutting down or unreachable, the
+    # marker survives for post-reboot resume.
+    if [ -n "$cli" ]; then
+      args=(session-ended --session "$session_id")
+      copilot_session="$(payload_session_id "$payload")"
+      [ -z "$copilot_session" ] || args+=(--copilot-session "$copilot_session")
+      "$cli" "${args[@]}" >/dev/null 2>&1 || true
+    fi
     emit
     exit 0
     """#
 
-    /// Copilot CLI hook wiring (one entry per lifecycle event). The app acts only on
-    /// sessionEnd (`end`), which asks it to clear the resume marker unless the app
-    /// is terminating.
+    /// Copilot CLI hook wiring: `sessionEnd` asks the live app to clear the resume
+    /// marker, which it does unless it is terminating.
     public static let config = #"""
     {
       "version": 1,
       "hooks": {
-        "sessionStart": [
-          { "type": "command", "bash": "\"$HOME/.copilot/hooks/copilot-projects-hook.sh\" start", "timeoutSec": 5 }
-        ],
-        "userPromptSubmitted": [
-          { "type": "command", "bash": "\"$HOME/.copilot/hooks/copilot-projects-hook.sh\" running", "timeoutSec": 5 }
-        ],
-        "preToolUse": [
-          { "type": "command", "bash": "\"$HOME/.copilot/hooks/copilot-projects-hook.sh\" pre", "timeoutSec": 10 }
-        ],
-        "postToolUse": [
-          { "type": "command", "bash": "\"$HOME/.copilot/hooks/copilot-projects-hook.sh\" post", "timeoutSec": 10 }
-        ],
-        "notification": [
-          { "type": "command", "bash": "\"$HOME/.copilot/hooks/copilot-projects-hook.sh\" notify", "timeoutSec": 5 }
-        ],
-        "agentStop": [
-          { "type": "command", "bash": "\"$HOME/.copilot/hooks/copilot-projects-hook.sh\" idle", "timeoutSec": 5 }
-        ],
         "sessionEnd": [
           { "type": "command", "bash": "\"$HOME/.copilot/hooks/copilot-projects-hook.sh\" end", "timeoutSec": 5 }
         ]

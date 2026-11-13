@@ -93,28 +93,17 @@ public enum Paths {
         sessionsDir.appendingPathComponent("\(sessionId).sock").path
     }
 
-    /// Atomically replaced status + clock record, written by the Copilot hook and the
-    /// app so status survives an app restart (and stays current while the app isn't
-    /// running).
-    public static func statusRecordPath(sessionId: String) -> String {
-        sessionsDir.appendingPathComponent("\(sessionId).status-record.json").path
-    }
-
     /// Present while the app has observed Copilot waiting on background agents.
     public static func backgroundAgentsMarkerPath(sessionId: String) -> String {
         sessionsDir.appendingPathComponent("\(sessionId).background-agents").path
     }
 
     /// Per-session marker holding the last Copilot CLI session id seen in this tab
-    /// (written by the hook from tool/notification payloads, which carry `sessionId`).
+    /// (written by the session's tracker).
     /// Lets the app auto-resume the exact agent session after a reboot recreates the
     /// shell — `copilot --resume=<id>` — instead of guessing per tab.
     public static func copilotSessionMarkerPath(sessionId: String) -> String {
         sessionsDir.appendingPathComponent("\(sessionId).copilot-session").path
-    }
-
-    public static func scheduledTurnMarkerPath(sessionId: String) -> String {
-        sessionsDir.appendingPathComponent("\(sessionId).scheduled-turn").path
     }
 
     public static func agentActivitySnapshotPath(sessionId: String) -> String {

@@ -743,14 +743,16 @@ described below) publishes what the coordinator is doing, and the app shows it.
 
 copilot-projects also installs a [Copilot CLI hook](https://docs.github.com/copilot) bridge into
 `~/.copilot/hooks/` (`copilot-projects-hook.sh` + `copilot-projects.json`) the first time the app
-launches. The app does not take status from it. It acts on one event, `sessionEnd`: when the
-tab's own Copilot exits while the app is running, the app forgets which conversation that tab
-resumes. A known non-owner's `sessionEnd` is ignored.
+launches. It registers one event, `sessionEnd`: when the tab's own Copilot exits while the app
+is running, the hook runs `copilot-projects session-ended` and the app forgets which
+conversation that tab resumes. A known non-owner's `sessionEnd` is ignored.
 
 The hook no-ops outside a copilot-projects terminal (it checks `COPILOT_PROJECTS_SESSION`), so it
 coexists with other integrations (e.g. cmux) and is safe to leave installed globally. Manage
 it with `copilot-projects install-hooks` / `uninstall-hooks`. Changing hook registration requires
 a new CLI session; an existing registration reads script-only updates on its next invocation.
+A Copilot session that registered other events with an earlier release keeps calling the
+script for them until it restarts, and the script ignores them.
 
 App-managed Copilot launches and recorded-session resumes use a Ghostty-compatible profile so
 Copilot CLI emits inline images through SwiftTerm's Kitty graphics support. The profile is scoped
@@ -854,8 +856,6 @@ heartbeat observation that finds the coordinator idle for the second observation
 no message or turn start in between, ends the tracker's foreground turn. One idle reading while
 the turn is still active reads Idle and takes a prompt for as long as it lasts, but the turn's
 timer keeps running and nothing is marked finished.
-Permission completions delivered during tracker startup retain their sender certificate even
-when SDK history includes the same events; historical-only completions do not create certificates.
 
 The elapsed-turn timer starts at the tracker's turn start and survives a relaunch while the
 snapshot on disk still shows the same request. Status is not saved: after a relaunch every

@@ -872,8 +872,8 @@ final class PullRequestsWorkspaceModelTests: XCTestCase {
         XCTAssertEqual(workspace.snapshotCalls, 2, "settled state.json update skips redundant polls")
 
         // Updating a tracked file in sessions/ triggers an immediate event-driven refresh.
-        try Data(#"{"schemaVersion":1,"status":"idle"}"#.utf8).write(
-            to: sessionsDir.appendingPathComponent("s2.status-record.json"),
+        try Data(#"{"schemaVersion":1,"foregroundTurnActive":false}"#.utf8).write(
+            to: sessionsDir.appendingPathComponent("s2.agent-activity.json"),
             options: .atomic
         )
         try await waitUntil { model.workspace == .connected(idleSessionSnapshot) }
@@ -934,9 +934,9 @@ final class PullRequestsWorkspaceModelTests: XCTestCase {
         await model.pollWorkspaceIfNeeded()
         XCTAssertEqual(workspace.snapshotCalls, 3, "settled initial signature skips unchanged polls")
 
-        // Hook/tracker writes session files before host finishes its throttled scan.
-        try Data(#"{"schemaVersion":1,"status":"idle"}"#.utf8).write(
-            to: sessionsDir.appendingPathComponent("s1.status-record.json"),
+        // The tracker writes session files before the host finishes its throttled scan.
+        try Data("copilot-session".utf8).write(
+            to: sessionsDir.appendingPathComponent("s1.copilot-session"),
             options: .atomic
         )
         await model.pollWorkspaceIfNeeded()

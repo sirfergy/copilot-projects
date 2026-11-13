@@ -8,7 +8,7 @@ import Darwin
 public enum CLIMain {
     /// Subcommands that should be handled by the CLI (vs. launching the GUI).
     public static let commands: Set<String> = [
-        "set-status", "status",
+        "session-ended",
         "notify",
         "list-projects", "projects",
         "list-hosts", "hosts",
@@ -138,29 +138,9 @@ public enum CLIMain {
         req.sessionId = parsed.flags["session"] ?? Env.sessionId(environment)
 
         switch command {
-        case "set-status":
-            guard let status = parsed.flags["status"] ?? parsed.positionals.first else {
-                fail("set-status requires a status: idle | running | waiting")
-                return 1
-            }
-            req.status = status
-            req.text = parsed.flags["text"]
-            if let rawTimestamp = parsed.flags["timestamp"] {
-                guard let timestamp = Int64(rawTimestamp) else {
-                    fail("--timestamp must be an integer")
-                    return 1
-                }
-                req.timestamp = timestamp
-            }
-            req.source = parsed.flags["source"]
+        case "session-ended":
+            // The Copilot CLI's sessionEnd hook: the session's Copilot is exiting.
             req.copilotSessionId = parsed.flags["copilot-session"]
-            if let rawNotification = parsed.flags["notification"] {
-                guard let notification = StatusNotificationKind(rawValue: rawNotification) else {
-                    fail("--notification must be elicitation or permission")
-                    return 1
-                }
-                req.notification = notification
-            }
         case "notify":
             req.title = parsed.flags["title"] ?? parsed.positionals.first
             req.body = parsed.flags["body"]
@@ -465,7 +445,6 @@ public enum CLIMain {
 
     private static func canonical(_ command: String) -> String {
         switch command {
-        case "status": return "set-status"
         case "projects": return "list-projects"
         case "hosts": return "list-hosts"
         case "ls": return "list-status"

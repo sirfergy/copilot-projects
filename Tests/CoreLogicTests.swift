@@ -300,7 +300,6 @@ final class CoreLogicTests: XCTestCase {
         let script = CopilotExtension.script
         XCTAssertTrue(script.contains("await sdkHistoryWithTimeout()"))
         XCTAssertTrue(script.contains("removeFile(temporaryPath)"))
-        XCTAssertTrue(script.contains("setScheduledTurnMarker(false)"))
         XCTAssertTrue(script.contains("removeFile(userInputResponsePath)"))
         XCTAssertTrue(script.contains(#"session.on("session.model_change""#))
         // Nothing can show by running it that the tracker never does these.
@@ -4602,15 +4601,6 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(summary["handledAfterResponses"] as? Int, 2)
         XCTAssertEqual(summary["pendingAfter"] as? [String], [])
         XCTAssertEqual(summary["responseRemoved"] as? Bool, true)
-    }
-
-    func testStatusNotificationKindRoundTripsOverControlProtocol() throws {
-        var request = ControlRequest(command: "set-status")
-        request.notification = .completed
-
-        let encoded = try Wire.encodeLine(request)
-        let decoded = try Wire.decode(ControlRequest.self, from: encoded)
-        XCTAssertEqual(decoded.notification, .completed)
     }
 
     func testRemoteTranscriptRevisionRoundTrips() throws {

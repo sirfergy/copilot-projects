@@ -27,8 +27,8 @@ struct PostedQuestionNotification: Equatable {
 /// Decides which posted question alerts can be withdrawn because their
 /// questions were answered somewhere else (terminal, app, web, or watch).
 ///
-/// Only positive evidence counts. Status hooks can report activity while a
-/// question is still pending, a snapshot can predate the alert, and a
+/// Only positive evidence counts. A session can read Running while a question
+/// the tracker does not list is still pending, a snapshot can predate the alert, and a
 /// restarted tracker re-lists recovered questions under a new epoch, so none
 /// of those alone withdraws an alert.
 enum AnsweredQuestionNotifications {
@@ -108,8 +108,8 @@ enum AnsweredQuestionNotifications {
             } else {
                 // Nothing tracks this question. A synthetic entry can vanish,
                 // a tracker still recovering a missed question can publish an
-                // empty list, and a parallel hook can report activity while it
-                // is still pending, but the turn can't end until it's answered.
+                // empty list, and the session can read Running while it is still
+                // pending, but the turn can't end until it's answered.
                 resolved = listed.isEmpty && status == .idle
             }
             if resolved {

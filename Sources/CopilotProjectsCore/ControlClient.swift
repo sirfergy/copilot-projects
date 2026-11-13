@@ -40,11 +40,8 @@ public struct ControlClient: Sendable {
         }
 
         // Bound every phase so a slow/hung app can never block the caller. This
-        // client runs inside the Copilot status hook; a hook that blocks past its
-        // timeout is treated as an error that DENIES the agent's tool call. Keeping
-        // it synchronous (not backgrounded) preserves status ordering — a
-        // running→waiting transition can't land out of order — while the timeout
-        // prevents a hang.
+        // client runs inside the Copilot CLI's sessionEnd hook, which has a 5 s
+        // timeout.
         let bounded = max(timeout, 0.001)
         var tv = timeval(
             tv_sec: Int(bounded),
@@ -71,9 +68,8 @@ public struct ControlClient: Sendable {
 
         // Bound connect() too: SO_RCVTIMEO/SO_SNDTIMEO only cover read/write, so a
         // blocking connect to an app whose accept loop is briefly stalled would
-        // hang here unbounded — and this client runs inside the preToolUse status
-        // hook, where blocking past the hook timeout makes the CLI DENY the agent's
-        // tool call. Connect non-blocking, wait at most ~2s for completion, then
+        // hang here unbounded, and this client runs inside the Copilot CLI's
+        // sessionEnd hook. Connect non-blocking, wait at most ~2s for completion, then
         // restore blocking mode so the SO_*TIMEO above govern the read/write.
         let savedFlags = fcntl(fd, F_GETFL, 0)
         _ = fcntl(fd, F_SETFL, savedFlags | O_NONBLOCK)

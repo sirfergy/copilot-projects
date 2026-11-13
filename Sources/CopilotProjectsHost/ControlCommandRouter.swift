@@ -5,7 +5,8 @@ struct ControlCommandRouter {
     struct Actions {
         let listProjects: () -> String
         let listStatus: () -> String
-        let setStatus: (SessionStatus, String?, ControlRequest) -> ControlResponse
+        /// The Copilot CLI's sessionEnd hook: the session's Copilot is exiting.
+        let sessionEnded: (ControlRequest) -> ControlResponse
         let notify: (String, String?, ControlRequest) -> ControlResponse
         let newProject: (ControlRequest) -> ControlResponse
         let newSession: (ControlRequest) -> ControlResponse
@@ -56,12 +57,8 @@ struct ControlCommandRouter {
             return actions.setDefaultHost(request)
         case "list-status":
             return .success(actions.listStatus())
-        case "set-status":
-            guard let raw = request.status,
-                  let status = SessionStatus(rawValue: raw.lowercased()) else {
-                return .failure("invalid status (use idle|running|waiting): \(request.status ?? "")")
-            }
-            return actions.setStatus(status, request.text, request)
+        case "session-ended":
+            return actions.sessionEnded(request)
         case "notify":
             guard let title = request.title else { return .failure("notify requires a title") }
             return actions.notify(title, request.body, request)
