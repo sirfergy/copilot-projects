@@ -555,6 +555,12 @@ struct TranscriptDrawer: View {
                 sessionId: sessionId,
                 copilotSessionId: copilotSessionId ?? ""
             ),
+            toolImages: promptAttachments.items(
+                forTurnId: turn.id,
+                sessionId: sessionId,
+                copilotSessionId: copilotSessionId ?? "",
+                fromTools: true
+            ),
             onPreview: onPreview
         )
     }

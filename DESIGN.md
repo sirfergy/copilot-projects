@@ -248,6 +248,8 @@ cards. Native Markdown selection, tool disclosure, and workflow controls remain.
 Retained terminal images follow their associated turn, fit the drawer width
 without changing aspect ratio, and cap inline height at 280pt. Loading reserves
 the PNG's fitted geometry; unavailable images are labeled rather than hidden.
+A prompt's images sit under the prompt. An image a tool returned sits under that
+tool's row inside Tools, and the collapsed Tools header counts them.
 Image corners reuse the 9pt message shape and native border treatment. Selecting
 an image opens a larger native preview with pan/zoom and explicit dismissal.
 The workspace UI input controller owns one preview item, shared by the root sheet

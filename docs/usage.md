@@ -776,8 +776,9 @@ writes nothing. The host merges the two, using the live file only when it names 
 the finished-turns file it extends. A failure the agent recovers from on its own (a retry,
 or a background agent restarting work) is cleared; model-catalog and other background notices
 are not shown. Copilot
-Projects renders that snapshot in the drawer without parsing private CLI session files or
-changing the terminal's PTY size. The host API supports full or bounded transcript windows
+Projects renders that snapshot in the drawer without changing the terminal's PTY size. For
+images only, the Mac drawer also reads the session's own `events.jsonl`: the images attached
+to a prompt and the images a tool returned. The host API supports full or bounded transcript windows
 for optional integrations; image association always precedes windowing. A client can also send
 `after=<epoch milliseconds>&copilotSessionId=<id>` (the start of its newest completed turn) to
 receive only the turns from that point on, merging each response into what it has by turn id.

@@ -753,6 +753,20 @@ final class NativeTranscriptImageTests: XCTestCase {
         return try XCTUnwrap(rep.representation(using: fileType, properties: properties))
     }
 
+    /// `pngBytes` grown to `targetBytes` with a text chunk, still a valid PNG of the same size in pixels.
+    private static func makePaddedPNG(from pngBytes: Data, targetBytes: Int, seed: UInt8) -> Data {
+        var out = Data(pngBytes.dropLast(12))
+        let pad = max(4, targetBytes - pngBytes.count - 12)
+        var len = UInt32(pad).bigEndian
+        out.append(Data(bytes: &len, count: 4))
+        out.append(contentsOf: "tEXt".utf8)
+        out.append(contentsOf: "k\0".utf8)
+        out.append(Data(repeating: seed, count: pad - 2))
+        out.append(Data(repeating: 0, count: 4))
+        out.append(pngBytes.suffix(12))
+        return out
+    }
+
     private static func makeSolidJPEG(
         width: Int,
         height: Int,
@@ -882,21 +896,8 @@ final class NativeTranscriptImageTests: XCTestCase {
         XCTAssertEqual(withTurn4.items(forTurnId: "turn-4", sessionId: appSessionId, copilotSessionId: copilotSessionId).map(\.data), [pngBytes, pngBytes, jpegBytes])
         XCTAssertEqual(withTurn4.items(forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: copilotSessionId), turn1)
 
-        func makePaddedPNG(targetBytes: Int, seed: UInt8) -> Data {
-            var out = Data(pngBytes.dropLast(12))
-            let pad = max(4, targetBytes - pngBytes.count - 12)
-            var len = UInt32(pad).bigEndian
-            out.append(Data(bytes: &len, count: 4))
-            out.append(contentsOf: "tEXt".utf8)
-            out.append(contentsOf: "k\0".utf8)
-            out.append(Data(repeating: seed, count: pad - 2))
-            out.append(Data(repeating: 0, count: 4))
-            out.append(pngBytes.suffix(12))
-            return out
-        }
-
         // Oversized (> 5 MiB) inline blob and binary_asset entries with structurally valid PNG bytes are rejected and surface as `data == nil` placeholders.
-        let oversizedValidPNG = makePaddedPNG(targetBytes: 5 * 1_024 * 1_024 + 64, seed: 0x41)
+        let oversizedValidPNG = Self.makePaddedPNG(from: pngBytes, targetBytes: 5 * 1_024 * 1_024 + 64, seed: 0x41)
         XCTAssertGreaterThan(oversizedValidPNG.count, 5 * 1_024 * 1_024)
         XCTAssertEqual(TranscriptPromptAttachments.pixelSize(oversizedValidPNG), CGSize(width: 180, height: 90))
         let oversizedBase64 = oversizedValidPNG.base64EncodedString()
@@ -915,9 +916,9 @@ final class NativeTranscriptImageTests: XCTestCase {
         XCTAssertEqual(oversizedItems.map(\.data), [nil, nil])
 
         // Aggregate 32 MiB total budget: newest turns keep their image data while older turns exceeding 32 MiB become placeholders.
-        let fourMiB1 = makePaddedPNG(targetBytes: 4_500_000, seed: 0x41)
-        let fourMiB2 = makePaddedPNG(targetBytes: 4_500_000, seed: 0x42)
-        let exactFiveMiB = makePaddedPNG(targetBytes: 5 * 1_024 * 1_024, seed: 0x43)
+        let fourMiB1 = Self.makePaddedPNG(from: pngBytes, targetBytes: 4_500_000, seed: 0x41)
+        let fourMiB2 = Self.makePaddedPNG(from: pngBytes, targetBytes: 4_500_000, seed: 0x42)
+        let exactFiveMiB = Self.makePaddedPNG(from: pngBytes, targetBytes: 5 * 1_024 * 1_024, seed: 0x43)
         XCTAssertEqual(exactFiveMiB.count, 5 * 1_024 * 1_024)
         let turn1Attachments = ((0..<3).map { _ in #"{"type":"blob","assetId":"sha256:four-1","mimeType":"image/png"}"# } + [#"{"type":"blob","assetId":"sha256:exact-5m","mimeType":"image/png"}"#]).joined(separator: ",")
         let turn2Attachments = (0..<4).map { _ in #"{"type":"blob","mimeType":"image/png","data":"\#(fourMiB2.base64EncodedString())"}"# }.joined(separator: ",")
@@ -1119,5 +1120,285 @@ final class NativeTranscriptImageTests: XCTestCase {
             for: reattached.turns[2], imageCapture: capture, promptAttachments: turn3Attachments
         )
         XCTAssertEqual(updatedTurn3Timeline.map(\.id), ["image-17", "image-18", "image-16"])
+    }
+
+    // MARK: - Images returned by tools
+
+    private func makeToolImageSession() throws -> (home: URL, copilotSessionId: String, events: URL) {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tool-images-\(UUID().uuidString)", isDirectory: true)
+        let copilotSessionId = UUID().uuidString.lowercased()
+        let sessionDir = home
+            .appendingPathComponent("session-state", isDirectory: true)
+            .appendingPathComponent(copilotSessionId, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: home) }
+        return (home, copilotSessionId, sessionDir.appendingPathComponent("events.jsonl", isDirectory: false))
+    }
+
+    private static func assetLine(_ assetId: String, _ bytes: Data, mimeType: String = "image/png") -> String {
+        #"{"type":"session.binary_asset","data":{"assetId":"\#(assetId)","type":"image","mimeType":"\#(mimeType)","byteLength":\#(bytes.count),"data":"\#(bytes.base64EncodedString())"},"id":"asset-\#(assetId)"}"#
+    }
+
+    private static func promptLine(_ turnId: String) -> String {
+        #"{"type":"user.message","data":{"content":"Look at this"},"id":"\#(turnId)","timestamp":"2026-11-13T12:00:00Z"}"#
+    }
+
+    /// A finished tool call that returned one image per asset id, in the shape the CLI records.
+    private static func toolImageLine(_ toolCallId: String, _ assetIds: [String], agentId: String? = nil) -> String {
+        let images = assetIds
+            .map { #"{"type":"image","mimeType":"image/png","assetId":"\#($0)","byteLength":1}"# }
+            .joined(separator: ",")
+        let agent = agentId.map { #","agentId":"\#($0)""# } ?? ""
+        return #"{"type":"tool.execution_complete","data":{"toolCallId":"\#(toolCallId)","success":true,"result":{"content":"ok","binaryResultsForLlm":[\#(images)]}},"id":"done-\#(toolCallId)"\#(agent)}"#
+    }
+
+    private static func toolTurn(
+        _ id: String,
+        kind: String = "foreground",
+        tools: [String],
+        pending: Bool = false
+    ) -> TranscriptTurn {
+        TranscriptTurn(
+            id: id,
+            startedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            endedAt: nil,
+            kind: kind,
+            userContent: "Look at this",
+            assistantMessages: [],
+            tools: tools.map { TranscriptTool(id: $0, name: "view", title: "\($0).png", success: pending ? nil : true) },
+            isAborted: false
+        )
+    }
+
+    private static func toolSnapshot(_ copilotSessionId: String, _ turns: [TranscriptTurn]) -> TranscriptSnapshot {
+        TranscriptSnapshot(
+            schemaVersion: 4,
+            updatedAt: Date(timeIntervalSince1970: 1_800_000_100),
+            copilotSessionId: copilotSessionId,
+            turns: turns
+        )
+    }
+
+    private static func write(_ lines: [String], to url: URL) throws {
+        try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private static func append(_ lines: [String], to url: URL) throws {
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((lines.joined(separator: "\n") + "\n").utf8))
+    }
+
+    /// Replaces `old` with `new`, of the same length, where it stands: the file keeps its identity and size.
+    private static func overwrite(_ old: String, with new: String, in url: URL) throws {
+        XCTAssertEqual(old.utf8.count, new.utf8.count)
+        let range = try XCTUnwrap(try Data(contentsOf: url).range(of: Data(old.utf8)))
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(range.lowerBound))
+        try handle.write(contentsOf: Data(new.utf8))
+    }
+
+    func testToolImagesLoadFromBinaryAssetsUnderTheToolCallThatReturnedThem() throws {
+        let session = try makeToolImageSession()
+        let png = remoteKittyTestPNGBytes(width: 120, height: 60)
+        let jpeg = try Self.makeSolidJPEG(width: 90, height: 60, color: .systemGreen)
+        try Self.write([
+            Self.assetLine("sha256:png", png),
+            Self.assetLine("sha256:jpeg", jpeg, mimeType: "image/jpeg"),
+            Self.promptLine("turn-1"),
+            #"{"type":"tool.execution_complete","data":{"toolCallId":"call-view","success":true,"result":{"content":"ok","binaryResultsForLlm":[{"type":"image","mimeType":"image/png","assetId":"sha256:png","description":"Image file at path /tmp/shot.png"},{"type":"resource","mimeType":"application/pdf","assetId":"sha256:pdf"},{"type":"image","mimeType":"image/jpeg","assetId":"sha256:jpeg"}]}},"id":"done-call-view"}"#,
+            Self.toolImageLine("call-missing", ["sha256:not-in-the-file"]),
+            Self.toolImageLine("call-subagent", ["sha256:png"], agentId: "agent-1"),
+            Self.toolImageLine("call-in-no-turn", ["sha256:png"]),
+            #"{"type":"tool.execution_complete","data":{"toolCallId":"call-text","success":true,"result":{"content":"no image"}},"id":"done-call-text"}"#,
+            Self.toolImageLine("call-automated", ["sha256:png"]),
+        ], to: session.events)
+        let snapshot = Self.toolSnapshot(session.copilotSessionId, [
+            Self.toolTurn("turn-1", tools: ["call-view", "call-missing", "call-subagent", "call-text"]),
+            Self.toolTurn("automated-1", kind: "automated", tools: ["call-automated"]),
+        ])
+        let appSessionId = "desktop-tool-images"
+        let loaded = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: snapshot,
+            copilotHome: session.home.path
+        )
+        func toolImages(_ turnId: String) -> [TranscriptPromptAttachments.Item] {
+            loaded.items(
+                forTurnId: turnId, sessionId: appSessionId, copilotSessionId: session.copilotSessionId, fromTools: true
+            )
+        }
+
+        // Images only, in result order, each under its own tool call. A sub-agent's result is not shown
+        // even when a row has its id, and an asset that is not in the file is a placeholder.
+        let turn1 = toolImages("turn-1")
+        XCTAssertEqual(turn1.map(\.toolCallId), ["call-view", "call-view", "call-missing"])
+        XCTAssertEqual(turn1.map(\.data), [png, jpeg, nil])
+        let automated = toolImages("automated-1")
+        XCTAssertEqual(automated.map(\.toolCallId), ["call-automated"])
+        XCTAssertEqual(automated.map(\.data), [png])
+        XCTAssertTrue(
+            loaded.items(forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: session.copilotSessionId).isEmpty
+        )
+
+        // The same bytes under another tool call or turn are another image, and a tool image's id is
+        // never a prompt image's (1 << 24) or a Kitty capture's (below 1 << 24).
+        let identities = (turn1 + automated).map(\.identity)
+        XCTAssertEqual(Set(identities).count, 4)
+        XCTAssertTrue(identities.allSatisfy { $0.sessionId == appSessionId && $0.imageId >> 24 == 2 })
+
+        // Nothing is handed to another session or another conversation.
+        XCTAssertTrue(loaded.items(
+            forTurnId: "turn-1", sessionId: "another-session", copilotSessionId: session.copilotSessionId, fromTools: true
+        ).isEmpty)
+        XCTAssertTrue(loaded.items(
+            forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: "another-conversation", fromTools: true
+        ).isEmpty)
+
+        // A tool's asset is written before its completion, so one that is missing will not arrive:
+        // it does not keep the events file watched.
+        XCTAssertTrue(loaded.watchedFiles.isEmpty)
+        XCTAssertFalse(loaded.hasWatchedFileChanges())
+    }
+
+    func testToolImageReadBeforeTheSnapshotShowsItsToolLoadsOnceTheToolIsDone() throws {
+        let session = try makeToolImageSession()
+        let png = remoteKittyTestPNGBytes(width: 120, height: 60)
+        let completion = Self.toolImageLine("call-late", ["sha256:late"])
+        try Self.write([Self.assetLine("sha256:late", png), Self.promptLine("turn-1"), completion], to: session.events)
+        let appSessionId = "desktop-tool-order"
+        func loadAttachments(
+            _ turn: TranscriptTurn,
+            previous: TranscriptPromptAttachments? = nil
+        ) -> TranscriptPromptAttachments {
+            TranscriptPromptAttachments.load(
+                sessionId: appSessionId,
+                snapshot: Self.toolSnapshot(session.copilotSessionId, [turn]),
+                previous: previous,
+                copilotHome: session.home.path
+            )
+        }
+        func load(
+            _ turn: TranscriptTurn,
+            previous: TranscriptPromptAttachments? = nil
+        ) -> [TranscriptPromptAttachments.Item] {
+            loadAttachments(turn, previous: previous).items(
+                forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: session.copilotSessionId, fromTools: true
+            )
+        }
+
+        // The tracker publishes the snapshot from events.jsonl, so the file runs ahead of it. Here the
+        // whole file is read while the snapshot has no row for the tool, then while the tool is running.
+        let beforeTheRow = loadAttachments(Self.toolTurn("turn-1", tools: []))
+        XCTAssertEqual(beforeTheRow.scannedEventsBytes, try Data(contentsOf: session.events).count)
+        XCTAssertTrue(beforeTheRow.toolItemsByTurnId.isEmpty)
+        XCTAssertEqual(load(Self.toolTurn("turn-1", tools: ["call-late"], pending: true)).map(\.data), [png])
+
+        // Blank the completion where it was read. A load that had dropped the line has nothing left to
+        // find; one that recorded it has no need to read it again.
+        try Self.overwrite(completion, with: String(repeating: " ", count: completion.utf8.count), in: session.events)
+        let done = load(Self.toolTurn("turn-1", tools: ["call-late"]), previous: beforeTheRow)
+        XCTAssertEqual(done.map(\.data), [png])
+        XCTAssertEqual(done.map(\.toolCallId), ["call-late"])
+    }
+
+    func testToolImagesLoadIncrementallyWithoutReadingAnEarlierTurnOrAMissingAssetAgain() throws {
+        let session = try makeToolImageSession()
+        let png = remoteKittyTestPNGBytes(width: 120, height: 60)
+        let jpeg = try Self.makeSolidJPEG(width: 90, height: 60, color: .systemGreen)
+        let firstAsset = Self.assetLine("sha256:first", png)
+        let absentAsset = Self.assetLine("sha256:absent", png)
+        let blank = String(repeating: " ", count: absentAsset.utf8.count)
+        try Self.write([
+            blank,
+            firstAsset,
+            Self.promptLine("turn-1"),
+            Self.toolImageLine("call-absent", ["sha256:absent"]),
+            Self.promptLine("turn-2"),
+            Self.toolImageLine("call-first", ["sha256:first"]),
+        ], to: session.events)
+        let turns = [
+            Self.toolTurn("turn-1", tools: ["call-absent"]),
+            Self.toolTurn("turn-2", tools: ["call-first"]),
+        ]
+        let appSessionId = "desktop-tool-incremental"
+        func toolImages(_ loaded: TranscriptPromptAttachments, _ turnId: String) -> [TranscriptPromptAttachments.Item] {
+            loaded.items(
+                forTurnId: turnId, sessionId: appSessionId, copilotSessionId: session.copilotSessionId, fromTools: true
+            )
+        }
+        let first = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: Self.toolSnapshot(session.copilotSessionId, turns),
+            copilotHome: session.home.path
+        )
+        XCTAssertEqual(toolImages(first, "turn-1").map(\.data), [nil])
+        XCTAssertEqual(toolImages(first, "turn-2").map(\.data), [png])
+
+        // In the part of the file already read: the asset turn 1 could not find now exists, and turn 2's
+        // asset no longer decodes. A later load must read neither again.
+        try Self.overwrite(blank, with: absentAsset, in: session.events)
+        try Self.overwrite(firstAsset, with: Self.assetLine("sha256:first", Data(count: png.count)), in: session.events)
+        try Self.append([
+            Self.assetLine("sha256:second", jpeg, mimeType: "image/jpeg"),
+            Self.promptLine("turn-3"),
+            Self.toolImageLine("call-second", ["sha256:second"]),
+        ], to: session.events)
+
+        let second = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: Self.toolSnapshot(
+                session.copilotSessionId,
+                turns + [Self.toolTurn("turn-3", tools: ["call-second"])]
+            ),
+            previous: first,
+            copilotHome: session.home.path
+        )
+        XCTAssertEqual(toolImages(second, "turn-3").map(\.data), [jpeg])
+        XCTAssertEqual(toolImages(second, "turn-2"), toolImages(first, "turn-2"))
+        XCTAssertEqual(toolImages(second, "turn-1").map(\.data), [nil])
+        XCTAssertTrue(second.watchedFiles.isEmpty)
+    }
+
+    func testToolImagesTakeOnlyTheBudgetPromptImagesLeave() throws {
+        let session = try makeToolImageSession()
+        let big = Self.makePaddedPNG(
+            from: remoteKittyTestPNGBytes(width: 180, height: 90),
+            targetBytes: 4_500_000,
+            seed: 0x44
+        )
+        try Self.write([
+            Self.assetLine("sha256:big", big),
+            #"{"type":"user.message","data":{"content":"Oldest turn","attachments":[{"type":"blob","assetId":"sha256:big","mimeType":"image/png"}]},"id":"turn-1"}"#,
+            Self.promptLine("turn-2"),
+            Self.toolImageLine("call-older", ["sha256:big", "sha256:big"]),
+            Self.promptLine("turn-3"),
+            Self.toolImageLine("call-newer", Array(repeating: "sha256:big", count: 6)),
+        ], to: session.events)
+        let appSessionId = "desktop-tool-budget"
+        let loaded = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: Self.toolSnapshot(session.copilotSessionId, [
+                Self.toolTurn("turn-1", tools: []),
+                Self.toolTurn("turn-2", tools: ["call-older"]),
+                Self.toolTurn("turn-3", tools: ["call-newer"]),
+            ]),
+            copilotHome: session.home.path
+        )
+        func images(_ turnId: String, fromTools: Bool) -> [Data?] {
+            loaded.items(
+                forTurnId: turnId, sessionId: appSessionId, copilotSessionId: session.copilotSessionId,
+                fromTools: fromTools
+            ).map(\.data)
+        }
+
+        // 32 MiB in all and 4.5 MB an image. The prompt image is the oldest here and still loads,
+        // because prompt images are served first; then tool images, newest turn first, until it runs out.
+        XCTAssertEqual(images("turn-1", fromTools: false), [big])
+        XCTAssertEqual(images("turn-3", fromTools: true), Array(repeating: Optional(big), count: 6))
+        XCTAssertEqual(images("turn-2", fromTools: true), [nil, nil])
     }
 }
