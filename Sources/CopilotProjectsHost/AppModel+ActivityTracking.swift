@@ -4,7 +4,7 @@ import CopilotProjectsProtocol
 import Darwin
 
 /// Where a session's tracker-only status came from.
-enum TrackerState: String, Encodable {
+enum TrackerState {
     /// The tracker's own reading.
     case alive
     /// The reading was stale or unusable, or the snapshot was not the tab
@@ -203,26 +203,15 @@ extension AppModel {
     }
 
     /// Starts the process check, which tells the status rule when a session's
-    /// agent process has gone, and the status shadow's once-a-second pass.
+    /// agent process has gone.
     func startLivenessReconciler() {
         livenessTimer?.invalidate()
-        statusTimer?.invalidate()
-
-        if livenessEnabled {
-            reconcileLiveness()
-        } else {
+        guard livenessEnabled else {
             liveAgentSessions = []
             liveCopilotSessions = []
+            return
         }
-
-        reconcileStatus()
-        let status = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.reconcileStatus() }
-        }
-        RunLoop.main.add(status, forMode: .common)
-        statusTimer = status
-
-        guard livenessEnabled else { return }
+        reconcileLiveness()
         let timer = Timer(timeInterval: 8, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.reconcileLiveness() }
         }
@@ -522,14 +511,6 @@ extension AppModel {
                 )
             }
             return complete
-        }
-    }
-
-    /// The once-a-second pass, which the status shadow compares on.
-    func reconcileStatus() {
-        withCoalescedProjectPublications {
-            reconcileStatus(now: Date())
-            recordStatusShadow(now: Date())
         }
     }
 
