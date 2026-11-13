@@ -171,11 +171,11 @@ final class ManualUnreadTests: XCTestCase {
         }
         XCTAssertNil(try snapshot().unreadMarker, "A read session has nothing to acknowledge")
 
-        f.finishTurn(target, startingAt: 100)
+        try f.model.finishTurn(sessionId: target)
         let seen = try snapshot()
         XCTAssertTrue(seen.unread && seen.ready, "The client saw the first turn finish")
 
-        f.finishTurn(target, startingAt: 300)
+        try f.model.finishTurn(sessionId: target)
         bridge.markRead(sessionId: target, unreadMarker: seen.unreadMarker)
         var current = try snapshot()
         XCTAssertTrue(current.unread, "The mark was for the first turn, not the one that finished since")
@@ -188,12 +188,10 @@ final class ManualUnreadTests: XCTestCase {
         XCTAssertNil(current.unreadMarker)
 
         // An aborted turn lights only the finished dot, and a second one outdates the first.
-        f.model.setStatus(sessionId: target, status: .running, text: nil, timestamp: 500)
-        f.model.setStatus(sessionId: target, status: .idle, text: nil, timestamp: 550, source: "session-end")
+        f.model.setFinishedUnseen(sessionId: target)
         let aborted = try snapshot()
         XCTAssertTrue(aborted.ready && !aborted.unread)
-        f.model.setStatus(sessionId: target, status: .running, text: nil, timestamp: 600)
-        f.model.setStatus(sessionId: target, status: .idle, text: nil, timestamp: 650, source: "session-end")
+        f.model.setFinishedUnseen(sessionId: target)
         bridge.markRead(sessionId: target, unreadMarker: aborted.unreadMarker)
         current = try snapshot()
         XCTAssertTrue(current.ready)
@@ -209,8 +207,8 @@ final class ManualUnreadTests: XCTestCase {
         XCTAssertTrue(try snapshot().unread)
 
         // A client that sends no marker clears whatever is unread, as it always has.
-        f.finishTurn(target, startingAt: 700)
-        f.finishTurn(target, startingAt: 900)
+        try f.model.finishTurn(sessionId: target)
+        try f.model.finishTurn(sessionId: target)
         bridge.markRead(sessionId: target)
         XCTAssertFalse(try snapshot().unread)
     }
@@ -225,7 +223,7 @@ final class ManualUnreadTests: XCTestCase {
             try XCTUnwrap(bridge.workspace()?.projects[0].sessions[1])
         }
 
-        f.finishTurn(target, startingAt: 100)
+        try f.model.finishTurn(sessionId: target)
         let seen = try snapshot()
         f.model.markSessionRead(sessionId: target)
         bridge.markUnread(sessionId: target)
@@ -351,17 +349,6 @@ private final class ManualUnreadFixture {
     @MainActor
     func session(_ id: String) -> Session {
         model.projects.flatMap(\.sessions).first { $0.id == id }!
-    }
-
-    /// Runs a turn to completion, as the CLI's hooks report it.
-    @MainActor
-    func finishTurn(_ sessionId: String, startingAt start: Int64) {
-        model.setStatus(sessionId: sessionId, status: .running, text: nil, timestamp: start)
-        model.setStatus(
-            sessionId: sessionId, status: .idle, text: nil, timestamp: start + 100,
-            source: "agent-stop"
-        )
-        model.postCompletionIfReady(sessionId: sessionId)
     }
 
     func savedSessions() throws -> [String: Session] {

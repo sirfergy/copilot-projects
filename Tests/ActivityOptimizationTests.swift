@@ -283,38 +283,18 @@ final class ActivityOptimizationTests: XCTestCase {
         let observation = model.objectWillChange.sink { publications += 1 }
         defer { withExtendedLifetime(observation) {} }
 
-        // Both sessions flip idle -> running via runtimeActivity in one scan:
-        // applyAgentActivityReads + reconcileRuntimeActivity must publish once total.
+        // Both sessions flip idle -> running in one scan: applying the reads and
+        // reconciling their status must publish once total.
         try writeRuntimeSnapshots(at: base, processing: true, observedAtMs: baseMs)
         model.refreshAgentActivitySnapshots(now: base)
         XCTAssertEqual(publications, 1)
         XCTAssertEqual(model.projects[0].sessions[0].status, .running)
         XCTAssertEqual(model.projects[0].sessions[1].status, .running)
-        XCTAssertTrue(model.projects[0].sessions[0].statusIsRuntimeDerived)
 
-        // A hook that reports the already-current status with nil text is a no-op
-        // for UI state: it clears statusIsRuntimeDerived without publishing.
-        model.setStatus(
-            sessionId: sessions[0].id,
-            status: .running,
-            text: nil,
-            timestamp: baseMs + 10
-        )
-        XCTAssertEqual(publications, 1)
-        XCTAssertFalse(model.projects[0].sessions[0].statusIsRuntimeDerived)
-
-        // Arm session 0 with backgroundAgentsActive + a deferred completion, while
-        // session 1 remains running. Finishing both in one scan exercises
-        // applyAgentActivityReads + reconcileRuntimeActivity + setBackgroundAgentsActive
-        // + postCompletionIfReady + postNotification and must publish once total.
+        // Session 0 has background agents running. Finishing both turns in one scan
+        // exercises the scan, the status reconcile, setBackgroundAgentsActive,
+        // postCompletionIfReady and postNotification, and must publish once total.
         model.setBackgroundAgentsActive(sessionId: sessions[0].id, active: true)
-        model.setStatus(
-            sessionId: sessions[0].id,
-            status: .idle,
-            text: nil,
-            timestamp: baseMs + 20,
-            source: "agent-stop"
-        )
         XCTAssertFalse(model.projects[0].sessions[0].turnCompleted)
         XCTAssertEqual(model.projects[0].sessions[1].status, .running)
 
@@ -425,7 +405,7 @@ final class ActivityOptimizationTests: XCTestCase {
         )
     }
 
-    func testSessionStateIndicatorSymbolNamesReflectDisplayStatusAndAttention() {
+    func testSessionStateIndicatorSymbolNamesReflectStatusAndAttention() {
         var session = Session(id: "s-1", title: "Alpha", cwd: "/tmp")
         XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "terminal.fill")
 
@@ -460,16 +440,6 @@ final class ActivityOptimizationTests: XCTestCase {
 
         session.status = .running
         XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "waveform")
-
-        var pendingQuestionActivity = failedActivity
-        pendingQuestionActivity.trackedUserInputs = [
-            TrackedUserInput(
-                requestId: "q-1", question: "Proceed?", choices: ["Yes", "No"],
-                allowFreeform: false, requestedAt: pendingQuestionActivity.updatedAt, agentId: nil
-            )
-        ]
-        session.agentActivity = pendingQuestionActivity
-        XCTAssertEqual(SessionStateIndicator.symbolName(for: session), "questionmark.bubble.fill")
     }
 }
 

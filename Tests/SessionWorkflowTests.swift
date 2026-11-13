@@ -65,7 +65,7 @@ final class SessionWorkflowTests: XCTestCase {
         let repository = StateRepository(path: root.appendingPathComponent("state.json"))
         try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
         let model = AppModel(
-            stateRepository: repository, persistPermissionStatus: { _, _, _, _ in },
+            stateRepository: repository,
             isAppActive: { false }, agentActivityDirectory: sessions, resumeMarkerDirectory: sessions,
             remotePromptLiveSessions: { _ in [session.id] },
             kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
@@ -369,7 +369,6 @@ final class SessionWorkflowTests: XCTestCase {
         try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
         let model = AppModel(
             stateRepository: repository,
-            persistPermissionStatus: { _, _, _, _ in },
             isAppActive: { false },
             agentActivityDirectory: sessions,
             resumeMarkerDirectory: sessions,
@@ -508,7 +507,6 @@ final class SessionWorkflowTests: XCTestCase {
         try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
         let model = AppModel(
             stateRepository: repository,
-            persistPermissionStatus: { _, _, _, _ in },
             isAppActive: { false },
             agentActivityDirectory: sessions,
             resumeMarkerDirectory: sessions,
@@ -716,7 +714,6 @@ final class SessionWorkflowTests: XCTestCase {
         try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
         let model = AppModel(
             stateRepository: repository,
-            persistPermissionStatus: { _, _, _, _ in },
             isAppActive: { false },
             agentActivityDirectory: sessions,
             resumeMarkerDirectory: sessions,

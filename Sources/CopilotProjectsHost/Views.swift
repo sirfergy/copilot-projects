@@ -817,7 +817,7 @@ struct SessionStateIndicator: View, Equatable {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.session.displayStatus == rhs.session.displayStatus
+        lhs.session.status == rhs.session.status
             && lhs.session.failedRequest == rhs.session.failedRequest
             && lhs.session.finishedUnseen == rhs.session.finishedUnseen
             && lhs.session.hasBackgroundWork == rhs.session.hasBackgroundWork
@@ -830,7 +830,7 @@ struct SessionStateIndicator: View, Equatable {
         if let parked = session.parked {
             return parked.state == .failed ? "exclamationmark.triangle.fill" : "moon.zzz.fill"
         }
-        switch session.displayStatus {
+        switch session.status {
         case .running:
             return "waveform"
         case .waiting:
@@ -847,7 +847,7 @@ struct SessionStateIndicator: View, Equatable {
     }
 
     var body: some View {
-        let isBackgroundIdle = session.displayStatus == .idle
+        let isBackgroundIdle = session.status == .idle
             && session.failedRequest == nil
             && !session.finishedUnseen
             && session.hasBackgroundWork
@@ -860,7 +860,7 @@ struct SessionStateIndicator: View, Equatable {
                 .font(.system(size: isIdle ? 8.5 : 10, weight: .semibold))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(isIdle ? StudioStyle.secondaryText.opacity(0.8) : badgeTint)
-                .symbolEffect(.variableColor.iterative, isActive: session.displayStatus == .running && !reduceMotion)
+                .symbolEffect(.variableColor.iterative, isActive: session.status == .running && !reduceMotion)
                 .symbolEffect(.pulse, isActive: isBackgroundIdle && !reduceMotion)
         }
         .frame(width: 18, height: 18)
@@ -868,7 +868,7 @@ struct SessionStateIndicator: View, Equatable {
     }
 
     private var isIdle: Bool {
-        session.displayStatus == .idle
+        session.status == .idle
             && session.failedRequest == nil
             && !session.finishedUnseen
             && !session.hasBackgroundWork
@@ -876,7 +876,7 @@ struct SessionStateIndicator: View, Equatable {
     }
 
     private var badgeTint: Color {
-        switch session.displayStatus {
+        switch session.status {
         case .running: return .green
         case .waiting: return .orange
         case .idle:
@@ -890,7 +890,7 @@ struct SessionStateIndicator: View, Equatable {
 
     private var help: String {
         if let parked = session.parked { return parked.label.lowercased() }
-        switch session.displayStatus {
+        switch session.status {
         case .running: return "running"
         case .waiting: return "waiting for input"
         case .idle:
@@ -1790,8 +1790,7 @@ struct SessionRow: View, Equatable {
             && lhs.session.hostId == rhs.session.hostId
             && lhs.session.memoryUsageBytes == rhs.session.memoryUsageBytes
             && lhs.session.parked == rhs.session.parked
-            && lhs.session.statusText == rhs.session.statusText
-            && lhs.session.displayStatus == rhs.session.displayStatus
+            && lhs.session.status == rhs.session.status
             && lhs.session.effectiveRunningStartedAtMilliseconds == rhs.session.effectiveRunningStartedAtMilliseconds
             && lhs.session.effectivePullRequestKeys == rhs.session.effectivePullRequestKeys
             && lhs.session.failedRequest == rhs.session.failedRequest
@@ -1805,7 +1804,7 @@ struct SessionRow: View, Equatable {
     var showsUnreadIndicator: Bool {
         // Avoid duplicating the idle completion dot unless the tab-number hint,
         // a manual unread mark, or a failure indicator applies.
-        session.isUnread && (showNumber || session.displayStatus != .idle
+        session.isUnread && (showNumber || session.status != .idle
             || !session.finishedUnseen || session.failedRequest != nil || session.markedUnread)
     }
 
@@ -1838,7 +1837,7 @@ struct SessionRow: View, Equatable {
     var stateLabel: String { session.attentionLabel }
 
     var stateColor: Color {
-        switch session.displayStatus {
+        switch session.status {
         case .running: return .green
         case .waiting: return .orange
         case .idle:
@@ -1874,8 +1873,8 @@ struct SessionRow: View, Equatable {
                         Text(session.title)
                             .font(.body.weight(.medium))
                             .lineLimit(2)
-                            .help(session.statusText ?? session.title)
-                        let showsRunningElapsed = session.displayStatus == .running
+                            .help(session.title)
+                        let showsRunningElapsed = session.status == .running
                             && session.effectiveRunningStartedAtMilliseconds != nil
                         let showsBackgroundBadge = session.hasBackgroundWork
                             && SessionStateIndicator.symbolName(for: session) != "sparkles"

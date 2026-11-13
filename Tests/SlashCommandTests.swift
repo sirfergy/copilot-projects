@@ -47,7 +47,7 @@ final class SlashCommandTests: XCTestCase {
             let copilot = copilot
             copilot.live = [session.id, other.id]
             model = AppModel(
-                stateRepository: repository, persistPermissionStatus: { _, _, _, _ in },
+                stateRepository: repository,
                 isAppActive: { false }, agentActivityDirectory: root, resumeMarkerDirectory: root,
                 remotePromptLiveSessions: { _ in copilot.live },
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
@@ -193,13 +193,13 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertNil(f.blocked)
 
         let notIdle = "Wait until Copilot is idle before restarting it"
-        f.model.setStatus(sessionId: f.session.id, status: .running, text: nil, timestamp: 1)
+        f.model.setStatus(.running, sessionId: f.session.id)
         XCTAssertEqual(f.blocked, notIdle)
         XCTAssertFalse(composer.canSend(workflow: f.workflow, operation: f.operation))
         await f.submit()
         XCTAssertEqual(composer.statusMessage, notIdle)
         XCTAssertEqual(composer.prompt, "/restart")
-        f.model.setStatus(sessionId: f.session.id, status: .idle, text: nil, timestamp: 2)
+        f.model.setStatus(.idle, sessionId: f.session.id)
         XCTAssertNil(f.blocked)
 
         f.model.projects[0].sessions[0].backgroundAgentsActive = true
@@ -285,9 +285,9 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertFalse(requestedOnScreen)
 
         // The row's item follows what the model publishes about its session.
-        f.model.setStatus(sessionId: f.other.id, status: .running, text: nil, timestamp: 1)
+        f.model.setStatus(.running, sessionId: f.other.id)
         XCTAssertFalse(try rowMenu(in: row).items[0].isEnabled)
-        f.model.setStatus(sessionId: f.other.id, status: .idle, text: nil, timestamp: 2)
+        f.model.setStatus(.idle, sessionId: f.other.id)
         XCTAssertTrue(try rowMenu(in: row).items[0].isEnabled)
 
         // A heartbeat that only refreshes the tracker's observation is not published, so an
@@ -301,7 +301,7 @@ final class SlashCommandTests: XCTestCase {
         // The Session menu's item follows the session on screen.
         f.model.syncMenuState(includeRuntimeAttention: true)
         XCTAssertTrue(f.model.menuState.snapshot.selectedSessionCanRestart)
-        f.model.setStatus(sessionId: f.session.id, status: .running, text: nil, timestamp: 3)
+        f.model.setStatus(.running, sessionId: f.session.id)
         f.model.syncMenuState(includeRuntimeAttention: true)
         XCTAssertFalse(f.model.menuState.snapshot.selectedSessionCanRestart)
     }
@@ -309,7 +309,7 @@ final class SlashCommandTests: XCTestCase {
     func testRestartIdleSessionsAsksTheIdleSessionsAndLeavesABusyOneAlone() async throws {
         let f = try Fixture()
         defer { f.close() }
-        f.model.setStatus(sessionId: f.session.id, status: .running, text: nil, timestamp: 1)
+        f.model.setStatus(.running, sessionId: f.session.id)
 
         f.model.restartIdleSessions(inProjectId: f.model.projects[0].id)
         let requestedIdle = await f.restartRequested(of: f.other)

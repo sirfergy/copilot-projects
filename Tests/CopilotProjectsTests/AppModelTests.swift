@@ -863,17 +863,9 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(reviewSession.pullRequestKeys, ["sirfergy/copilot-projects#270"])
             XCTAssertEqual(reviewSession.effectivePullRequestKeys, ["sirfergy/copilot-projects#270"])
 
-            // 3. Running status sets runningStartedAtMilliseconds and remoteWorkspaceSnapshot exposes both fields.
-            let hookStartMs: Int64 = 1_788_000_000_000
-            model.setStatus(
-                sessionId: s1.id,
-                status: .running,
-                text: "Working",
-                timestamp: hookStartMs,
-                source: "user-prompt"
-            )
-            XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, hookStartMs)
-            XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, hookStartMs)
+            // 3. A turn the tracker reports starts the timer at its foregroundTransitionAt, and
+            // remoteWorkspaceSnapshot exposes it.
+            let turnStartMs: Int64 = 1_788_000_005_000
 
             // Tracker snapshot foregroundTransitionAt across multiple assistant.turn_start iterations
             // does not reset the request's runningStartedAtMilliseconds, and snapshot.pullRequestKeys
@@ -941,13 +933,13 @@ final class AppModelTests: XCTestCase {
                     "sirfergy/copilot-projects#204",
                 ]
             )
-            XCTAssertEqual(updatedS1.runningStartedAtMilliseconds, hookStartMs)
-            XCTAssertEqual(updatedS1.effectiveRunningStartedAtMilliseconds, hookStartMs)
+            XCTAssertEqual(updatedS1.runningStartedAtMilliseconds, turnStartMs)
+            XCTAssertEqual(updatedS1.effectiveRunningStartedAtMilliseconds, turnStartMs)
 
             let remoteRunning = try XCTUnwrap(
                 model.remoteWorkspaceSnapshot().projects.first?.sessions.first(where: { $0.id == s1.id })
             )
-            XCTAssertEqual(remoteRunning.runningStartedAtMilliseconds, hookStartMs)
+            XCTAssertEqual(remoteRunning.runningStartedAtMilliseconds, turnStartMs)
             XCTAssertEqual(
                 remoteRunning.pullRequestKeys,
                 [
@@ -968,130 +960,116 @@ final class AppModelTests: XCTestCase {
                 options: .atomic
             )
             model.refreshAgentActivitySnapshots(now: secondIterationNow)
-            XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, hookStartMs)
-            XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, hookStartMs)
+            XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, turnStartMs)
+            XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, turnStartMs)
             let remoteSecondIteration = try XCTUnwrap(
                 model.remoteWorkspaceSnapshot().projects.first?.sessions.first(where: { $0.id == s1.id })
             )
-            XCTAssertEqual(remoteSecondIteration.runningStartedAtMilliseconds, hookStartMs)
+            XCTAssertEqual(remoteSecondIteration.runningStartedAtMilliseconds, turnStartMs)
 
-            // Pending question flips displayStatus to .waiting and hides effectiveRunningStartedAtMilliseconds.
+            func publish(_ snapshot: AgentActivitySnapshot, to sessionId: String) throws {
+                try JSONEncoder().encode(snapshot).write(
+                    to: root.appendingPathComponent("\(sessionId).agent-activity.json"),
+                    options: .atomic
+                )
+            }
+            func stamp(_ seconds: TimeInterval) -> String {
+                Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+                    .format(Date(timeIntervalSince1970: seconds))
+            }
+            @MainActor func s1Now() -> Session { model.projects[0].sessions[0] }
+
+            // A pending question shows Waiting and hides the elapsed time; the turn keeps its start.
             activity.trackedUserInputs = [
                 TrackedUserInput(
                     requestId: "req-1",
                     question: "Proceed?",
                     choices: ["Yes"],
                     allowFreeform: false,
-                    requestedAt: Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(now)
+                    requestedAt: stamp(1_788_000_016)
                 )
             ]
-            var waitingSession = updatedS1
-            waitingSession.agentActivity = activity
-            XCTAssertEqual(waitingSession.displayStatus, .waiting)
-            XCTAssertNil(waitingSession.effectiveRunningStartedAtMilliseconds)
+            try publish(activity, to: s1.id)
+            model.refreshAgentActivitySnapshots(now: secondIterationNow)
+            XCTAssertEqual(s1Now().status, .waiting)
+            XCTAssertNil(s1Now().effectiveRunningStartedAtMilliseconds)
+            XCTAssertEqual(s1Now().runningStartedAtMilliseconds, turnStartMs)
 
-            // Transitioning to .idle clears runningStartedAtMilliseconds, and a subsequent turn start does not
-            // mistake an old idle snapshot's foregroundTransitionAt for the new turn's start time.
+            // The turn's end clears the timer.
             var idleSnapshot = activity
             idleSnapshot.trackedUserInputs = nil
             idleSnapshot.foregroundTurnActive = false
-            idleSnapshot.foregroundTransitionAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-                .format(Date(timeIntervalSince1970: 1_788_000_020))
-            try JSONEncoder().encode(idleSnapshot).write(
-                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
-                options: .atomic
-            )
+            idleSnapshot.foregroundTransitionAt = stamp(1_788_000_020)
+            try publish(idleSnapshot, to: s1.id)
             model.refreshAgentActivitySnapshots(now: Date(timeIntervalSince1970: 1_788_000_021))
-            model.setStatus(
-                sessionId: s1.id,
-                status: .idle,
-                text: nil,
-                timestamp: hookStartMs + 20_000
-            )
-            XCTAssertNil(model.projects[0].sessions[0].runningStartedAtMilliseconds)
-            XCTAssertNil(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds)
+            XCTAssertNil(s1Now().runningStartedAtMilliseconds)
+            XCTAssertNil(s1Now().effectiveRunningStartedAtMilliseconds)
             let remoteIdle = try XCTUnwrap(
                 model.remoteWorkspaceSnapshot().projects.first?.sessions.first(where: { $0.id == s1.id })
             )
             XCTAssertNil(remoteIdle.runningStartedAtMilliseconds)
 
-            let nextTurnStartMs: Int64 = 1_788_000_060_000
-            model.setStatus(
-                sessionId: s1.id,
-                status: .running,
-                text: "Next turn",
-                timestamp: nextTurnStartMs,
-                source: "user-prompt"
-            )
-            XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
-            XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
-
-            // Transient permission wait preserves pre-wait runningStartedAtMilliseconds across .waiting -> .running,
-            // including when a post-wait assistant.turn_start snapshot arrives with a newer foregroundTransitionAt.
-            model.setStatus(
-                sessionId: s1.id,
-                status: .waiting,
-                text: "Needs permission",
-                timestamp: nextTurnStartMs + 5_000,
-                source: "permission",
-                notification: .permission
-            )
-            XCTAssertNil(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds)
-            model.setStatus(
-                sessionId: s1.id,
-                status: .running,
-                text: "Resumed after permission",
-                timestamp: nextTurnStartMs + 10_000,
-                source: "tool"
-            )
-            var postWaitActivity = idleSnapshot
-            postWaitActivity.conversationEpoch = "\(s1.id):1"
-            postWaitActivity.updatedAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-                .format(Date(timeIntervalSince1970: 1_788_000_073))
-            postWaitActivity.foregroundTurnActive = true
-            postWaitActivity.foregroundTransitionAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-                .format(Date(timeIntervalSince1970: 1_788_000_072))
-            try JSONEncoder().encode(postWaitActivity).write(
-                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
-                options: .atomic
-            )
+            // The next turn starts its own timer.
+            let nextTurnStartMs: Int64 = 1_788_000_072_000
+            var nextTurn = idleSnapshot
+            nextTurn.conversationEpoch = "\(s1.id):1"
+            nextTurn.updatedAt = stamp(1_788_000_073)
+            nextTurn.foregroundTurnActive = true
+            nextTurn.foregroundTransitionAt = stamp(1_788_000_072)
+            try publish(nextTurn, to: s1.id)
             model.refreshAgentActivitySnapshots(now: Date(timeIntervalSince1970: 1_788_000_073))
-            XCTAssertEqual(model.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
-            XCTAssertEqual(model.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
+            XCTAssertEqual(s1Now().runningStartedAtMilliseconds, nextTurnStartMs)
+            XCTAssertEqual(s1Now().effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
+
+            // A permission prompt hides the elapsed time, and the start survives it, also when the
+            // assistant.turn_start after it rewrites foregroundTransitionAt.
+            nextTurn.pendingPermissionRequestIds = ["permission-1"]
+            nextTurn.updatedAt = stamp(1_788_000_075)
+            try publish(nextTurn, to: s1.id)
+            model.refreshAgentActivitySnapshots(now: Date(timeIntervalSince1970: 1_788_000_075))
+            XCTAssertEqual(s1Now().status, .waiting)
+            XCTAssertNil(s1Now().effectiveRunningStartedAtMilliseconds)
+            nextTurn.pendingPermissionRequestIds = []
+            nextTurn.updatedAt = stamp(1_788_000_083)
+            nextTurn.foregroundTransitionAt = stamp(1_788_000_082)
+            try publish(nextTurn, to: s1.id)
+            model.refreshAgentActivitySnapshots(now: Date(timeIntervalSince1970: 1_788_000_083))
+            XCTAssertEqual(s1Now().runningStartedAtMilliseconds, nextTurnStartMs)
+            XCTAssertEqual(s1Now().effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
             let remotePostWait = try XCTUnwrap(
                 model.remoteWorkspaceSnapshot().projects.first?.sessions.first(where: { $0.id == s1.id })
             )
             XCTAssertEqual(remotePostWait.runningStartedAtMilliseconds, nextTurnStartMs)
 
-            // Quitting saves the timer. Relaunching after an off-host tool hook (where statusTimestamp
-            // advances in .status-record.json while the active snapshot's idleGeneration is unchanged)
-            // preserves the original request start, and timestamp-less status transitions record
-            // clocks.status so relaunch preserves the start too.
+            // Quitting saves the timer, and a relaunch keeps it while the tracker's snapshot on
+            // disk still shows the same request.
             model.save()
-            SessionArtifacts.persistStatus(
-                sessionId: s1.id,
-                status: .running,
-                timestamp: nextTurnStartMs + 15_000,
-                promptStatusTimestamp: nextTurnStartMs + 15_000,
-                sessionsDirectory: root
-            )
-            let relaunched = AppModel(
-                stateRepository: repository,
-                isAppActive: { false },
-                agentActivityDirectory: root,
-                resumeMarkerDirectory: root,
-                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
-                remoteSessionBackendAvailable: { true },
-                remoteSessionLauncher: { _, _, _ in },
-                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
-                gracefulSessionDestroyer: { _, _ in Task {} },
-                forcedSessionDestroyer: { _ in }
-            )
+            @MainActor func relaunch() -> AppModel {
+                AppModel(
+                    stateRepository: repository,
+                    isAppActive: { false },
+                    agentActivityDirectory: root,
+                    resumeMarkerDirectory: root,
+                    remoteCopilotExecutable: { "/usr/local/bin/copilot" },
+                    remoteSessionBackendAvailable: { true },
+                    remoteSessionLauncher: { _, _, _ in },
+                    kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                    gracefulSessionDestroyer: { _, _ in Task {} },
+                    forcedSessionDestroyer: { _ in }
+                )
+            }
+            // A relaunch judges the snapshot against the wall clock.
+            let wallNow = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+            nextTurn.updatedAt = stamp(wallNow.timeIntervalSince1970)
+            try publish(nextTurn, to: s1.id)
+            let relaunched = relaunch()
             defer {
                 relaunched.forcePendingSessionDestroys()
                 relaunched.detachAllClients()
             }
+            XCTAssertEqual(relaunched.projects[0].sessions[0].status, .idle)
             XCTAssertEqual(relaunched.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
+            relaunched.refreshAgentActivitySnapshots(now: wallNow)
             XCTAssertEqual(relaunched.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, nextTurnStartMs)
             XCTAssertEqual(
                 relaunched.projects[0].sessions[0].effectivePullRequestKeys,
@@ -1102,71 +1080,26 @@ final class AppModelTests: XCTestCase {
                 ]
             )
 
-            // Timestamp-less waiting -> running sequence updates runningStatusTimestampMilliseconds from clocks.status,
-            // without writing state.json.
-            let stateFile = {
-                try FileManager.default.attributesOfItem(atPath: repository.path.path)[.systemFileNumber] as? NSNumber
-            }
-            let beforeTimestampless = try stateFile()
-            relaunched.setStatus(sessionId: s1.id, status: .waiting, text: "Wait", notification: .permission)
-            relaunched.setStatus(sessionId: s1.id, status: .running, text: "Resume")
-            XCTAssertEqual(try stateFile(), beforeTimestampless)
-            relaunched.save()
-            let relaunchedTimestampless = AppModel(
-                stateRepository: repository,
-                isAppActive: { false },
-                agentActivityDirectory: root,
-                resumeMarkerDirectory: root,
-                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
-                remoteSessionBackendAvailable: { true },
-                remoteSessionLauncher: { _, _, _ in },
-                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
-                gracefulSessionDestroyer: { _, _ in Task {} },
-                forcedSessionDestroyer: { _ in }
-            )
+            // A relaunch that finds another request on disk (a restarted CLI counts idleGeneration
+            // from 0 again under a new conversationEpoch) starts a fresh timer at that request.
+            let newRequestStartMs = Int64(wallNow.timeIntervalSince1970 * 1_000) - 2_000
+            var newRequest = nextTurn
+            newRequest.conversationEpoch = "\(s1.id):2"
+            newRequest.foregroundTransitionAt = stamp(wallNow.timeIntervalSince1970 - 2)
+            try publish(newRequest, to: s1.id)
+            let relaunchedOnNewRequest = relaunch()
             defer {
-                relaunchedTimestampless.forcePendingSessionDestroys()
-                relaunchedTimestampless.detachAllClients()
+                relaunchedOnNewRequest.forcePendingSessionDestroys()
+                relaunchedOnNewRequest.detachAllClients()
             }
-            XCTAssertEqual(relaunchedTimestampless.projects[0].sessions[0].runningStartedAtMilliseconds, nextTurnStartMs)
+            XCTAssertNil(relaunchedOnNewRequest.projects[0].sessions[0].runningStartedAtMilliseconds)
+            relaunchedOnNewRequest.refreshAgentActivitySnapshots(now: wallNow)
+            XCTAssertEqual(
+                relaunchedOnNewRequest.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds,
+                newRequestStartMs)
 
-            // Off-host CLI restart or new request (even if idleGeneration resets to 0 under a new conversationEpoch)
-            // starts a fresh timer at the new request's timestamp.
-            let offHostTurnStartMs = SessionArtifacts.currentStatusTimestamp() + 60_000
-            var newOffHostActivity = postWaitActivity
-            newOffHostActivity.conversationEpoch = "\(s1.id):2"
-            newOffHostActivity.idleGeneration = 0
-            try JSONEncoder().encode(newOffHostActivity).write(
-                to: root.appendingPathComponent("\(s1.id).agent-activity.json"),
-                options: .atomic
-            )
-            SessionArtifacts.persistStatus(
-                sessionId: s1.id,
-                status: .running,
-                timestamp: offHostTurnStartMs,
-                promptStatusTimestamp: offHostTurnStartMs,
-                sessionsDirectory: root
-            )
-            let relaunchedOffHost = AppModel(
-                stateRepository: repository,
-                isAppActive: { false },
-                agentActivityDirectory: root,
-                resumeMarkerDirectory: root,
-                remoteCopilotExecutable: { "/usr/local/bin/copilot" },
-                remoteSessionBackendAvailable: { true },
-                remoteSessionLauncher: { _, _, _ in },
-                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
-                gracefulSessionDestroyer: { _, _ in Task {} },
-                forcedSessionDestroyer: { _ in }
-            )
-            defer {
-                relaunchedOffHost.forcePendingSessionDestroys()
-                relaunchedOffHost.detachAllClients()
-            }
-            XCTAssertEqual(relaunchedOffHost.projects[0].sessions[0].runningStartedAtMilliseconds, offHostTurnStartMs)
-            XCTAssertEqual(relaunchedOffHost.projects[0].sessions[0].effectiveRunningStartedAtMilliseconds, offHostTurnStartMs)
-
-            // Untrusted/mismatched copilotSessionId snapshot must not leak pullRequestKeys or foregroundTransitionAt.
+            // Another Copilot's snapshot in the tab's file must not leak pullRequestKeys, start a
+            // timer or show Running.
             let pinnedCopilotId = UUID().uuidString.lowercased()
             let foreignCopilotId = UUID().uuidString.lowercased()
             try Data("\(pinnedCopilotId)\n".utf8).write(
@@ -1174,32 +1107,20 @@ final class AppModelTests: XCTestCase {
                 options: .atomic
             )
             var foreignSnapshot = idleSnapshot
-            foreignSnapshot.updatedAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-                .format(Date(timeIntervalSince1970: 1_788_000_051))
+            foreignSnapshot.updatedAt = stamp(1_788_000_051)
             foreignSnapshot.copilotSessionId = foreignCopilotId
             foreignSnapshot.foregroundTurnActive = true
-            foreignSnapshot.foregroundTransitionAt = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-                .format(Date(timeIntervalSince1970: 1_788_000_050))
+            foreignSnapshot.foregroundTransitionAt = stamp(1_788_000_050)
             foreignSnapshot.pullRequestKeys = ["evil/foreign#999"]
-            try JSONEncoder().encode(foreignSnapshot).write(
-                to: root.appendingPathComponent("\(reviewSessionId).agent-activity.json"),
-                options: .atomic
-            )
+            try publish(foreignSnapshot, to: reviewSessionId)
             model.refreshAgentActivitySnapshots(now: Date(timeIntervalSince1970: 1_788_000_051))
-            model.setStatus(
-                sessionId: reviewSessionId,
-                status: .running,
-                text: "Reviewing",
-                timestamp: 1_788_000_080_000,
-                source: "user-prompt"
-            )
             let refreshedReview = try XCTUnwrap(
                 model.projects[0].sessions.first(where: { $0.id == reviewSessionId })
             )
             XCTAssertEqual(refreshedReview.pullRequestKeys, ["sirfergy/copilot-projects#270"])
             XCTAssertEqual(refreshedReview.effectivePullRequestKeys, ["sirfergy/copilot-projects#270"])
-            XCTAssertEqual(refreshedReview.runningStartedAtMilliseconds, 1_788_000_080_000)
-            XCTAssertEqual(refreshedReview.effectiveRunningStartedAtMilliseconds, 1_788_000_080_000)
+            XCTAssertEqual(refreshedReview.status, .idle)
+            XCTAssertNil(refreshedReview.runningStartedAtMilliseconds)
 
             // 4. SessionRow Equatable and VoiceOver accessibilityStatus include running elapsed time and PR keys.
             var rowSessionA = Session(id: "row-1", title: "Row", cwd: root.path)
@@ -1657,12 +1578,12 @@ final class AppModelTests: XCTestCase {
 
             // Starting, streaming, waiting, and finishing sessions, plus number-hint and drawer changes,
             // publish on AppModel without re-evaluating WorkspaceMenuState.
-            model.setStatus(sessionId: s1.id, status: .running, text: "Thinking…", timestamp: 1)
-            model.setStatus(sessionId: s1.id, status: .running, text: "Running bash…", timestamp: 2)
-            model.setStatus(sessionId: s2.id, status: .running, text: "Background work…", timestamp: 3)
-            model.setStatus(sessionId: s2.id, status: .waiting, text: "Approve?", timestamp: 4)
-            model.setStatus(sessionId: s2.id, status: .idle, text: nil, timestamp: 5)
-            model.setStatus(sessionId: s1.id, status: .idle, text: nil, timestamp: 6)
+            model.setStatus(.running, sessionId: s1.id)
+            model.setStatus(.running, sessionId: s2.id)
+            model.setStatus(.waiting, sessionId: s2.id)
+            model.setStatus(.idle, sessionId: s2.id)
+            model.setFinishedUnseen(sessionId: s2.id)
+            model.setStatus(.idle, sessionId: s1.id)
             model.setNumberHint(.projects)
             model.setNumberHint(.none)
             model.openTranscriptDrawer(sessionId: s1.id)

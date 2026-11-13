@@ -200,10 +200,7 @@ final class WorkspaceInputControllerTests: XCTestCase {
     func testOpeningASessionInAnotherProjectLeavesThatProjectsShownTabUnread() throws {
         let other = [Session(title: "shown", cwd: "/tmp"), Session(title: "target", cwd: "/tmp")]
         try withWorkspace(otherSessions: other) { model, input, _ in
-            for session in other {
-                model.setStatus(sessionId: session.id, status: .running, text: nil, timestamp: 1, source: "test")
-                model.setStatus(sessionId: session.id, status: .idle, text: nil, timestamp: 2, source: "test")
-            }
+            for session in other { model.setFinishedUnseen(sessionId: session.id) }
             @MainActor func finishedUnseen(_ session: Session) -> Bool? {
                 model.projects.flatMap(\.sessions).first { $0.id == session.id }?.finishedUnseen
             }
@@ -227,12 +224,9 @@ final class WorkspaceInputControllerTests: XCTestCase {
             // sessions[0] is current; sessions[1] is manually marked unread;
             // b1 & b4 finished unseen ("ready"); b2 & b3 are waiting for input.
             model.markSessionUnread(sessionId: sessions[1].id)
-            for ready in [b1, b4] {
-                model.setStatus(sessionId: ready.id, status: .running, text: nil, timestamp: 1, source: "test")
-                model.setStatus(sessionId: ready.id, status: .idle, text: nil, timestamp: 2, source: "test")
-            }
-            model.setStatus(sessionId: b2.id, status: .waiting, text: "approve 1?", timestamp: 3, source: "test")
-            model.setStatus(sessionId: b3.id, status: .waiting, text: "approve 2?", timestamp: 4, source: "test")
+            for ready in [b1, b4] { model.setFinishedUnseen(sessionId: ready.id) }
+            model.setStatus(.waiting, sessionId: b2.id)
+            model.setStatus(.waiting, sessionId: b3.id)
 
             XCTAssertTrue(model.hasAttentionSessions)
             XCTAssertEqual(model.totalWaiting, 2)

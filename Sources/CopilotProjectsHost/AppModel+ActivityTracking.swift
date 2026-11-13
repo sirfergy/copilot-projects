@@ -26,8 +26,7 @@ extension AppModel {
         if let snapshot, snapshot.isFresh(at: now), !snapshot.reportsTerminalDisconnect {
             let working: Bool?
             switch snapshot.runtimeForegroundActivity(
-                expectedSessionId: snapshot.copilotSessionId, now: now,
-                minimumObservationMilliseconds: nil
+                expectedSessionId: snapshot.copilotSessionId, now: now
             ) {
             case .working: working = true
             case .idle: working = false
@@ -41,8 +40,8 @@ extension AppModel {
             case .unknown: working = nil
             }
             if let working {
-                // A scheduled turn shows as idle, as it always has. A pending
-                // question shows as waiting through `Session.displayStatus`.
+                // A scheduled turn shows as idle, as it always has. Pending input
+                // shows as waiting: `reconcileStatus` lays that over this status.
                 return (
                     .alive, working && !snapshot.scheduledTurnActive ? .running : .idle,
                     !working && !snapshot.hasPendingInput
@@ -65,168 +64,21 @@ extension AppModel {
         return snapshot
     }
 
-    func runtimeForegroundActivity(
-        for session: Session,
-        now: Date,
-        resolvedOwner: String?? = nil
-    ) -> ForegroundActivity? {
-        let owner = resolvedOwner ?? resumeMarkerValue(sessionId: session.id, suffix: "copilot-session")
-        guard let snapshot = session.agentActivity else {
-            return runtimeTrackedOwners[session.id] == owner?.lowercased()
-                && owner != nil ? .unknown : nil
-        }
-        return snapshot.runtimeForegroundActivity(
-            expectedSessionId: owner,
-            now: now,
-            minimumObservationMilliseconds:
-                sessionSemantics.promptSafetyClock.timestamp(for: session.id)
-        )
-    }
-
-    func inputWaitWasResolved(
-        for session: Session,
-        foreground: ForegroundActivity?,
-        now: Date,
-        resolvedOwner: String?? = nil
-    ) -> Bool {
-        let nowMs = Int64(now.timeIntervalSince1970 * 1_000)
-        guard foreground != .unknown,
-              let wait = inputWaits[session.id],
-              let snapshot = session.agentActivity,
-              snapshot.isFresh(at: now),
-              snapshot.copilotSessionId?.lowercased() == wait.context.rootSessionId.lowercased(),
-              snapshot.copilotSessionId?.lowercased()
-                == (resolvedOwner ?? resumeMarkerValue(sessionId: session.id, suffix: "copilot-session"))?.lowercased(),
-              let epoch = snapshot.conversationEpoch, !epoch.isEmpty,
-              snapshot.trackedUserInputs?.isEmpty == true,
-              snapshot.trackedElicitations?.isEmpty == true,
-              snapshot.pendingPermissionRequestIds?.isEmpty == true,
-              let observed = foreground == nil
-                ? snapshot.updatedAtMilliseconds
-                : snapshot.runtimeActivity?.observedAtMilliseconds,
-              observed > wait.timestamp,
-              observed <= nowMs else {
-            return false
-        }
-        let sameEpoch = epoch == wait.context.conversationEpoch
-        if sameEpoch,
-           snapshot.runtimeActivity == nil, snapshot.inputCompletions == nil,
-           snapshot.sessionIdleAtMilliseconds == nil {
-            return true
-        }
-        if sameEpoch,
-           let completed = snapshot.inputCompletions?[wait.context.senderSessionId.lowercased()],
-           completed >= wait.timestamp, completed <= nowMs, completed <= observed {
-            return true
-        }
-        // Whole-session idle is stronger than a child completion and also covers
-        // cancellation or a post-crash CLI resume into a new conversationEpoch,
-        // where an individual input-completed event in the old epoch is absent.
-        if let idleAt = snapshot.sessionIdleAtMilliseconds,
-           idleAt > wait.timestamp, idleAt <= nowMs, idleAt <= observed,
-           sameEpoch || ((foreground == .idle || foreground == nil)
-               && !snapshot.foregroundTurnActive
-               && !snapshot.scheduledTurnActive
-               && snapshot.activeSubagents.isEmpty) {
-            return true
-        }
-        return false
-    }
-
-    func projectedStatus(
-        for session: Session,
-        foreground: ForegroundActivity?,
-        now: Date,
-        resolvedOwner: String?? = nil
-    ) -> SessionStatus {
-        if session.hasPendingInput { return .waiting }
-        if session.status == .waiting, !session.statusIsRuntimeDerived {
-            guard inputWaitWasResolved(
-                for: session,
-                foreground: foreground,
-                now: now,
-                resolvedOwner: resolvedOwner
-            ) else {
-                return .waiting
-            }
-            if foreground == nil {
-                return session.agentActivity?.foregroundTurnActive == true
-                    && !session.scheduledTurnActive ? .running : .idle
-            }
-        }
-        switch foreground {
-        case .working:
-            return session.scheduledTurnActive ? .idle : .running
-        case .idle:
-            return .idle
-        case .unknown, nil:
-            return session.status
-        }
-    }
-
-    private func reconcileRuntimeActivity(now: Date) {
+    /// Applies each session's tracker-only status. This is the one place
+    /// `Session.status` is written, and it runs after every snapshot scan and after
+    /// the process check.
+    func reconcileStatus(now: Date) {
         withCoalescedProjectPublications {
-            restoreCompletedPermissionWaits(now: now)
+            // With the process check switched off (COPILOT_PROJECTS_LIVENESS=0) no
+            // process list is kept, so a tracker is never taken as gone for being
+            // absent from it.
+            let live = livenessEnabled
+                ? remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions : nil
             var changed = false
             for pi in projects.indices {
-                for si in projects[pi].sessions.indices {
-                    let session = projects[pi].sessions[si]
-                    let foreground = runtimeForegroundActivity(for: session, now: now)
-                    guard foreground == .working || foreground == .idle
-                        || (session.status == .waiting
-                            && inputWaitWasResolved(for: session, foreground: foreground, now: now))
-                    else { continue }
-                    let status = projectedStatus(for: session, foreground: foreground, now: now)
-                    if status != session.status {
-                        if session.status == .waiting, !session.statusIsRuntimeDerived,
-                           status != .waiting, permissionStatusRestores[session.id] == nil,
-                           let timestamp = sessionSemantics.statusClock.timestamp(for: session.id),
-                           let promptTimestamp = sessionSemantics.promptSafetyClock.timestamp(for: session.id) {
-                            // Certified resolution must survive restart even when no
-                            // pre-wait permission snapshot survived with it.
-                            persistPermissionStatus(session.id, status, timestamp, promptTimestamp)
-                        }
-                        var updated = projects[pi].sessions[si]
-                        updated.status = status
-                        updated.statusIsRuntimeDerived = true
-                        updated.statusText = nil
-                        if status == .running {
-                            updated.runningStartedAtMilliseconds = updated.runningStartedAtMilliseconds
-                                ?? trustedForegroundTransitionMilliseconds(
-                                    sessionId: session.id,
-                                    snapshot: updated.agentActivity
-                                )
-                                ?? Int64(now.timeIntervalSince1970 * 1_000)
-                        } else if status == .idle {
-                            updated.runningStartedAtMilliseconds = nil
-                            updated.runningStatusTimestampMilliseconds = nil
-                            updated.runningRequestIdentity = nil
-                        }
-                        if status == .running {
-                            updated.finishedUnseen = false
-                            updated.turnCompleted = false
-                            completionPending.remove(session.id)
-                            completionSummaryContexts[session.id] = nil
-                        }
-                        projects[pi].sessions[si] = updated
-                        if status != .waiting {
-                            elicitationNotificationTokens[session.id] = nil
-                            if permissionStatusRestores[session.id] == nil {
-                                cancelWaitingNotifications(sessionId: session.id)
-                            }
-                        }
-                        changed = true
-                    }
-                    if let idleAt = session.agentActivity?.sessionIdleAtMilliseconds,
-                       idleAt <= Int64(now.timeIntervalSince1970 * 1_000),
-                       idleAt >= (sessionSemantics.statusClock.timestamp(for: session.id) ?? .min),
-                       session.agentActivity?.foregroundTurnActive == false,
-                       session.agentActivity?.activeSubagents.isEmpty == true {
-                        setBackgroundAgentsActive(sessionId: session.id, active: false)
-                    }
-                    if status == .idle {
-                        postCompletionIfReady(sessionId: session.id)
-                    }
+                for si in projects[pi].sessions.indices
+                    where reconcileStatus(projectIndex: pi, sessionIndex: si, live: live, now: now) {
+                    changed = true
                 }
             }
             dismissAnsweredQuestionNotifications(now: now)
@@ -235,16 +87,129 @@ extension AppModel {
         }
     }
 
-    /// Backstop for flaky agent stop / sessionEnd hooks: a session can only stay
-    /// `running`/`waiting` while its shell actually hosts a live agent process.
-    /// This never clears status while the agent is genuinely working (unlike a
-    /// time-based decay), and clears promptly when the agent exits or crashes.
+    private func reconcileStatus(
+        projectIndex pi: Int, sessionIndex si: Int, live: Set<String>?, now: Date
+    ) -> Bool {
+        var session = projects[pi].sessions[si]
+        let sid = session.id
+        let previous = session.status
+        let snapshot = ownedActivity(session)
+        let tracker = Self.trackerOnly(
+            snapshot, held: previous,
+            gone: live?.contains(sid) == false || session.trackerWarning != nil, now: now)
+        // A fresh snapshot of the tab's owner that lists pending input is waiting
+        // whatever its reading. A gone tracker's list counts for nothing: a
+        // disconnected one keeps republishing a question it can no longer see answered.
+        let waiting = tracker.state != .gone
+            && snapshot?.isFresh(at: now) == true && snapshot?.hasPendingInput == true
+        session.status = waiting ? .waiting : tracker.status
+
+        // The elapsed timer's start marks a foreground turn in progress: the
+        // tracker's own, not a working reading alone. On Nov 13 a schedule's turn
+        // read working for a heartbeat before its tracker marked it scheduled.
+        let nowMs = Int64(now.timeIntervalSince1970 * 1_000)
+        var turnEnded = false
+        if tracker.state == .alive, tracker.status == .running,
+           snapshot?.foregroundTurnActive == true {
+            let transition = snapshot?.foregroundTransitionMilliseconds
+            let identity = Self.runningRequestIdentity(snapshot)
+            if let started = session.runningStartedAtMilliseconds {
+                // A queued message can start the next request with no idle seen between.
+                if let transition, let identity, let existing = session.runningRequestIdentity,
+                   existing != identity, transition >= started {
+                    session.runningStartedAtMilliseconds = transition
+                    session.runningRequestIdentity = identity
+                    foregroundIdleGenerationBaselines[sid] = snapshot?.idleGeneration ?? -1
+                } else if session.runningRequestIdentity == nil {
+                    session.runningRequestIdentity = identity
+                }
+                // A timer kept across a relaunch has no baseline yet.
+                if foregroundIdleGenerationBaselines[sid] == nil {
+                    foregroundIdleGenerationBaselines[sid] = snapshot?.idleGeneration ?? -1
+                }
+            } else {
+                session.runningStartedAtMilliseconds = transition ?? nowMs
+                session.runningRequestIdentity = identity
+                session.finishedUnseen = false
+                session.turnCompleted = false
+                foregroundIdleGenerationBaselines[sid] = snapshot?.idleGeneration ?? -1
+                completionPending.remove(sid)
+                completionSummaryContexts[sid] = nil
+                backgroundAgentsSuppressed.remove(sid)
+            }
+        } else if let started = session.runningStartedAtMilliseconds, tracker.state != .held {
+            if tracker.state == .gone {
+                // The agent exited or its tracker went, so nothing will say the turn finished.
+                if projects[pi].effectiveParentSessionId(for: sid) == nil,
+                   !isVisible(projectIndex: pi, sessionIndex: si) {
+                    session.finishedUnseen = true
+                }
+                foregroundIdleGenerationBaselines[sid] = nil
+            } else if snapshot?.scheduledTurnActive == true {
+                // A schedule's message took the turn over; a scheduled turn completes quietly.
+                foregroundIdleGenerationBaselines[sid] = nil
+            } else if snapshot?.foregroundTurnActive == false {
+                // The tracker ended the turn: at its idle event, or at its second idle
+                // reading running. One idle reading with the turn still active is not
+                // an end: on Nov 12 five fell inside a request, for up to 2.5 s.
+                turnEnded = true
+                completionSummaryContexts[sid] = CompletionSummaryContext(
+                    copilotSessionId: snapshot?.copilotSessionId,
+                    activeTimestamp: started,
+                    completionTimestamp: snapshot?.updatedAtMilliseconds
+                )
+                completionPending.insert(sid)
+            }
+            if tracker.state == .gone || snapshot?.scheduledTurnActive == true || turnEnded {
+                session.runningStartedAtMilliseconds = nil
+                session.runningRequestIdentity = nil
+            }
+        }
+
+        let changed = session != projects[pi].sessions[si]
+        if changed { projects[pi].sessions[si] = session }
+        if previous == .waiting, session.status != .waiting {
+            cancelWaitingNotifications(sessionId: sid)
+        } else if previous != .waiting, session.status == .waiting, !launchScanPending, let snapshot {
+            // The first prompt of a wait alerts; more within the same wait do not.
+            if snapshot.trackedUserInputs?.isEmpty == false
+                || snapshot.trackedElicitations?.isEmpty == false {
+                scheduleElicitationNotification(sessionId: sid)
+            } else if snapshot.pendingPermissionRequestIds?.isEmpty == false {
+                schedulePermissionNotification(sessionId: sid)
+            }
+        }
+        // The tracker clears its whole-session idle time at every root or agent turn
+        // start, so one that is set means the background agents are done too.
+        if let idleAt = snapshot?.sessionIdleAtMilliseconds, idleAt <= nowMs,
+           snapshot?.foregroundTurnActive == false,
+           snapshot?.activeSubagents.isEmpty == true {
+            setBackgroundAgentsActive(sessionId: sid, active: false)
+        }
+        if turnEnded {
+            let delay = completionNotificationDelayNanoseconds
+            Task { @MainActor [weak self] in
+                // Allow a moment for the background-agent OSC title to arrive.
+                try? await Task.sleep(nanoseconds: delay)
+                self?.reconcileStatus(now: Date())
+            }
+        } else if session.status == .idle, snapshot != nil || tracker.state == .gone {
+            // Without its snapshot a session's background agents cannot be seen. In a
+            // replay of Nov 13 snapshots, a pass that had dropped one posted Finished
+            // with an agent still running.
+            postCompletionIfReady(sessionId: sid)
+        }
+        return changed
+    }
+
+    /// Starts the process check, which tells the status rule when a session's
+    /// agent process has gone, and the status shadow's once-a-second pass.
     func startLivenessReconciler() {
         livenessTimer?.invalidate()
         statusTimer?.invalidate()
 
         if livenessEnabled {
-            reconcileLiveness(markFinished: false)
+            reconcileLiveness()
         } else {
             liveAgentSessions = []
             liveCopilotSessions = []
@@ -272,6 +237,7 @@ extension AppModel {
         agentActivityRefreshGeneration += 1
         agentActivityRefreshCoolingDown = false
         agentActivityRefreshPending = false
+        launchScanPending = true
 
         try? FileManager.default.createDirectory(
             at: agentActivityDirectory,
@@ -401,8 +367,7 @@ extension AppModel {
     }
 
     /// Applies a scan's reads to the current sessions. A session the scan didn't
-    /// read, or that was observed or changed by a hook after the read began (a
-    /// later scan, a single-session load, or a scheduling hook), keeps its state;
+    /// read, or that a later scan observed after the read began, keeps its state;
     /// returns false when any did, so the caller can scan again.
     @discardableResult
     private func applyAgentActivityReads(
@@ -411,7 +376,6 @@ extension AppModel {
         observations: [String: Int],
         clock readTime: () -> Date
     ) -> Bool {
-        let fm = FileManager.default
         var nextProjects = projects
         var activityChanged = false
         var startingPromptChanged = false
@@ -461,9 +425,6 @@ extension AppModel {
                         sessionId: sessionId, suffix: "copilot-session"
                     )?.lowercased()
                     verifiedCopilotOwners[sessionId] = matchesMarker ? owner : nil
-                    if matchesMarker, snapshot?.runtimeActivity != nil {
-                        runtimeTrackedOwners[sessionId] = owner
-                    }
                 }
                 if nextProjects[pi].sessions[si].startingPrompt == nil,
                    let rawPrompt = validatedActivityStartingPrompt(
@@ -521,37 +482,7 @@ extension AppModel {
                     nextProjects[pi].sessions[si].trackerWarning = warning
                     activityChanged = true
                 }
-                if nextProjects[pi].sessions[si].status != .idle,
-                   let transitionMs = trustedForegroundTransitionMilliseconds(
-                       sessionId: sessionId,
-                       snapshot: effectiveFresh
-                   ) {
-                    let identity = trustedRunningRequestIdentity(sessionId: sessionId, snapshot: effectiveFresh)
-                    let existingIdentity = nextProjects[pi].sessions[si].runningRequestIdentity
-                    let isNewRequest = existingIdentity != nil
-                        && identity != nil
-                        && existingIdentity != identity
-                        && transitionMs >= (nextProjects[pi].sessions[si].runningStartedAtMilliseconds ?? .min)
-                    if nextProjects[pi].sessions[si].runningStartedAtMilliseconds == nil || isNewRequest {
-                        nextProjects[pi].sessions[si].runningStartedAtMilliseconds = transitionMs
-                        activityChanged = true
-                    }
-                    if let identity,
-                       existingIdentity == nil || isNewRequest,
-                       transitionMs >= (nextProjects[pi].sessions[si].runningStartedAtMilliseconds ?? .min) {
-                        nextProjects[pi].sessions[si].runningRequestIdentity = identity
-                    }
-                }
-
-                let scheduledMarkerURL = agentActivityDirectory
-                    .appendingPathComponent("\(sessionId).scheduled-turn", isDirectory: false)
-                let scheduledMarker = fm.fileExists(atPath: scheduledMarkerURL.path)
-                if fresh?.scheduledTurnActive == false {
-                    scheduledSnapshotsSuppressed.remove(sessionId)
-                }
-                let snapshotScheduled = fresh?.scheduledTurnActive == true
-                    && !scheduledSnapshotsSuppressed.contains(sessionId)
-                let scheduledActive = scheduledMarker || snapshotScheduled
+                let scheduledActive = fresh?.scheduledTurnActive == true
                 if nextProjects[pi].sessions[si].scheduledTurnActive != scheduledActive {
                     nextProjects[pi].sessions[si].scheduledTurnActive = scheduledActive
                     activityChanged = true
@@ -577,11 +508,11 @@ extension AppModel {
             agentActivitySnapshotCache = agentActivitySnapshotCache
                 .filter { seenSessionIds.contains($0.key) }
             agentActivityObservations = agentActivityObservations.filter { seenSessionIds.contains($0.key) }
-            runtimeTrackedOwners = runtimeTrackedOwners.filter { seenSessionIds.contains($0.key) }
             verifiedCopilotOwners = verifiedCopilotOwners.filter { seenSessionIds.contains($0.key) }
             trackerMissingSince = trackerMissingSince.filter { seenSessionIds.contains($0.key) }
             budgetNotificationKeys = budgetNotificationKeys.filter { seenSessionIds.contains($0.key) }
-            reconcileRuntimeActivity(now: readTime())
+            reconcileStatus(now: readTime())
+            launchScanPending = false
             reconcileParkedSessions(now: readTime())
             for target in budgetNotifications {
                 postNotification(
@@ -594,94 +525,11 @@ extension AppModel {
         }
     }
 
-    /// Load one session's agent-activity snapshot on the main actor, skipping the
-    /// `Data(contentsOf:)` read + JSON decode when the file's signature
-    /// (inode+size+mtime) matches the cached one. The caller re-applies the
-    /// freshness TTL, so skipping the read never stalls a stale→nil transition.
-    /// Scans read through `AgentActivityReader` instead; a scan whose read began
-    /// before this load leaves that session for the next scan.
-    func loadAgentActivitySnapshot(
-        sessionId: String,
-        path: String,
-        decoder: JSONDecoder,
-        fm: FileManager
-    ) -> AgentActivitySnapshot? {
-        agentActivityObservations[sessionId, default: 0] += 1
-        let cached = agentActivitySnapshotCache[sessionId]
-        guard let attributes = try? fm.attributesOfItem(atPath: path) else {
-            if cached != nil { agentActivitySnapshotCache.removeValue(forKey: sessionId) }
-            return nil
-        }
-        let signature = FileSignature(attributes: attributes)
-        if let cached, cached.signature == signature {
-            return cached.snapshot
-        }
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
-            // The file exists but the read failed (a transient `open()` denial or a
-            // racing writer). Fail closed and DON'T advance the cached signature: the
-            // signature mismatch guarantees a retry next scan, so this neither sticks
-            // a `nil` against a live signature nor serves a stale snapshot to
-            // freshness/promptability decisions in the meantime.
-            return nil
-        }
-        // A present-but-malformed file caches `(signature, nil)` so it isn't
-        // re-decoded every scan — only its next real change (new signature) re-reads.
-        let snapshot = try? decoder.decode(AgentActivitySnapshot.self, from: data)
-        agentActivitySnapshotCache[sessionId] = (signature, snapshot)
-        return snapshot
-    }
-
     /// The once-a-second pass, which the status shadow compares on.
     func reconcileStatus() {
         withCoalescedProjectPublications {
-            reconcileRuntimeActivity(now: Date())
-            // A completion held for background work is posted from a snapshot scan
-            // once the tracker's reading is usable. A tracker with no reading (an
-            // unsupported or remote CLI runtime) never gets one, so it is retried
-            // here, once the stop hook's wait for the background-agent title is over.
-            let settled = SessionArtifacts.currentStatusTimestamp()
-                - Int64(completionNotificationDelayNanoseconds / 1_000_000)
-            for sessionId in completionPending
-                where (sessionSemantics.statusClock.timestamp(for: sessionId) ?? .max) <= settled {
-                postCompletionIfReady(sessionId: sessionId)
-            }
+            reconcileStatus(now: Date())
             recordStatusShadow(now: Date())
-        }
-    }
-
-    /// Drops a session whose agent process has gone to idle and persists that.
-    /// With `markFinished`, a top-level session that is not on screen is flagged
-    /// finished and unseen.
-    private func clearStatusToIdle(pi: Int, si: Int, markFinished: Bool) {
-        withCoalescedProjectPublications {
-            let sid = projects[pi].sessions[si].id
-            cancelWaitingNotifications(sessionId: sid)
-            var updated = projects[pi].sessions[si]
-            updated.status = .idle
-            updated.statusText = nil
-            updated.runningStartedAtMilliseconds = nil
-            updated.runningStatusTimestampMilliseconds = nil
-            updated.runningRequestIdentity = nil
-            if markFinished,
-               projects[pi].effectiveParentSessionId(for: sid) == nil,
-               !isVisible(projectIndex: pi, sessionIndex: si) {
-                updated.finishedUnseen = true
-            }
-            projects[pi].sessions[si] = updated
-            let now = SessionArtifacts.currentStatusTimestamp()
-            let timestamp = max(now, sessionSemantics.statusClock.timestamp(for: sid) ?? now)
-            sessionSemantics.statusClock.seed(sessionId: sid, timestamp: timestamp)
-            sessionSemantics.promptSafetyClock.seed(
-                sessionId: sid,
-                timestamp: timestamp
-            )
-            SessionArtifacts.persistStatus(
-                sessionId: sid,
-                status: .idle,
-                timestamp: timestamp,
-                promptStatusTimestamp: timestamp
-            )
-            dismissAnsweredQuestionNotifications(sessionId: sid)
         }
     }
 
@@ -705,7 +553,7 @@ extension AppModel {
         return now.timeIntervalSince(missingSince) >= 45 ? warningMessage : nil
     }
 
-    private func reconcileLiveness(markFinished: Bool = true) {
+    private func reconcileLiveness() {
         withCoalescedProjectPublications {
             let snapshot = ProcessTree.snapshot()
             // Sessions whose shell currently hosts a live agent (copilot) process.
@@ -736,26 +584,7 @@ extension AppModel {
                 }
             }
 
-            let hasActive = projects.contains { project in
-                project.sessions.contains { $0.status == .running || $0.status == .waiting }
-            }
-            guard hasActive else { return }
-
-            let liveSessions = liveAgentSessions
-            for pi in projects.indices {
-                for si in projects[pi].sessions.indices {
-                    let status = projects[pi].sessions[si].status
-                    guard status == .running || status == .waiting else { continue }
-                    if SessionSemantics.livenessShouldDemote(
-                        status: status,
-                        hasLiveAgent: liveSessions.contains(projects[pi].sessions[si].id)
-                    ) {
-                        // The agent exited/crashed (active → idle). Flag it as finished &
-                        // unseen unless you're looking at it right now.
-                        clearStatusToIdle(pi: pi, si: si, markFinished: markFinished)
-                    }
-                }
-            }
+            reconcileStatus(now: Date())
         }
     }
 
@@ -799,8 +628,7 @@ extension AppModel {
             notifications?.post(event)
             return event.id
         }
-        let completionClock = sessionSemantics.statusClock.timestamp(for: sessionId)
-        // The status clock can't see a conversation rotating, so the reply
+        // A new turn can't be seen as a conversation rotating, so the reply
         // read after the load must still belong to the finished turn's epoch.
         let completionEpoch = receiptBoundSnapshot(sessionId: sessionId, now: { Date() })?
             .conversationEpoch
@@ -814,10 +642,11 @@ extension AppModel {
                 )
             }.value
             guard let self else { return }
-            // Another hook may start a new turn while the transcript is loading.
-            // Keep the original alert, but never attach that turn's content to it.
-            let stillCurrent = sessionSemantics.statusClock.timestamp(for: sessionId)
-                == completionClock
+            // A new turn may start while the transcript is loading. Keep the
+            // original alert, but never attach that turn's content to it.
+            let stillCurrent = locateIndex(sessionId).map {
+                projects[$0.p].sessions[$0.s].turnCompleted
+            } == true
             let reply = stillCurrent ? completionReply(sessionId: sessionId) : nil
             notifications?.post(NotificationEvent(
                 id: event.id,
@@ -861,8 +690,9 @@ extension AppModel {
         }
         let snapshotActivity = projects[loc.p].sessions[loc.s].agentActivity
         let baseline = foregroundIdleGenerationBaselines[sessionId]
-        let scheduledIdleIsCurrent = snapshotActivity?.lastIdleTurnKind == "scheduled"
-            && (baseline == nil || (snapshotActivity?.idleGeneration ?? -1) > baseline!)
+        // The tracker's last idle event describes this turn only if it came after the turn began.
+        let idleIsCurrent = baseline == nil || (snapshotActivity?.idleGeneration ?? -1) > baseline!
+        let scheduledIdleIsCurrent = snapshotActivity?.lastIdleTurnKind == "scheduled" && idleIsCurrent
         if projects[loc.p].sessions[loc.s].scheduledTurnActive || scheduledIdleIsCurrent
         {
             completionPending.remove(sessionId)
@@ -882,14 +712,10 @@ extension AppModel {
 
         guard projects[loc.p].effectiveParentSessionId(for: sessionId) == nil else { return }
         guard !isVisible(projectIndex: loc.p, sessionIndex: loc.s) else { return }
-        // Light the finished-and-unseen dot here too. When a session was already
-        // demoted to idle early (stale-working recovery, while background subagents
-        // were still running), the final agent-stop arrives with
-        // `previous == .idle`, so the active→idle edge in `setStatus` won't set this.
-        // Setting it at the completion chokepoint keeps the sidebar/tab dot in parity
-        // for both the direct-finish and the pre-demoted paths.
         withCoalescedProjectPublications {
             projects[loc.p].sessions[loc.s].finishedUnseen = true
+            // An aborted turn keeps the dot and posts no alert.
+            guard !(snapshotActivity?.lastIdleAborted == true && idleIsCurrent) else { return }
             postNotification(
                 projectId: projects[loc.p].id,
                 sessionId: sessionId,

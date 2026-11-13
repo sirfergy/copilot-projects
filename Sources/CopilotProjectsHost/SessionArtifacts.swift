@@ -3,90 +3,12 @@ import Darwin
 import CopilotProjectsCore
 import CopilotProjectsProtocol
 
-struct InputWaitContext: Codable, Equatable {
-    let senderSessionId: String
-    let rootSessionId: String
-    let conversationEpoch: String
-}
-
-struct SessionStatusRecord: Codable, Equatable {
-    static let currentSchemaVersion = 1
-
-    let schemaVersion: Int
-    let status: SessionStatus
-    let statusTimestamp: Int64
-    let promptStatusTimestamp: Int64
-    let inputWait: InputWaitContext?
-
-    init(
-        status: SessionStatus,
-        statusTimestamp: Int64,
-        promptStatusTimestamp: Int64,
-        inputWait: InputWaitContext? = nil
-    ) {
-        schemaVersion = Self.currentSchemaVersion
-        self.status = status
-        self.statusTimestamp = statusTimestamp
-        self.promptStatusTimestamp = promptStatusTimestamp
-        self.inputWait = inputWait
-    }
-}
-
-enum SessionStatusRecordLoad: Equatable {
-    case missing
-    case loaded(SessionStatusRecord)
-    case invalid
-}
-
 enum SessionArtifacts {
     private static let closeRequestSuffix = ".close-session-request"
     private static let gracefulCloseTimeout: Duration = .seconds(20)
 
     static func currentStatusTimestamp() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
-    }
-
-    @discardableResult
-    static func persistStatus(
-        sessionId: String,
-        status: SessionStatus,
-        timestamp: Int64,
-        promptStatusTimestamp: Int64,
-        sessionsDirectory: URL = Paths.sessionsDir
-    ) -> Bool {
-        do {
-            try FileManager.default.createDirectory(
-                at: sessionsDirectory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            let record = SessionStatusRecord(
-                status: status,
-                statusTimestamp: timestamp,
-                promptStatusTimestamp: promptStatusTimestamp
-            )
-            try JSONEncoder().encode(record).write(
-                to: sessionsDirectory.appendingPathComponent("\(sessionId).status-record.json"),
-                options: .atomic
-            )
-            return true
-        } catch {
-            NSLog("copilot-projects: could not persist status for \(sessionId): \(error)")
-            return false
-        }
-    }
-
-    static func loadStatusRecord(
-        sessionId: String,
-        sessionsDirectory: URL = Paths.sessionsDir
-    ) -> SessionStatusRecordLoad {
-        let url = sessionsDirectory.appendingPathComponent("\(sessionId).status-record.json")
-        guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
-        guard let data = try? Data(contentsOf: url),
-              let record = try? JSONDecoder().decode(SessionStatusRecord.self, from: data),
-              record.schemaVersion == SessionStatusRecord.currentSchemaVersion
-        else { return .invalid }
-        return .loaded(record)
     }
 
     @discardableResult

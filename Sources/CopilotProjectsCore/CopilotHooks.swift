@@ -1,7 +1,8 @@
 import Foundation
 
-/// Installs a Copilot CLI hook bridge so a coding agent's lifecycle drives the
-/// session status dot automatically. The hook no-ops unless it runs inside a
+/// Installs a Copilot CLI hook bridge that reports a coding agent's lifecycle to
+/// the app. The app takes status from the session's tracker and acts only on
+/// this bridge's `sessionEnd` report. The hook no-ops unless it runs inside a
 /// Copilot Projects terminal (where the per-session env is set), so it is safe to
 /// have configured globally and coexists with other integrations (e.g. cmux).
 public enum CopilotHooks {
@@ -370,11 +371,9 @@ public enum CopilotHooks {
     exit 0
     """#
 
-    /// Copilot CLI hook wiring (one entry per lifecycle event). sessionStart resets
-    /// to idle so a fresh agent never reads as running; tool events keep it running;
-    /// the notification hook surfaces "waiting" when the agent raises an ask_user /
-    /// permission prompt (which fire no tool hook); sessionEnd (`end`) resets to idle
-    /// and asks the live app to clear the resume marker unless the app is terminating.
+    /// Copilot CLI hook wiring (one entry per lifecycle event). The app acts only on
+    /// sessionEnd (`end`), which asks it to clear the resume marker unless the app
+    /// is terminating.
     public static let config = #"""
     {
       "version": 1,

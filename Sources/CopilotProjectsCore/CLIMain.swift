@@ -684,10 +684,6 @@ public enum CLIMain {
 
         Usage:
           copilot-projects                         Launch the app
-          copilot-projects set-status <state>      Set status of the current session
-                                              state: idle | running | waiting
-              [--text "..."] [--timestamp MS] [--source NAME]
-              [--notification elicitation|permission] [--session ID] [--project ID]
           copilot-projects notify <title> [body]   Post a macOS notification
               [--title T] [--body B] [--session ID] [--project ID]
           copilot-projects list-projects           List projects and their status
@@ -718,12 +714,12 @@ public enum CLIMain {
           copilot-projects check-assets            Load packaged assets without launching the app
           copilot-projects version                 Print the installed version
           copilot-projects install-cli [--dir D]   Symlink this binary onto your PATH
-          copilot-projects install-hooks           Install Copilot CLI status hooks (~/.copilot/hooks)
-          copilot-projects uninstall-hooks         Remove the Copilot CLI status hooks
+          copilot-projects install-hooks           Install the Copilot CLI hook and the tracker
+          copilot-projects uninstall-hooks         Remove the Copilot CLI hook and the tracker
           copilot-projects help                    Show this help
 
         Inside a copilot-projects terminal, COPILOT_PROJECTS_PROJECT / COPILOT_PROJECTS_SESSION are set,
-        so set-status / notify target the current session automatically.
+        so notify targets the current session automatically.
         """
         print(usage)
     }

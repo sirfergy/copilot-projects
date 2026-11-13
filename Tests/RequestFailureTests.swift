@@ -178,7 +178,7 @@ final class RequestFailureTests: XCTestCase {
         running.status = .running
         XCTAssertNil(running.failedRequest)
         XCTAssertEqual(running.attentionLabel, "Running")
-        model.setStatus(sessionId: session.id, status: .running, text: nil)
+        model.setStatus(.running, sessionId: session.id)
         XCTAssertEqual(model.projects[0].sessions[0].status, .running)
         XCTAssertEqual(model.projects[0].failedCount, 0)
         XCTAssertNil(model.remoteWorkspaceSnapshot().projects[0].sessions[0].lastError)
