@@ -42,9 +42,9 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
     var sessionId: String = ""
     var copilotSessionId: String = ""
     var orderedTurnIds: [String] = []
-    /// Tool rows the snapshot shows as finished. When this changes, `events.jsonl` has
-    /// completions that were not read yet, so the previous result cannot be reused.
-    var completedToolCount: Int = 0
+    /// Ids of the tool rows the snapshot shows as finished. When they change, `events.jsonl` has
+    /// completions that were not read or joined yet, so the previous result cannot be reused.
+    var completedToolIds: [String] = []
     var scannedEventsPath: String = ""
     var scannedEventsIdentity: String = ""
     var scannedEventsBytes: Int = 0
@@ -110,7 +110,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
             sessionId: sessionId,
             copilotSessionId: copilotId,
             orderedTurnIds: orderedTurnIds,
-            completedToolCount: toolTurns.reduce(0) { $0 + $1.tools.filter { $0.success != nil }.count }
+            completedToolIds: toolTurns.flatMap { $0.tools.filter { $0.success != nil }.map(\.id) }
         )
         guard !sessionId.isEmpty, !copilotId.isEmpty, !wantedTurnIds.isEmpty || !toolTurns.isEmpty else {
             return result
@@ -118,7 +118,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         let prior = (previous?.sessionId == sessionId && previous?.copilotSessionId == copilotId) ? previous : nil
         if let prior,
            prior.orderedTurnIds == orderedTurnIds,
-           prior.completedToolCount == result.completedToolCount,
+           prior.completedToolIds == result.completedToolIds,
            wantedTurnIds.isSubset(of: prior.resolvedTurnIds),
            Set(prior.itemsByTurnId.keys) == wantedTurnIds.intersection(prior.refsByTurnId.keys),
            !prior.hasWatchedFileChanges() {

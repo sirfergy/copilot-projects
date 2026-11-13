@@ -1281,28 +1281,56 @@ final class NativeTranscriptImageTests: XCTestCase {
                 copilotHome: session.home.path
             )
         }
-        func load(
-            _ turn: TranscriptTurn,
-            previous: TranscriptPromptAttachments? = nil
-        ) -> [TranscriptPromptAttachments.Item] {
-            loadAttachments(turn, previous: previous).items(
-                forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: session.copilotSessionId, fromTools: true
-            )
-        }
-
         // The tracker publishes the snapshot from events.jsonl, so the file runs ahead of it. Here the
-        // whole file is read while the snapshot has no row for the tool, then while the tool is running.
+        // whole file is read while the snapshot has no row for the tool, then the row appears running,
+        // then finished. Each load is given the one before it, as the controller does.
         let beforeTheRow = loadAttachments(Self.toolTurn("turn-1", tools: []))
         XCTAssertEqual(beforeTheRow.scannedEventsBytes, try Data(contentsOf: session.events).count)
         XCTAssertTrue(beforeTheRow.toolItemsByTurnId.isEmpty)
-        XCTAssertEqual(load(Self.toolTurn("turn-1", tools: ["call-late"], pending: true)).map(\.data), [png])
+        let whileRunning = loadAttachments(
+            Self.toolTurn("turn-1", tools: ["call-late"], pending: true), previous: beforeTheRow
+        )
 
         // Blank the completion where it was read. A load that had dropped the line has nothing left to
         // find; one that recorded it has no need to read it again.
         try Self.overwrite(completion, with: String(repeating: " ", count: completion.utf8.count), in: session.events)
-        let done = load(Self.toolTurn("turn-1", tools: ["call-late"]), previous: beforeTheRow)
+        let done = loadAttachments(Self.toolTurn("turn-1", tools: ["call-late"]), previous: whileRunning).items(
+            forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: session.copilotSessionId, fromTools: true
+        )
         XCTAssertEqual(done.map(\.data), [png])
         XCTAssertEqual(done.map(\.toolCallId), ["call-late"])
+    }
+
+    func testToolImagesFollowTheFinishedToolRowsWhenTheirCountStaysTheSame() throws {
+        let session = try makeToolImageSession()
+        let png = remoteKittyTestPNGBytes(width: 120, height: 60)
+        try Self.write([
+            Self.assetLine("sha256:shot", png),
+            Self.promptLine("turn-1"),
+            Self.toolImageLine("call-dropped", ["sha256:shot"]),
+            Self.toolImageLine("call-current", ["sha256:shot"]),
+        ], to: session.events)
+        let appSessionId = "desktop-tool-rows"
+        func load(_ automated: TranscriptTurn, previous: TranscriptPromptAttachments?) -> TranscriptPromptAttachments {
+            TranscriptPromptAttachments.load(
+                sessionId: appSessionId,
+                snapshot: Self.toolSnapshot(session.copilotSessionId, [Self.toolTurn("turn-1", tools: []), automated]),
+                previous: previous,
+                copilotHome: session.home.path
+            )
+        }
+
+        // The tracker drops an automated turn as another finishes a tool: the prompt turns and the
+        // number of finished tools are what they were, but the finished rows are not.
+        let first = load(Self.toolTurn("automated-1", kind: "automated", tools: ["call-dropped"]), previous: nil)
+        let second = load(Self.toolTurn("automated-2", kind: "automated", tools: ["call-current"]), previous: first)
+        XCTAssertEqual(
+            second.items(
+                forTurnId: "automated-2", sessionId: appSessionId, copilotSessionId: session.copilotSessionId,
+                fromTools: true
+            ).map(\.toolCallId),
+            ["call-current"]
+        )
     }
 
     func testToolImagesLoadIncrementallyWithoutReadingAnEarlierTurnOrAMissingAssetAgain() throws {
