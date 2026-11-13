@@ -97,7 +97,7 @@ struct Session: Identifiable, Codable, Equatable {
     }
     /// A pending structured `ask_user` or schema `elicitation` awaiting an answer.
     /// These are answered via their own card, so a free-form remote prompt must
-    /// never be injected over one even when the terminal footer reads idle.
+    /// never be injected over one.
     var hasPendingQuestions: Bool {
         (agentActivity?.trackedUserInputs?.isEmpty == false)
             || (agentActivity?.trackedElicitations?.isEmpty == false)

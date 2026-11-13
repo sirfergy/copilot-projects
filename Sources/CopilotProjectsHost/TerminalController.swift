@@ -42,35 +42,13 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
     private var launchRetry: Task<Void, Never>?
     private var launchRetired = false
 
-    /// What the Copilot CLI's own footer says it's doing. While a turn runs the
-    /// footer shows "… Working   esc cancel"; back at the prompt it shows
-    /// "/ commands · ? help · tab next tab". This is a hook-independent backstop:
-    /// a turn cancelled with Esc fires NO stop hook and leaves the agent process
-    /// alive (so neither the stop hook nor the process-liveness check can clear the
-    /// tab spinner), yet the footer still returns to its idle signature — and keeps
-    /// updating even while the tab is backgrounded, because the CLI keeps rendering
-    /// on focus-out.
-    ///
-    /// Only the bottom-most non-empty row can establish an idle prompt, so draft
-    /// text in the input box cannot spoof the footer. Deliberately does NOT gate
-    /// on the alternate buffer: a session resumed via dtach renders its TUI in
-    /// SwiftTerm's normal buffer (the CLI never re-emits 1049h on reattach), so an
-    /// alt-buffer check would blind this to every resumed agent. The caller scopes
-    /// this to live `running` agents, so a plain shell is never read.
-    @MainActor var agentActivity: FooterActivity {
-        guard !exited else { return .idle }
-        return footerActivity(Self.classifyFooterRows)
-    }
-
-    /// Stricter than `agentActivity`, for rewriting keyboard input: only Copilot's
-    /// footer layout counts, so shell text that mentions a hint cannot pass.
+    /// For rewriting keyboard input: only Copilot's footer layout counts, so shell
+    /// text that mentions a hint cannot pass.
     @MainActor var showsCopilotFooter: Bool {
-        !exited && footerActivity(Self.classifyCopilotFooterRows) != .unknown
+        !exited && copilotFooterActivity() != .unknown
     }
 
-    @MainActor private func footerActivity(
-        _ classify: ([String]) -> FooterActivity
-    ) -> FooterActivity {
+    @MainActor private func copilotFooterActivity() -> FooterActivity {
         guard let input = terminalView.terminalInputStateSnapshot() else { return .unknown }
         let snapshot = terminalView.terminalStateSnapshot()
         let rows = snapshot.dimensions.rows, cols = snapshot.dimensions.cols
@@ -78,7 +56,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         // Only the bottom band is footer chrome; output above it must not
         // promote an old idle footer or agent-authored text to activity evidence.
         let band = snapshot.visibleRows.filter { $0.row >= max(0, rows - 8) }
-        let activity = classify(band.map(\.text))
+        let activity = Self.classifyCopilotFooterRows(band.map(\.text))
         if activity != .unknown {
             if let row = band.last(where: { !Self.isEmptyFooterRow($0.text) }) {
                 Self.debugLog("activity sid=\(sessionId.prefix(8)) alt=\(input.isAlternateBuffer) row=\(row.row)/\(rows) -> \(activity)  [\(row.text.trimmingCharacters(in: .whitespaces).suffix(90))]")
@@ -110,17 +88,6 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         "esc cancel", "esc to cancel", "esc interrupt", "esc to interrupt",
         "esc again to cancel", "esc again to interrupt",
     ]
-
-    /// Classify copilot's footer line into coarse activity. Pure/static so it can be
-    /// unit-tested against captured fixtures.
-    nonisolated static func classifyFooterRows(_ rows: [String]) -> FooterActivity {
-        guard let footer = rows.last(where: { !isEmptyFooterRow($0) }) else { return .unknown }
-        let activity = classifyFooter(footer)
-        guard activity == .idle else { return activity }
-        // Modal chrome can sit above the shortcuts. Do not classify arbitrary
-        // draft/output rows as busy just because they contain "working".
-        return rows.contains { hasModalHint($0) } ? .working : .idle
-    }
 
     /// Require whole Copilot footer labels, allowing a padded model/status column
     /// and ignoring the scrollbar gutter.
@@ -182,24 +149,6 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         row.trimmingCharacters(
             in: CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
         ).isEmpty
-    }
-
-    nonisolated static func classifyFooter(_ footerLine: String) -> FooterActivity {
-        let f = footerLine.lowercased()
-        guard !f.trimmingCharacters(in: .whitespaces).isEmpty else { return .unknown }
-        if modalFooterHints.contains(where: { f.contains($0) }) || f.contains("working") {
-            return .working
-        }
-        if f.contains("tab next tab") || (f.contains("? help") && f.contains("/ commands")) {
-            return .idle
-        }
-        if (f.contains("autopilot") && f.contains("/ commands"))
-            || (f.contains("@ files") && f.contains("# issues"))
-            || f.contains("esc again to stop agents")
-            || f.contains("esc stop agents") {
-            return .idle
-        }
-        return .unknown
     }
 
     /// Append a diagnostic line, but only while `/tmp/copilot-projects-debug` exists

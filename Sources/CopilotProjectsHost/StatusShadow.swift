@@ -4,13 +4,14 @@ import Foundation
 
 // Temporary: the shadow run for making the tracker the only source of session status.
 //
-// Each footer poll, this works out what every session would show if only its tracker
-// decided and logs where that differs from what is shown. A reading the tracker cannot
-// vouch for holds what tracker-only last showed, and no footer stands in for it. It
-// changes nothing a user sees and has no switch.
+// Once a second, this works out what every session would show if only its tracker
+// decided (`AppModel.trackerOnly`) and logs where that differs from what is shown. A
+// reading the tracker cannot vouch for holds what tracker-only last showed. It changes
+// nothing a user sees and has no switch. Send-readiness is no longer compared: it comes
+// from the same rule.
 //
 // The PR that removes the other status sources deletes all of it: this file,
-// `AppModel.statusShadow`, the `polled` lines in `reconcileAgentFooters`,
+// `AppModel.statusShadow`, the `recordStatusShadow` call in `reconcileStatus`,
 // Tests/StatusShadowTests.swift and scripts/status-shadow-report.py.
 struct StatusShadow {
     /// One line of `status-shadow.jsonl`. A line is written when a comparison changes:
@@ -21,14 +22,12 @@ struct StatusShadow {
         /// When this app launch began. A new value means the app restarted.
         var run: Int64
         var sid: String
-        /// `status`: the attention label. `send`: whether a remote prompt would be sent.
+        /// `status`: the attention label.
         var what: String
         var shown: String?
         var tracker: String?
-        var state: State?
-        /// The comparison stopped: the session closed, the Mac slept, or (for `send`)
-        /// the tracker's own reading decides again, so the poll no longer reads the
-        /// footer.
+        var state: TrackerState?
+        /// The comparison stopped: the session closed or the Mac slept.
         var over: Bool?
 
         // What decided `shown`.
@@ -37,10 +36,6 @@ struct StatusShadow {
         var statusAt: Int64?
         var pending: Bool?
         var live: Bool?
-        var footer: String?
-        /// Today's reading of the tracker on a poll that read the footer: `unknown`
-        /// when prompt state or ownership holds it back, `none` when there is none.
-        var gate: String?
 
         // What decided `tracker`.
         var updatedAt: String?
@@ -48,18 +43,6 @@ struct StatusShadow {
         var scheduled: Bool?
         var error: String?
         var runtime: RuntimeActivitySnapshot?
-    }
-
-    /// Where a tracker-only value came from.
-    enum State: String, Encodable {
-        /// The tracker's own reading.
-        case alive
-        /// The reading was stale or unusable, or the snapshot was not the tab
-        /// owner's, so the status tracker-only last showed stands.
-        case held
-        /// The agent process exited, the tracker lost its connection to the CLI, or
-        /// the app's 45 s missing-tracker warning is up: idle, and no send.
-        case gone
     }
 
     private struct Key: Hashable {
@@ -87,51 +70,10 @@ struct StatusShadow {
         self.maximumBytes = maximumBytes
     }
 
-    /// What a session would show if only its tracker decided. A reading that is stale
-    /// or unusable holds `held` and takes no send, which is what the app does today
-    /// with such a reading: `projectedStatus` keeps the status and `promptEligibility`
-    /// is busy. The Nov 11 run let the terminal footer stand in, and each "tracker
-    /// dead" class came from that: an unreadable footer read as idle, and a footer
-    /// that reads working while the CLI waits on a background agent read as running.
-    /// `gone`: the agent process exited, or the 45 s missing-tracker warning is up.
-    static func trackerOnly(
-        _ snapshot: AgentActivitySnapshot?, held: SessionStatus, gone: Bool, now: Date
-    ) -> (state: State, status: SessionStatus, sendReady: Bool) {
-        if let snapshot, snapshot.isFresh(at: now), !snapshot.reportsTerminalDisconnect {
-            let working: Bool?
-            switch snapshot.runtimeForegroundActivity(
-                expectedSessionId: snapshot.copilotSessionId, now: now,
-                minimumObservationMilliseconds: nil
-            ) {
-            case .working: working = true
-            case .idle: working = false
-            // This CLI has no `isProcessing` (an older one, or a remote session), so
-            // the tracker's turn events are its reading.
-            case nil: working = snapshot.foregroundTurnActive || snapshot.scheduledTurnActive
-            // No usable reading: it is older than 15 s, its query failed, or the
-            // tracker withdrew it when a turn began. In the Nov 11 run turn events
-            // stood in here and called a session ready as its turn was starting.
-            case .unknown: working = nil
-            }
-            if let working {
-                // A scheduled turn shows as idle, as it does today. A pending question
-                // shows as waiting through `Session.displayStatus`.
-                return (
-                    .alive, working && !snapshot.scheduledTurnActive ? .running : .idle,
-                    !working && !snapshot.hasPendingInput
-                )
-            }
-        }
-        return gone || snapshot?.reportsTerminalDisconnect == true
-            ? (.gone, .idle, false) : (.held, held, false)
-    }
-
     /// Logs a line when this comparison differs from the last one for the session.
-    /// `read` is the footer the poll read, with today's reading of the tracker.
     mutating func note(
-        _ what: String, session: Session, shown: String, tracker: String, state: State,
-        read: (runtime: ForegroundActivity?, footer: FooterActivity)?, live: Bool,
-        statusAt: Int64?, now: Date
+        _ what: String, session: Session, shown: String, tracker: String, state: TrackerState,
+        live: Bool, statusAt: Int64?, now: Date
     ) {
         let key = Key(what: what, sid: session.id)
         let kind = shown == tracker ? nil : "\(shown)|\(tracker)|\(state)"
@@ -143,8 +85,6 @@ struct StatusShadow {
             shown: shown, tracker: tracker, state: state,
             status: session.status, runtimeDerived: session.statusIsRuntimeDerived,
             statusAt: statusAt, pending: session.hasPendingInput, live: live,
-            footer: read.map { "\($0.footer)" },
-            gate: read.map { $0.runtime.map { "\($0)" } ?? "none" },
             updatedAt: snapshot?.updatedAt, turn: snapshot?.foregroundTurnActive,
             scheduled: snapshot?.scheduledTurnActive, error: snapshot?.error,
             runtime: snapshot?.runtimeActivity
@@ -203,34 +143,22 @@ struct StatusShadow {
 }
 
 extension AppModel {
-    /// Compares what each session shows with its tracker-only status. `polled` holds
-    /// the sessions whose footer this poll read, with today's reading of the tracker.
+    /// Compares what each session shows with its tracker-only status.
     func recordStatusShadow(
-        polled: [String: (runtime: ForegroundActivity?, footer: FooterActivity)], now: Date,
-        uptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+        now: Date, uptime: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) {
         statusShadow.endAcrossSleep(now: now, uptime: uptime)
-        let nowMs = Int64(now.timeIntervalSince1970 * 1_000)
         let live = remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions
         var sessionIds: Set<String> = []
         for session in projects.lazy.flatMap(\.sessions) {
             sessionIds.insert(session.id)
-            let read = polled[session.id]
-            // A nested or replaced Copilot can still be writing this tab's snapshot.
-            // Only the tracker that owns the tab's marker speaks for it, the same
-            // rule today's reading applies (`runtimeForegroundActivity`).
-            var snapshot = session.agentActivity
-            if let owner = snapshot?.copilotSessionId,
-               verifiedCopilotOwners[session.id] != owner.lowercased() {
-                snapshot = nil
-            }
+            let snapshot = ownedActivity(session)
             let isLive = live.contains(session.id)
             // The first pass has no tracker-only status to hold, so it starts from
             // the one shown.
-            let tracker = StatusShadow.trackerOnly(
+            let tracker = Self.trackerOnly(
                 snapshot, held: statusShadow.held[session.id] ?? session.displayStatus,
                 gone: !isLive || session.trackerWarning != nil, now: now)
-            let statusAt = sessionSemantics.statusClock.timestamp(for: session.id)
             // The same label code, with only the status source swapped. The finished
             // and unread flags are set by past transitions, so they are carried over.
             var trackerOnly = session
@@ -239,36 +167,8 @@ extension AppModel {
             statusShadow.held[session.id] = trackerOnly.displayStatus
             statusShadow.note(
                 "status", session: session, shown: session.attentionLabel,
-                tracker: trackerOnly.attentionLabel, state: tracker.state,
-                read: read, live: isLive, statusAt: statusAt, now: now
-            )
-            // Whether a remote prompt would be sent is compared only where the poll
-            // read the footer, which today's rule needs. Where the tracker's own
-            // reading decides, the poll reads no footer, so one difference goes
-            // unmeasured: today a send there also needs an idle footer and a live
-            // process, and the tracker-only rule does not.
-            guard let read else {
-                statusShadow.end("send", sid: session.id, now: now)
-                continue
-            }
-            let shownReady = session.parked == nil && Self.remotePromptEligibility(
-                status: session.displayStatus,
-                scheduledTurnActive: session.scheduledTurnActive,
-                hasPendingQuestions: session.hasPendingInput,
-                hasLiveAgent: isLive,
-                backgroundOnly: Self.backgroundOnlyPromptEvidence(
-                    status: session.status, snapshot: session.agentActivity,
-                    backgroundAgentsActive: session.backgroundAgentsActive,
-                    now: now, nowMs: nowMs,
-                    clockMs: sessionSemantics.promptSafetyClock.timestamp(for: session.id)
-                ),
-                footerActivity: read.footer,
-                foregroundActivity: read.runtime
-            ) == .sent
-            statusShadow.note(
-                "send", session: session, shown: shownReady ? "ready" : "busy",
-                tracker: session.parked == nil && tracker.sendReady ? "ready" : "busy",
-                state: tracker.state, read: read, live: isLive, statusAt: statusAt, now: now
+                tracker: trackerOnly.attentionLabel, state: tracker.state, live: isLive,
+                statusAt: sessionSemantics.statusClock.timestamp(for: session.id), now: now
             )
         }
         statusShadow.end(except: sessionIds, now: now)

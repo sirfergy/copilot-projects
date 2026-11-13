@@ -3,7 +3,68 @@ import CopilotProjectsCore
 import CopilotProjectsProtocol
 import Darwin
 
+/// Where a session's tracker-only status came from.
+enum TrackerState: String, Encodable {
+    /// The tracker's own reading.
+    case alive
+    /// The reading was stale or unusable, or the snapshot was not the tab
+    /// owner's, so the last status stands.
+    case held
+    /// The agent process exited, the tracker lost its connection to the CLI, or
+    /// the app's 45 s missing-tracker warning is up: idle, and no send.
+    case gone
+}
+
 extension AppModel {
+    /// What a session shows, and whether it takes a prompt, when only its tracker
+    /// decides. A reading that is stale or unusable holds `held` and takes no
+    /// send. `gone`: the agent process exited, or the 45 s missing-tracker
+    /// warning is up.
+    nonisolated static func trackerOnly(
+        _ snapshot: AgentActivitySnapshot?, held: SessionStatus, gone: Bool, now: Date
+    ) -> (state: TrackerState, status: SessionStatus, sendReady: Bool) {
+        if let snapshot, snapshot.isFresh(at: now), !snapshot.reportsTerminalDisconnect {
+            let working: Bool?
+            switch snapshot.runtimeForegroundActivity(
+                expectedSessionId: snapshot.copilotSessionId, now: now,
+                minimumObservationMilliseconds: nil
+            ) {
+            case .working: working = true
+            case .idle: working = false
+            // This CLI has no `isProcessing` (an older one, or a remote session), so
+            // the tracker's turn events are its reading.
+            case nil: working = snapshot.foregroundTurnActive || snapshot.scheduledTurnActive
+            // No usable reading: it is older than 15 s, its query failed, or the
+            // tracker withdrew it when a turn began. In the Nov 11 shadow run turn
+            // events stood in here and called a session ready as its turn was
+            // starting.
+            case .unknown: working = nil
+            }
+            if let working {
+                // A scheduled turn shows as idle, as it always has. A pending
+                // question shows as waiting through `Session.displayStatus`.
+                return (
+                    .alive, working && !snapshot.scheduledTurnActive ? .running : .idle,
+                    !working && !snapshot.hasPendingInput
+                )
+            }
+        }
+        return gone || snapshot?.reportsTerminalDisconnect == true
+            ? (.gone, .idle, false) : (.held, held, false)
+    }
+
+    /// The snapshot that speaks for a tab. A nested or replaced Copilot can still
+    /// be writing the tab's snapshot file, so only the tracker that owned the
+    /// tab's marker at the last scan counts.
+    func ownedActivity(_ session: Session) -> AgentActivitySnapshot? {
+        guard let snapshot = session.agentActivity else { return nil }
+        if let owner = snapshot.copilotSessionId,
+           verifiedCopilotOwners[session.id] != owner.lowercased() {
+            return nil
+        }
+        return snapshot
+    }
+
     func runtimeForegroundActivity(
         for session: Session,
         now: Date,
@@ -141,7 +202,6 @@ extension AppModel {
                             updated.runningStatusTimestampMilliseconds = nil
                             updated.runningRequestIdentity = nil
                         }
-                        sessionSemantics.activityTracker.reset(sessionId: session.id)
                         if status == .running {
                             updated.finishedUnseen = false
                             updated.turnCompleted = false
@@ -181,7 +241,7 @@ extension AppModel {
     /// time-based decay), and clears promptly when the agent exits or crashes.
     func startLivenessReconciler() {
         livenessTimer?.invalidate()
-        footerTimer?.invalidate()
+        statusTimer?.invalidate()
 
         if livenessEnabled {
             reconcileLiveness(markFinished: false)
@@ -190,14 +250,12 @@ extension AppModel {
             liveCopilotSessions = []
         }
 
-        // Footer backstop: recovers an actively-working attached session after an app
-        // restart, and catches Esc-cancel when the stop hook never fires.
-        reconcileAgentFooters()
-        let footer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.reconcileAgentFooters() }
+        reconcileStatus()
+        let status = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.reconcileStatus() }
         }
-        RunLoop.main.add(footer, forMode: .common)
-        footerTimer = footer
+        RunLoop.main.add(status, forMode: .common)
+        statusTimer = status
 
         guard livenessEnabled else { return }
         let timer = Timer(timeInterval: 8, repeats: true) { [weak self] _ in
@@ -573,258 +631,19 @@ extension AppModel {
         return snapshot
     }
 
-    /// Decide whether a `.running` session should be demoted to idle because its
-    /// extension's RPC connection is gone. Pure and side-effect-free so it can be
-    /// unit-tested without the reconciler's controller/timer machinery. Returns the
-    /// evidence timestamp (ms) to seed the status clock, or nil when no demotion is
-    /// warranted. Conditions: the session is `.running`; the terminal footer is
-    /// idle (a disconnect proves RPC loss, not turn completion — the footer is the
-    /// authoritative foreground signal, so a genuinely-working session is never
-    /// demoted); the snapshot is fresh and reports a terminal disconnect (healthy
-    /// sessions have `error == nil` and never qualify); and the snapshot's evidence
-    /// time is within `[clockMs, nowMs]` so a newer status hook can't be overridden
-    /// and a future-dated snapshot (clock rollback) can't poison the clock.
-    nonisolated static func disconnectDemotionEvidenceMs(
-        status: SessionStatus,
-        footerActivity: FooterActivity,
-        snapshot: AgentActivitySnapshot?,
-        now: Date,
-        nowMs: Int64,
-        clockMs: Int64
-    ) -> Int64? {
-        SessionSemanticsAdapter.disconnectDemotionEvidenceMilliseconds(
-            status: status,
-            footerActivity: footerActivity,
-            snapshot: snapshot,
-            now: now,
-            nowMilliseconds: nowMs,
-            statusClockMilliseconds: clockMs
-        )
-    }
-
-    /// Backstop for cancelled turns. An Esc-cancel fires no stop hook and leaves the
-    /// agent alive, so neither the stop hook nor `reconcileLiveness` clears the tab
-    /// spinner — but the agent's own footer returns to its idle signature. Clear a
-    /// stale running/waiting status once the footer has read idle for a couple of
-    /// consecutive scans, but ONLY after we've actually observed the footer go
-    /// `working` in this epoch. That guard means footer lag right after the hook
-    /// flips us to running, an old idle footer scrolled into view, or a confirmation
-    /// prompt (which reads as `working`) can never clear a genuinely-active session.
-    /// Includes `waiting`, so an Esc-cancel of an ask_user/permission wait — which
-    /// also fires no stop hook — is caught too.
-    func reconcileAgentFooters() {
+    /// The once-a-second pass, which the status shadow compares on.
+    func reconcileStatus() {
         withCoalescedProjectPublications {
-        reconcileRuntimeActivity(now: Date())
-        var tracked: Set<String> = []
-        var polled: [String: (runtime: ForegroundActivity?, footer: FooterActivity)] = [:]
-        for pi in projects.indices {
-            for si in projects[pi].sessions.indices {
-                let status = projects[pi].sessions[si].status
-                let sid = projects[pi].sessions[si].id
-                let runtime = runtimeForegroundActivity(
-                    for: projects[pi].sessions[si], now: Date()
-                )
-                if runtime == .working || runtime == .idle {
-                    continue
-                }
-                guard let activity = remotePromptTarget?(sid)?.activity
-                    ?? controllers[sid]?.agentActivity else { continue }
-                polled[sid] = (runtime, activity)
-                // Self-recovery for the snapshot-driven demotion below: if the
-                // foreground turn has resumed (a fresh `assistant.turn_start` flipped
-                // `foregroundTurnActive` back to true), restore `.running`. This
-                // reverses a demotion that fired during an unusually long
-                // inter-iteration gap, so the fix no longer depends on that gap being
-                // shorter than the two-scan dwell window. `foregroundTurnActive` is set
-                // true ONLY at the root's `assistant.turn_start` and cleared at
-                // `turn_end`/`session.idle`, so the freshest snapshot reporting it true
-                // means the root is genuinely mid-turn ⇒ running (this holds regardless
-                // of subagent count, which is why there's no `activeSubagents` gate here
-                // — a subagent finishing between demotion and the foreground resuming
-                // must not strand the tab as idle). A genuinely-finished session can't
-                // trip this: `session.idle`/`turn_end` leave `foregroundTurnActive ==
-                // false`, and the clock guard rejects a stale snapshot at or before the
-                // latest status hook. Reject a future-dated snapshot (clock rollback)
-                // too. Run this BEFORE the completion check so a session that's about to
-                // be promoted back to running never fires a spurious completion.
-                if status == .idle {
-                    let recoveryNowMs = SessionArtifacts.currentStatusTimestamp()
-                    if let snapshotMs =
-                        SessionSemanticsAdapter.foregroundRecoveryEvidenceMilliseconds(
-                            status: status,
-                            snapshot: projects[pi].sessions[si].agentActivity,
-                            now: Date(),
-                            nowMilliseconds: recoveryNowMs,
-                            statusClockMilliseconds:
-                                sessionSemantics.statusClock.timestamp(for: sid)
-                                ?? Int64.min
-                        ) {
-                        sessionSemantics.activityTracker.resetForegroundIdle(
-                            sessionId: sid
-                        )
-                        sessionSemantics.activityTracker.resetDisconnectIdle(
-                            sessionId: sid
-                        )
-                        // Promote IN MEMORY ONLY, using the foreground-transition
-                        // timestamp (the root turn_start time — NOT `updatedAt`,
-                        // which unrelated republishes rewrite): `setStatus` advances
-                        // the clock via `shouldApply` to `snapshotMs` so a genuinely
-                        // newer idle/waiting hook is still accepted, and — because a
-                        // timestamp is supplied —
-                        // it does NOT persist to disk. We deliberately don't persist
-                        // here either: recovery compensates for a MISSING running hook,
-                        // so no hook wrote `running` to disk; writing it ourselves could
-                        // clobber a newer hook-written `idle` whose IPC is merely delayed
-                        // behind reconciliation, and a later timestamped idle IPC would
-                        // repair memory but not disk — leaving a stale `running` that
-                        // survives restart (the very bug this fixes). Leaving the disk
-                        // status to the hooks keeps recovery's only failure mode benign
-                        // and self-healing (disk reads `idle` for a running session →
-                        // footer promotion re-corrects within ~2s), never stuck-running.
-                        setStatus(
-                            sessionId: sid,
-                            status: .running,
-                            text: nil,
-                            timestamp: snapshotMs,
-                            source: "background-recovery"
-                        )
-                        continue
-                    }
-                }
-                if status == .idle, activity == .idle {
-                    postCompletionIfReady(sessionId: sid)
-                }
-                if status == .idle {
-                    sessionSemantics.activityTracker.resetDisconnectIdle(sessionId: sid)
-                    guard ActivityTracker.canPromoteIdleFromFooter(
-                        backgroundAgentsActive: projects[pi].sessions[si].hasBackgroundWork,
-                        hasLiveAgent: liveAgentSessions.contains(sid)
-                    ) else {
-                        sessionSemantics.activityTracker.reset(sessionId: sid)
-                        continue
-                    }
-                    tracked.insert(sid)
-                    if sessionSemantics.activityTracker.shouldPromoteFromFooter(
-                        sessionId: sid,
-                        currentStatus: status,
-                        activity: activity
-                    ) {
-                        setStatus(
-                            sessionId: sid,
-                            status: .running,
-                            text: nil,
-                            source: "footer"
-                        )
-                    }
-                    continue
-                }
-                // Disconnected-extension recovery: a fresh snapshot reporting a
-                // terminal RPC disconnect can no longer observe
-                // `turn_end`/`session.idle`, so its stuck `foregroundTurnActive`
-                // would otherwise keep the tab "working" forever (the 5s heartbeat
-                // republishes it fresh, defeating the isFresh TTL). Demote to idle
-                // once the disconnect persists across two scans — but ONLY when the
-                // terminal footer is idle (a disconnect proves RPC loss, not turn
-                // completion; the footer is the authoritative foreground signal, so
-                // a genuinely-working session is never demoted). Scoped to
-                // `reportsTerminalDisconnect`, so a healthy session (error == nil)
-                // never enters here. The evidence timestamp orders the demotion
-                // against the status clock so a reconnect turn_start isn't dropped.
-                if let evidenceMs = Self.disconnectDemotionEvidenceMs(
-                    status: status,
-                    footerActivity: activity,
-                    snapshot: projects[pi].sessions[si].agentActivity,
-                    now: Date(),
-                    nowMs: SessionArtifacts.currentStatusTimestamp(),
-                    clockMs: sessionSemantics.statusClock.timestamp(for: sid)
-                        ?? Int64.min
-                ) {
-                    tracked.insert(sid)
-                    sessionSemantics.activityTracker.resetForegroundIdle(sessionId: sid)
-                    if sessionSemantics.activityTracker.observeDisconnectIdle(
-                        sessionId: sid,
-                        currentStatus: status
-                    ) {
-                        clearStatusToIdle(pi: pi, si: si, markFinished: false, effectiveTime: evidenceMs)
-                    }
-                    continue
-                } else {
-                    sessionSemantics.activityTracker.resetDisconnectIdle(sessionId: sid)
-                }
-                // Stale "working" recovery: the foreground turn has ended, but
-                // scheduled, subagent, or CLI background-agent work keeps
-                // `session.idle` from firing, so no hook demotes the tab and it reads
-                // "working" while the terminal is actually idle and interactive.
-                // Scope this strictly to fresh background-only evidence so ordinary
-                // sessions keep falling through. Demote to idle
-                // once the ended-turn condition persists across two scans (a normal
-                // inter-iteration gap flips `foregroundTurnActive` false only briefly:
-                // `turn_end` fires per loop iteration and tool calls run *inside* a
-                // turn, so foreground stays active through them). Leave scheduled,
-                // subagent, and background-agent state intact so the background
-                // indicator persists.
-                // The clock-ordering guard rejects a snapshot that predates the latest
-                // status hook, so a just-submitted prompt (whose running hook advanced
-                // the clock before its own fresh snapshot lands) can't be demoted; and
-                // seeding the clock from the foreground-transition timestamp (the
-                // turn_end time) — not `updatedAt` (which unrelated republishes bump)
-                // and not `now` — keeps a subsequent user-prompt hook from being
-                // swallowed. A future-dated transition (system-clock rollback) is
-                // rejected outright so it can't drive a demotion or poison the clock.
-                let backgroundNow = Date()
-                let backgroundNowMs = SessionArtifacts.currentStatusTimestamp()
-                if let snapshotMs =
-                    SessionSemanticsAdapter.backgroundDemotionEvidenceMilliseconds(
-                        status: status,
-                        snapshot: projects[pi].sessions[si].agentActivity,
-                        backgroundAgentsActive:
-                            projects[pi].sessions[si].backgroundAgentsActive,
-                        now: backgroundNow,
-                        nowMilliseconds: backgroundNowMs,
-                        statusClockMilliseconds:
-                            sessionSemantics.statusClock.timestamp(for: sid)
-                    ) {
-                    tracked.insert(sid)
-                    if sessionSemantics.activityTracker.observeForegroundIdle(
-                        sessionId: sid,
-                        currentStatus: status,
-                        foregroundTurnActive: false
-                    ) {
-                        clearStatusToIdle(
-                            pi: pi,
-                            si: si,
-                            markFinished: false,
-                            effectiveTime: snapshotMs
-                        )
-                        // Don't post completion here: background work is still active.
-                        // Its final stop signal owns completion.
-                    }
-                    continue
-                } else {
-                    sessionSemantics.activityTracker.resetForegroundIdle(sessionId: sid)
-                }
-                tracked.insert(sid)
-                if sessionSemantics.activityTracker.observeFooter(
-                    sessionId: sid,
-                    currentStatus: status,
-                    activity: activity
-                ) {
-                    clearStatusToIdle(pi: pi, si: si, markFinished: true)
-                    postCompletionIfReady(sessionId: sid)
-                }
-            }
-        }
-        sessionSemantics.activityTracker.retain(activeSessionIds: tracked)
-        recordStatusShadow(polled: polled, now: Date())
+            reconcileRuntimeActivity(now: Date())
+            recordStatusShadow(now: Date())
         }
     }
 
-    /// Drop a session to idle and (unless it's on screen) flag it finished & unseen,
-    /// then persist the corrected status. Shared by the liveness and footer reconcilers.
-    private func clearStatusToIdle(pi: Int, si: Int, markFinished: Bool, effectiveTime: Int64? = nil) {
+    /// Drops a session whose agent process has gone to idle and, unless it is on
+    /// screen, flags it finished and unseen, then persists the corrected status.
+    private func clearStatusToIdle(pi: Int, si: Int, markFinished: Bool) {
         withCoalescedProjectPublications {
             let sid = projects[pi].sessions[si].id
-            sessionSemantics.activityTracker.reset(sessionId: sid)
             cancelWaitingNotifications(sessionId: sid)
             var updated = projects[pi].sessions[si]
             updated.status = .idle
@@ -838,20 +657,8 @@ extension AppModel {
                 updated.finishedUnseen = true
             }
             projects[pi].sessions[si] = updated
-            // Seed the clock from the evidence that triggered the demotion, not `now`.
-            // For a snapshot-driven demotion `effectiveTime` is the snapshot's own
-            // timestamp; advancing the clock to `now` would let it swallow a fresh
-            // user-prompt running hook whose timestamp is slightly earlier than `now`,
-            // freezing the tab in idle. Clamp to `now` so a future-dated snapshot (e.g.
-            // after a system-clock rollback) can't poison the clock and reject later
-            // legitimate hooks. Liveness/footer callers pass nil and keep the prior
-            // `now`-based behavior.
             let now = SessionArtifacts.currentStatusTimestamp()
-            let base = min(effectiveTime ?? now, now)
-            let timestamp = max(
-                base,
-                sessionSemantics.statusClock.timestamp(for: sid) ?? base
-            )
+            let timestamp = max(now, sessionSemantics.statusClock.timestamp(for: sid) ?? now)
             sessionSemantics.statusClock.seed(sessionId: sid, timestamp: timestamp)
             sessionSemantics.promptSafetyClock.seed(
                 sessionId: sid,
@@ -928,8 +735,8 @@ extension AppModel {
                 for si in projects[pi].sessions.indices {
                     let status = projects[pi].sessions[si].status
                     guard status == .running || status == .waiting else { continue }
-                    if ActivityTracker.livenessShouldDemote(
-                        currentStatus: status,
+                    if SessionSemantics.livenessShouldDemote(
+                        status: status,
                         hasLiveAgent: liveSessions.contains(projects[pi].sessions[si].id)
                     ) {
                         // The agent exited/crashed (active → idle). Flag it as finished &
@@ -1053,11 +860,7 @@ extension AppModel {
             foregroundIdleGenerationBaselines.removeValue(forKey: sessionId)
             return
         }
-        let activity = controllers[sessionId]?.agentActivity
-        guard Self.canPostCompletion(
-            status: projects[loc.p].sessions[loc.s].status,
-            activity: activity
-        ) else { return }
+        guard projects[loc.p].sessions[loc.s].status == .idle else { return }
         guard !projects[loc.p].sessions[loc.s].hasBackgroundWork else { return }
         completionPending.remove(sessionId)
         let summaryContext = completionSummaryContexts.removeValue(forKey: sessionId)
@@ -1116,23 +919,4 @@ extension AppModel {
             && selectedSessionId == sessionId
     }
 
-    nonisolated static func canPostCompletion(
-        status: SessionStatus,
-        activity: FooterActivity?
-    ) -> Bool {
-        SessionSemantics.canPostCompletion(
-            status: status,
-            footerActivity: activity
-        )
-    }
-
-    nonisolated static func shouldClearPendingCompletion(
-        status: SessionStatus,
-        source: String?
-    ) -> Bool {
-        SessionSemantics.shouldClearPendingCompletion(
-            status: status,
-            source: source
-        )
-    }
 }

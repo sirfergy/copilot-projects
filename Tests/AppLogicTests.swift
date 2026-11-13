@@ -178,18 +178,6 @@ final class AppLogicTests: XCTestCase {
         XCTAssertFalse(view.isUsingMetalRenderer)
     }
 
-    func testFooterClassification() {
-        XCTAssertEqual(
-            TerminalController.classifyFooter("◎ Working   esc cancel"),
-            .working
-        )
-        XCTAssertEqual(
-            TerminalController.classifyFooter("/ commands · ? help · tab next tab"),
-            .idle
-        )
-        XCTAssertEqual(TerminalController.classifyFooter("ordinary output"), .unknown)
-    }
-
     func testRemoteSubmitFocusBytesBracketTheSubmission() {
         XCTAssertEqual(
             ProjectsTerminalView.remoteSubmitBytes(
@@ -257,236 +245,6 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(ledger.contains("session:third"))
     }
 
-    func testRemotePromptEligibilityRequiresSettledLiveCopilot() {
-        // Idle terminal footer + live agent → sendable. Background subagents keep
-        // `status` at `.running`, but fresh background-only evidence lets the
-        // foreground prompt stay usable (the regression this fixes).
-        XCTAssertEqual(
-            AppModel.remotePromptEligibility(
-                status: .running,
-                hasLiveAgent: true,
-                backgroundOnly: true,
-                footerActivity: .idle
-            ),
-            .sent
-        )
-        // A stale idle footer alone is not enough to bypass `.running`.
-        XCTAssertEqual(
-            AppModel.remotePromptEligibility(
-                status: .running,
-                hasLiveAgent: true,
-                footerActivity: .idle
-            ),
-            .busy
-        )
-        // Scheduled state alone is not enough to bypass foreground gating.
-        XCTAssertEqual(
-            AppModel.remotePromptEligibility(
-                status: .running,
-                scheduledTurnActive: true,
-                hasLiveAgent: true,
-                footerActivity: .idle
-            ),
-            .busy
-        )
-        // Fresh background-only evidence allows a separate foreground prompt while
-        // scheduled work continues behind it.
-        XCTAssertEqual(
-            AppModel.remotePromptEligibility(
-                status: .running,
-                scheduledTurnActive: true,
-                hasLiveAgent: true,
-                backgroundOnly: true,
-                footerActivity: .idle
-            ),
-            .sent
-        )
-        // A pending structured ask_user/elicitation → block (answer via its card).
-        XCTAssertEqual(
-            AppModel.remotePromptEligibility(
-                status: .running,
-                hasPendingQuestions: true,
-                hasLiveAgent: true,
-                footerActivity: .idle
-            ),
-            .busy
-        )
-        // A raw permission prompt surfaces only as `status == .waiting` (no
-        // structured-question entry), and the footer can read `.idle` behind the
-        // dialog. `.waiting` must block so a free-form message is never typed over
-        // the permission selection.
-        XCTAssertEqual(
-            AppModel.remotePromptEligibility(
-                status: .waiting,
-                hasPendingQuestions: false,
-                hasLiveAgent: true,
-                footerActivity: .idle
-            ),
-            .busy
-        )
-        // Foreground genuinely working (footer not idle) → block.
-        XCTAssertEqual(
-            AppModel.remotePromptEligibility(
-                status: .running,
-                hasLiveAgent: true,
-                footerActivity: .working
-            ),
-            .busy
-        )
-        // Footer state unknown → don't send until it confirms idle.
-        XCTAssertEqual(
-            AppModel.remotePromptEligibility(
-                status: .idle,
-                hasLiveAgent: true,
-                footerActivity: .unknown
-            ),
-            .busy
-        )
-        // No live Copilot → not sendable.
-        XCTAssertEqual(
-            AppModel.remotePromptEligibility(
-                status: .idle,
-                hasLiveAgent: false,
-                footerActivity: .idle
-            ),
-            .noLiveCopilot
-        )
-    }
-
-    func testBackgroundOnlyPromptEvidenceRequiresOrderedSnapshot() throws {
-        let formatter = ISO8601DateFormatter()
-        let now = Date()
-        let transition = now.addingTimeInterval(-1)
-        let snapshot = AgentActivitySnapshot(
-            schemaVersion: AgentActivitySnapshot.currentSchemaVersion,
-            updatedAt: formatter.string(from: now),
-            foregroundTurnActive: false,
-            foregroundTransitionAt: formatter.string(from: transition),
-            scheduledTurnActive: false,
-            activeSubagents: [
-                TrackedSubagent(
-                    id: "agent-1",
-                    name: "reviewer",
-                    description: "Reviews the PR",
-                    model: "gpt"
-                ),
-            ],
-            schedules: [],
-            idleGeneration: 0,
-            lastIdleAborted: false,
-            lastIdleTurnKind: nil,
-            error: nil
-        )
-        let nowMs = Int64(now.timeIntervalSince1970 * 1_000)
-        let transitionMs = try XCTUnwrap(snapshot.foregroundTransitionMilliseconds)
-
-        XCTAssertTrue(AppModel.backgroundOnlyPromptEvidence(
-            status: .running,
-            snapshot: snapshot,
-            backgroundAgentsActive: false,
-            now: now,
-            nowMs: nowMs,
-            clockMs: transitionMs - 1
-        ))
-        XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
-            status: .running,
-            snapshot: snapshot,
-            backgroundAgentsActive: false,
-            now: now,
-            nowMs: nowMs,
-            clockMs: transitionMs
-        ))
-        XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
-            status: .running,
-            snapshot: snapshot,
-            backgroundAgentsActive: false,
-            now: now,
-            nowMs: nowMs,
-            clockMs: nowMs
-        ))
-
-        var activeForeground = snapshot
-        activeForeground.foregroundTurnActive = true
-        XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
-            status: .running,
-            snapshot: activeForeground,
-            backgroundAgentsActive: false,
-            now: now,
-            nowMs: nowMs,
-            clockMs: nil
-        ))
-
-        var noSubagents = snapshot
-        noSubagents.activeSubagents = []
-        XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
-            status: .running,
-            snapshot: noSubagents,
-            backgroundAgentsActive: false,
-            now: now,
-            nowMs: nowMs,
-            clockMs: nil
-        ))
-        // CLI background agents (terminal-title state, no `activeSubagents`) count
-        // as background-only evidence just like scheduled/subagent work.
-        XCTAssertTrue(AppModel.backgroundOnlyPromptEvidence(
-            status: .running,
-            snapshot: noSubagents,
-            backgroundAgentsActive: true,
-            now: now,
-            nowMs: nowMs,
-            clockMs: transitionMs - 1
-        ))
-        // ...but only once the foreground turn has actually gone idle.
-        var noSubagentsActiveForeground = noSubagents
-        noSubagentsActiveForeground.foregroundTurnActive = true
-        XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
-            status: .running,
-            snapshot: noSubagentsActiveForeground,
-            backgroundAgentsActive: true,
-            now: now,
-            nowMs: nowMs,
-            clockMs: nil
-        ))
-
-        var scheduled = noSubagents
-        scheduled.scheduledTurnActive = true
-        XCTAssertTrue(AppModel.backgroundOnlyPromptEvidence(
-            status: .running,
-            snapshot: scheduled,
-            backgroundAgentsActive: false,
-            now: now,
-            nowMs: nowMs,
-            clockMs: transitionMs - 1
-        ))
-        XCTAssertTrue(AppModel.backgroundOnlyPromptEvidence(
-            status: .idle,
-            snapshot: scheduled,
-            backgroundAgentsActive: false,
-            now: now,
-            nowMs: nowMs,
-            clockMs: transitionMs
-        ))
-        XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
-            status: .idle,
-            snapshot: scheduled,
-            backgroundAgentsActive: false,
-            now: now,
-            nowMs: nowMs,
-            clockMs: transitionMs + 1
-        ))
-
-        var disconnected = snapshot
-        disconnected.error = "Connection is closed."
-        XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
-            status: .idle,
-            snapshot: disconnected,
-            backgroundAgentsActive: false,
-            now: now,
-            nowMs: nowMs,
-            clockMs: nil
-        ))
-    }
-
     func testSessionHasPendingQuestions() {
         var session = Session(title: "q", cwd: "/tmp")
         XCTAssertFalse(session.hasPendingQuestions)
@@ -513,157 +271,6 @@ final class AppLogicTests: XCTestCase {
             ]
         )
         XCTAssertTrue(session.hasPendingQuestions)
-    }
-
-    @MainActor
-    func testRemotePromptableFollowsTheLiveForegroundNotBackgroundWork() throws {
-        _ = NSApplication.shared
-        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent(".build/remote-prompt-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let session = Session(title: "prompt", cwd: root.path)
-        defer { SessionArtifacts.removeFiles(sessionId: session.id) }
-        let project = Project(
-            name: "project",
-            cwd: root.path,
-            sessions: [session],
-            selectedSessionId: session.id
-        )
-        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
-        try repository.save(PersistedState(
-            projects: [project],
-            selectedProjectId: project.id
-        ))
-
-        var liveSessions: Set<String> = [session.id]
-        var activity = FooterActivity.idle
-        let model = AppModel(
-            stateRepository: repository,
-            agentActivityDirectory: root,
-            remotePromptLiveSessions: { _ in liveSessions },
-            remotePromptTarget: { requestedSessionId in
-                guard requestedSessionId == session.id else { return nil }
-                return RemotePromptTarget(activity: activity)
-            }
-        )
-        func promptable() -> Bool {
-            model.remoteWorkspaceSnapshot().projects[0].sessions[0].promptable == true
-        }
-
-        XCTAssertTrue(promptable())
-
-        // Foreground genuinely working (footer working) → not promptable.
-        activity = .working
-        XCTAssertFalse(promptable())
-        activity = .idle
-
-        // Background agents active must NOT block a settled foreground at a prompt.
-        model.setBackgroundAgentsActive(sessionId: session.id, active: true)
-        XCTAssertTrue(promptable())
-        model.setBackgroundAgentsActive(sessionId: session.id, active: false)
-
-        let subagentTransitionAt = ISO8601DateFormatter().string(from: Date())
-        let subagentSnapshot = AgentActivitySnapshot(
-            schemaVersion: 1,
-            updatedAt: ISO8601DateFormatter().string(from: Date()),
-            foregroundTurnActive: false,
-            foregroundTransitionAt: subagentTransitionAt,
-            scheduledTurnActive: false,
-            activeSubagents: [
-                TrackedSubagent(
-                    id: "agent-1",
-                    name: "reviewer",
-                    description: "Reviews the PR",
-                    model: "gpt"
-                ),
-            ],
-            schedules: [],
-            idleGeneration: 0,
-            lastIdleAborted: false,
-            lastIdleTurnKind: nil,
-            error: nil
-        )
-        try JSONEncoder().encode(subagentSnapshot).write(
-            to: root.appendingPathComponent("\(session.id).agent-activity.json")
-        )
-        model.refreshAgentActivitySnapshots()
-        XCTAssertEqual(model.projects[0].sessions[0].activeSubagentCount, 1)
-        XCTAssertTrue(model.projects[0].sessions[0].hasBackgroundWork)
-        // A live background subagent + idle footer must stay promptable (the reported bug).
-        XCTAssertTrue(promptable())
-        model.setStatus(
-            sessionId: session.id,
-            status: .running,
-            text: nil,
-            timestamp: 1,
-            source: "background-only"
-        )
-        XCTAssertTrue(promptable())
-
-        // A raw permission prompt sets `status == .waiting` (no structured question)
-        // while the footer can still read idle behind the dialog — not promptable.
-        model.setStatus(
-            sessionId: session.id,
-            status: .waiting,
-            text: nil,
-            timestamp: 2,
-            source: "permission-prompt"
-        )
-        XCTAssertEqual(activity, .idle)
-        XCTAssertFalse(promptable())
-        model.setStatus(
-            sessionId: session.id,
-            status: .running,
-            text: nil,
-            timestamp: 3,
-            source: "permission-resolved"
-        )
-
-        let scheduledTransitionMs = Int64(Date().timeIntervalSince1970) * 1_000
-        let scheduledTransition = Date(
-            timeIntervalSince1970: Double(scheduledTransitionMs) / 1_000
-        )
-        model.setStatus(
-            sessionId: session.id,
-            status: .idle,
-            text: nil,
-            timestamp: scheduledTransitionMs,
-            source: "scheduled-start"
-        )
-        let scheduledSnapshot = AgentActivitySnapshot(
-            schemaVersion: 1,
-            updatedAt: ISO8601DateFormatter().string(from: scheduledTransition),
-            foregroundTurnActive: false,
-            foregroundTransitionAt: ISO8601DateFormatter().string(from: scheduledTransition),
-            scheduledTurnActive: true,
-            activeSubagents: [],
-            schedules: [],
-            idleGeneration: 0,
-            lastIdleAborted: false,
-            lastIdleTurnKind: nil,
-            error: nil
-        )
-        try JSONEncoder().encode(scheduledSnapshot).write(
-            to: root.appendingPathComponent("\(session.id).agent-activity.json")
-        )
-        model.refreshAgentActivitySnapshots()
-        XCTAssertTrue(promptable())
-        model.setStatus(
-            sessionId: session.id,
-            status: .idle,
-            text: nil,
-            timestamp: scheduledTransitionMs + 1,
-            source: "scheduled-idle"
-        )
-
-        liveSessions = []
-        XCTAssertFalse(promptable())
-        liveSessions = [session.id]
-
-        // Footer not idle → not promptable mid-work.
-        activity = .working
-        XCTAssertFalse(promptable())
     }
 
     @MainActor
@@ -1196,122 +803,6 @@ final class AppLogicTests: XCTestCase {
         )
     }
 
-    func testActivityTrackerRequiresObservedWorkAndTwoIdleTicks() {
-        let sessionId = UUID().uuidString
-        var tracker = ActivityTracker()
-        XCTAssertFalse(tracker.observeFooter(
-            sessionId: sessionId, currentStatus: .running, activity: .idle))
-        XCTAssertFalse(tracker.observeFooter(
-            sessionId: sessionId, currentStatus: .running, activity: .working))
-        XCTAssertFalse(tracker.observeFooter(
-            sessionId: sessionId, currentStatus: .running, activity: .idle))
-        XCTAssertTrue(tracker.observeFooter(
-            sessionId: sessionId, currentStatus: .running, activity: .idle))
-    }
-
-    func testActivityTrackerRequiresTwoWorkingTicksToPromoteIdleSession() {
-        let sessionId = UUID().uuidString
-        var tracker = ActivityTracker()
-        XCTAssertFalse(tracker.shouldPromoteFromFooter(
-            sessionId: sessionId, currentStatus: .idle, activity: .unknown))
-        XCTAssertFalse(tracker.shouldPromoteFromFooter(
-            sessionId: sessionId, currentStatus: .idle, activity: .working))
-        XCTAssertTrue(tracker.shouldPromoteFromFooter(
-            sessionId: sessionId, currentStatus: .idle, activity: .working))
-        XCTAssertFalse(tracker.observeFooter(
-            sessionId: sessionId, currentStatus: .running, activity: .idle))
-        XCTAssertTrue(tracker.observeFooter(
-            sessionId: sessionId, currentStatus: .running, activity: .idle))
-    }
-
-    func testFooterDoesNotPromoteWhileBackgroundAgentsAreActive() {
-        XCTAssertFalse(ActivityTracker.canPromoteIdleFromFooter(
-            backgroundAgentsActive: true,
-            hasLiveAgent: true
-        ))
-        XCTAssertTrue(ActivityTracker.canPromoteIdleFromFooter(
-            backgroundAgentsActive: false,
-            hasLiveAgent: true
-        ))
-        XCTAssertFalse(ActivityTracker.canPromoteIdleFromFooter(
-            backgroundAgentsActive: false,
-            hasLiveAgent: false
-        ))
-    }
-
-    func testForegroundIdleDemotesOnlyAfterTwoInactiveScans() {
-        let sessionId = UUID().uuidString
-        var tracker = ActivityTracker()
-        // A single inactive scan is a normal inter-iteration gap: don't demote.
-        XCTAssertFalse(tracker.observeForegroundIdle(
-            sessionId: sessionId, currentStatus: .running, foregroundTurnActive: false))
-        // Two consecutive inactive scans mean the foreground turn really ended.
-        XCTAssertTrue(tracker.observeForegroundIdle(
-            sessionId: sessionId, currentStatus: .running, foregroundTurnActive: false))
-    }
-
-    func testDisconnectIdleDwellDoesNotReuseForegroundIdleTicks() {
-        let sessionId = UUID().uuidString
-        var tracker = ActivityTracker()
-        XCTAssertFalse(tracker.observeForegroundIdle(
-            sessionId: sessionId, currentStatus: .running, foregroundTurnActive: false))
-        XCTAssertFalse(tracker.observeDisconnectIdle(
-            sessionId: sessionId, currentStatus: .running))
-        XCTAssertTrue(tracker.observeDisconnectIdle(
-            sessionId: sessionId, currentStatus: .running))
-    }
-
-    func testDisconnectIdleDwellResetsWhenPolicyStopsQualifying() {
-        let sessionId = UUID().uuidString
-        var tracker = ActivityTracker()
-        XCTAssertFalse(tracker.observeDisconnectIdle(
-            sessionId: sessionId, currentStatus: .running))
-        tracker.resetDisconnectIdle(sessionId: sessionId)
-        XCTAssertFalse(tracker.observeDisconnectIdle(
-            sessionId: sessionId, currentStatus: .running))
-        XCTAssertTrue(tracker.observeDisconnectIdle(
-            sessionId: sessionId, currentStatus: .running))
-    }
-
-    func testForegroundIdleDwellResetsWhenTurnResumes() {
-        let sessionId = UUID().uuidString
-        var tracker = ActivityTracker()
-        XCTAssertFalse(tracker.observeForegroundIdle(
-            sessionId: sessionId, currentStatus: .running, foregroundTurnActive: false))
-        // Next agentic iteration starts — foreground turn active again resets dwell.
-        XCTAssertFalse(tracker.observeForegroundIdle(
-            sessionId: sessionId, currentStatus: .running, foregroundTurnActive: true))
-        // A later lone inactive scan must not demote on its own.
-        XCTAssertFalse(tracker.observeForegroundIdle(
-            sessionId: sessionId, currentStatus: .running, foregroundTurnActive: false))
-        XCTAssertTrue(tracker.observeForegroundIdle(
-            sessionId: sessionId, currentStatus: .running, foregroundTurnActive: false))
-    }
-
-    func testForegroundIdleOnlyAppliesToRunningStatus() {
-        let sessionId = UUID().uuidString
-        var tracker = ActivityTracker()
-        // Not running (e.g. waiting/idle): never demote via this path.
-        XCTAssertFalse(tracker.observeForegroundIdle(
-            sessionId: sessionId, currentStatus: .waiting, foregroundTurnActive: false))
-        XCTAssertFalse(tracker.observeForegroundIdle(
-            sessionId: sessionId, currentStatus: .waiting, foregroundTurnActive: false))
-    }
-
-    func testResetForegroundIdlePreservesFooterDwellState() {
-        let sessionId = UUID().uuidString
-        var tracker = ActivityTracker()
-        // Build up footer-demote dwell state (saw working, one idle tick).
-        XCTAssertFalse(tracker.observeFooter(
-            sessionId: sessionId, currentStatus: .running, activity: .working))
-        XCTAssertFalse(tracker.observeFooter(
-            sessionId: sessionId, currentStatus: .running, activity: .idle))
-        // Clearing only the foreground-idle counter must not wipe footer progress.
-        tracker.resetForegroundIdle(sessionId: sessionId)
-        XCTAssertTrue(tracker.observeFooter(
-            sessionId: sessionId, currentStatus: .running, activity: .idle))
-    }
-
     func testForegroundTransitionMillisecondsParsesIndependentlyOfUpdatedAt() {
         let snapshot = AgentActivitySnapshot(
             schemaVersion: AgentActivitySnapshot.currentSchemaVersion,
@@ -1689,7 +1180,7 @@ final class AppLogicTests: XCTestCase {
             completionNotificationDelayNanoseconds: 10_000_000,
             isAppActive: { false },
             agentActivityDirectory: activityDirectory,
-            remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) }
+            resumeMarkerDirectory: activityDirectory
         )
         let notifications = NotificationSpy()
         model.attach(notifications: notifications)
@@ -1714,8 +1205,15 @@ final class AppLogicTests: XCTestCase {
             idleGeneration: 0,
             lastIdleAborted: false,
             lastIdleTurnKind: nil,
-            error: nil
+            error: nil,
+            copilotSessionId: "owner",
+            runtimeActivity: RuntimeActivitySnapshot(
+                processing: false,
+                observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+                idleAtMilliseconds: nil, error: nil)
         )
+        try Data("owner".utf8).write(
+            to: activityDirectory.appendingPathComponent("\(session.id).copilot-session"))
         let snapshotURL = activityDirectory
             .appendingPathComponent("\(session.id).agent-activity.json")
         try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
@@ -1734,14 +1232,14 @@ final class AppLogicTests: XCTestCase {
         snapshot.activeSubagents = []
         try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
         model.refreshAgentActivitySnapshots()
-        model.reconcileAgentFooters()
+        model.reconcileStatus()
         XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
         XCTAssertEqual(model.totalReady, 1)
         XCTAssertTrue(model.remoteWorkspaceSnapshot().projects[0].sessions[0].ready)
         XCTAssertEqual(notifications.calls.count, 1)
 
-        model.reconcileAgentFooters()
+        model.reconcileStatus()
         XCTAssertEqual(notifications.calls.count, 1)
     }
 
@@ -4727,14 +4225,6 @@ final class AppLogicTests: XCTestCase {
             selectedSessionId: "session",
             sessionId: "session"
         ))
-        XCTAssertFalse(AppModel.canPostCompletion(status: .running, activity: .idle))
-        XCTAssertFalse(AppModel.canPostCompletion(status: .idle, activity: .working))
-        XCTAssertTrue(AppModel.canPostCompletion(status: .idle, activity: .idle))
-        XCTAssertTrue(AppModel.canPostCompletion(status: .idle, activity: .unknown))
-        XCTAssertTrue(AppModel.canPostCompletion(status: .idle, activity: nil))
-        XCTAssertFalse(AppModel.shouldClearPendingCompletion(status: .running, source: "footer"))
-        XCTAssertTrue(AppModel.shouldClearPendingCompletion(status: .running, source: nil))
-        XCTAssertTrue(AppModel.shouldClearPendingCompletion(status: .waiting, source: "hook"))
     }
 
     func testScrollbarGutterStrippingKeepsAdjacentContent() {
@@ -8001,49 +7491,6 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(try snapshot(errorJSON: "\"Error: Connection is closed.\"").reportsTerminalDisconnect)
         XCTAssertTrue(try snapshot(errorJSON: "\"Connection is disposed.\"").reportsTerminalDisconnect)
         XCTAssertTrue(try snapshot(errorJSON: "\"CONNECTION IS CLOSED\"").reportsTerminalDisconnect)
-    }
-
-    func testDisconnectDemotionEvidencePolicy() throws {
-        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-07-14T00:00:00Z"))
-        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
-        func snap(error: String?, updatedAt: String = "2026-07-14T00:00:00Z") throws -> AgentActivitySnapshot {
-            var body = "{\"schemaVersion\":1,\"updatedAt\":\"\(updatedAt)\","
-                + "\"foregroundTurnActive\":true,\"scheduledTurnActive\":false,"
-                + "\"activeSubagents\":[],\"schedules\":[],\"idleGeneration\":0,"
-                + "\"lastIdleAborted\":false"
-            if let error { body += ",\"error\":\"\(error)\"" }
-            body += "}"
-            return try JSONDecoder().decode(AgentActivitySnapshot.self, from: Data(body.utf8))
-        }
-        // Running + idle footer + fresh disconnect, newer than the clock → demote (returns evidence ms).
-        XCTAssertEqual(
-            AppModel.disconnectDemotionEvidenceMs(
-                status: .running, footerActivity: .idle,
-                snapshot: try snap(error: "Connection is closed."),
-                now: now, nowMs: nowMs, clockMs: .min),
-            nowMs
-        )
-        // Healthy snapshot (no terminal error) → never demote.
-        XCTAssertNil(AppModel.disconnectDemotionEvidenceMs(
-            status: .running, footerActivity: .idle,
-            snapshot: try snap(error: nil), now: now, nowMs: nowMs, clockMs: .min))
-        // Footer still working → don't demote a genuinely-working session.
-        XCTAssertNil(AppModel.disconnectDemotionEvidenceMs(
-            status: .running, footerActivity: .working,
-            snapshot: try snap(error: "Connection is closed."), now: now, nowMs: nowMs, clockMs: .min))
-        // Not running → not applicable.
-        XCTAssertNil(AppModel.disconnectDemotionEvidenceMs(
-            status: .idle, footerActivity: .idle,
-            snapshot: try snap(error: "Connection is closed."), now: now, nowMs: nowMs, clockMs: .min))
-        // Snapshot older than the status clock → don't override a newer hook.
-        XCTAssertNil(AppModel.disconnectDemotionEvidenceMs(
-            status: .running, footerActivity: .idle,
-            snapshot: try snap(error: "Connection is closed."), now: now, nowMs: nowMs, clockMs: nowMs + 1))
-        // Stale snapshot (updatedAt long past) → isFresh false → don't demote.
-        XCTAssertNil(AppModel.disconnectDemotionEvidenceMs(
-            status: .running, footerActivity: .idle,
-            snapshot: try snap(error: "Connection is closed.", updatedAt: "2000-01-01T00:00:00Z"),
-            now: now, nowMs: nowMs, clockMs: .min))
     }
 
     func testRemoteTerminalScreenCaptureNormalizesCells() {
@@ -18675,13 +18122,11 @@ final class AppLogicTests: XCTestCase {
         )
         let repository = StateRepository(path: root.appendingPathComponent("state.json"))
         try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
-        var injectedPromptTarget: RemotePromptTarget?
         let model = AppModel(
             stateRepository: repository,
             isAppActive: { false },
             agentActivityDirectory: directory,
-            resumeMarkerDirectory: directory,
-            remotePromptTarget: { _ in injectedPromptTarget }
+            resumeMarkerDirectory: directory
         )
 
         let base = Date()
@@ -18835,7 +18280,7 @@ final class AppLogicTests: XCTestCase {
         )
         XCTAssertEqual(workingModel.indicator, .backgroundWork(nil))
 
-        // Terminal disconnect and snapshot expiry clear runtime-only, hook-driven (without working footer), background-agent, or scheduled indicators so dead sessions never spin forever.
+        // Terminal disconnect and snapshot expiry clear runtime-only, hook-driven, background-agent, or scheduled indicators so dead sessions never spin forever.
         try publish(makeSnapshot(at: base.addingTimeInterval(9.2), processing: true, intent: "Before disconnect"), at: base.addingTimeInterval(9.2))
         try publish(
             makeSnapshot(
@@ -18848,9 +18293,6 @@ final class AppLogicTests: XCTestCase {
             at: base.addingTimeInterval(9.4)
         )
         XCTAssertNil(workingModel.indicator)
-        injectedPromptTarget = RemotePromptTarget(activity: .working)
-        XCTAssertEqual(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(9.4)), .working(nil))
-        injectedPromptTarget = nil
 
         model.setStatus(sessionId: session.id, status: .running, text: "Stuck hook", timestamp: baseMs + 9_500)
         model.setBackgroundAgentsActive(sessionId: session.id, active: true)
@@ -18865,9 +18307,6 @@ final class AppLogicTests: XCTestCase {
             at: base.addingTimeInterval(10)
         )
         XCTAssertNil(workingModel.indicator)
-        injectedPromptTarget = RemotePromptTarget(activity: .working)
-        XCTAssertEqual(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(10)), .working("Stuck hook"))
-        injectedPromptTarget = nil
         model.refreshAgentActivitySnapshots(now: base.addingTimeInterval(26))
         XCTAssertNil(workingModel.indicator)
         model.setBackgroundAgentsActive(sessionId: session.id, active: false)
@@ -18890,9 +18329,6 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(workingModel.indicator, .working("Active before expiry"))
         model.setBackgroundAgentsActive(sessionId: session.id, active: true)
         XCTAssertNil(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(50)))
-        injectedPromptTarget = RemotePromptTarget(activity: .working)
-        XCTAssertEqual(model.sessionWorkingIndicator(sessionId: session.id, now: base.addingTimeInterval(50)), .working(nil))
-        injectedPromptTarget = nil
         model.setBackgroundAgentsActive(sessionId: session.id, active: false)
 
         // Turn end clears the indicator; closing the drawer removes the cached workingModel.

@@ -844,15 +844,16 @@ The host uses fresh runtime observations for status and prompt eligibility witho
 ordering clocks to heartbeat time. Input waits are released only by matching, same-conversation
 completion evidence after the wait, with no other input pending. Suppressed permission
 notifications use the same sender-scoped completion check before restoring status.
-Terminal footer checks still protect modal UI,
-including when a draft or autopilot changes the visible shortcut hints; unknown and modal
-footers do not make a session promptable.
+A session takes a prompt only on its tracker's own reading: a fresh snapshot from the tab's
+owner that finds the coordinator idle with nothing pending. A stale or unusable reading, or no
+tracker, offers no send. The terminal footer is not read for status or for sending.
 
 Confirmed input-wait resolution is persisted at the existing ordering clocks before runtime
 reconciliation clears the live wait. Notification debounce controls banner timing, not whether a
 completed wait can be saved; suppressed repeat notifications still refresh the retained clocks.
 
-Older trackers and explicitly unsupported/remote CLI runtimes retain the legacy path.
+A session whose tracker has no processing observation (an older tracker, or an unsupported
+or remote CLI runtime) takes its status from the hooks alone.
 During a mixed-version upgrade, same-conversation snapshots with all pending-input fields
 known empty can release legacy waits; missing fields or a changed conversation do not.
 A failed or expired observation from a supported tracker is unknown, not idle. The process-tree
