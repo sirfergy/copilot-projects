@@ -3542,7 +3542,7 @@ test("cursor reading is single-flight and does not block heartbeat publication",
   runtime.intervalCallback();
   runtime.intervalCallback();
   assert.equal(runtime.session.questionEventCalls.length, before + 1);
-  assert.ok(runtime.activityWrites.length > writes);
+  await waitFor(() => runtime.activityWrites.length > writes, "heartbeat was not published");
   finish({ events: [], cursor: "tail", hasMore: false, cursorStatus: "ok" });
   await new Promise((resolve) => setImmediate(resolve));
 });
@@ -4141,24 +4141,21 @@ test("mismatched runtime response ownership fails closed", {
   assert.equal(readSnapshot(runtime).runtimeActivity.processing, null);
 });
 
-test("idle heartbeats publish liveness at once and then the observation taken that tick", {
+test("an idle heartbeat is one write, carrying the observation taken that tick", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
   await waitForActivity(runtime, (activity) => activity?.processing === false);
   const calls = runtime.session.runtimeCalls.length;
   const writes = runtime.activityWrites.length;
-  const previous = readSnapshot(runtime).workflow.observedAtMilliseconds;
   await new Promise((resolve) => setTimeout(resolve, 5));
   const tickStart = Date.now();
   runtime.intervalCallback();
-  // Liveness is written before the tick's query can answer.
-  assert.equal(runtime.activityWrites.length - writes, 1);
-  assert.equal(runtime.activityWrites.at(-1).workflow.observedAtMilliseconds, previous);
-  await waitFor(() => runtime.activityWrites.length - writes >= 2, "observation was not published");
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitFor(() => runtime.activityWrites.length > writes, "observation was not published");
+  // Long enough for the heartbeat timer to fire, had the observation not cancelled it.
+  await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(runtime.session.runtimeCalls.length - calls, 2);
-  assert.equal(runtime.activityWrites.length - writes, 2);
+  assert.equal(runtime.activityWrites.length - writes, 1);
   const published = runtime.activityWrites.at(-1);
   assert.ok(published.workflow.observedAtMilliseconds >= tickStart);
   assert.equal(published.runtimeActivity.observedAtMilliseconds, published.workflow.observedAtMilliseconds);
@@ -4167,7 +4164,7 @@ test("idle heartbeats publish liveness at once and then the observation taken th
   assert.equal(published.workflow.sendReady, true);
 });
 
-test("a hung runtime query never delays a heartbeat's liveness publish", {
+test("a hung runtime query leaves each heartbeat's liveness publish to its timer", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
@@ -4179,13 +4176,12 @@ test("a hung runtime query never delays a heartbeat's liveness publish", {
   await new Promise((resolve) => setTimeout(resolve, 5));
   const firstTick = Date.now();
   runtime.intervalCallback();
-  assert.equal(runtime.activityWrites.length - writes, 1);
   assert.equal(typeof release, "function", "the tick did not start its query");
   const calls = runtime.session.runtimeCalls.length;
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  await waitFor(() => runtime.activityWrites.length - writes >= 1, "liveness was not published");
   const secondTick = Date.now();
   runtime.intervalCallback();
-  assert.equal(runtime.activityWrites.length - writes, 2);
+  await waitFor(() => runtime.activityWrites.length - writes >= 2, "liveness was not published");
   for (const [index, tick] of [firstTick, secondTick].entries()) {
     const liveness = runtime.activityWrites[writes + index];
     assert.ok(Date.parse(liveness.updatedAt) >= tick);
@@ -4205,6 +4201,27 @@ test("a hung runtime query never delays a heartbeat's liveness publish", {
   assert.ok(published.workflow.observedAtMilliseconds < secondTick);
 });
 
+test("a heartbeat armed before shutdown does not write the snapshot back", {
+  concurrency: false,
+}, async (t) => {
+  let shutdown;
+  const once = process.once;
+  process.once = function (event, listener) {
+    if (event === "SIGTERM") shutdown = listener;
+    return once.call(this, event, listener);
+  };
+  t.after(() => { process.once = once; });
+  const runtime = await createRuntime(t);
+  // Shutdown removes the snapshot, then waits on this RPC before it exits.
+  runtime.session.rpc.eventLog.releaseInterest = () => new Promise(() => {});
+  runtime.session.processingHandler = () => new Promise(() => {});
+  runtime.intervalCallback();
+  shutdown();
+  assert.equal(realExistsSync(runtime.snapshotPath), false);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(realExistsSync(runtime.snapshotPath), false);
+});
+
 test("a heartbeat observation that is not newer adds no write", {
   concurrency: false,
 }, async (t) => {
@@ -4217,6 +4234,7 @@ test("a heartbeat observation that is not newer adds no write", {
   t.after(() => { Date.now = originalDateNow; });
   runtime.intervalCallback();
   await waitFor(() => runtime.session.runtimeCalls.length >= calls + 2, "poll did not run");
+  await waitFor(() => runtime.activityWrites.length > writes, "liveness was not published");
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(runtime.activityWrites.length - writes, 1);
   assert.equal(readSnapshot(runtime).workflow.observedAtMilliseconds, previous);
@@ -4244,9 +4262,10 @@ test("an older runtime read never overwrites a newer workflow observation", {
   release({ processing: false });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(runtime.activityWrites.length, writes, "an older read published");
-  runtime.session.processingHandler = async () => ({ processing: false });
+  // This tick's query never answers, so its heartbeat shows what the tracker holds.
+  runtime.session.processingHandler = () => new Promise(() => {});
   runtime.intervalCallback();
-  const liveness = runtime.activityWrites[writes];
+  const liveness = await waitFor(() => runtime.activityWrites[writes], "liveness was not published");
   assert.equal(liveness.workflow.observedAtMilliseconds, newer.observedAtMilliseconds);
   assert.equal(liveness.workflow.maxAiCredits, 60);
 });
@@ -4363,8 +4382,10 @@ test("turn transitions and transient RPC errors keep fresh workflow capabilities
   Date.now = () => heartbeatObservedAt + 16_000;
   try {
     runtime.intervalCallback();
-    const expired = readSnapshot(runtime).workflow;
-    assert.deepEqual(expired.capabilities, []);
+    const expired = await waitFor(() => {
+      const workflow = readSnapshot(runtime).workflow;
+      return workflow.capabilities.length === 0 && workflow;
+    }, "the expired observation was not published");
     assert.equal(expired.sendReady, false);
   } finally {
     Date.now = originalDateNow;

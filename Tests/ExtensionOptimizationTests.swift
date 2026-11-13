@@ -103,21 +103,23 @@ final class ExtensionOptimizationTests: XCTestCase {
         let steadyTicks = try XCTUnwrap(summary["steadyTicks"] as? Int)
         let steadyWrites = try XCTUnwrap(summary["steadyWrites"] as? Int)
         XCTAssertGreaterThanOrEqual(steadyTicks, 2)
-        // Exactly one heartbeat per tick, plus at most one write straddling the
-        // sampling window. Before the change this was two per tick. (This fake
-        // session has no runtime connection; a native session's successful
-        // runtime observation adds one write per tick, covered in JSTests.)
+        // Exactly one heartbeat per tick, give or take one write straddling
+        // either end of the sampling window: the heartbeat timer writes a
+        // twentieth of the poll after its tick. (This fake session has no
+        // runtime connection; a native session's successful runtime
+        // observation is that one write, covered in JSTests.)
         XCTAssertLessThanOrEqual(steadyWrites, steadyTicks + 1)
-        XCTAssertGreaterThanOrEqual(steadyWrites, steadyTicks)
+        XCTAssertGreaterThanOrEqual(steadyWrites, steadyTicks - 1)
         XCTAssertEqual(summary["heartbeatAdvanced"] as? Bool, true)
         // The catalog still reaches the host, and a genuinely changed schedule
-        // list still publishes on top of the tick's heartbeat.
+        // list is published by its own refresh, which is then the tick's write.
         XCTAssertEqual(summary["publishedModels"] as? Int, 1)
         XCTAssertEqual(summary["publishedSchedules"] as? Int, 2)
         let changeTicks = try XCTUnwrap(summary["changeTicks"] as? Int)
         let changeWrites = try XCTUnwrap(summary["changeWrites"] as? Int)
         XCTAssertGreaterThanOrEqual(changeTicks, 2)
-        XCTAssertGreaterThanOrEqual(changeWrites, changeTicks + 2)
+        XCTAssertGreaterThanOrEqual(changeWrites, changeTicks)
+        XCTAssertLessThanOrEqual(changeWrites, changeTicks + 1)
     }
 
     /// A failing refresh still reports immediately, and a later success still
@@ -982,7 +984,7 @@ extension ExtensionOptimizationTests {
 
         // A real change must still publish without waiting for anything: from
         // here every refresh returns a different list, so a change-only publish
-        // fires on top of each tick's heartbeat.
+        // is each tick's one write.
         globalThis.__mutate = true;
         const changeBaselineWrites = globalThis.__snapshotWrites || 0;
         const changeBaselineTicks = scheduleListCalls;
