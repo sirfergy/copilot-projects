@@ -2851,7 +2851,7 @@ extension AppModel {
         if let previous {
             guard previous.sessionId == sessionId,
                   previous.payloadFingerprint == payloadFingerprint else {
-                return .failure("request id is bound to a different session or prompt", code: "conflict")
+                return .failure("request id is bound to a different session, prompt or delivery mode", code: "conflict")
             }
             guard let loc = locateIndex(sessionId) else {
                 return .failure("The session has ended.", code: "gone")
@@ -3057,7 +3057,7 @@ extension AppModel {
                 code: "indeterminate"
             )
         case .conflict:
-            return .failure("request id is bound to a different session or prompt", code: "conflict")
+            return .failure("request id is bound to a different session, prompt or delivery mode", code: "conflict")
         }
     }
 

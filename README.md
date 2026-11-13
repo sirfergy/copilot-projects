@@ -546,7 +546,8 @@ a new turn at once when none is. A session that is parked, restarting, waiting f
 input or without a running Copilot refuses either kind, and a refused steer is never
 queued instead: the command says why and exits non-zero (8 when busy). It exits 0
 once the session's tracker has been handed the prompt. Replaying a `--request-id`
-never sends twice; replaying it with a different prompt, session or `--steer` exits 3.
+does not send twice while the app remembers the request (about a week); replaying it
+with a different prompt, session or `--steer` exits 3.
 An app left running from before it learned `--steer` ignores it and queues the
 prompt, so restart the app after updating.
 
