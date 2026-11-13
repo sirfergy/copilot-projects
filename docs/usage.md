@@ -551,8 +551,8 @@ prompt. Configured creation rejects `pullRequestURL`; the separate review route
 accepts its canonical PR URL and rejects `kind` and `initialPrompt`.
 
 Gateways and `SessionHost.createSession` reject launch options on the legacy
-`sessions/create` route. Gateways must
-expose the configured route only when the host advertises the
+`sessions/create` route. Gateways
+expose the configured route whether or not the host advertises the
 `configured-session-creation` protocol capability. Clients must not
 fall back to the legacy endpoint when configured creation is unsupported: older
 hosts ignore unknown JSON fields and could otherwise silently drop the prompt
@@ -570,8 +570,8 @@ Keep an immutable request body and UUID for an explicit retry after a network
 or 5xx error. Do not automatically resubmit prompts, reuse a UUID after changing
 the project or launch options, or retain pending retries indefinitely. A matching
 retry returns the original session, even if it moved projects; a changed intent
-returns 409, as does a retry for a session with no recorded intent. The host
-persists intent hashes, not starting-prompt text.
+returns 409, as does a retry for a session with no recorded intent. The ledger
+persists intent hashes, not starting-prompt text; the workspace saves both.
 An existing terminal socket without a stored intent cannot satisfy a configured
 or review create, even if its master may have exited; it returns 409 rather than assuming
 the requested intent is safe to repeat. Fresh configured and review
