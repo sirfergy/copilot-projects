@@ -68,8 +68,7 @@ final class ForegroundActivityTests: XCTestCase {
                 isAppActive: { false },
                 agentActivityDirectory: directory,
                 resumeMarkerDirectory: directory,
-                remotePromptLiveSessions: { _ in [sid] },
-                remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) }
+                remotePromptLiveSessions: { _ in [sid] }
             )
         }
 
@@ -114,24 +113,6 @@ final class ForegroundActivityTests: XCTestCase {
         func cleanup() {
             SessionArtifacts.removeFiles(sessionId: session.id)
             try? FileManager.default.removeItem(at: root)
-        }
-    }
-
-    func testReadyFooterVariantsDoNotBlockRemotePrompts() {
-        for footer in [
-            "/ commands · ? help · GPT-6 Astra",
-            "autopilot · / commands · GPT-6 Astra",
-            "autopilot (limited) · / commands · GPT-6 Astra",
-            "ctrl+q enqueue · @ files · # issues · GPT-6 Astra",
-            "esc again to stop agents · GPT-6 Astra",
-        ] {
-            let activity = TerminalController.classifyFooter(footer)
-            XCTAssertEqual(activity, .idle, footer)
-            XCTAssertEqual(AppModel.remotePromptEligibility(
-                status: .idle,
-                hasLiveAgent: true,
-                footerActivity: activity
-            ), .sent, footer)
         }
     }
 
@@ -198,66 +179,6 @@ final class ForegroundActivityTests: XCTestCase {
         XCTAssertNil(remote.statusText)
     }
 
-    func testModalAndForegroundBusyHintsWinOverReadyHints() {
-        for footer in [
-            "/ commands · ? help · esc cancel",
-            "autopilot · / commands · esc to interrupt",
-            "@ files · # issues · esc again to cancel",
-            "esc again to interrupt · GPT-6 Astra",
-        ] {
-            XCTAssertEqual(TerminalController.classifyFooter(footer), .working, footer)
-        }
-        XCTAssertEqual(TerminalController.classifyFooter("/ commands"), .unknown)
-        XCTAssertEqual(TerminalController.classifyFooter("ordinary output"), .unknown)
-        XCTAssertEqual(TerminalController.classifyFooterRows([
-            "@ files · # issues", "model picker"
-        ]), .unknown)
-        XCTAssertEqual(TerminalController.classifyFooterRows([
-            "autopilot · / commands", "esc cancel"
-        ]), .working)
-        XCTAssertEqual(TerminalController.classifyFooterRows([
-            "autopilot · / commands", "  \u{0} "
-        ]), .idle)
-    }
-
-    func testSeparateModalFooterRowVetoesIdleWithoutTreatingDraftAsBusy() {
-        for hint in [
-            "esc cancel", "esc to cancel", "esc interrupt", "esc to interrupt",
-            "esc again to cancel", "esc again to interrupt",
-        ] {
-            let activity = TerminalController.classifyFooterRows([
-                hint, "ctrl+q enqueue · @ files · # issues", "  \u{0} ",
-            ])
-            XCTAssertEqual(activity, .working, hint)
-            XCTAssertEqual(
-                AppModel.remotePromptEligibility(
-                    status: .idle, hasLiveAgent: true, footerActivity: activity
-                ), .busy, hint)
-        }
-        XCTAssertEqual(
-            TerminalController.classifyFooterRows([
-                "esc cancel · tab switch", "@ files · # issues",
-            ]), .working)
-        XCTAssertEqual(
-            TerminalController.classifyFooterRows([
-                "◎ Working   esc cancel", "ctrl+q enqueue · @ files · # issues",
-            ]), .working)
-        for draft in [
-            "keep working on this", "esc cancel doesn't work",
-            "remember to esc cancel", "press esc to interrupt",
-            "esc again to stop agents", "esc stop agents",
-        ] {
-            XCTAssertEqual(
-                TerminalController.classifyFooterRows([
-                    draft, "@ files · # issues",
-                ]), .idle, draft)
-        }
-        XCTAssertEqual(
-            TerminalController.classifyFooterRows([
-                "esc cancel", "model picker",
-            ]), .unknown)
-    }
-
     func testStrictFooterRequiresCopilotLayout() {
         for shellLine in [
             "zsh ~/working %",
@@ -267,31 +188,29 @@ final class ForegroundActivityTests: XCTestCase {
             "% echo tab next tab",
             "% cat notes # issues and @ files",
         ] {
-            XCTAssertNotEqual(TerminalController.classifyFooterRows([shellLine]), .unknown, shellLine)
             XCTAssertEqual(TerminalController.classifyCopilotFooterRows([shellLine]), .unknown, shellLine)
         }
-        for rows in [
-            ["◎ Working   esc cancel"],
-            ["◎ Working   esc cancel  ┃"],
-            ["/ commands · ? help · tab next tab"],
-            ["/ commands · ? help · tab next tab┃"],
-            ["/ commands · ? help · GPT-6 Astra"],
-            ["autopilot · / commands · GPT-6 Astra"],
-            ["autopilot (limited) · / commands · GPT-6 Astra"],
-            ["ctrl+q enqueue · @ files · # issues · GPT-6 Astra"],
-            ["esc again to stop agents · GPT-6 Astra"],
-            ["/ commands · ? help · esc cancel"],
-            ["autopilot · / commands · esc to interrupt"],
-            ["@ files · # issues · esc again to cancel"],
-            ["esc again to interrupt · GPT-6 Astra"],
-            ["autopilot · / commands", "esc cancel"],
-            ["◎ Working   esc cancel", "ctrl+q enqueue · @ files · # issues"],
-            ["keep working on this", "@ files · # issues"],
-            ["esc cancel", "model picker"],
-        ] {
-            XCTAssertEqual(
-                TerminalController.classifyCopilotFooterRows(rows),
-                TerminalController.classifyFooterRows(rows), "\(rows)")
+        let cases: [([String], FooterActivity)] = [
+            (["◎ Working   esc cancel"], .working),
+            (["◎ Working   esc cancel  ┃"], .working),
+            (["/ commands · ? help · tab next tab"], .idle),
+            (["/ commands · ? help · tab next tab┃"], .idle),
+            (["/ commands · ? help · GPT-6 Astra"], .idle),
+            (["autopilot · / commands · GPT-6 Astra"], .idle),
+            (["autopilot (limited) · / commands · GPT-6 Astra"], .idle),
+            (["ctrl+q enqueue · @ files · # issues · GPT-6 Astra"], .idle),
+            (["esc again to stop agents · GPT-6 Astra"], .idle),
+            (["/ commands · ? help · esc cancel"], .working),
+            (["autopilot · / commands · esc to interrupt"], .working),
+            (["@ files · # issues · esc again to cancel"], .working),
+            (["esc again to interrupt · GPT-6 Astra"], .working),
+            (["autopilot · / commands", "esc cancel"], .working),
+            (["◎ Working   esc cancel", "ctrl+q enqueue · @ files · # issues"], .working),
+            (["keep working on this", "@ files · # issues"], .idle),
+            (["esc cancel", "model picker"], .unknown),
+        ]
+        for (rows, expected) in cases {
+            XCTAssertEqual(TerminalController.classifyCopilotFooterRows(rows), expected, "\(rows)")
         }
     }
 
@@ -355,7 +274,6 @@ final class ForegroundActivityTests: XCTestCase {
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .waiting)
         XCTAssertTrue(fixture.sends.permissionRestores.isEmpty)
-        XCTAssertFalse(fixture.promptable)
 
         snapshot.inputCompletions = [child: waitAt + 50]
         try fixture.publish(snapshot)
@@ -411,7 +329,6 @@ final class ForegroundActivityTests: XCTestCase {
             try fixture.publish(invalidSnapshot)
             XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .waiting)
             XCTAssertTrue(fixture.sends.permissionRestores.isEmpty)
-            XCTAssertFalse(fixture.promptable)
         }
         let recordURL = fixture.directory.appendingPathComponent("\(fixture.session.id).status-record.json")
         let record = try JSONDecoder().decode(SessionStatusRecord.self, from: Data(contentsOf: recordURL))
@@ -770,7 +687,7 @@ final class ForegroundActivityTests: XCTestCase {
         XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .running)
         XCTAssertEqual(fixture.model.projects[0].sessions[0].displayStatus, .waiting)
         fixture.model.refreshAgentActivitySnapshots()
-        fixture.model.reconcileAgentFooters()
+        fixture.model.reconcileStatus()
         let waiting = fixture.model.projects[0].sessions[0]
         XCTAssertEqual(waiting.displayStatus, .waiting)
         let row = SessionRow(session: waiting, isActive: true, onSelect: {}, onClose: {})
@@ -1175,20 +1092,16 @@ final class ForegroundActivityTests: XCTestCase {
     }
 
     @MainActor
-    func testDisconnectedRuntimeStillUsesTheDisplayBackstopButCannotAdmitInput() throws {
+    func testADisconnectedTrackerCannotAdmitInput() throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
-        fixture.model.setStatus(
-            sessionId: fixture.session.id, status: .running,
-            text: nil, timestamp: fixture.baseMs - 100)
         var snapshot = fixture.snapshot()
+        try fixture.publish(snapshot)
+        XCTAssertTrue(fixture.promptable)
         snapshot.error = "Connection is closed."
         snapshot.runtimeActivity?.error = snapshot.error
         snapshot.runtimeActivity?.processing = nil
         try fixture.publish(snapshot)
-        fixture.model.reconcileAgentFooters()
-        fixture.model.reconcileAgentFooters()
-        XCTAssertEqual(fixture.model.projects[0].sessions[0].status, .idle)
         XCTAssertFalse(fixture.promptable, "not ready")
     }
 

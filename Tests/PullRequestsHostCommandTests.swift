@@ -59,7 +59,6 @@ final class PullRequestsHostCommandTests: XCTestCase {
                 agentActivityDirectory: root, resumeMarkerDirectory: root,
                 remotePromptLiveSessions: { _ in [] },
                 copilotResumeSessions: { resuming.tabs[$0] ?? [] },
-                remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) },
                 remoteCopilotExecutable: { "/opt/copilot/bin/copilot" },
                 remoteReposDirectory: { root.path },
                 remoteSessionBackendAvailable: { true },

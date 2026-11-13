@@ -50,7 +50,6 @@ final class SlashCommandTests: XCTestCase {
                 stateRepository: repository, persistPermissionStatus: { _, _, _, _ in },
                 isAppActive: { false }, agentActivityDirectory: root, resumeMarkerDirectory: root,
                 remotePromptLiveSessions: { _ in copilot.live },
-                remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) },
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
             )
             try heartbeat(session)

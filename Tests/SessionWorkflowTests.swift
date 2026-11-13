@@ -68,7 +68,6 @@ final class SessionWorkflowTests: XCTestCase {
             stateRepository: repository, persistPermissionStatus: { _, _, _, _ in },
             isAppActive: { false }, agentActivityDirectory: sessions, resumeMarkerDirectory: sessions,
             remotePromptLiveSessions: { _ in [session.id] },
-            remotePromptTarget: { _ in RemotePromptTarget(activity: .idle) },
             kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
         )
         let now = Date()

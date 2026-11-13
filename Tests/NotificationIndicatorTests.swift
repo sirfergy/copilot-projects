@@ -209,7 +209,6 @@ final class NotificationIndicatorTests: XCTestCase {
         let repository = StateRepository(path: root.appendingPathComponent("state.json"))
         try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
         let spy = NotificationSpy()
-        var footerActivity: FooterActivity = .working
         let model = AppModel(
             stateRepository: repository,
             completionTranscriptLoader: { _ in
@@ -218,8 +217,7 @@ final class NotificationIndicatorTests: XCTestCase {
             elicitationReplyRetryDelaysNanoseconds: [],
             isAppActive: { false },
             agentActivityDirectory: root,
-            resumeMarkerDirectory: root,
-            remotePromptTarget: { _ in RemotePromptTarget(activity: footerActivity) }
+            resumeMarkerDirectory: root
         )
         model.attach(notifications: spy)
 
@@ -238,21 +236,13 @@ final class NotificationIndicatorTests: XCTestCase {
         XCTAssertFalse(model.projects[0].sessions[1].finishedUnseen)
         XCTAssertNil(NSApp.dockTile.badgeLabel)
 
-        // 2. Child aborting/ending or recovering to idle without a completion signal also stays quiet.
+        // 2. Child aborting/ending without a completion signal also stays quiet.
         model.setStatus(sessionId: child.id, status: .running, text: nil, timestamp: 300)
         model.setStatus(sessionId: child.id, status: .idle, text: nil, timestamp: 400, source: "session-end")
         XCTAssertTrue(spy.posted.isEmpty)
         XCTAssertFalse(model.projects[0].sessions[1].hasUnread)
         XCTAssertFalse(model.projects[0].sessions[1].finishedUnseen)
 
-        model.setStatus(sessionId: child.id, status: .running, text: nil, timestamp: 450)
-        footerActivity = .working
-        model.reconcileAgentFooters()
-        footerActivity = .idle
-        model.reconcileAgentFooters()
-        model.reconcileAgentFooters()
-        XCTAssertEqual(model.projects[0].sessions[1].status, SessionStatus.idle)
-        XCTAssertFalse(model.projects[0].sessions[1].finishedUnseen)
 
         // 3. Child asking a question still notifies and marks unread.
         let questionTimestamp = SessionArtifacts.currentStatusTimestamp() + 10
@@ -267,19 +257,8 @@ final class NotificationIndicatorTests: XCTestCase {
         model.markSessionRead(sessionId: child.id)
         spy.posted.removeAll()
 
-        // 4. Once ungrouped to top-level, recovery and turn completion mark ready and notify normally.
-        let ungroupedTimestamp = SessionArtifacts.currentStatusTimestamp() + 100
+        // 4. Once ungrouped to top-level, turn completion marks ready and notifies normally.
         model.ungroupSession(projectId: project.id, sessionId: child.id)
-        model.setStatus(
-            sessionId: child.id, status: .running, text: nil, timestamp: ungroupedTimestamp
-        )
-        footerActivity = .working
-        model.reconcileAgentFooters()
-        footerActivity = .idle
-        model.reconcileAgentFooters()
-        model.reconcileAgentFooters()
-        XCTAssertEqual(model.projects[0].sessions[1].status, SessionStatus.idle)
-        XCTAssertTrue(model.projects[0].sessions[1].finishedUnseen)
 
         let completed = expectation(description: "ungrouped completion posted")
         spy.onPost = { event in

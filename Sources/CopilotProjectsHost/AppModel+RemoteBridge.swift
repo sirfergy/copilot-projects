@@ -4,14 +4,6 @@ import CopilotProjectsProtocol
 import CopilotProjectsPullRequests
 import Darwin
 
-public enum RemotePromptResult: Equatable, Sendable {
-    case sent
-    case forbidden
-    case invalid
-    case busy
-    case noLiveCopilot
-}
-
 public enum RemoteCommandResult: Equatable, Sendable {
     case sent
     case busy
@@ -102,10 +94,6 @@ private struct SetModelRequestFile: Codable {
     let modelId: String
     let reasoningEffort: String?
     let contextTier: String?
-}
-
-struct RemotePromptTarget {
-    let activity: FooterActivity
 }
 
 struct RemoteElicitationTerminalTarget {
@@ -768,7 +756,6 @@ extension AppModel {
     /// Built on every gateway poll, so time-dependent fields such as each
     /// workflow's `fresh` are judged at `promptNow`.
     func remoteWorkspaceSnapshot(now promptNow: Date = Date()) -> RemoteWorkspaceSnapshot {
-        let promptLiveSessions = remotePromptLiveSessions?(agentProcessNames) ?? liveAgentSessions
         let hosts = availableHosts
         let resolvedHostHealth = hostHealthProvider?() ?? hostHealth
         let closedItems = recentlyClosedSessionItems
@@ -825,10 +812,7 @@ extension AppModel {
                             ready: session.finishedUnseen,
                             background: session.hasBackgroundWork,
                             scheduled: !session.schedules.isEmpty,
-                            promptable: remotePromptable(
-                                session, status: status, foreground: foreground,
-                                liveSessions: promptLiveSessions, now: promptNow
-                            ),
+                            promptable: remotePromptable(session, now: promptNow),
                             pendingUserInputs: session.agentActivity?
                                 .remoteUserInputRequests(),
                             pendingElicitations: session.agentActivity?
@@ -1071,32 +1055,13 @@ extension AppModel {
         return .sent
     }
 
-    /// Whether `session` can take a prompt now, as the workspace snapshot says it.
-    func remotePromptable(
-        _ session: Session,
-        status: SessionStatus,
-        foreground: ForegroundActivity?,
-        liveSessions: Set<String>,
-        now: Date
-    ) -> Bool {
-        session.parked == nil && Self.remotePromptEligibility(
-            status: status,
-            scheduledTurnActive: session.scheduledTurnActive,
-            hasPendingQuestions: session.hasPendingInput,
-            hasLiveAgent: liveSessions.contains(session.id),
-            backgroundOnly: Self.backgroundOnlyPromptEvidence(
-                status: session.status,
-                snapshot: session.agentActivity,
-                backgroundAgentsActive: session.backgroundAgentsActive,
-                now: now,
-                nowMs: Int64(now.timeIntervalSince1970 * 1_000),
-                clockMs: sessionSemantics.promptSafetyClock.timestamp(for: session.id)
-            ),
-            footerActivity: remotePromptTarget?(session.id)?.activity
-                ?? controllers[session.id]?.agentActivity
-                ?? .unknown,
-            foregroundActivity: foreground
-        ) == .sent
+    /// Whether `session` can take a prompt now, as the workspace snapshot says it:
+    /// its tracker's own reading finds it idle with nothing pending. A stale or
+    /// unusable reading, or no tracker, offers no send, whatever became of the tracker.
+    func remotePromptable(_ session: Session, now: Date) -> Bool {
+        session.parked == nil && Self.trackerOnly(
+            ownedActivity(session), held: session.status, gone: false, now: now
+        ).sendReady
     }
 
     /// Why the app can't ask this session's tracker for a restart right now, for
@@ -1148,71 +1113,6 @@ extension AppModel {
         controller(for: sessionId)?.terminalView.sendRemoteScroll(
             delta: delta,
             agentLive: liveAgentSessions.contains(sessionId)
-        )
-    }
-
-    /// Whether a remote message may be sent to a session right now. Readiness of the
-    /// *foreground* is the gate — primarily the terminal footer, NOT whether the
-    /// session is globally `.running`. Scheduled work and subagents can keep the
-    /// session globally active after the foreground has returned to an idle prompt,
-    /// so gating on that background state stranded the composer's queued messages.
-    ///
-    /// `status == .waiting` is still blocked: it marks a foreground question the user
-    /// must answer inline — an `ask_user`/`elicitation` dialog OR a raw tool
-    /// permission prompt. Permission prompts surface *only* via the CLI status hook
-    /// (they populate no structured-question entry, so `hasPendingQuestions` is
-    /// `false` for them) and the footer can read `.idle` behind the dialog, so the
-    /// `.waiting` check is the one signal that reliably guards them.
-    /// `hasPendingQuestions` is the extension's authoritative signal for structured
-    /// questions. Scheduled work is allowed only with fresh, clock-ordered evidence
-    /// that the interactive foreground is inactive.
-    nonisolated static func remotePromptEligibility(
-        status: SessionStatus,
-        scheduledTurnActive: Bool = false,
-        hasPendingQuestions: Bool = false,
-        hasLiveAgent: Bool,
-        backgroundOnly: Bool = false,
-        footerActivity: FooterActivity,
-        foregroundActivity: ForegroundActivity? = nil
-    ) -> RemotePromptResult {
-        SessionSemanticsAdapter.remotePromptResult(
-            status: status,
-            scheduledTurnActive: scheduledTurnActive,
-            hasPendingQuestions: hasPendingQuestions,
-            hasLiveAgent: hasLiveAgent,
-            backgroundOnly: backgroundOnly,
-            footerActivity: footerActivity,
-            foregroundActivity: foregroundActivity
-        )
-    }
-
-    /// Evidence that a session is only busy because scheduled, subagent, or CLI
-    /// background-agent work remains after the interactive foreground ended. This
-    /// mirrors the causal guards in `reconcileAgentFooters`: stale footer text alone
-    /// is never enough to inject a remote prompt over a possibly-active foreground
-    /// turn.
-    ///
-    /// `backgroundAgentsActive` carries the session's CLI background-agent state
-    /// (scraped from the terminal title: "Copilot: Waiting for background agents").
-    /// Those agents have no representation in the heartbeat's `activeSubagents`
-    /// array, yet they keep `session.idle` from firing exactly like scheduled and
-    /// subagent work — so a `.running` session whose foreground has gone idle while
-    /// they run must count as background-only too, or it reads "working" forever.
-    nonisolated static func backgroundOnlyPromptEvidence(
-        status: SessionStatus,
-        snapshot: AgentActivitySnapshot?,
-        backgroundAgentsActive: Bool,
-        now: Date,
-        nowMs: Int64,
-        clockMs: Int64?
-    ) -> Bool {
-        SessionSemanticsAdapter.hasBackgroundOnlyPromptEvidence(
-            status: status,
-            snapshot: snapshot,
-            backgroundAgentsActive: backgroundAgentsActive,
-            now: now,
-            nowMilliseconds: nowMs,
-            promptClockMilliseconds: clockMs
         )
     }
 
@@ -1779,18 +1679,12 @@ extension AppModel {
             resolvedOwner: .some(owner)
         )
         guard projected != .waiting else { return nil }
-        let needsFooterEvidence = isOwnedDisconnect
-            || (session.statusIsRuntimeDerived
-                && (foreground == .unknown || !isSnapshotActive))
-        let isFooterWorking = needsFooterEvidence
-            && (remotePromptTarget?(session.id)?.activity
-                ?? controllers[session.id]?.agentActivity) == .working
-        let hasIndependentRunningOnDisconnect = isFooterWorking
-            || (sessionSemantics.statusClock.timestamp(for: session.id) ?? .min)
+        let hasIndependentRunningOnDisconnect =
+            (sessionSemantics.statusClock.timestamp(for: session.id) ?? .min)
                 > (disconnectTimestamp ?? .max)
         let status: SessionStatus = isOwnedDisconnect
             ? (hasIndependentRunningOnDisconnect ? projected : .idle)
-            : (session.statusIsRuntimeDerived && !isFooterWorking
+            : (session.statusIsRuntimeDerived
                 && (foreground == .unknown || !isSnapshotActive)
                 ? .idle : projected)
 

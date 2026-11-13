@@ -391,7 +391,7 @@ final class AppModel: ObservableObject {
     private var isNavigatingSessionHistory = false
 
     var livenessTimer: Timer?
-    var footerTimer: Timer?
+    var statusTimer: Timer?
     var agentActivityTimer: Timer?
     var hostHealthTimer: Timer?
     private var hostHealthRefreshTask: Task<Void, Never>?
@@ -447,7 +447,7 @@ final class AppModel: ObservableObject {
     let completionTranscriptLoader: @Sendable (String) -> TranscriptSnapshot
     var scheduledSnapshotsSuppressed: Set<String> = []
     var foregroundIdleGenerationBaselines: [String: Int] = [:]
-    private let completionNotificationDelayNanoseconds: UInt64
+    let completionNotificationDelayNanoseconds: UInt64
     private let permissionNotificationDelayNanoseconds: UInt64
     private let elicitationReplyRetryDelaysNanoseconds: [UInt64]
     let persistPermissionStatus:
@@ -506,7 +506,6 @@ final class AppModel: ObservableObject {
     let remotePromptLiveSessions: ((Set<String>) -> Set<String>)?
     /// Tabs still bringing back a Copilot session (tests stand in for the process tree).
     let copilotResumeSessions: ((String) -> Set<String>)?
-    let remotePromptTarget: ((String) -> RemotePromptTarget?)?
     let remoteElicitationTarget:
         ((String) -> RemoteElicitationTerminalTarget?)?
     var remoteCommandRequestLedger = RemoteCommandRequestLedger()
@@ -597,7 +596,6 @@ final class AppModel: ObservableObject {
         resumeMarkerDirectory: URL = Paths.sessionsDir,
         remotePromptLiveSessions: ((Set<String>) -> Set<String>)? = nil,
         copilotResumeSessions: ((String) -> Set<String>)? = nil,
-        remotePromptTarget: ((String) -> RemotePromptTarget?)? = nil,
         remoteElicitationTarget:
             ((String) -> RemoteElicitationTerminalTarget?)? = nil,
         remoteCopilotExecutable: @escaping () -> String? = { Paths.copilotExecutable },
@@ -661,7 +659,6 @@ final class AppModel: ObservableObject {
         self.screenshotImageCapturer = screenshotImageCapturer
         self.remotePromptLiveSessions = remotePromptLiveSessions
         self.copilotResumeSessions = copilotResumeSessions
-        self.remotePromptTarget = remotePromptTarget
         self.remoteElicitationTarget = remoteElicitationTarget
         self.remoteCopilotExecutable = remoteCopilotExecutable
         self.remoteWrapperExecutable = remoteWrapperExecutable
@@ -2423,7 +2420,7 @@ final class AppModel: ObservableObject {
         guard !isTerminating else { return }
         isTerminating = true
         powerOffProtectionGeneration += 1
-        footerTimer?.invalidate()
+        statusTimer?.invalidate()
         livenessTimer?.invalidate()
         agentActivityTimer?.invalidate()
         hostHealthTimer?.invalidate()
@@ -3242,9 +3239,7 @@ final class AppModel: ObservableObject {
             projects[loc.p].sessions[loc.s].finishedUnseen = false
             projects[loc.p].sessions[loc.s].turnCompleted = false
             backgroundAgentsSuppressed.remove(sessionId)
-            if Self.shouldClearPendingCompletion(status: status, source: source) {
-                completionPending.remove(sessionId)
-            }
+            completionPending.remove(sessionId)
         }
         if hasCompletionSignal {
             if !completionPending.contains(sessionId) {
@@ -3278,9 +3273,6 @@ final class AppModel: ObservableObject {
             }
         }
 
-        if status == .idle {
-            sessionSemantics.activityTracker.reset(sessionId: sessionId)
-        }
         // Completion signals mark ready through postCompletionIfReady, after background
         // work drains. Idle events without one (aborts, session end) need attention now.
         if status == .idle, previous == .running || previous == .waiting,
@@ -3292,7 +3284,7 @@ final class AppModel: ObservableObject {
         if hasCompletionSignal {
             let delay = completionNotificationDelayNanoseconds
             Task { @MainActor [weak self] in
-                // Allow one footer scan for the background-agent OSC title to arrive.
+                // Allow a moment for the background-agent OSC title to arrive.
                 try? await Task.sleep(nanoseconds: delay)
                 self?.postCompletionIfReady(sessionId: sessionId)
             }

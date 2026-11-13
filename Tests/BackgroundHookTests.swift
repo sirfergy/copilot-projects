@@ -119,7 +119,7 @@ final class BackgroundHookTests: XCTestCase {
         }
     }
 
-    func testChildActivityHooksCannotInvalidateBackgroundPromptEvidence() throws {
+    func testChildActivityHooksDoNotAdvanceThePromptClock() throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         try fixture.run("running", payload:
@@ -128,44 +128,11 @@ final class BackgroundHookTests: XCTestCase {
             #"{"sessionId":"\#(fixture.childId)","timestamp":300,"prompt":"background child task"}"#)
         try fixture.run("pre", payload:
             #"{"sessionId":"\#(fixture.childId)","timestamp":300}"#)
-        let record = try JSONDecoder().decode(
-            SessionStatusRecord.self,
-            from: Data(contentsOf: fixture.file("status-record.json")))
-        let snapshot = AgentActivitySnapshot(
-            schemaVersion: 1,
-            updatedAt: "1970-01-01T00:00:00.400Z",
-            foregroundTurnActive: false,
-            foregroundTransitionAt: "1970-01-01T00:00:00.200Z",
-            scheduledTurnActive: false,
-            activeSubagents: [],
-            schedules: [],
-            idleGeneration: 0,
-            lastIdleAborted: false,
-            lastIdleTurnKind: nil,
-            error: nil,
-            copilotSessionId: fixture.ownerId)
-        let backgroundOnly = AppModel.backgroundOnlyPromptEvidence(
-            status: record.status,
-            snapshot: snapshot,
-            backgroundAgentsActive: true,
-            now: Date(timeIntervalSince1970: 0.4),
-            nowMs: 400,
-            clockMs: record.promptStatusTimestamp)
-        XCTAssertTrue(backgroundOnly)
-        XCTAssertEqual(AppModel.remotePromptEligibility(
-            status: record.status, hasLiveAgent: true,
-            backgroundOnly: backgroundOnly, footerActivity: .idle), .sent)
+        XCTAssertEqual(try fixture.statusRecord().promptStatusTimestamp, 100)
 
         try fixture.run("pre", payload:
             #"{"sessionId":"\#(fixture.ownerId)","timestamp":300}"#)
-        let foregroundRecord = try JSONDecoder().decode(
-            SessionStatusRecord.self,
-            from: Data(contentsOf: fixture.file("status-record.json")))
-        XCTAssertFalse(AppModel.backgroundOnlyPromptEvidence(
-            status: foregroundRecord.status, snapshot: snapshot,
-            backgroundAgentsActive: true,
-            now: Date(timeIntervalSince1970: 0.4), nowMs: 400,
-            clockMs: foregroundRecord.promptStatusTimestamp))
+        XCTAssertEqual(try fixture.statusRecord().promptStatusTimestamp, 300)
     }
 
     func testChildPromptDoesNotBlockAnIdleForeground() throws {
@@ -188,8 +155,6 @@ final class BackgroundHookTests: XCTestCase {
             from: Data(contentsOf: fixture.file("status-record.json")))
         XCTAssertEqual(record.status, .idle)
         XCTAssertEqual(record.promptStatusTimestamp, 200)
-        XCTAssertEqual(AppModel.remotePromptEligibility(
-            status: record.status, hasLiveAgent: true, footerActivity: .idle), .sent)
     }
 
     func testOwnerActivityHooksStillAdvanceForegroundClock() throws {
@@ -269,9 +234,6 @@ final class BackgroundHookTests: XCTestCase {
             from: Data(contentsOf: fixture.file("status-record.json")))
         XCTAssertEqual(record.status, .waiting)
         XCTAssertEqual(record.promptStatusTimestamp, 300)
-        XCTAssertEqual(AppModel.remotePromptEligibility(
-            status: record.status, hasLiveAgent: true,
-            backgroundOnly: true, footerActivity: .idle), .busy)
 
         try fixture.run("post", payload:
             #"{"sessionId":"\#(fixture.ownerId)","timestamp":500}"#)
@@ -364,8 +326,6 @@ final class BackgroundHookTests: XCTestCase {
             from: Data(contentsOf: fixture.file("status-record.json")))
         XCTAssertEqual(settled.status, .idle)
         XCTAssertEqual(settled.promptStatusTimestamp, 500)
-        XCTAssertEqual(AppModel.remotePromptEligibility(
-            status: settled.status, hasLiveAgent: true, footerActivity: .idle), .sent)
     }
 
     func testChildLifecycleHooksPreserveForegroundStateAndMarkers() throws {
