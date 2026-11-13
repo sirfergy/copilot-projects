@@ -3564,7 +3564,7 @@ test("a late first cursor response still applies without blocking tracker startu
   await waitFor(() => readSnapshot(runtime).trackedElicitations.some((entry) => entry.requestId === "late"), "late response ignored");
 });
 
-test("polled completions clear live cards and preserve input completion ownership", {
+test("polled completions clear live cards", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
@@ -3575,9 +3575,6 @@ test("polled completions clear live cards and preserve input completion ownershi
   await runtime.session.emit("elicitation.completed", { requestId: "url-request", action: "cancel" }, {}, false);
   runtime.intervalCallback();
   await waitFor(() => readSnapshot(runtime).trackedElicitations.length === 0 && readSnapshot(runtime).trackedUserInputs.length === 0, "completed cards remained");
-  const completions = readSnapshot(runtime).inputCompletions;
-  assert.equal(typeof completions[childId.toLowerCase()], "number");
-  assert.equal(typeof completions[runtime.copilotSessionId.toLowerCase()], "number");
 });
 
 test("cursor staging retains the newest pending question after old requests exceed the cap", {
@@ -4585,93 +4582,30 @@ test("late workflow metadata reply after 3s timeout withdraws and recovers capab
   );
 });
 
-test("only observed input completions certify the matching sender", {
+test("a permission request stays pending until its completion is observed", {
   concurrency: false,
 }, async (t) => {
   const runtime = await createRuntime(t);
   await waitForActivity(runtime, (activity) => activity?.processing === false);
   const child = uuid();
   await runtime.session.emit("permission.completed", { requestId: "unseen" }, { agentId: child });
-  assert.equal(readSnapshot(runtime).inputCompletions[child], undefined);
   await runtime.session.emit("permission.requested", { requestId: "permission" }, { agentId: child });
   assert.deepEqual(readSnapshot(runtime).pendingPermissionRequestIds, ["permission"]);
   await runtime.session.emit("permission.completed", { requestId: "permission" }, { agentId: child });
-  await waitFor(() => readSnapshot(runtime).inputCompletions[child], "completion was not published");
   assert.deepEqual(readSnapshot(runtime).pendingPermissionRequestIds, []);
-  assert.equal(readSnapshot(runtime).inputCompletions[runtime.copilotSessionId], undefined);
 });
 
-for (const sender of ["root", "child"]) {
-  for (const historyMode of ["none", "overlap", "historical request"]) {
-    test(`startup permission completion certifies ${sender} with ${historyMode} history`, {
-      concurrency: false,
-    }, async (t) => {
-      let owner;
-      let completed;
-      const runtime = await createRuntime(t, (session) => {
-        owner = sender === "root" ? session.sessionId : uuid();
-        const extra = sender === "root" ? {} : { agentId: owner };
-        const requested = {
-          id: uuid(), type: "permission.requested",
-          timestamp: new Date().toISOString(),
-          data: { requestId: "startup" }, ...extra,
-        };
-        completed = {
-          ...requested, id: uuid(), type: "permission.completed",
-        };
-        session.getEvents = async () => {
-          if (historyMode !== "historical request") {
-            await session.emit(requested.type, requested.data, requested);
-          }
-          await session.emit(completed.type, completed.data, completed);
-          return historyMode === "none" ? [] : [requested, completed];
-        };
-      });
-      await waitForActivity(runtime, (activity) => activity?.processing === false);
-      const snapshot = readSnapshot(runtime);
-      assert.deepEqual(snapshot.pendingPermissionRequestIds, []);
-      assert.deepEqual(snapshot.inputCompletions, {
-        [owner]: Date.parse(completed.timestamp),
-      });
-      await runtime.session.emit(completed.type, completed.data, {
-        ...completed, timestamp: new Date(Date.parse(completed.timestamp) + 10).toISOString(),
-      });
-      assert.deepEqual(readSnapshot(runtime).inputCompletions, snapshot.inputCompletions);
-    });
-  }
-}
-
-test("historical-only and unowned startup permission completions do not certify a sender", {
+test("a permission requested while history loads is pending after startup", {
   concurrency: false,
 }, async (t) => {
-  const child = uuid();
   const runtime = await createRuntime(t, (session) => {
-    const requested = {
-      id: uuid(), type: "permission.requested", agentId: child,
-      timestamp: new Date().toISOString(), data: { requestId: "historical" },
-    };
     session.getEvents = async () => {
-      await session.emit("permission.completed", { requestId: "unseen" }, { agentId: child });
-      return [requested, { ...requested, id: uuid(), type: "permission.completed" }];
+      await session.emit("permission.requested", { requestId: "startup" });
+      return [];
     };
   });
-  assert.deepEqual(readSnapshot(runtime).pendingPermissionRequestIds, []);
-  assert.deepEqual(readSnapshot(runtime).inputCompletions, {});
-});
-
-test("conversation rotation drops old input completion certificates", {
-  concurrency: false,
-}, async (t) => {
-  const runtime = await createRuntime(t);
-  const child = uuid();
-  await runtime.session.emit("permission.requested", { requestId: "permission" }, { agentId: child });
-  await runtime.session.emit("permission.completed", { requestId: "permission" }, { agentId: child });
-  await waitFor(() => readSnapshot(runtime).inputCompletions[child], "completion missing");
-  const next = uuid();
-  runtime.session.sessionId = next;
-  await runtime.session.emit("session.start", { sessionId: next });
-  await waitFor(() => readSnapshot(runtime).copilotSessionId === next, "rotation missing");
-  assert.deepEqual(readSnapshot(runtime).inputCompletions, {});
+  await waitForActivity(runtime, (activity) => activity?.processing === false);
+  assert.deepEqual(readSnapshot(runtime).pendingPermissionRequestIds, ["startup"]);
 });
 
 test("reused child agents leave and rejoin background activity independently of the coordinator", {
@@ -4732,35 +4666,6 @@ test("background child iteration churn cannot starve coordinator observations", 
   } finally {
     for (const finish of finishers) finish({ processing: false });
   }
-});
-
-test("a matching completed input wait reissues an older in-flight observation", {
-  concurrency: false,
-}, async (t) => {
-  const runtime = await createRuntime(t);
-  await waitForActivity(runtime, (activity) => activity?.processing === false);
-  const child = uuid();
-  await runtime.session.emit("permission.requested", { requestId: "permission" }, { agentId: child });
-  const at = Date.now();
-  writeHandoff(runtime, join(runtime.sessions, `${runtime.appSessionId}.status-record.json`), {
-    schemaVersion: 1, status: "waiting", statusTimestamp: at, promptStatusTimestamp: at,
-    inputWait: {
-      senderSessionId: child,
-      rootSessionId: runtime.copilotSessionId,
-      conversationEpoch: readSnapshot(runtime).conversationEpoch,
-    },
-  });
-
-  let finishOld;
-  runtime.session.processingHandler = () => new Promise((resolve) => { finishOld = resolve; });
-  runtime.intervalCallback();
-  await waitFor(() => finishOld, "query did not start");
-  await runtime.session.emit("permission.completed", { requestId: "permission" }, { agentId: child });
-  const completedAt = readSnapshot(runtime).inputCompletions[child];
-  runtime.session.processingHandler = async () => ({ processing: false });
-  finishOld({ processing: false });
-  await waitForActivity(runtime, (activity) =>
-    activity?.processing === false && activity.observedAtMilliseconds >= completedAt);
 });
 
 test("whole-session idle clears pending permissions before its first publication", {

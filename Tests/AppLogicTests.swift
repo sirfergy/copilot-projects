@@ -865,7 +865,11 @@ final class AppLogicTests: XCTestCase {
         )
         let firstCopilotSession = UUID().uuidString
         try Data(firstCopilotSession.utf8).write(to: marker)
-        model.sessionEnded(sessionId: session.id, copilotSessionId: firstCopilotSession)
+        // As the sessionEnd hook sends it.
+        var ended = ControlRequest(command: "session-ended")
+        ended.sessionId = session.id
+        ended.copilotSessionId = firstCopilotSession
+        XCTAssertTrue(model.handle(ended).ok)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
 
         let powerOffCopilotSession = UUID().uuidString
@@ -1325,66 +1329,7 @@ final class AppLogicTests: XCTestCase {
         ))
     }
 
-    func testCopilotHookIgnoresNotificationsThatAreNotInputWaits() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let bin = root.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let hookURL = root.appendingPathComponent("copilot-projects-hook.sh")
-        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookURL.path)
-
-        let capture = root.appendingPathComponent("cli-args.txt")
-        let fakeCLI = bin.appendingPathComponent("copilot-projects")
-        try """
-        #!/bin/sh
-        printf '%s\n' "$*" >> "$CAPTURE_FILE"
-        """.write(to: fakeCLI, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
-
-        let tabId = UUID().uuidString
-        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
-        let backgroundAgents = sessions.appendingPathComponent("\(tabId).background-agents")
-        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
-        try Data().write(to: backgroundAgents)
-
-        // What cli-1.0.107 sends besides the two input waits, then the `session_idle`
-        // type the runtime never shipped.
-        for type in [
-            "agent_idle", "agent_completed", "shell_completed", "shell_detached_completed",
-            "new_inbox_message", "session_idle",
-        ] {
-            try runHook(
-                hookURL: hookURL,
-                action: "notify",
-                payload: #"{"timestamp":200,"notificationType":"\#(type)"}"#,
-                tabId: tabId,
-                root: root,
-                bin: bin,
-                capture: capture
-            )
-        }
-        XCTAssertEqual(
-            try FileManager.default.contentsOfDirectory(atPath: sessions.path),
-            [backgroundAgents.lastPathComponent]
-        )
-        XCTAssertFalse(FileManager.default.fileExists(atPath: capture.path))
-
-        try runHook(
-            hookURL: hookURL,
-            action: "start",
-            payload: #"{"timestamp":300}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        XCTAssertFalse(FileManager.default.fileExists(atPath: backgroundAgents.path))
-    }
-
-    func testCopilotHookUsesResolvedSessionForFilesAndLiveStatus() throws {
+    func testCopilotHookReportsTheResolvedSession() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let bin = root.appendingPathComponent("bin", isDirectory: true)
@@ -1428,7 +1373,7 @@ final class AppLogicTests: XCTestCase {
 
         try runHook(
             hookURL: hookURL,
-            action: "start",
+            action: "end",
             payload: #"{"timestamp":100}"#,
             tabId: stale,
             root: root,
@@ -1436,17 +1381,7 @@ final class AppLogicTests: XCTestCase {
             capture: capture
         )
 
-        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
-        XCTAssertTrue(FileManager.default.fileExists(
-            atPath: sessions.appendingPathComponent("\(resolved).status-record.json").path
-        ))
-        XCTAssertFalse(FileManager.default.fileExists(
-            atPath: sessions.appendingPathComponent("\(stale).status-record.json").path
-        ))
-        XCTAssertEqual(
-            try cliCallLines(in: capture),
-            ["set-status idle --session \(resolved) --timestamp 100"]
-        )
+        XCTAssertEqual(try cliCallLines(in: capture), ["session-ended --session \(resolved)"])
     }
 
     func testCopilotHookSkipsResolverOutsideManagedTerminal() throws {
@@ -1480,7 +1415,7 @@ final class AppLogicTests: XCTestCase {
         let process = Process()
         let input = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [hookURL.path, "start"]
+        process.arguments = [hookURL.path, "end"]
         var environment = ProcessInfo.processInfo.environment
         environment["HOME"] = root.path
         environment["RESOLVER_CALLED"] = called.path
@@ -1497,347 +1432,6 @@ final class AppLogicTests: XCTestCase {
 
         XCTAssertEqual(process.terminationStatus, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: called.path))
-    }
-
-    func testCopilotHookDelegatesSessionEndResumeCleanupToApp() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let bin = root.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let hookURL = root.appendingPathComponent("copilot-projects-hook.sh")
-        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
-            ofItemAtPath: hookURL.path
-        )
-
-        let capture = root.appendingPathComponent("cli-args.txt")
-        let fakeCLI = bin.appendingPathComponent("copilot-projects")
-        try """
-        #!/bin/sh
-        printf '%s\n' "$*" >> "$CAPTURE_FILE"
-        """.write(to: fakeCLI, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
-            ofItemAtPath: fakeCLI.path
-        )
-
-        let tabId = UUID().uuidString
-        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
-        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
-        let marker = sessions.appendingPathComponent("\(tabId).copilot-session")
-        try Data(UUID().uuidString.utf8).write(to: marker)
-
-        try runHook(
-            hookURL: hookURL,
-            action: "end",
-            payload: #"{"timestamp":200,"reason":"user_exit"}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-
-        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-        XCTAssertEqual(
-            try cliCallLines(in: capture),
-            ["set-status idle --session \(tabId) --timestamp 200 --source session-end"]
-        )
-
-        let copilotSessionId = UUID().uuidString
-        try Data(copilotSessionId.utf8).write(to: marker)
-        try runHook(
-            hookURL: hookURL,
-            action: "end",
-            payload: #"{"timestamp":210,"reason":"user_exit","sessionId":"\#(copilotSessionId)"}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-        XCTAssertEqual(
-            try cliCallLines(in: capture).last,
-            "set-status idle --session \(tabId) --timestamp 210 --source session-end --copilot-session \(copilotSessionId)"
-        )
-    }
-
-    func testCopilotHookDoesNotOverwriteResumeMarkerFromInheritedHelper() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let bin = root.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let hookURL = root.appendingPathComponent("copilot-projects-hook.sh")
-        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookURL.path)
-
-        let capture = root.appendingPathComponent("cli-args.txt")
-        let fakeCLI = bin.appendingPathComponent("copilot-projects")
-        try """
-        #!/bin/sh
-        printf '%s\n' "$*" >> "$CAPTURE_FILE"
-        """.write(to: fakeCLI, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
-
-        let tabId = UUID().uuidString
-        let ownerCopilotSession = UUID().uuidString
-        let helperCopilotSession = UUID().uuidString
-        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
-        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
-        let marker = sessions.appendingPathComponent("\(tabId).copilot-session")
-        try Data(ownerCopilotSession.utf8).write(to: marker)
-
-        try runHook(
-            hookURL: hookURL,
-            action: "pre",
-            payload: #"{"timestamp":200,"sessionId":"\#(helperCopilotSession)"}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-
-        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), ownerCopilotSession)
-    }
-
-    func testCopilotHookCarriesConversationIdentityThroughCompletion() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let bin = root.appendingPathComponent("bin")
-        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let hookURL = root.appendingPathComponent("hook.sh")
-        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
-        let capture = root.appendingPathComponent("args.txt")
-        let cli = bin.appendingPathComponent("copilot-projects")
-        try """
-        #!/bin/sh
-        printf '%s\\n' "$*" >> "$CAPTURE_FILE"
-        """.write(to: cli, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
-        let tabId = UUID().uuidString
-        let conversationId = UUID().uuidString
-        for (action, extra) in [
-            ("running", ""),
-            ("idle", ""),
-            ("notify", ",\"notification_type\":\"elicitation_dialog\""),
-        ] {
-            try runHook(
-                hookURL: hookURL,
-                action: action,
-                payload: "{\"sessionId\":\"\(conversationId)\",\"timestamp\":100\(extra)}",
-                tabId: tabId, root: root, bin: bin, capture: capture
-            )
-        }
-        let calls = try cliCallLines(in: capture)
-        XCTAssertEqual(calls.count, 3)
-        XCTAssertFalse(calls[0].contains("--copilot-session"))
-        XCTAssertTrue(calls.dropFirst().allSatisfy { $0.contains("--copilot-session \(conversationId)") })
-        XCTAssertTrue(calls[1].contains("--source agent-stop"))
-        XCTAssertTrue(calls[2].contains("--notification elicitation"))
-    }
-
-    func testCopilotHookRoutesNativeNotificationsForWaitingAndCompletedTurns() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let bin = root.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let hookURL = root.appendingPathComponent("copilot-projects-hook.sh")
-        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookURL.path)
-
-        let capture = root.appendingPathComponent("cli-args.txt")
-        let fakeCLI = bin.appendingPathComponent("copilot-projects")
-        try """
-        #!/bin/sh
-        printf '%s\n' "$*" >> "$CAPTURE_FILE"
-        """.write(to: fakeCLI, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
-
-        let tabId = UUID().uuidString
-        try runHook(
-            hookURL: hookURL,
-            action: "start",
-            payload: #"{"timestamp":100}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        XCTAssertEqual(
-            try hookStatusRecord(root: root, tabId: tabId).promptStatusTimestamp,
-            100
-        )
-        try runHook(
-            hookURL: hookURL,
-            action: "notify",
-            payload: #"{"timestamp":120,"notification_type":"elicitation_dialog"}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        var cliCalls = try cliCallLines(in: capture)
-        XCTAssertEqual(cliCalls, [
-            "set-status idle --session \(tabId) --timestamp 100",
-            "set-status waiting --session \(tabId) --timestamp 120 --notification elicitation",
-        ])
-
-        try runHook(
-            hookURL: hookURL,
-            action: "notify",
-            payload: #"{"timestamp":125,"notification_type":"permission_prompt"}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        cliCalls = try cliCallLines(in: capture)
-        XCTAssertEqual(
-            cliCalls.last,
-            "set-status waiting --session \(tabId) --timestamp 125"
-        )
-
-        try runHook(
-            hookURL: hookURL,
-            action: "running",
-            payload: #"{"timestamp":130}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        try runHook(
-            hookURL: hookURL,
-            action: "idle",
-            payload: #"{"timestamp":135}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        cliCalls = try cliCallLines(in: capture)
-        XCTAssertEqual(cliCalls.suffix(2), [
-            "set-status running --session \(tabId) --timestamp 130",
-            "set-status idle --session \(tabId) --timestamp 135 --source agent-stop",
-        ])
-        // A second stop finds no turn to claim, so it is not another completion.
-        try runHook(
-            hookURL: hookURL,
-            action: "idle",
-            payload: #"{"timestamp":140}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        XCTAssertEqual(
-            try cliCallLines(in: capture).last,
-            "set-status idle --session \(tabId) --timestamp 140"
-        )
-
-        try runHook(
-            hookURL: hookURL,
-            action: "running",
-            payload: #"{"timestamp":190}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        try runHook(
-            hookURL: hookURL,
-            action: "idle",
-            payload: #"{"timestamp":195,"aborted":true}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        cliCalls = try cliCallLines(in: capture)
-        XCTAssertEqual(cliCalls.filter { $0.contains("--source agent-stop") }.count, 1)
-        XCTAssertEqual(cliCalls.suffix(2), [
-            "set-status running --session \(tabId) --timestamp 190",
-            "set-status idle --session \(tabId) --timestamp 195",
-        ])
-        XCTAssertEqual(cliCalls.count, 8)
-    }
-
-    func testCopilotHookKeepsScheduledTurnsOutOfForegroundStatus() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let bin = root.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let hookURL = root.appendingPathComponent("copilot-projects-hook.sh")
-        try CopilotHooks.script.write(to: hookURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookURL.path)
-
-        let capture = root.appendingPathComponent("cli-args.txt")
-        let fakeCLI = bin.appendingPathComponent("copilot-projects")
-        try """
-        #!/bin/sh
-        printf '%s\n' "$*" >> "$CAPTURE_FILE"
-        """.write(to: fakeCLI, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
-
-        let tabId = UUID().uuidString
-        try runHook(
-            hookURL: hookURL,
-            action: "running",
-            payload: #"{"timestamp":100,"prompt":"[Scheduled prompt #16] Check PRs"}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        try runHook(
-            hookURL: hookURL,
-            action: "pre",
-            payload: #"{"timestamp":110}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-        let record = try hookStatusRecord(root: root, tabId: tabId)
-        XCTAssertEqual(record.status, .idle)
-        XCTAssertEqual(record.statusTimestamp, 110)
-        XCTAssertEqual(record.promptStatusTimestamp, 100)
-        try runHook(
-            hookURL: hookURL,
-            action: "idle",
-            payload: #"{"timestamp":115}"#,
-            tabId: tabId,
-            root: root,
-            bin: bin,
-            capture: capture
-        )
-
-        let calls = try cliCallLines(in: capture)
-        XCTAssertTrue(calls.contains(
-            "set-status idle --session \(tabId) --timestamp 100 --source scheduled-start"
-        ))
-        XCTAssertTrue(calls.contains(
-            "set-status idle --session \(tabId) --timestamp 110 --source scheduled-active"
-        ))
-        XCTAssertTrue(calls.contains(
-            "set-status idle --session \(tabId) --timestamp 115 --source scheduled-idle"
-        ))
-        XCTAssertEqual(
-            try hookStatusRecord(root: root, tabId: tabId).promptStatusTimestamp,
-            115
-        )
-        XCTAssertFalse(calls.contains { $0.contains("--source agent-stop") })
-        XCTAssertFalse(FileManager.default.fileExists(
-            atPath: root.appendingPathComponent("sessions/\(tabId).scheduled-turn").path
-        ))
     }
 
     @MainActor
@@ -4268,7 +3862,7 @@ final class AppLogicTests: XCTestCase {
         Paths.ensureStateDir()
         let paths = [
             "status", "status-timestamp", "prompt-status-timestamp", "copilot-allow-all",
-            "transcript-quarantine.json",
+            "transcript-quarantine.json", "status-record.json", "scheduled-turn",
         ].map { Paths.sessionsDir.appendingPathComponent("\(sessionId).\($0)").path }
         for path in paths {
             try Data("123".utf8).write(to: URL(fileURLWithPath: path))
@@ -4700,13 +4294,12 @@ final class AppLogicTests: XCTestCase {
     }
 
     func testControlCommandRouterValidatesBeforeDispatch() {
-        var didSetStatus = false
         var copilotRequests: [ControlRequest] = []
         var closeRequests: [ControlRequest] = []
         let router = ControlCommandRouter(actions: .init(
             listProjects: { "" },
             listStatus: { "" },
-            setStatus: { _, _, _ in didSetStatus = true; return .success() },
+            sessionEnded: { _ in .success() },
             notify: { _, _, _ in .success() },
             newProject: { _ in .success() },
             newSession: { _ in .success() },
@@ -4722,8 +4315,6 @@ final class AppLogicTests: XCTestCase {
             diagnostics: { "" },
             remote: { _ in .success() }
         ))
-        XCTAssertFalse(router.handle(ControlRequest(command: "set-status")).ok)
-        XCTAssertFalse(didSetStatus)
         XCTAssertFalse(router.handle(ControlRequest(command: "unknown")).ok)
 
         func copilotRequest(project: String?, requestId: String?, prompt: String?) -> ControlRequest {
@@ -8341,7 +7932,7 @@ final class AppLogicTests: XCTestCase {
 
     // MARK: - Remote web terminal image rendering
 
-    func testCLIParsesStatusNotificationFlagIntoControlRequest() throws {
+    func testCLISendsTheSessionEndHooksReportAsAControlRequest() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let socketPath = root.appendingPathComponent("control.sock").path
@@ -8359,14 +7950,13 @@ final class AppLogicTests: XCTestCase {
         var environment = ProcessInfo.processInfo.environment
         environment["COPILOT_PROJECTS_SOCKET"] = socketPath
 
+        XCTAssertTrue(CLIMain.isCommand("session-ended"))
         XCTAssertEqual(CLIMain.run([
-            "set-status", "waiting",
-            "--notification", "permission",
+            "session-ended",
             "--session", "session-1",
             "--copilot-session", "copilot-session-1",
         ], environment: environment), 0)
-        XCTAssertEqual(received?.status, "waiting")
-        XCTAssertEqual(received?.notification, .permission)
+        XCTAssertEqual(received?.command, "session-ended")
         XCTAssertEqual(received?.sessionId, "session-1")
         XCTAssertEqual(received?.copilotSessionId, "copilot-session-1")
     }
@@ -8864,14 +8454,6 @@ final class AppLogicTests: XCTestCase {
         try String(contentsOf: capture, encoding: .utf8)
             .split(whereSeparator: \.isNewline)
             .map(String.init)
-    }
-
-    private func hookStatusRecord(root: URL, tabId: String) throws -> SessionStatusRecord {
-        try JSONDecoder().decode(
-            SessionStatusRecord.self,
-            from: Data(contentsOf: root
-                .appendingPathComponent("sessions/\(tabId).status-record.json"))
-        )
     }
 
     private func connectUnixSocket(path: String) throws -> Int32 {

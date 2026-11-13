@@ -459,10 +459,9 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         }
     }
 
-    /// Whether a recorded Copilot session id is a strict UUID (the only form the
-    /// hook writes and the form `copilot --resume` expects). Rejects anything else
-    /// before it's interpolated into the shell command — defense-in-depth alongside
-    /// the hook's own validation.
+    /// Whether a recorded Copilot session id is a strict UUID (the form
+    /// `copilot --resume` expects). Rejects anything else before it's interpolated
+    /// into the shell command.
     nonisolated static func isSafeSessionId(_ s: String) -> Bool {
         UUID(uuidString: s) != nil
     }

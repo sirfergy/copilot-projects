@@ -2187,10 +2187,10 @@ final class NotificationsTests: XCTestCase {
         await model.pollWorkspaceIfNeeded()
         XCTAssertEqual(workspace.snapshotCalls, 2)
 
-        // Writing a session status record in sessions/ triggers an immediate refresh.
+        // Writing a session's tracker snapshot in sessions/ triggers an immediate refresh.
         try FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
-        try Data(#"{"schemaVersion":1,"status":"waiting"}"#.utf8).write(
-            to: sessionsDir.appendingPathComponent("s1.status-record.json"),
+        try Data(#"{"schemaVersion":1,"foregroundTurnActive":false}"#.utf8).write(
+            to: sessionsDir.appendingPathComponent("s1.agent-activity.json"),
             options: .atomic
         )
         try await waitUntil { model.liveSessions["s1"]?.status == .waiting }

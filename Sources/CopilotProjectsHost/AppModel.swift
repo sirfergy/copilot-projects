@@ -115,14 +115,10 @@ final class AppModel: ObservableObject {
     private lazy var controlRouter = ControlCommandRouter(actions: .init(
         listProjects: { [unowned self] in self.renderProjects() },
         listStatus: { [unowned self] in self.renderStatus() },
-        // A hook's status is not taken: the tracker decides it. Only the
-        // `sessionEnd` hook's report of an exit is acted on.
-        setStatus: { [unowned self] _, _, request in
+        sessionEnded: { [unowned self] request in
             guard let target = self.resolve(request) else { return .failure("no target session") }
-            if request.source == "session-end" {
-                self.sessionEnded(
-                    sessionId: target.sessionId, copilotSessionId: request.copilotSessionId)
-            }
+            self.sessionEnded(
+                sessionId: target.sessionId, copilotSessionId: request.copilotSessionId)
             return .success()
         },
         notify: { [unowned self] title, body, request in
@@ -999,7 +995,7 @@ final class AppModel: ObservableObject {
         Paths.ensureStateDir()
         let dtach = Paths.dtachExecutable
         let socket = dtach != nil ? Paths.dtachSocketPath(sessionId: sessionId) : nil
-        // Last Copilot session id seen in this tab (written by the hook). If the
+        // Last Copilot session id seen in this tab (written by the tracker). If the
         // shell is created fresh after a reboot, the controller resumes this exact
         // agent session; on a normal relaunch dtach reattaches and ignores it.
         let recordedCopilot = resumeRecordedSession

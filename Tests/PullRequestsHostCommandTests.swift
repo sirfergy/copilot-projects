@@ -105,7 +105,7 @@ final class PullRequestsHostCommandTests: XCTestCase {
         var dispatched: [String] = []
         let router = ControlCommandRouter(actions: .init(
             listProjects: { "" }, listStatus: { "" },
-            setStatus: { _, _, _ in .success() }, notify: { _, _, _ in .success() },
+            sessionEnded: { _ in .success() }, notify: { _, _, _ in .success() },
             newProject: { _ in .success() }, newSession: { _ in .success() },
             newCopilotSession: { _ in dispatched.append("new-copilot-session"); return .success() },
             closeSession: { _ in .success() }, renameProject: { _, _ in .success() }, focus: { _ in .success() },

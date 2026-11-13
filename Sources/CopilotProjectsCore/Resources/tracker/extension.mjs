@@ -290,7 +290,6 @@ if (validSessionId && socketPath) {
     const liveTranscriptPath = join(sessionsDir, `${appSessionId}.transcript-live.json`);
     const transcriptOwnerPath = join(sessionsDir, `${appSessionId}.transcript-owner.json`);
     const transcriptOwnerLockPath = `${transcriptOwnerPath}.flock`;
-    const scheduledTurnPath = join(sessionsDir, `${appSessionId}.scheduled-turn`);
     const copilotSessionPath = join(sessionsDir, `${appSessionId}.copilot-session`);
     const userInputResponsePath = join(
         sessionsDir, `${appSessionId}.user-input-response.json`
@@ -342,24 +341,18 @@ if (validSessionId && socketPath) {
     // Passive observation only: NEVER register interest / call setRequired for
     // permission events, or this extension would take prompt ownership away
     // from the CLI's terminal UI.
-    const pendingPermissionRequests = new Map();
-    const completedPermissionRequests = new Map();
-    const inputCompletions = new Map();
+    const pendingPermissionRequests = new Set();
+    const completedPermissionRequests = new Set();
     let terminalDisconnectError = null;
     let foregroundTurnActive = false;
     let currentIntent = null;
     // Wall-clock time of the most recent `foregroundTurnActive` transition
     // (root turn_start/turn_end/session.idle). Distinct from `updatedAt`,
     // which every publish() rewrites (heartbeats, questions, model/subagent
-    // events). The macOS client seeds its status-event clock from THIS value
-    // so those unrelated republishes can't advance the clock past a delayed
-    // status hook. At each transition it's set to `normalizedTimestamp(
-    // event.timestamp)` — the CLI event's causal time — matching the time
-    // base the status hooks use (`payload_timestamp` reads the same event
-    // `timestamp`), so it's directly comparable to the status-event clock.
-    // The initial value predates any turn and never seeds a clock (recovery/
-    // demotion require a real transition first). A turn that two idle heartbeat
-    // readings end keeps its start time here: no event says when it ended.
+    // events). The macOS client starts its elapsed-turn timer from THIS value.
+    // At each transition it's set to `normalizedTimestamp(event.timestamp)`,
+    // the CLI event's causal time. A turn that two idle heartbeat readings end
+    // keeps its start time here: no event says when it ended.
     let foregroundTransitionAt = null;
     let runtimeActivity = {
         processing: null, observedAtMilliseconds: null,
@@ -1016,7 +1009,7 @@ if (validSessionId && socketPath) {
     // Several Copilot processes can share one app session id: a `copilot -p`
     // classifier (or any spawned CLI) inherits COPILOT_PROJECTS_SESSION from
     // the terminal and would otherwise clobber the interactive session's
-    // shared files (transcript, agent-activity, scheduled-turn marker) with
+    // shared files (transcript, agent-activity) with
     // its own events. Only the process that owns the app session may write
     // them. Ownership is re-evaluated per write and reclaimed whenever the
     // recorded owner is gone, so the live interactive session recovers
@@ -1342,7 +1335,6 @@ if (validSessionId && socketPath) {
 
     function activateForegroundSharedFiles() {
         if (!claimForegroundOwnership()) return;
-        setScheduledTurnMarker(scheduledTurnActive);
         publish();
         publishTranscript(true);
         refreshRuntimeActivity(true);
@@ -1437,17 +1429,6 @@ if (validSessionId && socketPath) {
         if (validCopilotSessionId) {
             writeMarker(copilotSessionPath, copilotSessionId);
         }
-    }
-
-    function setScheduledTurnMarker(active) {
-        if (!ownsSharedFiles()) return;
-        try {
-            if (active) {
-                writeFileSync(scheduledTurnPath, "");
-            } else {
-                rmSync(scheduledTurnPath, { force: true });
-            }
-        } catch {}
     }
 
     try {
@@ -1784,43 +1765,6 @@ if (validSessionId && socketPath) {
                 idleAtMilliseconds: null,
                 error: runtimeActivity?.error ?? "pending",
             };
-        }
-    }
-
-    function recordInputCompletion(owner, event) {
-        if (!sessionIdPattern.test(owner || "")) return;
-        const timestamp = Date.parse(normalizedTimestamp(event.timestamp));
-        if (!Number.isFinite(timestamp)) return;
-        const key = owner.toLowerCase();
-        const previous = inputCompletions.get(key);
-        inputCompletions.delete(key);
-        inputCompletions.set(key, Math.max(previous ?? timestamp, timestamp));
-        while (inputCompletions.size > 128) {
-            inputCompletions.delete(inputCompletions.keys().next().value);
-        }
-        // Child activity does not invalidate a coordinator observation. Only a
-        // matching input wait needs a fresh read after this completion.
-        let record;
-        try {
-            record = JSON.parse(readFileSync(
-                join(sessionsDir, `${appSessionId}.status-record.json`), "utf8"
-            ));
-        } catch (error) {
-            if (error?.code !== "ENOENT") {
-                console.error("[copilot-projects] could not read input wait context:", error);
-            }
-            return;
-        }
-        if (record?.status === "waiting"
-            && typeof record.inputWait?.senderSessionId === "string"
-            && typeof record.inputWait?.rootSessionId === "string"
-            && record.inputWait.senderSessionId.toLowerCase() === key
-            && record.inputWait.rootSessionId.toLowerCase() === copilotSessionId.toLowerCase()
-            && record.inputWait?.conversationEpoch === conversationEpoch
-            && Number.isSafeInteger(record.statusTimestamp)
-            && record.statusTimestamp <= timestamp) {
-            runtimeActivityRevision += 1;
-            refreshRuntimeActivity(true);
         }
     }
 
@@ -2968,7 +2912,6 @@ if (validSessionId && socketPath) {
             currentIntent: currentActivityText(),
             foregroundTransitionAt,
             runtimeActivity,
-            inputCompletions: Object.fromEntries(inputCompletions),
             sessionIdleAtMilliseconds,
             scheduledTurnActive,
             activeSubagents: [...activeSubagents.values()],
@@ -2982,7 +2925,7 @@ if (validSessionId && socketPath) {
                 : [...pendingElicitations.values()],
             // Always present (including []) so the host can distinguish this
             // extension from an older build that cannot validate prompts.
-            pendingPermissionRequestIds: [...pendingPermissionRequests.keys()],
+            pendingPermissionRequestIds: [...pendingPermissionRequests],
             ...(currentModel ? { model: currentModel } : {}),
             ...(availableModels && !restartRequested ? { availableModels } : {}),
             copilotSessionId,
@@ -3233,10 +3176,7 @@ if (validSessionId && socketPath) {
             noteQuestionCompleted(requestId);
             const entry = pending.get(requestId);
             const cleared = (!recovered || entry) ? observeLiveRootQuestion(event) : false;
-            if (entry) {
-                pending.delete(requestId);
-                recordInputCompletion(entry.agentId || copilotSessionId, event);
-            }
+            if (entry) pending.delete(requestId);
             return Boolean(entry) || cleared;
         }
         if (completedQuestionRequests.has(requestId)) return false;
@@ -4359,20 +4299,13 @@ if (validSessionId && socketPath) {
             if (!completedPermissionRequests.has(requestId)
                     && !pendingPermissionRequests.has(requestId)
                     && pendingPermissionRequests.size < 64) {
-                pendingPermissionRequests.set(requestId, event.agentId || copilotSessionId);
+                pendingPermissionRequests.add(requestId);
                 changed = true;
             }
         } else if (event.type === "permission.completed") {
-            const completed = completedPermissionRequests.get(requestId);
-            const owner = pendingPermissionRequests.get(requestId) ?? completed?.owner;
-            const certify = live && !completed?.certified && owner !== undefined;
-            completedPermissionRequests.set(requestId, {
-                owner,
-                certified: completed?.certified === true || certify,
-            });
+            completedPermissionRequests.add(requestId);
             boundCompletedPermissionIds();
-            changed = pendingPermissionRequests.delete(requestId) || certify;
-            if (certify) recordInputCompletion(owner, event);
+            changed = pendingPermissionRequests.delete(requestId);
         }
         if (live && changed) publish();
     }
@@ -5243,8 +5176,8 @@ if (validSessionId && socketPath) {
         }
         transcriptInitialized = true;
         for (const event of queuedTranscriptEvents) {
-            // These were delivered live while history loaded. History can
-            // overlap them, but must not consume their one sender certificate.
+            // These were delivered live while history loaded, and history can
+            // overlap them.
             applyPermissionEvent(event, true);
             if (durableTranscriptAuthoritative) {
                 applyModelFromEvent(event);
@@ -5297,7 +5230,6 @@ if (validSessionId && socketPath) {
         inFlightHandoffs.clear();
         pendingPermissionRequests.clear();
         completedPermissionRequests.clear();
-        inputCompletions.clear();
         runtimeActivityUnsupported = false;
         runtimeMetadataSeq = 0;
         lastSettledMetadataSeq = 0;
@@ -5408,7 +5340,6 @@ if (validSessionId && socketPath) {
             // the previous conversation while the marker now names the new
             // one, so discard it before anything can read the pair.
             discardRotatedTranscript();
-            setScheduledTurnMarker(false);
             // Every handler re-validates `copilotSessionId` before acting,
             // so these files can never be applied to the wrong
             // conversation — but a remote client that answered the previous
@@ -5634,10 +5565,9 @@ if (validSessionId && socketPath) {
                 startingPrompt = prompt;
             }
         }
-        setScheduledTurnMarker(currentTurnKind === "scheduled");
-        // The snapshot says what the marker says, as soon as it does. Waiting for
-        // the next turn start left them apart for up to 45 s, 44 times on Nov 11,
-        // when a schedule's message landed in the middle of a turn.
+        // The snapshot says a scheduled turn has begun as soon as its message
+        // arrives. Waiting for the next turn start left it up to 45 s behind, 44
+        // times on Nov 11, when a schedule's message landed in the middle of a turn.
         scheduledTurnActive = currentTurnKind === "scheduled";
         foregroundTurnActive = currentTurnKind !== "scheduled";
         foregroundTransitionAt = normalizedTimestamp(event.timestamp);
@@ -5671,7 +5601,6 @@ if (validSessionId && socketPath) {
         scheduledTurnActive = currentTurnKind === "scheduled";
         foregroundTurnActive = !scheduledTurnActive;
         foregroundTransitionAt = normalizedTimestamp(event.timestamp);
-        if (scheduledTurnActive) setScheduledTurnMarker(true);
         publish();
         if (needsRefresh) refreshRuntimeActivity(true);
         processCloseSessionRequest();
@@ -5723,7 +5652,6 @@ if (validSessionId && socketPath) {
         pendingPermissionRequests.clear();
         publish();
         refreshRuntimeActivity(true);
-        setTimeout(() => setScheduledTurnMarker(false), 5_000);
         processCloseSessionRequest();
     });
 
@@ -5903,7 +5831,6 @@ if (validSessionId && socketPath) {
         if (isRecordedOwner()) {
             writeTranscriptSnapshot();
             removeFile(snapshotPath);
-            removeFile(scheduledTurnPath);
             // Deliberately keep transcriptOwnerPath: it records this process's
             // appSessionId/copilotSessionId provenance for the transcript that
             // was just flushed. If we deleted it here, a foreign reader that

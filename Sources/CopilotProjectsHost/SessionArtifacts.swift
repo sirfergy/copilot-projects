@@ -190,22 +190,21 @@ enum SessionArtifacts {
     /// don't linger.
     private static let retiredFileSuffixes = [
         "status", "status-timestamp", "prompt-status-timestamp", "copilot-allow-all",
-        "transcript-quarantine.json",
+        "transcript-quarantine.json", "status-record.json", "scheduled-turn",
     ]
 
-    /// Files `removeFiles` has no `Paths` helper for. The hook (`CopilotHooks.script`)
-    /// clears `active-turn` on sessionEnd, which a close that has to kill the CLI
-    /// never runs; hooks before this one also left `agent-stop-completion`. The remote
-    /// launch wrapper never clears its `remote-*` files, and `remote-initial-args`
-    /// holds the session's whole starting prompt.
+    /// Files `removeFiles` has no `Paths` helper for. Earlier releases' status hooks
+    /// left `active-turn` and `agent-stop-completion` when a close had to kill the
+    /// CLI. The remote launch wrapper never clears its `remote-*` files, and
+    /// `remote-initial-args` holds the session's whole starting prompt.
     private static let hookMarkerSuffixes = [
         "active-turn", "agent-stop-completion",
         "remote-host", "remote-initial-args", "remote-request-id",
     ]
 
     /// Files replaced by writing a pid-named sibling and renaming it over the
-    /// original: `<name>.<pid>` by the hook, `<name>.<pid>.tmp` by the tracker. A
-    /// writer killed between the two steps leaves the sibling behind.
+    /// original: `<name>.<pid>` by earlier releases' status hooks, `<name>.<pid>.tmp`
+    /// by the tracker. A writer killed between the two steps leaves the sibling behind.
     private static let hookTemporaryFileBases = ["status-record.json"]
     private static let trackerTemporaryFileBases = [
         "copilot-session", "agent-activity.json", "transcript.json",
@@ -245,10 +244,8 @@ enum SessionArtifacts {
         }
         for path in [
             Paths.dtachSocketPath(sessionId: sessionId),
-            Paths.statusRecordPath(sessionId: sessionId),
             Paths.backgroundAgentsMarkerPath(sessionId: sessionId),
             Paths.copilotSessionMarkerPath(sessionId: sessionId),
-            Paths.scheduledTurnMarkerPath(sessionId: sessionId),
             Paths.agentActivitySnapshotPath(sessionId: sessionId),
             Paths.userInputResponsePath(sessionId: sessionId),
             Paths.elicitationResponsePath(sessionId: sessionId),

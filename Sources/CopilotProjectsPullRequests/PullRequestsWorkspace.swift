@@ -129,7 +129,6 @@ struct WorkspaceDirectorySignature: Equatable, Sendable {
         let runtimeIdleAtMilliseconds: Int64?
         let runtimeError: String?
         let sessionIdleAtMilliseconds: Int64?
-        let inputCompletions: [String: Int64]?
         let error: String?
 
         init?(path: String) {
@@ -153,7 +152,6 @@ struct WorkspaceDirectorySignature: Equatable, Sendable {
             runtimeIdleAtMilliseconds = decoded.runtimeActivity?.idleAtMilliseconds
             runtimeError = decoded.runtimeActivity?.error
             sessionIdleAtMilliseconds = decoded.sessionIdleAtMilliseconds
-            inputCompletions = decoded.inputCompletions
             error = decoded.error
         }
 
@@ -171,7 +169,6 @@ struct WorkspaceDirectorySignature: Equatable, Sendable {
             let workflow: WorkflowSummary?
             let runtimeActivity: RuntimeSummary?
             let sessionIdleAtMilliseconds: Int64?
-            let inputCompletions: [String: Int64]?
             let error: String?
         }
     }
@@ -212,7 +209,6 @@ struct WorkspaceDirectorySignature: Equatable, Sendable {
 
     static func isTrackedSessionEntry(_ name: String) -> Bool {
         guard !name.isEmpty, !name.hasPrefix(".") else { return false }
-        if name.contains(".status-record.json.") { return false }
         return !ignoredSessionSuffixes.contains { name.hasSuffix($0) }
     }
 
