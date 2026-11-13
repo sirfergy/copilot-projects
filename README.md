@@ -532,6 +532,24 @@ turn's MCP calls are never cut off. Copilot keeps running: the session's termina
 says when the servers have restarted. The app has no menu item for it and remote
 clients are not offered it.
 
+To send a prompt to a session's Copilot from a script, use `send-session-prompt`:
+
+```bash
+copilot-projects send-session-prompt --session <id> --prompt-file prompt.md
+copilot-projects send-session-prompt --session <id> --steer --prompt "Rebase before you push"
+```
+
+Without `--steer` the prompt is queued, and Copilot takes it only once the session
+is fully idle: no turn, background agent or background shell. `--steer` delivers it
+as the composer's **Steer current task** does: into the turn that is running, or as
+a new turn at once when none is. A session that is parked, restarting, waiting for
+input or without a running Copilot refuses either kind, and a refused steer is never
+queued instead: the command says why and exits non-zero (8 when busy). It exits 0
+once the session's tracker has been handed the prompt. Replaying a `--request-id`
+never sends twice; replaying it with a different prompt, session or `--steer` exits 3.
+An app left running from before it learned `--steer` ignores it and queues the
+prompt, so restart the app after updating.
+
 Commands inside an app-managed terminal automatically target its current
 project and session. Hooks for other tools can post a notification:
 
@@ -553,7 +571,7 @@ Use `Ctrl-\` to detach without ending the session.
 
 The bundled [`coordinate-copilot-sessions`](.github/skills/coordinate-copilot-sessions)
 skill teaches Copilot CLI to stagger-launch child sessions (`--parent-session`),
-steer them over the control socket (`send-session-prompt`), or spin off a
+prompt them over the control socket (`send-session-prompt`), or spin off a
 tangent into a standalone tab (`--no-parent`). Symlink it into `~/.copilot/skills/`
 to make it available in every repository:
 

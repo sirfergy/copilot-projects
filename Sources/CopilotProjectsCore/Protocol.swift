@@ -23,6 +23,8 @@ public struct ControlRequest: Codable, Sendable {
     public var action: String?
     public var requestId: String?
     public var prompt: String?
+    /// How `send-session-prompt` delivers its prompt. Absent means `.enqueue`.
+    public var promptMode: RemotePromptMode?
     public var hostId: String?
     public var parentSessionId: String?
 

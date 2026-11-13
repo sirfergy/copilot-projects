@@ -450,7 +450,15 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertEqual(received.last?.sessionId, "s1")
         XCTAssertNil(received.last?.projectId)
         XCTAssertEqual(received.last?.prompt, "Keep going!")
+        XCTAssertNil(received.last?.promptMode)
         XCTAssertNotNil(received.last?.requestId.flatMap(UUID.init(uuidString:)))
+
+        // --steer asks for the delivery mode the composer's Steer uses.
+        XCTAssertEqual(CLIMain.run([
+            "send-session-prompt", "--session", "s1", "--steer", "--prompt", "Rebase first",
+        ], environment: environment), 0)
+        XCTAssertEqual(received.last?.promptMode, .immediate)
+        XCTAssertEqual(received.last?.prompt, "Rebase first")
 
         // Prompt file with explicit project and request-id.
         let promptFile = root.appendingPathComponent("prompt.txt")

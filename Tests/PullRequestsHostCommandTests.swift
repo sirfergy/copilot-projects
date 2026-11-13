@@ -709,6 +709,11 @@ final class PullRequestsHostCommandTests: XCTestCase {
             XCTAssertEqual(queued.code, "queued")
             XCTAssertEqual(queued.text, "a1")
             XCTAssertTrue(FileManager.default.fileExists(atPath: handoffURL.path))
+            struct Handoff: Decodable { let action: RemoteSessionAction }
+            @MainActor func handedOffMode() throws -> RemotePromptMode? {
+                try JSONDecoder().decode(Handoff.self, from: Data(contentsOf: handoffURL)).action.mode
+            }
+            XCTAssertEqual(try handedOffMode(), .enqueue)
             let replayQueued = send(nativeReqId, project: nil, session: "a1", prompt: "Queue via SDK")
             XCTAssertTrue(replayQueued.ok)
             XCTAssertEqual(replayQueued.code, "queued")
@@ -817,6 +822,18 @@ final class PullRequestsHostCommandTests: XCTestCase {
             let notReady = send(UUID().uuidString, project: nil, session: "a1", prompt: "Queue via SDK")
             XCTAssertFalse(notReady.ok)
             XCTAssertEqual(notReady.code, "busy")
+
+            // A request that asks to steer hands the tracker `.immediate`, and the mode is
+            // part of what its request id is bound to.
+            snapshot.workflow = makeWorkflow(sendReady: true)
+            try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+            let steerId = UUID().uuidString
+            var steer = request("send-session-prompt", session: "a1", requestId: steerId, prompt: "Rebase first")
+            steer.promptMode = .immediate
+            let steered = model.handle(steer)
+            XCTAssertEqual(steered.code, "queued", steered.error ?? "")
+            XCTAssertEqual(try handedOffMode(), .immediate)
+            XCTAssertEqual(send(steerId, project: nil, session: "a1", prompt: "Rebase first").code, "conflict")
         }
     }
 }
