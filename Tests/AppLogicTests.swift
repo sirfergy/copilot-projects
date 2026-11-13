@@ -9173,6 +9173,166 @@ final class AppLogicTests: XCTestCase {
         }
     }
 
+    /// An image a tool returned shows under that tool's row once Tools is open, in the drawer and at
+    /// full width, light and dark. Geometry only: an image reserves its fitted size before it decodes.
+    @MainActor
+    func testHostedTranscriptDrawerShowsToolImagesUnderTheirToolRow() throws {
+        _ = NSApplication.shared
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tool-image-drawer-\(UUID().uuidString)", isDirectory: true)
+        let copilotSessionId = UUID().uuidString.lowercased()
+        let sessionDir = home
+            .appendingPathComponent("session-state", isDirectory: true)
+            .appendingPathComponent(copilotSessionId, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let png = remoteKittyTestPNGBytes(width: 480, height: 180)
+        let events = [
+            #"{"type":"session.binary_asset","data":{"assetId":"sha256:shot","type":"image","mimeType":"image/png","data":"\#(png.base64EncodedString())"},"id":"asset-1"}"#,
+            #"{"type":"user.message","data":{"content":"Open the screenshot"},"id":"turn-1"}"#,
+            #"{"type":"tool.execution_complete","data":{"toolCallId":"call-view","success":true,"result":{"content":"ok","binaryResultsForLlm":[{"type":"image","mimeType":"image/png","assetId":"sha256:shot"},{"type":"image","mimeType":"image/png","assetId":"sha256:gone"}]}},"id":"done-1"}"#,
+        ].joined(separator: "\n") + "\n"
+        try events.write(
+            to: sessionDir.appendingPathComponent("events.jsonl", isDirectory: false),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        func turn(_ id: String, _ tools: [TranscriptTool]) -> TranscriptTurn {
+            TranscriptTurn(
+                id: id,
+                startedAt: Date(timeIntervalSince1970: 1_800_000_000),
+                endedAt: nil,
+                kind: "foreground",
+                userContent: "Open the screenshot",
+                assistantMessages: [],
+                tools: tools,
+                isAborted: false
+            )
+        }
+        // Each turn has a running tool, so each Tools header has a spinner. The distance between the
+        // two spinners is how tall the first turn's Tools section is.
+        let turns = [
+            turn("turn-1", [
+                TranscriptTool(id: "call-view", name: "view", title: "shot.png", success: true),
+                TranscriptTool(id: "call-wait", name: "bash", title: "Wait", success: nil),
+            ]),
+            turn("turn-2", [TranscriptTool(id: "call-later", name: "bash", title: "Later", success: nil)]),
+        ]
+        let appSessionId = "desktop-tool-image-drawer"
+        let attachments = TranscriptPromptAttachments.load(
+            sessionId: appSessionId,
+            snapshot: TranscriptSnapshot(
+                schemaVersion: 4,
+                updatedAt: Date(timeIntervalSince1970: 1_800_000_100),
+                copilotSessionId: copilotSessionId,
+                turns: turns
+            ),
+            copilotHome: home.path
+        )
+        let toolImages = attachments.items(
+            forTurnId: "turn-1", sessionId: appSessionId, copilotSessionId: copilotSessionId, fromTools: true
+        )
+        XCTAssertEqual(toolImages.map { $0.data != nil }, [true, false])
+        XCTAssertEqual(
+            TranscriptTools.summaryLabel(for: turns[0].tools, imageCount: toolImages.count),
+            "Tools (2 tools) · view, bash · 1 running · 2 images"
+        )
+        XCTAssertEqual(
+            TranscriptTools.summaryLabel(for: turns[1].tools, imageCount: 1),
+            "Tools (1 tool) · bash · 1 running · 1 image"
+        )
+
+        func findProgressIndicators(in view: NSView) -> [NSProgressIndicator] {
+            ((view as? NSProgressIndicator).map { [$0] } ?? [])
+                + view.subviews.flatMap(findProgressIndicators(in:))
+        }
+        /// The distance between the two spinners with the first turn's Tools section closed, then open.
+        func toolsSectionHeights(
+            _ attachments: TranscriptPromptAttachments,
+            appearance: NSAppearance.Name,
+            width: CGFloat
+        ) throws -> (closed: CGFloat, open: CGFloat) {
+            let window = NSWindow(
+                contentRect: NSRect(x: -18_000, y: -18_000, width: width, height: 900),
+                styleMask: [.titled],
+                backing: .buffered,
+                defer: false
+            )
+            window.isReleasedWhenClosed = false
+            window.appearance = NSAppearance(named: appearance)
+            let host = NSHostingView(
+                rootView: TranscriptDrawer(
+                    turns: turns,
+                    imageCapture: nil,
+                    sessionId: appSessionId,
+                    promptAttachments: attachments,
+                    copilotSessionId: copilotSessionId,
+                    workflow: nil,
+                    operation: .unavailable,
+                    workflowProvider: nil,
+                    operationProvider: nil,
+                    promptComposer: nil,
+                    onClose: {},
+                    onAction: { _ in RemoteWorkflowActionResult(state: .applied) },
+                    onPreview: { _ in }
+                )
+                .environment(\.colorScheme, appearance == .darkAqua ? .dark : .light)
+                .environment(\.controlActiveState, .key)
+            )
+            host.frame = NSRect(x: 0, y: 0, width: width, height: 900)
+            window.contentView = host
+            window.orderBack(nil)
+            defer {
+                window.orderOut(nil)
+                window.contentView = nil
+                window.close()
+            }
+            func pump() {
+                for _ in 0..<8 {
+                    CFRunLoopRunInMode(.defaultMode, 0, false)
+                    host.layoutSubtreeIfNeeded()
+                }
+            }
+            func windowY(_ view: NSView) -> CGFloat { view.convert(NSPoint.zero, to: nil).y }
+
+            pump()
+            let spinners = findProgressIndicators(in: host).sorted { windowY($0) > windowY($1) }
+            guard spinners.count == 2 else {
+                XCTFail("expected one spinner per turn, found \(spinners.count)")
+                return (0, 0)
+            }
+            let closed = windowY(spinners[0]) - windowY(spinners[1])
+            try sendClick(
+                in: window,
+                point: spinners[0].convert(NSPoint(x: -40, y: spinners[0].bounds.midY), to: nil)
+            )
+            pump()
+            return (closed, windowY(spinners[0]) - windowY(spinners[1]))
+        }
+
+        defer { UserDefaults.standard.removeObject(forKey: TranscriptDrawer.fullWidthTranscriptKey) }
+        let specs: [(appearance: NSAppearance.Name, width: CGFloat, fullWidth: Bool)] = [
+            (.aqua, 420, false),
+            (.darkAqua, 420, false),
+            (.aqua, 960, true),
+            (.darkAqua, 960, true),
+        ]
+        for spec in specs {
+            UserDefaults.standard.set(spec.fullWidth, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+            let without = try toolsSectionHeights(
+                TranscriptPromptAttachments(), appearance: spec.appearance, width: spec.width
+            )
+            let with = try toolsSectionHeights(attachments, appearance: spec.appearance, width: spec.width)
+            // Closed, the images take no room: only the header's count says they are there.
+            XCTAssertEqual(with.closed, without.closed, accuracy: 1, "\(spec)")
+            XCTAssertGreaterThan(without.open, without.closed + 30, "\(spec)")
+            // Open, the first row is followed by the 480 x 180 image at its fitted height (over
+            // 100 pt at the drawer's width) and by the "Image unavailable" row (44 pt).
+            XCTAssertGreaterThan(with.open, without.open + 150, "\(spec)")
+        }
+    }
+
     func testTranscriptTurnReasoningStepsCodableRoundTripAndLegacyDecode() throws {
         let legacyJSON = Data("""
         {"id":"t1","startedAt":"1970-01-01T00:01:40Z","endedAt":null,"kind":"foreground",\

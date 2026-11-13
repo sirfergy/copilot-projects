@@ -7,6 +7,7 @@ struct TranscriptTurnCard: View {
     let turn: TranscriptTurn
     let imageCapture: RemoteKittyImageCapture?
     var promptAttachments: [TranscriptPromptAttachments.Item] = []
+    var toolImages: [TranscriptPromptAttachments.Item] = []
     var isPending = false
     var pendingMode: RemotePromptMode? = nil
     let onPreview: (TranscriptImagePreviewItem) -> Void
@@ -108,7 +109,12 @@ struct TranscriptTurnCard: View {
             }
 
             if !turn.tools.isEmpty {
-                TranscriptTools(tools: turn.tools, isTurnInProgress: turn.endedAt == nil && !turn.isAborted)
+                TranscriptTools(
+                    tools: turn.tools,
+                    isTurnInProgress: turn.endedAt == nil && !turn.isAborted,
+                    images: toolImages,
+                    onPreview: onPreview
+                )
             }
             if let error = turn.error {
                 TranscriptTurnFailure(error: error)
@@ -233,6 +239,9 @@ struct TranscriptTools: View {
 
     let tools: [TranscriptTool]
     var isTurnInProgress = true
+    /// Images the tools returned, each shown under the row whose id is its `toolCallId`.
+    let images: [TranscriptPromptAttachments.Item]
+    let onPreview: (TranscriptImagePreviewItem) -> Void
 
     static func previewText(for tools: [TranscriptTool]) -> String {
         var counts: [String: Int] = [:]
@@ -248,7 +257,11 @@ struct TranscriptTools: View {
         }.joined(separator: ", ")
     }
 
-    static func summaryLabel(for tools: [TranscriptTool], isTurnInProgress: Bool = true) -> String {
+    static func summaryLabel(
+        for tools: [TranscriptTool],
+        isTurnInProgress: Bool = true,
+        imageCount: Int = 0
+    ) -> String {
         var parts = ["Tools (\(tools.count) \(tools.count == 1 ? "tool" : "tools"))"]
         let preview = previewText(for: tools)
         if !preview.isEmpty { parts.append(preview) }
@@ -258,7 +271,12 @@ struct TranscriptTools: View {
             let running = tools.filter { $0.success == nil }.count
             if running > 0 { parts.append("\(running) running") }
         }
+        if imageCount > 0 { parts.append(Self.imageCountText(imageCount)) }
         return parts.joined(separator: " · ")
+    }
+
+    private static func imageCountText(_ count: Int) -> String {
+        count == 1 ? "1 image" : "\(count) images"
     }
 
     var body: some View {
@@ -267,13 +285,23 @@ struct TranscriptTools: View {
             icon: "wrench.and.screwdriver",
             title: "Tools",
             subtitle: Self.previewText(for: tools),
-            accessibilityLabel: Self.summaryLabel(for: tools, isTurnInProgress: isTurnInProgress),
+            accessibilityLabel: Self.summaryLabel(
+                for: tools,
+                isTurnInProgress: isTurnInProgress,
+                imageCount: images.count
+            ),
             accessibilityIdentifier: "transcript-tools-toggle"
         ) {
             if failedCount > 0 {
                 Text("· \(failedCount) failed")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.red)
+                    .layoutPriority(1)
+            }
+            // A badge, not part of the subtitle: the subtitle is one line and truncates.
+            if !images.isEmpty {
+                Text("· \(Self.imageCountText(images.count))")
+                    .font(.caption.weight(.medium))
                     .layoutPriority(1)
             }
             if isTurnInProgress, tools.contains(where: { $0.success == nil }) {
@@ -304,6 +332,9 @@ struct TranscriptTools: View {
                     }
                     .font(.caption)
                     .accessibilityElement(children: .combine)
+                    ForEach(images.filter { $0.toolCallId == tool.id }) { item in
+                        TranscriptImageView(identity: item.identity, data: item.data, onPreview: onPreview)
+                    }
                 }
             }
             .textSelection(.enabled)

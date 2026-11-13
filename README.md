@@ -75,10 +75,18 @@ uploads. This repository does not add an upload UI to the standalone desktop app
 ## Transcript images
 
 The Mac session-details drawer displays retained inline terminal images beneath
-their associated turn. Select an image for a larger, zoomable native preview;
+their associated turn. It also shows the PNG and JPEG images attached to a prompt,
+under that prompt, and the images a tool returned, under that tool's row in the
+turn's Tools section, whose collapsed header counts them. Both are Mac-only and are
+read from that session's own Copilot event log, so they do not depend on what the
+terminal still holds. A sub-agent's tool images are not shown. An image the terminal
+also drew, because its tool call was expanded there, appears in both places.
+Select an image for a larger, zoomable native preview;
 Done, Command-W, or Escape dismiss the preview without ending the session.
 Loading and unavailable states keep their space, and decoding is bounded and
-off the main actor. No Markdown image URLs or arbitrary file paths are fetched.
+off the main actor. No Markdown image URLs are fetched. The only file path read is
+one a prompt attachment names, and only while it is a regular file last modified
+before its turn began.
 
 Native and remote transcript images keep their original turn when the terminal retransmits
 unchanged, still-advertised image data. A redraw does not move an older image to

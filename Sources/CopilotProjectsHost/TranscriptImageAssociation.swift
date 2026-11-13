@@ -4,9 +4,10 @@ import ImageIO
 import CopilotProjectsCore
 import CopilotProjectsProtocol
 
-/// Prompt image attachments resolved directly from a Copilot session's
-/// `events.jsonl` `user.message` attachments for the turns in a
-/// `TranscriptSnapshot`. Stateless: no cross-session or cross-turn cache.
+/// Prompt image attachments and the images tools returned, resolved directly from a
+/// Copilot session's `events.jsonl` (`user.message` attachments and
+/// `tool.execution_complete` results) for the turns in a `TranscriptSnapshot`.
+/// Stateless: no cross-session or cross-turn cache.
 struct TranscriptPromptAttachments: Equatable, Sendable {
     private static let maxAttachmentsPerTurn = 8
     private static let maxBytesPerImage = 5 * 1_024 * 1_024
@@ -24,6 +25,8 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         let assetId: String?
         let inline: Span?
         let index: Int
+        /// Set on an image a tool returned: the `toolCallId` of the tool row it belongs under.
+        var toolCallId: String? = nil
     }
 
     struct Item: Equatable, Identifiable, Sendable {
@@ -32,12 +35,16 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         var contentHash: UInt64? = nil
         var pixelSize: CGSize? = nil
         var grayscaleGrid: [UInt8]? = nil
+        var toolCallId: String? = nil
         var id: TranscriptImageIdentity { identity }
     }
 
     var sessionId: String = ""
     var copilotSessionId: String = ""
     var orderedTurnIds: [String] = []
+    /// Ids of the tool rows the snapshot shows as finished. When they change, `events.jsonl` has
+    /// completions that were not read or joined yet, so the previous result cannot be reused.
+    var completedToolIds: [String] = []
     var scannedEventsPath: String = ""
     var scannedEventsIdentity: String = ""
     var scannedEventsBytes: Int = 0
@@ -46,16 +53,27 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
     var assetSpans: [String: Span] = [:]
     var payloadBytesBySpan: [Span: Int] = [:]
     var itemsByTurnId: [String: [Item]] = [:]
+    /// Image results of root tool calls by `toolCallId`, recorded as the scan meets them and
+    /// joined to the snapshot's tool rows afterwards. The tracker builds the snapshot from
+    /// `events.jsonl`, so a completion can be read here before the snapshot shows its tool.
+    var toolRefsByCallId: [String: [Ref]] = [:]
+    var toolItemsByTurnId: [String: [Item]] = [:]
     var watchedFiles: [String: String] = [:]
 
-    func items(forTurnId turnId: String, sessionId expectedSessionId: String, copilotSessionId expectedCopilotId: String) -> [Item] {
+    /// The turn's prompt images, or with `fromTools` the images its tools returned.
+    func items(
+        forTurnId turnId: String,
+        sessionId expectedSessionId: String,
+        copilotSessionId expectedCopilotId: String,
+        fromTools: Bool = false
+    ) -> [Item] {
         guard !expectedSessionId.isEmpty,
               !expectedCopilotId.isEmpty,
               expectedSessionId == sessionId,
               expectedCopilotId == copilotSessionId else {
             return []
         }
-        return itemsByTurnId[turnId] ?? []
+        return (fromTools ? toolItemsByTurnId : itemsByTurnId)[turnId] ?? []
     }
 
     func hasWatchedFileChanges() -> Bool {
@@ -86,15 +104,21 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         }
         let orderedTurnIds = activeTurns.map(\.id)
         let wantedTurnIds = Set(orderedTurnIds)
+        // Turns of every kind have tool rows, automated turns included.
+        let toolTurns = snapshot.turns.filter { !$0.tools.isEmpty }
         var result = TranscriptPromptAttachments(
             sessionId: sessionId,
             copilotSessionId: copilotId,
-            orderedTurnIds: orderedTurnIds
+            orderedTurnIds: orderedTurnIds,
+            completedToolIds: toolTurns.flatMap { $0.tools.filter { $0.success != nil }.map(\.id) }
         )
-        guard !sessionId.isEmpty, !copilotId.isEmpty, !wantedTurnIds.isEmpty else { return result }
+        guard !sessionId.isEmpty, !copilotId.isEmpty, !wantedTurnIds.isEmpty || !toolTurns.isEmpty else {
+            return result
+        }
         let prior = (previous?.sessionId == sessionId && previous?.copilotSessionId == copilotId) ? previous : nil
         if let prior,
            prior.orderedTurnIds == orderedTurnIds,
+           prior.completedToolIds == result.completedToolIds,
            wantedTurnIds.isSubset(of: prior.resolvedTurnIds),
            Set(prior.itemsByTurnId.keys) == wantedTurnIds.intersection(prior.refsByTurnId.keys),
            !prior.hasWatchedFileChanges() {
@@ -128,6 +152,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
            eventsSize >= prior.scannedEventsBytes {
             result.resolvedTurnIds = prior.resolvedTurnIds.intersection(wantedTurnIds)
             result.refsByTurnId = prior.refsByTurnId.filter { wantedTurnIds.contains($0.key) }
+            result.toolRefsByCallId = prior.toolRefsByCallId
             startOffset = prior.scannedEventsBytes
         } else {
             startOffset = 0
@@ -141,6 +166,8 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         let userNeedle = Array("\"user.message\"".utf8)
         let assetPrefix = Array("{\"type\":\"session.binary_asset\"".utf8)
         let assetNeedle = Array("\"session.binary_asset\"".utf8)
+        let toolPrefix = Array("{\"type\":\"tool.execution_complete\"".utf8)
+        let toolNeedle = Array("\"binaryResultsForLlm\"".utf8)
         let decoder = JSONDecoder()
         func scanRange(_ lower: Int, _ upper: Int, assetsOnly: Set<String>? = nil) -> Int {
             guard lower < upper, fseeko(fp, off_t(lower), SEEK_SET) == 0 else { return lower }
@@ -168,7 +195,12 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
                 let isUser = assetsOnly == nil && (hasTypePrefix
                     ? memcmp(ptr, userPrefix, userPrefix.count) == 0
                     : memmem(ptr, lineLen, userNeedle, userNeedle.count) != nil)
-                guard isUser || isAsset else { continue }
+                // 0.12% of completions carry a binary result, so only those are decoded.
+                let isTool = assetsOnly == nil
+                    && lineLen >= toolPrefix.count
+                    && memcmp(ptr, toolPrefix, toolPrefix.count) == 0
+                    && memmem(ptr, lineLen, toolNeedle, toolNeedle.count) != nil
+                guard isUser || isAsset || isTool else { continue }
                 autoreleasepool {
                     let lineSlice = Data(bytesNoCopy: ptr, count: lineLen - 1, deallocator: .none)
                     guard let event = try? decoder.decode(RawUserMessageEvent.self, from: lineSlice),
@@ -180,6 +212,16 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
                        data.hasData,
                        assetsOnly?.contains(id) != false {
                         result.assetSpans[id] = span
+                        return
+                    }
+                    // Root calls only: the transcript has no row for a sub-agent's tool. Recorded
+                    // whether or not the snapshot shows the tool yet (see `toolRefsByCallId`).
+                    if isTool, event.agentId == nil, let callId = data.toolCallId {
+                        let refs = (data.binaryResults ?? []).enumerated().compactMap { index, binary -> Ref? in
+                            guard binary.type == "image", let assetId = binary.assetId else { return nil }
+                            return Ref(path: nil, assetId: assetId, inline: nil, index: index, toolCallId: callId)
+                        }
+                        result.toolRefsByCallId[callId] = refs.isEmpty ? nil : refs
                         return
                     }
                     guard assetsOnly == nil,
@@ -212,16 +254,21 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
            !wantedTurnIds.subtracting(prior.orderedTurnIds).isSubset(of: result.resolvedTurnIds) {
             _ = scanRange(0, startOffset)
         }
-        let wantedAssets = Set(result.refsByTurnId.values.flatMap { $0.compactMap(\.assetId) })
+        let promptAssets = Set(result.refsByTurnId.values.flatMap { $0.compactMap(\.assetId) })
+        let wantedAssets = promptAssets.union(result.toolRefsByCallId.values.flatMap { $0.compactMap(\.assetId) })
+        // An asset the previous load already looked for is not looked for again: 53 real tool
+        // results name an asset that is not in the file, and each load would re-read from byte 0.
         let priorWanted = Set(prior?.refsByTurnId.values.flatMap { $0.compactMap(\.assetId) } ?? [])
+            .union(prior?.toolRefsByCallId.values.flatMap { $0.compactMap(\.assetId) } ?? [])
         let unsearched = wantedAssets.subtracting(result.assetSpans.keys).subtracting(priorWanted)
         if startOffset > 0, !unsearched.isEmpty {
             _ = scanRange(0, startOffset, assetsOnly: unsearched)
         }
         result.assetSpans = result.assetSpans.filter { wantedAssets.contains($0.key) }
+        // Only a prompt's asset can still arrive: a tool's asset is written before its completion.
         if !wantedTurnIds.isSubset(of: result.resolvedTurnIds)
             || consumedEnd < eventsSize
-            || !wantedAssets.isSubset(of: result.assetSpans.keys) {
+            || !promptAssets.isSubset(of: result.assetSpans.keys) {
             result.watchedFiles[eventsPath] = eventsToken
         }
         result.scannedEventsIdentity = eventsIdentity
@@ -230,9 +277,21 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         let payloadDecoder = JSONDecoder()
         payloadDecoder.userInfo[Self.decodePayloadsKey] = true
         var remainingBudget = Self.maxTotalBytes
-        for turn in activeTurns.reversed() {
-            guard let refs = result.refsByTurnId[turn.id],
-                  result.itemsByTurnId[turn.id] == nil else { continue }
+        // Prompt turns first, then tool turns, each newest first, so tool images only take the
+        // budget prompt images leave. 12 real sessions hold over 8 MB of tool images; sharing the
+        // budget in turn order would let those screenshots push older prompt images out.
+        let passes = activeTurns.reversed().map { (turn: $0, fromTools: false) }
+            + toolTurns.reversed().map { (turn: $0, fromTools: true) }
+        for (turn, fromTools) in passes {
+            let store: WritableKeyPath<TranscriptPromptAttachments, [String: [Item]]> =
+                fromTools ? \.toolItemsByTurnId : \.itemsByTurnId
+            func turnRefs(in attachments: TranscriptPromptAttachments?) -> [Ref] {
+                fromTools
+                    ? turn.tools.flatMap { attachments?.toolRefsByCallId[$0.id] ?? [] }
+                    : attachments?.refsByTurnId[turn.id] ?? []
+            }
+            let refs = turnRefs(in: result)
+            guard !refs.isEmpty, result[keyPath: store][turn.id] == nil else { continue }
             var sourcesUnchanged = true
             for ref in refs {
                 if let path = ref.path {
@@ -249,13 +308,13 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
                 }
             }
             if sourcesUnchanged,
-               let priorItems = prior?.itemsByTurnId[turn.id],
-               prior?.refsByTurnId[turn.id] == refs,
+               let priorItems = prior?[keyPath: store][turn.id],
+               turnRefs(in: prior) == refs,
                priorItems.count == refs.count,
                priorItems.allSatisfy({ $0.data != nil }),
                priorItems.reduce(0, { $0 + ($1.data?.count ?? 0) }) <= remainingBudget {
                 remainingBudget -= priorItems.reduce(0, { $0 + ($1.data?.count ?? 0) })
-                result.itemsByTurnId[turn.id] = priorItems
+                result[keyPath: store][turn.id] = priorItems
                 continue
             }
             var items: [Item] = []
@@ -302,19 +361,26 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
                 if let data = loaded?.data {
                     remainingBudget -= data.count
                 }
-                let occurrenceKey = "\(copilotId)\0\(turn.id)\0\(index)"
-                let imageId = (UInt32(truncatingIfNeeded: Self.fnv1a64(occurrenceKey.utf8)) & 0x00FF_FFFF) | (1 << 24)
+                // A tool image is one result of one tool call; ids starting at 2 << 24 keep it
+                // apart from prompt images (1 << 24) and Kitty captures (up to 0xFFFFFF).
+                let occurrence = ref.toolCallId.map { "\($0)\0\(ref.index)" } ?? "\(index)"
+                let occurrenceKey = "\(copilotId)\0\(turn.id)\0\(occurrence)"
+                let imageId = (UInt32(truncatingIfNeeded: Self.fnv1a64(occurrenceKey.utf8)) & 0x00FF_FFFF)
+                    | (fromTools ? 2 << 24 : 1 << 24)
                 let version = loaded.map { Self.fnv1a64("\(occurrenceKey)\0\($0.token)".utf8) | (1 << 63) }
                     ?? (Self.fnv1a64("\(occurrenceKey)\0missing".utf8) & ~(1 << 63))
-                let isTranscoded = loaded.map { $0.data.starts(with: [0xFF, 0xD8]) || max($0.size.width, $0.size.height) > 896 } == true
+                // The grid is only read when a prompt image is matched against its terminal copy.
+                let isTranscoded = !fromTools
+                    && loaded.map { $0.data.starts(with: [0xFF, 0xD8]) || max($0.size.width, $0.size.height) > 896 } == true
                 items.append(Item(
                     identity: TranscriptImageIdentity(sessionId: sessionId, imageId: imageId, version: version),
                     data: loaded?.data, contentHash: loaded?.hash, pixelSize: loaded?.size,
-                    grayscaleGrid: isTranscoded ? loaded.flatMap { Self.grayscaleGrid($0.data) } : nil
+                    grayscaleGrid: isTranscoded ? loaded.flatMap { Self.grayscaleGrid($0.data) } : nil,
+                    toolCallId: ref.toolCallId
                 ))
             }
             if !items.isEmpty {
-                result.itemsByTurnId[turn.id] = items
+                result[keyPath: store][turn.id] = items
             }
         }
         return result
@@ -522,9 +588,15 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         let mimeType: String?
         let data: String?
         let hasData: Bool
+        let toolCallId: String?
+        let binaryResults: [RawAttachment]?
 
         private enum CodingKeys: String, CodingKey {
-            case source, attachments, assetId, type, mimeType, data
+            case source, attachments, assetId, type, mimeType, data, toolCallId, result
+        }
+
+        private enum ResultKeys: String, CodingKey {
+            case binaryResultsForLlm
         }
 
         init(from decoder: Decoder) throws {
@@ -537,6 +609,9 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
             let decodePayloads = (decoder.userInfo[TranscriptPromptAttachments.decodePayloadsKey] as? Bool) == true
             data = decodePayloads ? try c.decodeIfPresent(String.self, forKey: .data) : nil
             hasData = c.contains(.data) && ((try? c.decodeNil(forKey: .data)) != true)
+            toolCallId = try c.decodeIfPresent(String.self, forKey: .toolCallId)
+            let result = try? c.nestedContainer(keyedBy: ResultKeys.self, forKey: .result)
+            binaryResults = try result?.decodeIfPresent([RawAttachment].self, forKey: .binaryResultsForLlm)
         }
     }
 
