@@ -33,10 +33,9 @@ public struct RemoteProtocolInfo: Codable, Equatable, Sendable {
     }
 }
 
-/// Absence means an older host. An updated host explicitly distinguishes an
-/// older, live tracker from one whose state is currently unavailable.
+/// Whether a session's tracker confirms operations with receipts. A value this
+/// build does not know decodes as `unavailable`.
 public enum RemoteOperationSupport: String, Codable, Equatable, Sendable {
-    case legacy
     case receipts
     case unavailable
 
@@ -53,20 +52,12 @@ public enum RemoteOperationSupport: String, Codable, Equatable, Sendable {
 
 public extension RemoteSessionSnapshot {
     func negotiatedOperationSupport(protocolInfo: RemoteProtocolInfo?) -> RemoteOperationSupport {
-        let hostSupportsReceipts = protocolInfo?.supports(RemoteProtocolInfo.operationReceipts) == true
-        switch operationSupport {
-        case .legacy?:
-            return .legacy
-        case .unavailable?:
+        guard operationSupport == .receipts,
+              protocolInfo?.supports(RemoteProtocolInfo.operationReceipts) == true,
+              let conversationEpoch, !conversationEpoch.isEmpty else {
             return .unavailable
-        case .receipts?:
-            guard hostSupportsReceipts, let conversationEpoch, !conversationEpoch.isEmpty else {
-                return .unavailable
-            }
-            return .receipts
-        case nil:
-            return hostSupportsReceipts ? .unavailable : .legacy
         }
+        return .receipts
     }
 }
 

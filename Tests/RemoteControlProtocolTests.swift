@@ -5,13 +5,18 @@ import CopilotProjectsProtocol
 final class RemoteControlProtocolTests: XCTestCase {
     private let epoch = "00000000-0000-4000-8000-000000000001"
 
-    func testControlDeliveryNegotiationPreservesLegacyAndFailsClosed() throws {
-        let legacy = try JSONDecoder().decode(
+    func testControlDeliveryNegotiationFailsClosed() throws {
+        let withoutCapability = try JSONDecoder().decode(
             RemoteProtocolInfo.self,
             from: Data(#"{"revision":1,"capabilities":["sdk-operation-receipts"]}"#.utf8)
         )
-        XCTAssertEqual(legacy.controlDeliverySupport, .legacy)
-        XCTAssertNil(legacy.controlDeliveryEpoch)
+        XCTAssertEqual(withoutCapability.controlDeliverySupport, .unavailable)
+        XCTAssertNil(withoutCapability.controlDeliveryEpoch)
+        // An epoch alone promises nothing: the host must also advertise the capability.
+        XCTAssertEqual(
+            RemoteProtocolInfo(revision: 1, capabilities: [], controlDeliveryEpoch: epoch).controlDeliverySupport,
+            .unavailable
+        )
 
         let invalidEpochs: [String?] = [nil, "", "not-an-epoch"]
         for invalidEpoch in invalidEpochs {

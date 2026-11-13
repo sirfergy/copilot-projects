@@ -73,7 +73,7 @@ final class RemoteControlHostTests: XCTestCase {
             first.model.remoteWorkspaceSnapshot().protocolInfo?.controlDeliveryEpoch,
             first.model.remoteControlDeliveryEpoch
         )
-        XCTAssertEqual(RemoteProtocolInfo.current.controlDeliverySupport, .legacy)
+        XCTAssertEqual(RemoteProtocolInfo.current.controlDeliverySupport, .unavailable)
     }
 
     @MainActor
