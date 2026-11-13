@@ -447,7 +447,7 @@ final class AppModel: ObservableObject {
     let completionTranscriptLoader: @Sendable (String) -> TranscriptSnapshot
     var scheduledSnapshotsSuppressed: Set<String> = []
     var foregroundIdleGenerationBaselines: [String: Int] = [:]
-    private let completionNotificationDelayNanoseconds: UInt64
+    let completionNotificationDelayNanoseconds: UInt64
     private let permissionNotificationDelayNanoseconds: UInt64
     private let elicitationReplyRetryDelaysNanoseconds: [UInt64]
     let persistPermissionStatus:

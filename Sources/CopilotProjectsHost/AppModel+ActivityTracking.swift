@@ -635,12 +635,23 @@ extension AppModel {
     func reconcileStatus() {
         withCoalescedProjectPublications {
             reconcileRuntimeActivity(now: Date())
+            // A completion held for background work is posted from a snapshot scan
+            // once the tracker's reading is usable. A tracker with no reading (an
+            // unsupported or remote CLI runtime) never gets one, so it is retried
+            // here, once the stop hook's wait for the background-agent title is over.
+            let settled = SessionArtifacts.currentStatusTimestamp()
+                - Int64(completionNotificationDelayNanoseconds / 1_000_000)
+            for sessionId in completionPending
+                where (sessionSemantics.statusClock.timestamp(for: sessionId) ?? .max) <= settled {
+                postCompletionIfReady(sessionId: sessionId)
+            }
             recordStatusShadow(now: Date())
         }
     }
 
-    /// Drops a session whose agent process has gone to idle and, unless it is on
-    /// screen, flags it finished and unseen, then persists the corrected status.
+    /// Drops a session whose agent process has gone to idle and persists that.
+    /// With `markFinished`, a top-level session that is not on screen is flagged
+    /// finished and unseen.
     private func clearStatusToIdle(pi: Int, si: Int, markFinished: Bool) {
         withCoalescedProjectPublications {
             let sid = projects[pi].sessions[si].id

@@ -1179,8 +1179,7 @@ final class AppLogicTests: XCTestCase {
             stateRepository: repository,
             completionNotificationDelayNanoseconds: 10_000_000,
             isAppActive: { false },
-            agentActivityDirectory: activityDirectory,
-            resumeMarkerDirectory: activityDirectory
+            agentActivityDirectory: activityDirectory
         )
         let notifications = NotificationSpy()
         model.attach(notifications: notifications)
@@ -1205,15 +1204,8 @@ final class AppLogicTests: XCTestCase {
             idleGeneration: 0,
             lastIdleAborted: false,
             lastIdleTurnKind: nil,
-            error: nil,
-            copilotSessionId: "owner",
-            runtimeActivity: RuntimeActivitySnapshot(
-                processing: false,
-                observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
-                idleAtMilliseconds: nil, error: nil)
+            error: nil
         )
-        try Data("owner".utf8).write(
-            to: activityDirectory.appendingPathComponent("\(session.id).copilot-session"))
         let snapshotURL = activityDirectory
             .appendingPathComponent("\(session.id).agent-activity.json")
         try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
