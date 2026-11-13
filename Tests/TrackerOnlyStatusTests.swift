@@ -320,6 +320,19 @@ final class TrackerOnlyStatusTests: XCTestCase {
         XCTAssertEqual(tab.alerts.events.count, 1)
     }
 
+    func testAQuestionPendingAtLaunchIsNotAlertedAgain() throws {
+        let tab = try makeTab()
+        // As launch leaves it until the first scan is applied.
+        tab.model.launchScanPending = true
+        try tab.publish(.tracker(processing: true, question: "Deploy?", at: tab.now))
+        XCTAssertEqual(tab.label, "Waiting for input")
+        XCTAssertTrue(tab.alerts.events.isEmpty, "it was asked before the app relaunched")
+
+        try tab.publish(.tracker(processing: true, at: tab.now))
+        try tab.publish(.tracker(processing: true, question: "Ship?", at: tab.now))
+        XCTAssertEqual(tab.alerts.events.map(\.kind), [.elicitation], "the next wait alerts")
+    }
+
     func testAListedQuestionShowsWaitingUnlessItsTrackerIsGone() throws {
         let tab = try makeTab()
         // The tracker withdrew its reading as the turn began, and lists the question.

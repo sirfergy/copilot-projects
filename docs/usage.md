@@ -859,8 +859,9 @@ when SDK history includes the same events; historical-only completions do not cr
 
 The elapsed-turn timer starts at the tracker's turn start and survives a relaunch while the
 snapshot on disk still shows the same request. Status is not saved: after a relaunch every
-session reads Idle until its tracker's next snapshot is read, and a question or permission
-prompt still pending then posts its banner again.
+session reads Idle until its tracker's next snapshot is read. A question or permission prompt
+that is already pending at that first read shows as Waiting and posts no banner, whether it was
+asked before the relaunch or while the app was closed.
 
 The terminal footer and the Copilot CLI hooks are not read for status or for sending. Tune the
 process names the agent-process check looks for with `COPILOT_PROJECTS_AGENT_PROCESSES`

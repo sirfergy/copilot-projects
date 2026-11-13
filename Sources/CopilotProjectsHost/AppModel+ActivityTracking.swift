@@ -170,7 +170,7 @@ extension AppModel {
         if changed { projects[pi].sessions[si] = session }
         if previous == .waiting, session.status != .waiting {
             cancelWaitingNotifications(sessionId: sid)
-        } else if previous != .waiting, session.status == .waiting, let snapshot {
+        } else if previous != .waiting, session.status == .waiting, !launchScanPending, let snapshot {
             // The first prompt of a wait alerts; more within the same wait do not.
             if snapshot.trackedUserInputs?.isEmpty == false
                 || snapshot.trackedElicitations?.isEmpty == false {
@@ -237,6 +237,7 @@ extension AppModel {
         agentActivityRefreshGeneration += 1
         agentActivityRefreshCoolingDown = false
         agentActivityRefreshPending = false
+        launchScanPending = true
 
         try? FileManager.default.createDirectory(
             at: agentActivityDirectory,
@@ -511,6 +512,7 @@ extension AppModel {
             trackerMissingSince = trackerMissingSince.filter { seenSessionIds.contains($0.key) }
             budgetNotificationKeys = budgetNotificationKeys.filter { seenSessionIds.contains($0.key) }
             reconcileStatus(now: readTime())
+            launchScanPending = false
             reconcileParkedSessions(now: readTime())
             for target in budgetNotifications {
                 postNotification(

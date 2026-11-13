@@ -431,6 +431,10 @@ final class AppModel: ObservableObject {
     /// Temporary shadow-run log; see StatusShadow.swift.
     lazy var statusShadow = StatusShadow(directory: stateRepository.path.deletingLastPathComponent())
     var backgroundAgentsSuppressed: Set<String> = []
+    /// True from launch until the first snapshot scan is applied. A prompt already
+    /// pending then counts as alerted: the app is relaunched at every install, and
+    /// at the Nov 12 14:55 PT install five sessions were waiting on a question.
+    var launchScanPending = false
     var completionPending: Set<String> = []
     var completionSummaryContexts: [String: CompletionSummaryContext] = [:]
     let completionTranscriptLoader: @Sendable (String) -> TranscriptSnapshot
