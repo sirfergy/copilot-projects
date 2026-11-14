@@ -56,6 +56,11 @@ the Mac if it does not resume. Save unsent desktop text before restarting.
 A session whose tracker has stopped cannot be restarted this way; run `/restart`
 in its terminal.
 
+When the tracker's own checks refuse a restart or MCP reload, the receipt reports
+`target-unavailable` whichever check failed. The tracker writes what each check read to its
+process log (`~/.copilot/logs/process-<start ms>-<tracker pid>.log`) as
+`[copilot-projects] refused <kind> <operation ID>:`.
+
 ## Remote screenshot attachments
 
 Remote integrations can stage PNG/JPEG screenshots privately and attach them to
