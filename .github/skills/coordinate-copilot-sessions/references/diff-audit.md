@@ -4,5 +4,8 @@ Load this every time you audit a child's merge-base diff, including before decla
 
 Specifically check for and reject:
 
-- **Speculative guards, fallbacks, dead plumbing, or duplication:** speculative edge-case guards, redundant fallbacks, dead plumbing, unnecessary abstractions, or cross-track duplication.
-- **Speculative flags, wrappers, parsers, or defensive patches:** speculative config flags, unnecessary wrapper classes/helpers, regex error-message parsers where typed unwrapping works, redundant validation layers, or >15-line defensive patches for hypothetical review nitpicks.
+- Speculative config flags.
+- Unnecessary wrapper classes/helpers.
+- Regex error-message parsers where typed unwrapping works.
+- Redundant validation layers.
+- Defensive patches of more than 15 lines for hypothetical review nitpicks.
