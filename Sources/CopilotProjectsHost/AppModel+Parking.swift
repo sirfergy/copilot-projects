@@ -36,6 +36,11 @@ struct ParkingRuntime {
     var sessionStore: @Sendable () -> CopilotSessionStore = { CopilotSessionStore() }
     /// Creates the session's terminal, whose new dtach master runs `copilot --resume`.
     var startTerminal: @MainActor (AppModel, String) -> Void = { $0.controller(for: $1) }
+    /// Waits until a time, or not at all once it has passed.
+    var sleepUntil: @MainActor (Date) async -> Void = {
+        let wait = $0.timeIntervalSinceNow
+        if wait > 0 { try? await ContinuousClock().sleep(until: .now.advanced(by: .seconds(wait))) }
+    }
 }
 
 extension AppModel {
@@ -379,6 +384,17 @@ extension AppModel {
         remoteOpenSessions[sessionId].map {
             now.timeIntervalSince($0.last) <= SessionParking.remoteOpenWindow
         } ?? false
+    }
+
+    /// Park Session from a remote client. The client asking let go of the session
+    /// as it asked, so its last refresh is waited out, once. A client that still
+    /// has the session open keeps refreshing, and the park is refused as ever.
+    func parkSessionForRemoteClient(_ sessionId: String) async -> String? {
+        if let last = remoteOpenSessions[sessionId]?.last {
+            // A refresh exactly `remoteOpenWindow` old still counts, so wait a little past it.
+            await parkingRuntime.sleepUntil(last.addingTimeInterval(SessionParking.remoteOpenWindow + 0.1))
+        }
+        return await parkSession(sessionId)
     }
 
     // MARK: - commands

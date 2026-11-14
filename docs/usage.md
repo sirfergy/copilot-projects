@@ -691,8 +691,9 @@ against the agent's schema, whatever the client checked.
 #### Remote park session
 
 `SessionHost.parkSession` parks one session as the Mac's **Park Session** does, with
-the same rules. A session's snapshot carries `parkable: true` while **Park Idle
-Sessions** is on and the session isn't already parked; otherwise the field is
+the same rules. It first waits out the 5 seconds for which the client asking still
+counts as having the session open. A session's snapshot carries `parkable: true` while
+**Park Idle Sessions** is on and the session isn't already parked; otherwise the field is
 omitted. Hosts report `supportsSessionParking`, and other conformers default to
 unsupported. `RemoteProtocolInfo.current` omits `park-session-v1`: a gateway
 advertises it only when it routes the `park-session` control to a host that declares
@@ -705,8 +706,9 @@ and that session is `parkable`, and applies no rule of its own. `parkSession` re
 that, Copilot has up to 20 seconds to say whether it is idle. The session's `parked`
 state reaches snapshots sooner.
 
-A session open in the web or iOS app is not parked, so parking the session a client
-has open is refused with that reason.
+A session open in the web or iOS app is not parked. A client that parks the session it
+has open lets go of it first; the park is refused with that reason only when another
+client still has it open.
 
 #### Shared quick replies
 

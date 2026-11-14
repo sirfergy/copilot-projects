@@ -82,8 +82,10 @@ public protocol SessionHost: AnyObject, Sendable {
     /// `RemoteSessionParkContract.controlType` and advertises its capability only when true.
     var supportsSessionParking: Bool { get }
     /// Parks one session as the Mac's own Park Session does, with the same
-    /// rules. Returns `.refused` when the session was left running, or `.parked`
-    /// once Copilot has exited or 20 seconds after it was told to stop.
+    /// rules, after waiting out the 5 seconds for which the client asking still
+    /// counts as having it open. Returns `.refused` when the session was left
+    /// running, or `.parked` once Copilot has exited or 20 seconds after it was
+    /// told to stop.
     func parkSession(sessionId: String) async -> RemoteSessionParkResult
     var supportsReopenClosedSession: Bool { get }
     func reopenClosedSession(id: String?) -> RemoteReopenSessionResult
