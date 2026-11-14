@@ -1129,6 +1129,66 @@ test("stalled question reads reject watcher and polling restart without releasin
   }
 });
 
+// What the tracker logs for each refusal of a request, parsed.
+function captureRefusals(t) {
+  const logged = [];
+  const savedError = console.error;
+  console.error = (...args) => { logged.push(args.join(" ")); };
+  t.after(() => { console.error = savedError; });
+  return (request) => {
+    const prefix = `[copilot-projects] refused ${request.payload.kind} ${request.operationId}: `;
+    return logged.filter((line) => line.startsWith(prefix)).map((line) => JSON.parse(line.slice(prefix.length)));
+  };
+}
+
+// What a refusal logs for the checks that read idle.
+const idleChecks = {
+  authority: true, operations: 0, questionsCaughtUp: true, restartRequested: false, processing: false,
+  foregroundTurnActive: false, scheduledTurnActive: false, subagents: 0, questionEvents: 0, pendingInput: false,
+};
+
+test("the log says which check refused a busy session's restart", {
+  concurrency: false,
+}, async (t) => {
+  const refusalsOf = captureRefusals(t);
+  for (const [busy, failed] of [
+    ["question", { questionEvents: 1, pendingInput: true }],
+    ["runtime", { freshActiveWork: true }],
+  ]) {
+    const runtime = await createRuntime(t);
+    await workflowReady(runtime);
+    if (busy === "question") {
+      await runtime.session.emit("elicitation.requested", pendingURLQuestion("missed"), {}, false);
+    } else {
+      runtime.session.activityHandler = async () => ({ abortable: false, hasActiveWork: true });
+    }
+    const request = workflowHandoff(runtime, "session-restart", {});
+    await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "busy restart not rejected");
+    assert.deepEqual(refusalsOf(request), [{
+      freshProcessing: false, freshActiveWork: false, sendStarted: false, ...idleChecks, ...failed,
+    }]);
+  }
+});
+
+test("the log of a restart refused during a heartbeat's question read shows only questions not caught up", {
+  concurrency: false,
+}, async (t) => {
+  const refusalsOf = captureRefusals(t);
+  const runtime = await createRuntime(t);
+  await workflowReady(runtime);
+  const read = runtime.session.questionEventHandler;
+  let finish;
+  runtime.session.questionEventHandler = (params) => new Promise((resolve) => {
+    finish = () => resolve(read(params));
+  });
+  t.after(() => finish?.());
+  runtime.intervalCallback();
+  await waitFor(() => finish, "heartbeat question read did not start");
+  const request = workflowHandoff(runtime, "session-restart", {});
+  await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "restart not rejected");
+  assert.deepEqual(refusalsOf(request), [{ payload: true, capable: true, ...idleChecks, questionsCaughtUp: false }]);
+});
+
 test("a completed native send invalidates restart preflight before a delayed turn-start event", {
   concurrency: false,
 }, async (t) => {

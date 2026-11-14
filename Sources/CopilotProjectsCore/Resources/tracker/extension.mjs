@@ -2123,6 +2123,20 @@ if (validSessionId && socketPath) {
         return sessionIsIdle() && (!parkCheck || schedules.length === 0);
     }
 
+    // A refused restart or MCP reload answers `target-unavailable` whichever
+    // check failed. On Nov 13 an idle session (F7F48511) refused a restart and
+    // nothing recorded which, so the log carries what the checks read.
+    function logRefusal(context, checks) {
+        if (!queuedCommands.has(context.kind)) return;
+        console.error(`[copilot-projects] refused ${context.kind} ${context.operationId}:`, JSON.stringify({
+            ...checks, authority: operationAuthorityCurrent(context), operations: activeOperationKeys.size,
+            questionsCaughtUp: questionEventStream?.sessionId === copilotSessionId && questionEventStream.caughtUp === true,
+            restartRequested, processing: runtimeActivity?.processing ?? null,
+            foregroundTurnActive, scheduledTurnActive, subagents: activeSubagents.size,
+            questionEvents: pendingQuestionRequestIds.size, pendingInput: workflowHasPendingInput(),
+        }));
+    }
+
     // Hot reload: once the app has installed a different tracker and the
     // session is idle on two consecutive heartbeats with no turn between them,
     // ask the runtime to reload this session's extensions, which replaces this
@@ -2699,6 +2713,10 @@ if (validSessionId && socketPath) {
             && (kind !== "answer-session-budget"
                 || pendingBudgetRequest?.requestId === action.requestId);
         if (!valid || !operationAuthorityCurrent(context)) {
+            logRefusal(context, {
+                payload: request.schemaVersion === 1 && validWorkflowAction(action, kind),
+                capable: workflow.capabilities.includes(kind),
+            });
             publishRejectedPreflight(context, "target-unavailable", path, encoded);
             return;
         }
@@ -2709,10 +2727,11 @@ if (validSessionId && socketPath) {
             const preparingKey = operationExecutionKey(context.conversationEpoch, context.operationId);
             activeOperationKeys.add(preparingKey);
             let ready = false;
+            let processing, activity;
             try {
                 const scheduled = parkCheck ? await workflowRead("session.schedule.list", {}, context) : null;
-                const processing = await workflowRead("session.metadata.isProcessing", {}, context);
-                const activity = await workflowRead("session.metadata.activity", {}, context);
+                processing = await workflowRead("session.metadata.isProcessing", {}, context);
+                activity = await workflowRead("session.metadata.activity", {}, context);
                 // The published list leaves out what it can't show, so read the queue itself.
                 const queue = parkCheck ? await workflowRead("session.queue.pendingItems", {}, context) : null;
                 await recoverQuestionsBounded();
@@ -2731,6 +2750,13 @@ if (validSessionId && socketPath) {
                     // A turn that came and went during the reads may have left work behind.
                     || (parkCheck && (pendingMessages.length !== 0
                         || runtimeActivityRevision !== activityRevision))) {
+                // Copilot's answers to the two reads above, null when one gave no boolean.
+                // The line's plain `processing` is the tracker's reading from before them.
+                logRefusal(context, {
+                    freshProcessing: typeof processing?.processing === "boolean" ? processing.processing : null,
+                    freshActiveWork: typeof activity?.hasActiveWork === "boolean" ? activity.hasActiveWork : null,
+                    sendStarted: nativeSendRevision !== sendRevision,
+                });
                 publishRejectedPreflight(context, "target-unavailable", path, encoded);
                 return;
             }
