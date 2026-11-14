@@ -338,6 +338,12 @@ def launch_session_and_wait(
             try:
                 status_output = cli_runner(["list-status"])
             except CoordinatorError as exc:
+                err_lower = str(exc).lower()
+                if time.monotonic() < deadline and any(
+                    t in err_lower for t in ("the app is busy", "errno 35", "timed out")
+                ):
+                    sleep_fn(poll_interval_seconds)
+                    continue
                 raise CoordinatorError(
                     f"{exc}; session {session_id} was already launched; "
                     f"if retrying launch, reuse --request-id {req_uuid}"
@@ -440,6 +446,7 @@ def send_session_prompt(
     request_id: str | None = None,
     socket_path: str | None = None,
     sender: Callable[[dict[str, object], str | None], dict[str, object]] | None = None,
+    steer: bool = False,
 ) -> dict[str, object]:
     if not session_id or not session_id.strip():
         raise CoordinatorError("session_id is required")
@@ -453,6 +460,8 @@ def send_session_prompt(
     }
     if project_id and project_id.strip():
         payload["projectId"] = project_id.strip()
+    if steer:
+        payload["promptMode"] = "immediate"
 
     dispatch = sender or (lambda req, sp: send_control_request(req, socket_path=sp))
     try:
@@ -554,6 +563,11 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--prompt", help="Prompt text to send.")
     group.add_argument("--prompt-file", help="Path to prompt file (<=8192B UTF-8).")
     p_send.add_argument("--request-id", help="Optional UUID request ID.")
+    p_send.add_argument(
+        "--steer",
+        action="store_true",
+        help="Deliver into the running turn, or start one at once, instead of queueing.",
+    )
     p_send.add_argument("--socket", help="Optional control socket path override.")
 
     p_status = sub.add_parser("status", help="List session statuses as JSON.")
@@ -613,6 +627,7 @@ def main(argv: list[str] | None = None) -> int:
                 project_id=args.project,
                 request_id=args.request_id,
                 socket_path=args.socket,
+                steer=args.steer,
             )
             print(json.dumps(res, indent=2))
             return 0
