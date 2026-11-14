@@ -707,8 +707,9 @@ that, Copilot has up to 20 seconds to say whether it is idle. The session's `par
 state reaches snapshots sooner.
 
 A session open in the web or iOS app is not parked. A client that parks the session it
-has open lets go of it first; the park is refused with that reason only when another
-client still has it open.
+has open lets go of it first. The park is still refused with that reason when the session
+is refreshed again before the wait ends: by another client that has it open, or by a last
+refresh from the asking client that arrives after its request.
 
 #### Shared quick replies
 
