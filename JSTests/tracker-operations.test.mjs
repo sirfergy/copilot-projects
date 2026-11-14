@@ -1153,7 +1153,7 @@ test("the log says which check refused a busy session's restart", {
   const refusalsOf = captureRefusals(t);
   for (const [busy, failed] of [
     ["question", { questionEvents: 1, pendingInput: true }],
-    ["runtime", { runtimeIdle: false }],
+    ["runtime", { freshActiveWork: true }],
   ]) {
     const runtime = await createRuntime(t);
     await workflowReady(runtime);
@@ -1164,7 +1164,9 @@ test("the log says which check refused a busy session's restart", {
     }
     const request = workflowHandoff(runtime, "session-restart", {});
     await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "busy restart not rejected");
-    assert.deepEqual(refusalsOf(request), [{ runtimeIdle: true, sendStarted: false, ...idleChecks, ...failed }]);
+    assert.deepEqual(refusalsOf(request), [{
+      freshProcessing: false, freshActiveWork: false, sendStarted: false, ...idleChecks, ...failed,
+    }]);
   }
 });
 

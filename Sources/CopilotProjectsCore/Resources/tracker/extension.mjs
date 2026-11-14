@@ -2727,10 +2727,11 @@ if (validSessionId && socketPath) {
             const preparingKey = operationExecutionKey(context.conversationEpoch, context.operationId);
             activeOperationKeys.add(preparingKey);
             let ready = false;
+            let processing, activity;
             try {
                 const scheduled = parkCheck ? await workflowRead("session.schedule.list", {}, context) : null;
-                const processing = await workflowRead("session.metadata.isProcessing", {}, context);
-                const activity = await workflowRead("session.metadata.activity", {}, context);
+                processing = await workflowRead("session.metadata.isProcessing", {}, context);
+                activity = await workflowRead("session.metadata.activity", {}, context);
                 // The published list leaves out what it can't show, so read the queue itself.
                 const queue = parkCheck ? await workflowRead("session.queue.pendingItems", {}, context) : null;
                 await recoverQuestionsBounded();
@@ -2749,7 +2750,13 @@ if (validSessionId && socketPath) {
                     // A turn that came and went during the reads may have left work behind.
                     || (parkCheck && (pendingMessages.length !== 0
                         || runtimeActivityRevision !== activityRevision))) {
-                logRefusal(context, { runtimeIdle: ready, sendStarted: nativeSendRevision !== sendRevision });
+                // Copilot's answers to the two reads above, null when one gave no boolean.
+                // The line's plain `processing` is the tracker's reading from before them.
+                logRefusal(context, {
+                    freshProcessing: typeof processing?.processing === "boolean" ? processing.processing : null,
+                    freshActiveWork: typeof activity?.hasActiveWork === "boolean" ? activity.hasActiveWork : null,
+                    sendStarted: nativeSendRevision !== sendRevision,
+                });
                 publishRejectedPreflight(context, "target-unavailable", path, encoded);
                 return;
             }
