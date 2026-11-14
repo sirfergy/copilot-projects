@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import socket
 import tempfile
@@ -245,15 +247,26 @@ class CoordinatorTests(unittest.TestCase):
                 socket_path=str(sock_file),
             )
             t.join(timeout=2)
+
+            t = threading.Thread(target=handle_one, daemon=True)
+            t.start()
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = coordinator.main(
+                    ["send", "--session", "S1", "--prompt", "Stop", "--socket", str(sock_file), "--steer"]
+                )
+            t.join(timeout=2)
             server.close()
 
             self.assertTrue(res["ok"])
             self.assertEqual(res["code"], "queued")
-            self.assertEqual(len(received), 1)
+            self.assertEqual(len(received), 2)
             self.assertEqual(received[0]["command"], "send-session-prompt")
             self.assertEqual(received[0]["sessionId"], "S1")
             self.assertEqual(received[0]["projectId"], "P1")
             self.assertEqual(received[0]["prompt"], "Please simplify the fallback in foo.ts")
+            self.assertNotIn("promptMode", received[0])
+            self.assertEqual(rc, 0)
+            self.assertEqual(received[1].get("promptMode"), "immediate")
         finally:
             if sock_file.exists():
                 sock_file.unlink()
@@ -358,6 +371,41 @@ class CoordinatorTests(unittest.TestCase):
                     cli_runner=fake_unrelated_error,
                 )
             self.assertEqual(len(seen_cmds), 1)
+
+    def test_launch_session_retries_transient_list_status_busy_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt_path = Path(tmp) / "p.md"
+            prompt_path.write_text("Child task prompt", encoding="utf-8")
+            polls = 0
+
+            def fake_cli(args: list[str]) -> str:
+                nonlocal polls
+                if args[0] == "new-copilot-session":
+                    return "S-BUSY"
+                if args[0] == "list-status":
+                    polls += 1
+                    if polls == 1:
+                        raise coordinator.CoordinatorError(
+                            "copilot-projects list-status failed: copilot-projects: the app is busy"
+                        )
+                    if polls == 2:
+                        raise coordinator.CoordinatorError(
+                            "copilot-projects list-status failed: copilot-projects: io error: read failed (errno 35)"
+                        )
+                    return "Proj/Child 1  running  S-BUSY"
+                raise AssertionError(f"unexpected command: {args}")
+
+            res = coordinator.launch_session_and_wait(
+                project_id="P1",
+                title="Child 1",
+                prompt_file=prompt_path,
+                wait_running=True,
+                cli_runner=fake_cli,
+                sleep_fn=lambda _: None,
+            )
+            self.assertEqual(res["session_id"], "S-BUSY")
+            self.assertEqual(res["status"], "running")
+            self.assertEqual(polls, 3)
 
     def test_launch_session_no_parent_flag_and_manifest_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
