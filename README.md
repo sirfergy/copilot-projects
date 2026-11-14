@@ -585,9 +585,9 @@ Use `Ctrl-\` to detach without ending the session.
 
 The bundled [`coordinate-copilot-sessions`](.github/skills/coordinate-copilot-sessions)
 skill teaches Copilot CLI to stagger-launch child sessions (`--parent-session`),
-prompt them over the control socket (`send-session-prompt`), or spin off a
-tangent into a standalone tab (`--no-parent`). Symlink it into `~/.copilot/skills/`
-to make it available in every repository:
+queue or steer prompts to them over the control socket (`send-session-prompt`), or
+spin off a tangent into a standalone tab (`--no-parent`). Symlink it into
+`~/.copilot/skills/` to make it available in every repository:
 
 ```bash
 mkdir -p ~/.copilot/skills
