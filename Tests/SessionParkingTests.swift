@@ -231,12 +231,11 @@ final class SessionParkingTests: XCTestCase {
     func testABusySessionIsLeftAloneAndItsInputReopens() async throws {
         // Busy when asked, a turn that starts between the answer and the stop, and the
         // rule no longer holding once Copilot answers: opened in the web or iOS app,
-        // marked unread, parking switched off.
+        // parking switched off.
         let quiet: (Fixture) -> Void = { _ in }
         let answers: [(RemoteOperationState, Bool, (Fixture) -> Void)] = [
             (.rejected, false, quiet), (.applied, true, quiet),
             (.applied, false, { $0.model.noteRemoteClientHasOpen($0.id) }),
-            (.applied, false, { $0.model.markSessionUnread(sessionId: $0.id) }),
             (.applied, false, { $0.defaults.set(SessionParking.off, forKey: SessionParking.settingKey) }),
         ]
         for (state, turnStarted, meanwhile) in answers {
@@ -287,7 +286,10 @@ final class SessionParkingTests: XCTestCase {
                 to: $0.sessions.appendingPathComponent("\($0.id).session-send.json")
             ) }),
             ("nothing saved to resume", { try FileManager.default.removeItem(at: $0.copilotHome) }),
-            ("unread", { $0.model.markSessionUnread(sessionId: $0.id) }),
+            ("latest request failed", {
+                try $0.publish { $0.lastTurnError = TrackedTurnError(message: "The request failed.") }
+                $0.model.refreshAgentActivitySnapshots()
+            }),
             ("open in a remote client", { $0.model.noteRemoteClientHasOpen($0.id) }),
         ]
         for (name, arrange) in cases {
@@ -312,6 +314,45 @@ final class SessionParkingTests: XCTestCase {
             XCTAssertNil(result, sessionIsChild ? "as the child" : "as the parent")
             XCTAssertEqual(f.model.parkedState(f.id), .parked)
             XCTAssertEqual(f.model.projects[0].effectiveParentSessionIdsBySessionId(), [child: parent])
+        }
+    }
+
+    func testASessionWithSomethingUnseenIsParkedAndItsRowKeepsTheMark() async throws {
+        // A manual mark, an unread notification, and a turn that finished with nobody looking.
+        let marks: [(String, (inout Session) -> Void)] = [
+            ("marked unread", { $0.markedUnread = true }),
+            ("unread", { $0.hasUnread = true }),
+            ("finished unseen", { $0.finishedUnseen = true }),
+        ]
+        for (name, mark) in marks {
+            let f = try Fixture()
+            mark(&f.model.projects[0].sessions[0])
+            let before = try f.wire
+            XCTAssertNotNil(before.attention, name)
+            async let refusal = f.model.parkSession(f.id)
+            try await f.answerParkCheck(.applied)
+            let result = await refusal
+            XCTAssertNil(result, name)
+            XCTAssertEqual(f.model.parkedState(f.id), .parked, name)
+
+            // The parked row says so beside its parked mark, and clients are told what they were.
+            let row = SessionRow(
+                session: f.model.projects[0].sessions[0], isActive: false, onSelect: {}, onClose: {}
+            )
+            XCTAssertEqual(SessionStateIndicator.symbolName(for: row.session), "moon.zzz.fill", name)
+            XCTAssertTrue(row.showsUnreadIndicator, name)
+            XCTAssertEqual(row.accessibilityStatus, "Parked, Unread", name)
+            let wire = try f.wire
+            XCTAssertEqual(wire.attention, before.attention, name)
+            XCTAssertEqual([wire.unread, wire.ready], [before.unread, before.ready], name)
+
+            // The mark outlives the resume.
+            f.model.resumeParkedSession(f.id)
+            let later = Date().addingTimeInterval(1)
+            try f.publish(at: later)
+            f.model.refreshAgentActivitySnapshots(now: later)
+            XCTAssertNil(f.model.parkedState(f.id), name)
+            XCTAssertEqual(try f.wire.attention, before.attention, "\(name), after the resume")
         }
     }
 
