@@ -57,8 +57,8 @@ extension AppModel {
         locateIndex(sessionId).flatMap { projects[$0.p].sessions[$0.s].parked?.state }
     }
 
-    /// True while a session's input is closed for parking, so the caller answers
-    /// "busy". Input addressed to a parked session starts its resume.
+    /// True while a session's input is closed for parking, so the caller refuses
+    /// it. Input addressed to a parked session starts its resume.
     func parkingBlocksInput(_ sessionId: String) -> Bool {
         guard let state = parkedState(sessionId) else { return false }
         if state == .parked { resumeParkedSession(sessionId) }

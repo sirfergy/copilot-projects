@@ -585,7 +585,8 @@ is fully idle: no turn, background agent or background shell. `--steer` delivers
 as the composer's **Steer current task** does: into the turn that is running, or as
 a new turn at once when none is. A session that is parked, restarting, waiting for
 input or without a running Copilot refuses either kind, and a refused steer is never
-queued instead: the command says why and exits non-zero (8 when busy). It exits 0
+queued instead: the command says why and exits non-zero (8 when busy). A parked
+session exits 9 instead: run `unpark-session`, then send the prompt again. It exits 0
 once the session's tracker has been handed the prompt. Replaying a `--request-id`
 does not send twice while the app remembers the request (about a week); replaying it
 with a different prompt, session or `--steer` exits 3.
