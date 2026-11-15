@@ -34,6 +34,8 @@ STATUS_LINE_RE = re.compile(
 class CoordinatorError(RuntimeError):
     """Raised when a coordinator operation fails validation or execution."""
 
+    code: str | None = None  # the app's own reason code, when it refused the request
+
 
 @dataclass(frozen=True)
 class ProjectEntry:
@@ -222,7 +224,9 @@ def send_control_request(
         code = resp.get("code")
         err = resp.get("error") or "unknown error"
         suffix = f" ({code})" if code else ""
-        raise CoordinatorError(f"control socket error{suffix}: {err}")
+        error = CoordinatorError(f"control socket error{suffix}: {err}")
+        error.code = code
+        raise error
     return resp
 
 
@@ -463,9 +467,23 @@ def send_session_prompt(
     if steer:
         payload["promptMode"] = "immediate"
 
-    dispatch = sender or (lambda req, sp: send_control_request(req, socket_path=sp))
+    socket_path = socket_path or control_socket_path()  # one socket for every request below
+    def dispatch(req: dict[str, object], timeout: float = 5.0) -> dict[str, object]:
+        if sender:
+            return sender(req, socket_path)
+        return send_control_request(req, socket_path=socket_path, timeout=timeout)
+
     try:
-        resp = dispatch(payload, socket_path)
+        try:
+            resp = dispatch(payload)
+        except CoordinatorError as exc:
+            if exc.code != "parked":
+                raise
+            # The app stopped this session's Copilot to free memory: start it again over the
+            # same socket, wait until it takes a prompt (110 s at most), then send once more.
+            target = {k: payload[k] for k in ("sessionId", "projectId") if k in payload}
+            dispatch({"command": "unpark-session", **target}, timeout=120.0)
+            resp = dispatch(payload)
     except CoordinatorError as exc:
         raise CoordinatorError(
             f"{exc}; if retrying the same prompt, reuse --request-id {req_uuid}"
