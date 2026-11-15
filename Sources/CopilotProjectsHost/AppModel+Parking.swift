@@ -18,6 +18,9 @@ enum SessionParking {
     static let remoteOpenWindow: TimeInterval = 5
     /// How often the gateway refreshes the session a client has open.
     static let remoteRefreshInterval: TimeInterval = 0.5
+    /// How many times `unpark-session` looks for a session that takes a prompt. The
+    /// wait has to end before its client stops waiting.
+    static let unparkPolls = 440
 }
 
 /// What parking reads from and does to processes, so tests can stand in for it.
@@ -394,6 +397,47 @@ extension AppModel {
             ))
         }
         return await parkSession(sessionId)
+    }
+
+    // MARK: - park-session and unpark-session
+
+    /// The scripted `park-session` and `unpark-session`. Each answers once its result is known.
+    func parkingCommand(_ request: ControlRequest) async -> ControlResponse {
+        let sessionId = request.sessionId ?? ""
+        if let refusal = automationRefusal(sessionId: sessionId, projectId: request.projectId) { return refusal }
+        if request.command == "park-session" {
+            if parkedState(sessionId) == .parked { return .success(code: "parked") }
+            // Nobody chose this session, so Park All's rules apply. The rule is asked first, as Park
+            // All asks it: `parkSession` alone refuses a session with no Copilot for the wrong reason.
+            var reason = parkBlocker(for: sessionId, unattended: true)
+            if reason == nil { reason = await parkSession(sessionId, unattended: true) }
+            return reason.map { ControlResponse.failure($0, code: "busy") } ?? .success(code: "parked")
+        }
+        guard let state = parkedState(sessionId) else { return .success(code: "resumed") }
+        if state == .parking {
+            return .failure("The session is still being parked. Try again in a few seconds.", code: "busy")
+        }
+        resumeParkedSession(sessionId)
+        // The row stops being parked at the resumed tracker's first report, which
+        // offers no send yet, so this waits for what a sent prompt needs.
+        for _ in 0..<SessionParking.unparkPolls {
+            if parkedState(sessionId) == .failed {
+                return .failure("Copilot didn't start again in this session. Nothing was lost. "
+                    + "Run the command again, or open the session on the Mac.")
+            }
+            if parkedState(sessionId) == nil, takesPrompt(sessionId) { return .success(code: "resumed") }
+            await parkingRuntime.sleepUntil(Date().addingTimeInterval(0.25))
+        }
+        return .failure("The session can't take a prompt yet. Check its terminal.", code: "busy")
+    }
+
+    /// Whether `send-session-prompt` would hand the session's tracker a prompt now.
+    private func takesPrompt(_ sessionId: String) -> Bool {
+        guard let snapshot = parkingAdapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
+              let workflow = snapshot.workflow else { return false }
+        let now = Date()
+        return snapshot.remoteOperationProjection(at: now).conversationEpoch != nil
+            && workflow.supports(.send, at: now) && workflow.sendReady
     }
 
     // MARK: - commands

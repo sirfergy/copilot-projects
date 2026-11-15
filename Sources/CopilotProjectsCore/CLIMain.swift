@@ -22,6 +22,8 @@ public enum CLIMain {
         "close-session",
         "restart-session",
         "reload-session-mcp",
+        "park-session",
+        "unpark-session",
         "rename-project",
         "focus",
         "attach",
@@ -123,7 +125,7 @@ public enum CLIMain {
             return sendSessionPrompt(rest, environment: environment)
         case "set-parent-session":
             return setParentSession(rest, environment: environment)
-        case "close-session", "restart-session", "reload-session-mcp":
+        case "close-session", "restart-session", "reload-session-mcp", "park-session", "unpark-session":
             return explicitSessionCommand(command, rest, environment: environment)
         default:
             break
@@ -362,11 +364,12 @@ public enum CLIMain {
 
     private static func sendAutomationRequest(
         _ req: ControlRequest,
-        environment: [String: String]
+        environment: [String: String],
+        timeout: TimeInterval = ControlClient().timeout
     ) -> Int32 {
         do {
             let socketPath = Env.socket(environment) ?? Paths.socketPath
-            let resp = try ControlClient(socketPath: socketPath).send(req)
+            let resp = try ControlClient(socketPath: socketPath, timeout: timeout).send(req)
             if resp.ok, let text = resp.text, !text.isEmpty {
                 print(text)
             }
@@ -414,7 +417,7 @@ public enum CLIMain {
         return sendAutomationRequest(req, environment: environment)
     }
 
-    // MARK: - close-session, restart-session, reload-session-mcp (automation)
+    // MARK: - close-session, restart-session, reload-session-mcp, park-session, unpark-session (automation)
 
     /// The target is always explicit: the calling terminal's session is never implied,
     /// so a script cannot end or restart the session it runs in by omitting `--session`.
@@ -439,7 +442,9 @@ public enum CLIMain {
         var req = ControlRequest(command: command)
         req.sessionId = sessionId
         req.projectId = parsed.flags["project"]
-        return sendAutomationRequest(req, environment: environment)
+        // A park and an unpark answer once their result is known, so their client waits longer.
+        let waits = command == "park-session" || command == "unpark-session"
+        return sendAutomationRequest(req, environment: environment, timeout: waits ? 120 : ControlClient().timeout)
     }
 
     // MARK: - aliases
@@ -684,6 +689,10 @@ public enum CLIMain {
           copilot-projects restart-session         Ask an idle session's Copilot to run /restart
               --session ID [--project ID]
           copilot-projects reload-session-mcp      Ask an idle session's Copilot to run /mcp reload
+              --session ID [--project ID]
+          copilot-projects park-session            Park an idle session that is not on screen, and wait for the result
+              --session ID [--project ID]
+          copilot-projects unpark-session          Start a parked session's Copilot again, and wait until it takes a prompt
               --session ID [--project ID]
           copilot-projects rename-project <name>   Rename a project [--project ID]
           copilot-projects focus                   Focus a project/session [--project ID] [--session ID]

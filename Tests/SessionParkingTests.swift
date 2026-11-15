@@ -619,4 +619,133 @@ final class SessionParkingTests: XCTestCase {
         let saved = Data(#"{"id":"a","title":"t","cwd":"/tmp","parked":{"state":"napping"}}"#.utf8)
         XCTAssertNil(try JSONDecoder().decode(Session.self, from: saved).parked)
     }
+
+    // MARK: - park-session and unpark-session
+
+    private func command(_ name: String, _ sessionId: String, project: String? = nil) -> ControlRequest {
+        var request = ControlRequest(command: name)
+        request.sessionId = sessionId
+        request.projectId = project
+        return request
+    }
+
+    func testAScriptedParkFollowsParkAllsRulesAndSaysWhyItLeftASessionAlone() async throws {
+        let other = Session(title: "Other", cwd: "/tmp")
+        let f = try Fixture(others: [other])
+        let project = f.model.projects[0].id
+
+        // The session on screen is left alone, for the Mac's own reason.
+        f.model.show(projectId: project, sessionId: f.id)
+        var response = await f.model.parkingCommand(command("park-session", f.id))
+        XCTAssertEqual([response.code, response.error], ["busy", "It is the session on screen."])
+        // A session with no Copilot is refused by the rule, not by a guess about its Copilot.
+        response = await f.model.parkingCommand(command("park-session", other.id))
+        XCTAssertEqual(response.error, f.model.parkBlocker(for: other.id, unattended: true))
+        XCTAssertNotEqual(response.error, "Its Copilot may be running another session too.")
+        // Gone, or moved to another project, as the other session commands answer.
+        response = await f.model.parkingCommand(command("park-session", "gone"))
+        XCTAssertEqual(response.code, "gone")
+        response = await f.model.parkingCommand(command("park-session", f.id, project: "elsewhere"))
+        XCTAssertEqual(response.code, "conflict")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.question.path), "Copilot was not asked")
+
+        // Off screen it is parked, and asking again says so without asking Copilot.
+        f.model.show(projectId: project, sessionId: other.id)
+        async let parking = f.model.parkingCommand(command("park-session", f.id, project: project))
+        try await f.answerParkCheck(.applied)
+        response = await parking
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.code, "parked")
+        XCTAssertEqual(f.model.parkedState(f.id), .parked)
+        response = await f.model.parkingCommand(command("park-session", f.id))
+        XCTAssertEqual(response.code, "parked")
+        XCTAssertEqual(f.processes.stops, [[f.id]])
+    }
+
+    func testAScriptedUnparkWaitsUntilTheSessionTakesAPrompt() async throws {
+        func workflow(sends: Bool) -> (inout AgentActivitySnapshot) -> Void {
+            { $0.workflow = RemoteSessionWorkflow(
+                observedAtMilliseconds: $0.workflow!.observedAtMilliseconds,
+                capabilities: sends ? ["session-send"] : [], sendReady: sends
+            ) }
+        }
+        // A resume is under way. The row stops being parked at the resumed tracker's
+        // first report, which offers no send yet. The next one does.
+        let f = try Fixture(parked: ParkedSession(state: .resuming, sinceMilliseconds: 1))
+        f.model.parkingRuntime.sleepUntil = { [unowned f] until in
+            f.processes.waits.append(until)
+            try? f.publish(workflow(sends: f.processes.waits.count > 1))
+            f.model.refreshAgentActivitySnapshots()
+            XCTAssertNil(f.model.parkedState(f.id))
+        }
+        var response = await f.model.parkingCommand(command("unpark-session", f.id))
+        XCTAssertEqual(response.code, "resumed")
+        XCTAssertGreaterThan(f.processes.waits.count, 1, "the first report does not take a prompt")
+        XCTAssertEqual(f.processes.started, [], "a resume under way is not started again")
+
+        // Parked: the command starts Copilot again, and says so when it does not come back.
+        let g = try Fixture(parked: ParkedSession(state: .parked, sinceMilliseconds: 1))
+        g.processes.alive = false
+        g.processes.master = false
+        g.model.setLiveAgentSessionsForTesting([])
+        g.model.parkingRuntime.sleepUntil = { [unowned g] _ in
+            XCTAssertEqual(g.model.parkedState(g.id), .resuming)
+            g.model.refreshAgentActivitySnapshots(now: Date().addingTimeInterval(91))
+        }
+        for attempt in 1...2 {
+            response = await g.model.parkingCommand(command("unpark-session", g.id))
+            XCTAssertFalse(response.ok)
+            XCTAssertNil(response.code, "a resume that failed is not a refusal")
+            XCTAssertEqual(g.model.parkedState(g.id), .failed)
+            XCTAssertEqual(g.processes.started.count, attempt, "asking again tries again")
+        }
+
+        // Nothing to wait for when the session is not parked, and no resume while it is being parked.
+        let live = try Fixture()
+        live.model.parkingRuntime.sleepUntil = { _ in XCTFail("a session that is not parked has nothing to wait for") }
+        response = await live.model.parkingCommand(command("unpark-session", live.id))
+        XCTAssertEqual(response.code, "resumed")
+        let parking = try Fixture(parked: ParkedSession(state: .parking, sinceMilliseconds: 1))
+        response = await parking.model.parkingCommand(command("unpark-session", parking.id))
+        XCTAssertEqual(response.code, "busy")
+        XCTAssertEqual(parking.processes.started, [])
+
+        // Copilot is back but never takes a prompt: the wait ends at its limit.
+        let stuck = try Fixture(parked: ParkedSession(state: .resuming, sinceMilliseconds: 1))
+        stuck.model.parkingRuntime.sleepUntil = { [unowned stuck] until in
+            stuck.processes.waits.append(until)
+            guard stuck.processes.waits.count == 1 else { return }
+            try? stuck.publish(workflow(sends: false))
+            stuck.model.refreshAgentActivitySnapshots()
+        }
+        response = await stuck.model.parkingCommand(command("unpark-session", stuck.id))
+        XCTAssertEqual(response.code, "busy")
+        XCTAssertNil(stuck.model.parkedState(stuck.id))
+        XCTAssertEqual(stuck.processes.waits.count, SessionParking.unparkPolls)
+    }
+
+    func testTheCommandLineWaitsForAParkAndAnUnparkAndExitsWithTheirResult() async throws {
+        let f = try Fixture()
+        let socketPath = "/tmp/cp-\(UUID().uuidString.prefix(8)).sock"
+        XCTAssertTrue(f.model.startServer(socketPath: socketPath))
+        defer {
+            f.model.stopServer()
+            try? FileManager.default.removeItem(atPath: socketPath)
+        }
+        var environment = ProcessInfo.processInfo.environment
+        environment["COPILOT_PROJECTS_SOCKET"] = socketPath
+        // The client blocks on the socket while the model answers on the main actor.
+        let run: ([String]) async -> Int32 = { [environment] arguments in
+            await Task.detached { CLIMain.run(arguments, environment: environment) }.value
+        }
+        f.model.show(projectId: f.model.projects[0].id, sessionId: f.id)
+        let refused = await run(["park-session", "--session", f.id])
+        XCTAssertEqual(refused, 8, "the session on screen is left alone")
+        let notParked = await run(["unpark-session", "--session", f.id])
+        XCTAssertEqual(notParked, 0)
+        let gone = await run(["unpark-session", "--session", "gone"])
+        XCTAssertEqual(gone, 4)
+        let moved = await run(["park-session", "--session", f.id, "--project", "elsewhere"])
+        XCTAssertEqual(moved, 3)
+    }
 }
