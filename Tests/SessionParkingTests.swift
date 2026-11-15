@@ -15,6 +15,8 @@ final class SessionParkingTests: XCTestCase {
         var masterChecks = 0
         /// The title of each alert the model raised.
         var alerts: [String] = []
+        /// The time each wait before a remote client's park was to end.
+        var waits: [Date] = []
     }
 
     @MainActor
@@ -488,6 +490,46 @@ final class SessionParkingTests: XCTestCase {
         f.defaults.set(SessionParking.off, forKey: SessionParking.settingKey)
         sessions = f.model.remoteWorkspaceSnapshot().projects[0].sessions
         XCTAssertEqual(try sessions.map(parkableOnTheWire), [nil, nil])
+    }
+
+    func testAClientParksTheSessionItHadOpenOnceItsLastRefreshLapsesUnlessAnotherStillHasItOpen() async throws {
+        // The client let go as it asked, just after its last refresh, which still counts.
+        let f = try Fixture()
+        let refreshed = Date()
+        f.model.noteRemoteClientHasOpen(f.id, now: refreshed)
+        XCTAssertNotNil(f.model.parkBlocker(for: f.id))
+        f.model.parkingRuntime.sleepUntil = { [unowned f] until in
+            f.processes.waits.append(until)
+            // Nothing has changed while the Mac waits.
+            XCTAssertNil(f.model.parkedState(f.id))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: f.question.path))
+            // The wait passes: that refresh is as much older.
+            let aged = refreshed.addingTimeInterval(-until.timeIntervalSinceNow)
+            f.model.remoteOpenSessions[f.id] = (first: aged, last: aged)
+        }
+        let bridge: any SessionHost = RemoteModelBridge(model: f.model)
+        async let parked = bridge.parkSession(sessionId: f.id)
+        try await f.answerParkCheck(.applied)
+        let result = await parked
+        XCTAssertEqual(result, .parked)
+        XCTAssertEqual(f.processes.stops, [[f.id]])
+        // Once, until just past the 5 s for which that refresh counts.
+        XCTAssertEqual(f.processes.waits.count, 1)
+        XCTAssertEqual(
+            try XCTUnwrap(f.processes.waits.first).timeIntervalSince(refreshed),
+            SessionParking.remoteOpenWindow + SessionParking.remoteRefreshInterval + 0.1, accuracy: 0.001
+        )
+
+        // Another client still has it open and refreshes during the wait: refused as ever.
+        let g = try Fixture()
+        g.model.noteRemoteClientHasOpen(g.id)
+        g.model.parkingRuntime.sleepUntil = { [unowned g] _ in g.model.noteRemoteClientHasOpen(g.id) }
+        let other: any SessionHost = RemoteModelBridge(model: g.model)
+        let refused = await other.parkSession(sessionId: g.id)
+        XCTAssertEqual(refused, .refused("It is open in the web or iOS app."))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: g.question.path), "Copilot was not asked")
+        XCTAssertNil(g.model.parkedState(g.id))
+        XCTAssertEqual(g.processes.stops, [])
     }
 
     /// `parkable` as a client reads it from the encoded snapshot.

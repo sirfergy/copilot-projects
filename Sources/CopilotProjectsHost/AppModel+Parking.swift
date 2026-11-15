@@ -16,6 +16,8 @@ enum SessionParking {
     static let resumeTimeoutMilliseconds: Int64 = 90_000
     /// A remote client has a session open for this long after its last refresh.
     static let remoteOpenWindow: TimeInterval = 5
+    /// How often the gateway refreshes the session a client has open.
+    static let remoteRefreshInterval: TimeInterval = 0.5
 }
 
 /// What parking reads from and does to processes, so tests can stand in for it.
@@ -36,6 +38,11 @@ struct ParkingRuntime {
     var sessionStore: @Sendable () -> CopilotSessionStore = { CopilotSessionStore() }
     /// Creates the session's terminal, whose new dtach master runs `copilot --resume`.
     var startTerminal: @MainActor (AppModel, String) -> Void = { $0.controller(for: $1) }
+    /// Waits until a time, or not at all once it has passed.
+    var sleepUntil: @MainActor (Date) async -> Void = {
+        let wait = $0.timeIntervalSinceNow
+        if wait > 0 { try? await ContinuousClock().sleep(until: .now.advanced(by: .seconds(wait))) }
+    }
 }
 
 extension AppModel {
@@ -379,6 +386,20 @@ extension AppModel {
         remoteOpenSessions[sessionId].map {
             now.timeIntervalSince($0.last) <= SessionParking.remoteOpenWindow
         } ?? false
+    }
+
+    /// Park Session from a remote client. The client asking let go of the session
+    /// as it asked, so its last refresh is waited out, once. A client that still
+    /// has the session open keeps refreshing, and the park is refused as ever.
+    func parkSessionForRemoteClient(_ sessionId: String) async -> String? {
+        if let last = remoteOpenSessions[sessionId]?.last {
+            // A refresh already on its way when the client let go lands at most one gateway
+            // refresh later, and one exactly `remoteOpenWindow` old still counts: wait past both.
+            await parkingRuntime.sleepUntil(last.addingTimeInterval(
+                SessionParking.remoteOpenWindow + SessionParking.remoteRefreshInterval + 0.1
+            ))
+        }
+        return await parkSession(sessionId)
     }
 
     // MARK: - commands

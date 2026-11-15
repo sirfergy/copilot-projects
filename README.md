@@ -401,7 +401,9 @@ Session** for that session.
 
 A session is parked only after Copilot confirms it is idle. Sessions that are working,
 waiting for you, scheduled, running background work, unread, or open in the web or iOS
-app are left alone. Text typed in a session's terminal but not sent is not kept.
+app are left alone. **Park Session** chosen in the web or iOS app parks the session that
+app has open, and the app lets go of it. A session another page or device still has open
+is left alone. Text typed in a session's terminal but not sent is not kept.
 
 ### Remote SSH hosts
 
