@@ -271,6 +271,73 @@ class CoordinatorTests(unittest.TestCase):
             if sock_file.exists():
                 sock_file.unlink()
 
+    def test_send_unparks_a_parked_session_then_sends_the_same_request_once_more(self) -> None:
+        received: list[dict[str, object]] = []
+        replies = [
+            b'{"ok":false,"code":"parked","error":"The session is parked."}\n',
+            b'{"ok":true,"code":"resumed"}\n',
+            b'{"ok":true,"code":"queued","text":"S1"}\n',
+        ]
+        sock_file = Path("/tmp") / f"cp-test-{uuid.uuid4().hex[:8]}.sock"
+        try:
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(sock_file))
+            server.listen(1)
+
+            def serve() -> None:
+                for reply in replies:
+                    conn, _ = server.accept()
+                    with conn:
+                        received.append(json.loads(conn.recv(4096).decode("utf-8").strip()))
+                        conn.sendall(reply)
+
+            t = threading.Thread(target=serve, daemon=True)
+            t.start()
+            res = coordinator.send_session_prompt(
+                session_id="S1", project_id="P1", prompt="Rebase and push", socket_path=str(sock_file)
+            )
+            t.join(timeout=2)
+            server.close()
+
+            self.assertEqual(res["code"], "queued")
+            self.assertEqual(
+                [r["command"] for r in received],
+                ["send-session-prompt", "unpark-session", "send-session-prompt"],
+            )
+            self.assertEqual(received[1], {"command": "unpark-session", "sessionId": "S1", "projectId": "P1"})
+            self.assertEqual(received[2], received[0], "the same request, so it cannot be delivered twice")
+        finally:
+            if sock_file.exists():
+                sock_file.unlink()
+
+    def test_send_reports_why_a_parked_session_did_not_come_back_and_retries_nothing_else(self) -> None:
+        def refuse(code: str, message: str) -> coordinator.CoordinatorError:
+            error = coordinator.CoordinatorError(f"control socket error ({code}): {message}")
+            error.code = code
+            return error
+
+        sent: list[str] = []
+
+        def parked_then_stuck(req: dict[str, object], _socket: object) -> dict[str, object]:
+            sent.append(str(req["command"]))
+            if req["command"] == "unpark-session":
+                raise refuse("", "Copilot didn't start again in this session.")
+            raise refuse("parked", "The session is parked.")
+
+        with self.assertRaisesRegex(coordinator.CoordinatorError, "didn't start again.*reuse --request-id"):
+            coordinator.send_session_prompt(session_id="S1", prompt="Go", sender=parked_then_stuck)
+        self.assertEqual(sent, ["send-session-prompt", "unpark-session"])
+
+        sent.clear()
+
+        def busy(req: dict[str, object], _socket: object) -> dict[str, object]:
+            sent.append(str(req["command"]))
+            raise refuse("busy", "The session is waiting for your input in the terminal.")
+
+        with self.assertRaisesRegex(coordinator.CoordinatorError, "waiting for your input"):
+            coordinator.send_session_prompt(session_id="S1", prompt="Go", sender=busy)
+        self.assertEqual(sent, ["send-session-prompt"], "only a parked session is unparked")
+
     def test_launch_session_resolves_parent_from_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             prompt_path = Path(tmp) / "p.md"
