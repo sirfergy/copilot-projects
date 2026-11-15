@@ -145,9 +145,8 @@ extension AppModel {
               FileManager.default.fileExists(atPath: events) else {
             return "This session has nothing saved to resume from yet."
         }
-        guard !session.isUnread, !session.finishedUnseen, session.failedRequest == nil else {
-            return "It has something you haven't seen yet."
-        }
+        // Unlike an unread mark, a failed request's mark is the row's icon, which parking takes.
+        guard session.failedRequest == nil else { return "Its latest request failed." }
         guard sessionPromptComposers[sessionId]?.isAttaching != true,
               sessionPromptComposers[sessionId]?.attachments.isEmpty != false else {
             return "Its unsent message has attachments, which would have to be attached again."
@@ -424,7 +423,7 @@ extension AppModel {
         guard !sessionIds.isEmpty else {
             presentAlert(
                 title: "No Sessions to Park",
-                message: "Only sessions that are idle, read, and not on screen can be parked."
+                message: "Only sessions that are idle and not on screen can be parked."
             )
             return
         }

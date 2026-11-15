@@ -1802,9 +1802,11 @@ struct SessionRow: View, Equatable {
     }
 
     var showsUnreadIndicator: Bool {
+        // A parked row's icon is the parked mark, so the badge says there is something unseen.
+        if session.parked != nil { return session.offersMarkAsRead }
         // Avoid duplicating the idle completion dot unless the tab-number hint,
         // a manual unread mark, or a failure indicator applies.
-        session.isUnread && (showNumber || session.status != .idle
+        return session.isUnread && (showNumber || session.status != .idle
             || !session.finishedUnseen || session.failedRequest != nil || session.markedUnread)
     }
 
@@ -1828,7 +1830,7 @@ struct SessionRow: View, Equatable {
             states.append(childSummary.label)
             states.append(isExpanded ? "Expanded" : "Collapsed")
         }
-        if session.isUnread { states.append("Unread") }
+        if session.isUnread || showsUnreadIndicator { states.append("Unread") }
         if session.hasBackgroundWork { states.append("Background work active") }
         if !session.schedules.isEmpty { states.append("Scheduled work") }
         return states.joined(separator: ", ")
