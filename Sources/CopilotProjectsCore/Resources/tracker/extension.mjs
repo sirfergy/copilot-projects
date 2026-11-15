@@ -516,6 +516,8 @@ if (validSessionId && socketPath) {
     // around its members and their separating commas.
     const DROPPED_TURNS_SECTION_BYTES = Buffer.byteLength(',"droppedTurns":[]');
     const RESUME_TRANSCRIPT_TURN_PREFIX = "session-resume-";
+    // An answer's turn has no `user.message`, so the Mac's prompt-image loader skips this prefix.
+    const ANSWER_TRANSCRIPT_TURN_PREFIX = "ask-user-answer-";
     const MAX_TRANSCRIPT_TEXT = 50_000;
     const MAX_TRANSCRIPT_METADATA_TEXT = 512;
     const MAX_TRANSCRIPT_REASONING_STEPS = 100;
@@ -2841,6 +2843,10 @@ if (validSessionId && socketPath) {
             liveMessageStreams.clear();
             refreshPendingMessages();
         }
+        if (root && event.type === "tool.execution_complete"
+                && askUserAnswer(event.data) !== null) {
+            workflowLiveTurnId = ANSWER_TRANSCRIPT_TURN_PREFIX + event.id;
+        }
         if (root && event.type === "pending_messages.modified") {
             refreshPendingMessages();
         }
@@ -4606,6 +4612,16 @@ if (validSessionId && socketPath) {
                 pendingTranscriptTurn.tools.push(tool);
             }
             if (tool) tool.success = event.data.success === true;
+            const answer = askUserAnswer(event.data);
+            if (answer !== null) {
+                // The answer opens the next turn, as a prompt sent mid-request does.
+                finishTranscriptTurn(false, event.timestamp);
+                startTranscriptTurn({
+                    id: ANSWER_TRANSCRIPT_TURN_PREFIX + event.id,
+                    timestamp: event.timestamp,
+                    data: { content: answer },
+                }, "foreground");
+            }
             if (live) {
                 if (prChanged) publish();
                 schedulePublishTranscript();
@@ -4691,6 +4707,16 @@ if (validSessionId && socketPath) {
             data && typeof data === "object"
                 && (data.interactionId === "resume" || data.model === "resumed")
         );
+    }
+
+    // What the person answered to the `ask_user` this event completes, as the
+    // CLI's own `Title: value` lines, or null. Only an accepted answer with
+    // values has a `detailedContent` that starts `User responded:`.
+    function askUserAnswer(data) {
+        const lead = "User responded:\n";
+        const text = data?.toolTelemetry?.properties?.elicitation_action === "accept"
+            ? data.result?.detailedContent : null;
+        return typeof text === "string" && text.startsWith(lead) ? text.slice(lead.length) : null;
     }
 
     function replayHistoryEvent(

@@ -773,7 +773,10 @@ terminal views.
 The companion Copilot extension records completed root turns through the supported Copilot SDK
 event API. It atomically writes a bounded per-tab transcript snapshot after each turn, including
 stopped turns, failed requests with the CLI's error message, and compact tool summaries but
-excluding raw tool arguments and results. The snapshot is two files: finished turns in
+excluding raw tool arguments and results. The one exception is `ask_user`: its question stays in
+its turn as a Copilot message, and an accepted answer opens the next turn as that turn's prompt,
+in the CLI's own `Title: value` lines (that turn's id starts with `ask-user-answer-`). A declined,
+cancelled, empty or failed question adds nothing. The snapshot is two files: finished turns in
 `<tab>.transcript.json`, rewritten only when they change, and the turn in progress in
 `<tab>.transcript-live.json`, rewritten as it streams. A publish that changes neither file
 writes nothing. The host merges the two, using the live file only when it names the revision of
