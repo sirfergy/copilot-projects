@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 import uuid
+from unittest import mock
 from pathlib import Path
 import sys
 
@@ -337,6 +338,21 @@ class CoordinatorTests(unittest.TestCase):
         with self.assertRaisesRegex(coordinator.CoordinatorError, "waiting for your input"):
             coordinator.send_session_prompt(session_id="S1", prompt="Go", sender=busy)
         self.assertEqual(sent, ["send-session-prompt"], "only a parked session is unparked")
+
+    def test_send_uses_one_socket_for_the_prompt_the_unpark_and_the_resend(self) -> None:
+        sockets: list[object] = []
+
+        def parked_once(req: dict[str, object], socket_path: object) -> dict[str, object]:
+            sockets.append(socket_path)
+            if len(sockets) > 1:
+                return {"ok": True, "code": "queued"}
+            error = coordinator.CoordinatorError("control socket error (parked): The session is parked.")
+            error.code = "parked"
+            raise error
+
+        with mock.patch.object(coordinator, "control_socket_path", side_effect=["/first.sock", "/newer.sock"]):
+            coordinator.send_session_prompt(session_id="S1", prompt="Go", sender=parked_once)
+        self.assertEqual(sockets, ["/first.sock"] * 3)
 
     def test_launch_session_resolves_parent_from_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

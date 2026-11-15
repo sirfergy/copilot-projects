@@ -467,6 +467,7 @@ def send_session_prompt(
     if steer:
         payload["promptMode"] = "immediate"
 
+    socket_path = socket_path or control_socket_path()  # one socket for every request below
     def dispatch(req: dict[str, object], timeout: float = 5.0) -> dict[str, object]:
         if sender:
             return sender(req, socket_path)
