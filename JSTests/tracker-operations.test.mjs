@@ -2960,6 +2960,38 @@ test("text streamed after an answer shows in the answer's turn before its messag
   assert.deepEqual(turn.assistantMessages.map((message) => message.content), ["I'll use"]);
 });
 
+test("a tool still running when the answer arrives finishes on its own row in the answer's turn", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await emitEvents(runtime, [
+    { id: "ask-turn", type: "user.message", timestamp: questionTime(0),
+      data: { content: "Run the tests and ask me which database to use" } },
+    { id: "ask-loop", type: "assistant.turn_start", timestamp: questionTime(1), data: {} },
+    { id: "slow-start", type: "tool.execution_start", timestamp: questionTime(2),
+      data: { toolCallId: "call-slow", toolName: "bash", arguments: { description: "Run the tests" } } },
+    { id: "quick-start", type: "tool.execution_start", timestamp: questionTime(3),
+      data: { toolCallId: "call-quick", toolName: "view", arguments: { path: "schema.sql" } } },
+    { id: "quick-done", type: "tool.execution_complete", timestamp: questionTime(4),
+      data: { toolCallId: "call-quick", success: true } },
+    askUserStart("call-ask", 5),
+    askUserComplete("call-ask", 60, "accepted"),
+    { id: "slow-done", type: "tool.execution_complete", timestamp: questionTime(90),
+      data: { toolCallId: "call-slow", success: true } },
+    { id: "ask-idle", type: "session.idle", timestamp: questionTime(91), data: { aborted: false } },
+  ]);
+  const { turns } = await finishedTranscript(runtime);
+  const rows = (turn) => turn.tools.map(({ id, name, title, success }) => ({ id, name, title, success }));
+  assert.deepEqual(turns.map((turn) => turn.id), ["ask-turn", "ask-user-answer-done-call-ask"]);
+  assert.deepEqual(rows(turns[0]), [
+    { id: "call-quick", name: "view", title: "schema.sql", success: true },
+    { id: "call-ask", name: "ask_user", title: "ask_user", success: true },
+  ]);
+  assert.deepEqual(rows(turns[1]), [
+    { id: "call-slow", name: "bash", title: "Run the tests", success: true },
+  ]);
+});
+
 function transcriptTurnsOf(runtime) {
   return readTranscript(runtime)?.turns ?? [];
 }

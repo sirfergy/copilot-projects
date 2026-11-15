@@ -4614,13 +4614,17 @@ if (validSessionId && socketPath) {
             if (tool) tool.success = event.data.success === true;
             const answer = askUserAnswer(event.data);
             if (answer !== null) {
-                // The answer opens the next turn, as a prompt sent mid-request does.
+                // The answer opens the next turn and takes the tools still
+                // running with it, so each finishes on its own row.
+                const { tools } = pendingTranscriptTurn;
+                pendingTranscriptTurn.tools = tools.filter((row) => row.success !== null);
                 finishTranscriptTurn(false, event.timestamp);
                 startTranscriptTurn({
                     id: ANSWER_TRANSCRIPT_TURN_PREFIX + event.id,
                     timestamp: event.timestamp,
                     data: { content: answer },
                 }, "foreground");
+                pendingTranscriptTurn.tools = tools.filter((row) => row.success === null);
             }
             if (live) {
                 if (prChanged) publish();
