@@ -101,6 +101,7 @@ struct TranscriptPromptAttachments: Equatable, Sendable {
         let copilotId = snapshot.copilotSessionId
         let activeTurns = snapshot.turns.filter {
             $0.kind != "automated" && !$0.id.isEmpty && !$0.id.hasPrefix("session-resume-")
+                && !$0.id.hasPrefix("ask-user-answer-")
         }
         let orderedTurnIds = activeTurns.map(\.id)
         let wantedTurnIds = Set(orderedTurnIds)

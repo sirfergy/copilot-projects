@@ -1391,6 +1391,29 @@ final class NativeTranscriptImageTests: XCTestCase {
         XCTAssertTrue(second.watchedFiles.isEmpty)
     }
 
+    func testAnAnswerTurnHasNoPromptToFindInTheEventLog() throws {
+        let session = try makeToolImageSession()
+        try Self.write([Self.promptLine("turn-1")], to: session.events)
+        // The answer to an `ask_user` opens a turn named for the tool call that carried it, so no
+        // `user.message` in the log has its id.
+        let snapshot = Self.toolSnapshot(session.copilotSessionId, [
+            Self.toolTurn("turn-1", tools: []),
+            Self.toolTurn("ask-user-answer-done-call-ask", tools: []),
+        ])
+        let appSessionId = "desktop-answer-turn"
+        let first = TranscriptPromptAttachments.load(
+            sessionId: appSessionId, snapshot: snapshot, copilotHome: session.home.path
+        )
+        XCTAssertTrue(first.watchedFiles.isEmpty)
+
+        // Every prompt is found and nothing is watched, so the log growing is no reason to read it again.
+        try Self.append([Self.promptLine("turn-2")], to: session.events)
+        let second = TranscriptPromptAttachments.load(
+            sessionId: appSessionId, snapshot: snapshot, previous: first, copilotHome: session.home.path
+        )
+        XCTAssertEqual(second.scannedEventsBytes, first.scannedEventsBytes)
+    }
+
     func testToolImagesTakeOnlyTheBudgetPromptImagesLeave() throws {
         let session = try makeToolImageSession()
         let big = Self.makePaddedPNG(

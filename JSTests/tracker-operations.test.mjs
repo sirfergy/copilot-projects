@@ -2798,6 +2798,165 @@ test("durable history streams the pending turn and live text follows newer input
   assert.equal(previousTurn.assistantMessages.some((message) => message.content.startsWith("new ")), false);
 });
 
+const questionTime = (seconds) => new Date(1_700_000_000_000 + seconds * 1_000).toISOString();
+
+function askUserStart(toolCallId, seconds) {
+  return {
+    id: `start-${toolCallId}`, type: "tool.execution_start", timestamp: questionTime(seconds),
+    data: {
+      toolCallId, toolName: "ask_user",
+      arguments: {
+        message: "Which database should I use?",
+        requestedSchema: { properties: {
+          engine: { type: "string", title: "Database engine", enum: ["PostgreSQL", "SQLite"] },
+          migrate: { type: "boolean", title: "Run migrations" },
+        } },
+      },
+    },
+  };
+}
+
+// How an `ask_user` ends, in the CLI's wording for each outcome.
+function askUserComplete(toolCallId, seconds, outcome) {
+  const { action, ...ending } = {
+    accepted: { action: "accept", result: {
+      content: "User responded: engine=PostgreSQL, migrate=true",
+      detailedContent: "User responded:\nDatabase engine: PostgreSQL\nRun migrations: true",
+    } },
+    empty: { action: "accept", result: { content: "User accepted but provided no values." } },
+    declined: { action: "decline", result: {
+      content: "The user is not available to respond and will review your work later.",
+    } },
+    cancelled: { action: "cancel", result: { content: "User cancelled the request." } },
+    failed: { error: { code: "failure", message: "Error asking user: the request timed out" } },
+  }[outcome];
+  return {
+    id: `done-${toolCallId}`, type: "tool.execution_complete", timestamp: questionTime(seconds),
+    data: {
+      toolCallId, success: outcome !== "failed", ...ending,
+      toolTelemetry: action ? { properties: { elicitation_action: action } } : { metrics: {} },
+    },
+  };
+}
+
+// One request in which Copilot asks, the person answers a minute later, and Copilot carries on.
+function answeredQuestionEvents() {
+  return [
+    { id: "ask-turn", type: "user.message", timestamp: questionTime(0),
+      data: { content: "Set up the database layer" } },
+    { id: "ask-loop", type: "assistant.turn_start", timestamp: questionTime(1), data: {} },
+    askUserStart("call-ask", 2),
+    askUserComplete("call-ask", 60, "accepted"),
+    { id: "after-message", type: "assistant.message", timestamp: questionTime(61),
+      data: { messageId: "after", content: "I'll use PostgreSQL." } },
+    { id: "view-start", type: "tool.execution_start", timestamp: questionTime(62),
+      data: { toolCallId: "call-view", toolName: "view", arguments: { path: "schema.sql" } } },
+    { id: "view-done", type: "tool.execution_complete", timestamp: questionTime(63),
+      data: { toolCallId: "call-view", success: true } },
+    { id: "ask-idle", type: "session.idle", timestamp: questionTime(64), data: { aborted: false } },
+  ];
+}
+
+async function emitEvents(runtime, events) {
+  for (const { type, data, ...extra } of events) {
+    await runtime.session.emit(type, data, extra);
+  }
+}
+
+function finishedTranscript(runtime) {
+  return waitFor(() => {
+    const transcript = readTranscript(runtime);
+    return transcript?.turns.at(-1)?.endedAt && transcript;
+  }, "the last turn did not finish");
+}
+
+function assertAnswerOpensTheNextTurn(turns) {
+  const outline = ({ id, kind, userContent, startedAt, endedAt, isAborted }) =>
+    ({ id, kind, userContent, startedAt, endedAt, isAborted });
+  const rows = (turn) => turn.tools.map(({ id, name, success }) => ({ id, name, success }));
+  const replies = (turn) => turn.assistantMessages.map((message) => message.content);
+  assert.deepEqual(turns.map(outline), [
+    { id: "ask-turn", kind: "foreground", userContent: "Set up the database layer",
+      startedAt: questionTime(0), endedAt: questionTime(60), isAborted: false },
+    { id: "ask-user-answer-done-call-ask", kind: "foreground",
+      userContent: "Database engine: PostgreSQL\nRun migrations: true",
+      startedAt: questionTime(60), endedAt: questionTime(64), isAborted: false },
+  ]);
+  const [question, answer] = turns;
+  assert.deepEqual(replies(question), ["Which database should I use?"]);
+  assert.deepEqual(rows(question), [{ id: "call-ask", name: "ask_user", success: true }]);
+  assert.deepEqual(replies(answer), ["I'll use PostgreSQL."]);
+  assert.deepEqual(rows(answer), [{ id: "call-view", name: "view", success: true }]);
+}
+
+test("an accepted answer opens the next turn when the journal is replayed", {
+  concurrency: false,
+}, async (t) => {
+  const events = answeredQuestionEvents();
+  const runtime = await createRuntime(t, (session, fixture) => {
+    const journal = durableJournal(fixture);
+    realMkdirSync(join(journal, ".."), { recursive: true });
+    realWriteFileSync(journal, events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+    session.history = events;
+  });
+  const transcript = await waitFor(() => {
+    const value = readTranscript(runtime);
+    return runtime.durableReadsFinished > 0 && value?.turns.length === 2 && value;
+  }, "the replayed journal did not give the question's turn and the answer's");
+  assertAnswerOpensTheNextTurn(transcript.turns);
+});
+
+test("an accepted answer opens the next turn when its events arrive live", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await emitEvents(runtime, answeredQuestionEvents());
+  assertAnswerOpensTheNextTurn((await finishedTranscript(runtime)).turns);
+});
+
+test("a question declined, cancelled, accepted with no values or failed opens no turn", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  // The accepted question comes last: its turn shows the four before it were read.
+  const outcomes = ["declined", "cancelled", "empty", "failed", "accepted"];
+  await emitEvents(runtime, [
+    { id: "ask-turn", type: "user.message", timestamp: questionTime(0), data: { content: "Ask five times" } },
+    { id: "ask-loop", type: "assistant.turn_start", timestamp: questionTime(1), data: {} },
+    ...outcomes.flatMap((outcome, index) => [
+      askUserStart(outcome, 2 + index * 2),
+      askUserComplete(outcome, 3 + index * 2, outcome),
+    ]),
+    { id: "ask-idle", type: "session.idle", timestamp: questionTime(20), data: { aborted: false } },
+  ]);
+  const { turns } = await finishedTranscript(runtime);
+  assert.deepEqual(turns.map((turn) => turn.id), ["ask-turn", "ask-user-answer-done-accepted"]);
+  assert.deepEqual(
+    turns[0].tools.map(({ id, success }) => ({ id, success })),
+    outcomes.map((outcome) => ({ id: outcome, success: outcome !== "failed" }))
+  );
+  assert.deepEqual(turns[1].tools, []);
+});
+
+test("text streamed after an answer shows in the answer's turn before its message is final", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  const untilAnswered = answeredQuestionEvents().slice(0, 4);
+  assert.equal(untilAnswered.at(-1).id, "done-call-ask");
+  await emitEvents(runtime, untilAnswered);
+  await runtime.session.emit("assistant.message_delta", { messageId: "after", deltaContent: "I'll use" });
+  // A tool start publishes the turn in progress without waiting out the delta throttle.
+  await runtime.session.emit("tool.execution_start", { toolCallId: "marker", toolName: "view" });
+  const turn = await waitFor(() => {
+    const turn = readTranscript(runtime)?.turns.at(-1);
+    return turn?.tools.some((tool) => tool.id === "marker") && turn;
+  }, "the turn in progress was not published");
+  assert.equal(turn.id, "ask-user-answer-done-call-ask");
+  assert.equal(turn.endedAt, null);
+  assert.deepEqual(turn.assistantMessages.map((message) => message.content), ["I'll use"]);
+});
+
 function transcriptTurnsOf(runtime) {
   return readTranscript(runtime)?.turns ?? [];
 }
