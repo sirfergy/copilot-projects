@@ -2889,7 +2889,12 @@ extension AppModel {
             return .failure("The session moved to another project.", code: "conflict")
         }
         if parkingBlocksInput(sessionId) {
-            return .failure("The session is parked and is resuming. Try again in a few seconds.", code: "busy")
+            // A session still being parked can't be unparked yet either, so it stays busy.
+            if parkedState(sessionId) == .parking {
+                return .failure("The session is still being parked. Try again in a few seconds.", code: "busy")
+            }
+            return .failure("The session is parked. Open it, or run copilot-projects unpark-session "
+                + "--session \(sessionId), then send the prompt again.", code: "parked")
         }
 
         let freshSnapshot = adapter.loadFreshSnapshot(sessionId: sessionId, now: clock)

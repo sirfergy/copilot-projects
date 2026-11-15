@@ -8092,7 +8092,8 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(received.last?.projectId)
 
         let expectedExits: [(String?, Int32)] = [
-            ("bad-request", 2), ("conflict", 3), ("gone", 4), ("unavailable", 5), ("busy", 8), (nil, 1),
+            ("bad-request", 2), ("conflict", 3), ("gone", 4), ("unavailable", 5), ("busy", 8),
+            ("parked", 9), (nil, 1),
         ]
         for (code, status) in expectedExits {
             nextResponse = .failure("failed", code: code)

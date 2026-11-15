@@ -241,6 +241,7 @@ public enum CLIMain {
         case "unknown-project": return 6
         case "invalid": return 7
         case "busy": return 8
+        case "parked": return 9
         default: return 1
         }
     }

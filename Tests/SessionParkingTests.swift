@@ -61,6 +61,7 @@ final class SessionParkingTests: XCTestCase {
                 isAppActive: { false }, agentActivityDirectory: sessions, resumeMarkerDirectory: sessions,
                 remotePromptLiveSessions: { _ in [live] },
                 remoteSessionBackendAvailable: { true },
+                sessionCreationLedger: SessionCreationLedger(url: root.appendingPathComponent("ledger.json")),
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
                 alertPresenter: {
                     processes.alerts.append($0.messageText)
@@ -618,6 +619,27 @@ final class SessionParkingTests: XCTestCase {
         // A record this build cannot read leaves an ordinary tab.
         let saved = Data(#"{"id":"a","title":"t","cwd":"/tmp","parked":{"state":"napping"}}"#.utf8)
         XCTAssertNil(try JSONDecoder().decode(Session.self, from: saved).parked)
+    }
+
+    func testAPromptSentToAParkedSessionIsRefusedAsParkedAndStillStartsCopilotAgain() throws {
+        let f = try Fixture(parked: ParkedSession(state: .parked, sinceMilliseconds: 1))
+        f.processes.alive = false
+        f.processes.master = false
+        f.model.setLiveAgentSessionsForTesting([])
+        let response = f.model.sendPullRequestsSessionPrompt(
+            requestId: UUID(), projectId: nil, sessionId: f.id, prompt: "Carry on"
+        )
+        XCTAssertEqual(response.code, "parked")
+        XCTAssertEqual(response.error?.contains("copilot-projects unpark-session --session \(f.id),"), true)
+        XCTAssertEqual(f.model.parkedState(f.id), .resuming)
+        XCTAssertEqual(f.processes.started, [f.id])
+
+        // Still being parked, a session can't be unparked yet either: busy, as before.
+        let parking = try Fixture(parked: ParkedSession(state: .parking, sinceMilliseconds: 1))
+        XCTAssertEqual(parking.model.sendPullRequestsSessionPrompt(
+            requestId: UUID(), projectId: nil, sessionId: parking.id, prompt: "Carry on"
+        ).code, "busy")
+        XCTAssertEqual(parking.model.parkedState(parking.id), .parking)
     }
 
     // MARK: - park-session and unpark-session
