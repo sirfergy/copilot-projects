@@ -3417,16 +3417,6 @@ if (validSessionId && socketPath) {
         return typeof message === "string" ? message : null;
     }
 
-    // What the person answered to the `ask_user` this event completes, as the
-    // CLI's own `Title: value` lines, or null. Only an accepted answer with
-    // values has a `detailedContent` that starts `User responded:`.
-    function askUserAnswer(data) {
-        const lead = "User responded:\n";
-        const text = data?.toolTelemetry?.properties?.elicitation_action === "accept"
-            ? data.result?.detailedContent : null;
-        return typeof text === "string" && text.startsWith(lead) ? text.slice(lead.length) : null;
-    }
-
     function durableAskUserBooleanSchema(event) {
         const schema = event.data?.arguments?.requestedSchema;
         if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
@@ -4717,6 +4707,16 @@ if (validSessionId && socketPath) {
             data && typeof data === "object"
                 && (data.interactionId === "resume" || data.model === "resumed")
         );
+    }
+
+    // What the person answered to the `ask_user` this event completes, as the
+    // CLI's own `Title: value` lines, or null. Only an accepted answer with
+    // values has a `detailedContent` that starts `User responded:`.
+    function askUserAnswer(data) {
+        const lead = "User responded:\n";
+        const text = data?.toolTelemetry?.properties?.elicitation_action === "accept"
+            ? data.result?.detailedContent : null;
+        return typeof text === "string" && text.startsWith(lead) ? text.slice(lead.length) : null;
     }
 
     function replayHistoryEvent(
