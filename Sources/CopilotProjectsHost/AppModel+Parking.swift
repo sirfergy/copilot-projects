@@ -120,17 +120,12 @@ extension AppModel {
         guard !isTerminating, stateLoadFailure == nil, let loc = locateIndex(sessionId) else {
             return "The workspace is not available."
         }
-        let project = projects[loc.p]
-        let session = project.sessions[loc.s]
+        let session = projects[loc.p].sessions[loc.s]
         if let parked = session.parked, parked.state != .parking || parked.sinceMilliseconds != attempt {
             return "It is already \(parked.label.lowercased())."
         }
         guard session.hostId == nil, remoteSessionBackendAvailable() else {
             return "Only local Copilot sessions can be parked."
-        }
-        let parents = project.effectiveParentSessionIdsBySessionId()
-        guard parents[sessionId] == nil, !parents.values.contains(sessionId) else {
-            return "Sessions with a parent or child session can't be parked yet."
         }
         // The liveness pass has seen its Copilot, so judging it idle reads no processes.
         guard liveCopilotSessions.contains(sessionId),
@@ -203,7 +198,7 @@ extension AppModel {
         // From here to the stop is one main-actor turn.
         let processes = parkingRuntime.liveProcesses(sessionId)
         guard isAttempt(sessionId, .parking, attempt) else { return "The session changed." }
-        // The whole rule again: the session may have been opened, grouped or attached to,
+        // The whole rule again: the session may have been opened or attached to,
         // or parking switched off, while Copilot was being asked.
         if let reason = idle && !processes.isEmpty
             ? parkBlocker(for: sessionId, unattended: unattended, attempt: attempt)
