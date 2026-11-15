@@ -516,7 +516,7 @@ if (validSessionId && socketPath) {
     // around its members and their separating commas.
     const DROPPED_TURNS_SECTION_BYTES = Buffer.byteLength(',"droppedTurns":[]');
     const RESUME_TRANSCRIPT_TURN_PREFIX = "session-resume-";
-    // Also in TranscriptImageAssociation.swift: an answer's turn has no `user.message`.
+    // An answer's turn has no `user.message`, so the Mac's prompt-image loader skips this prefix.
     const ANSWER_TRANSCRIPT_TURN_PREFIX = "ask-user-answer-";
     const MAX_TRANSCRIPT_TEXT = 50_000;
     const MAX_TRANSCRIPT_METADATA_TEXT = 512;
@@ -3419,12 +3419,12 @@ if (validSessionId && socketPath) {
 
     // What the person answered to the `ask_user` this event completes, as the
     // CLI's own `Title: value` lines, or null. Only an accepted answer with
-    // values has `detailedContent`: a decline, a cancel, an accept with no
-    // values and a failure have none.
+    // values has a `detailedContent` that starts `User responded:`.
     function askUserAnswer(data) {
+        const lead = "User responded:\n";
         const text = data?.toolTelemetry?.properties?.elicitation_action === "accept"
             ? data.result?.detailedContent : null;
-        return typeof text === "string" ? text.replace(/^User responded:\n/, "") : null;
+        return typeof text === "string" && text.startsWith(lead) ? text.slice(lead.length) : null;
     }
 
     function durableAskUserBooleanSchema(event) {

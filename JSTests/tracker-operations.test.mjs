@@ -2816,18 +2816,21 @@ function askUserStart(toolCallId, seconds) {
   };
 }
 
-// How an `ask_user` ends, in the CLI's wording for each outcome.
+// How an `ask_user` ends, in the CLI's wording for each outcome. A result with
+// no log of its own can repeat `content` as `detailedContent`.
 function askUserComplete(toolCallId, seconds, outcome) {
+  const plain = (content) => ({ result: { content, detailedContent: content } });
   const { action, ...ending } = {
     accepted: { action: "accept", result: {
       content: "User responded: engine=PostgreSQL, migrate=true",
       detailedContent: "User responded:\nDatabase engine: PostgreSQL\nRun migrations: true",
     } },
-    empty: { action: "accept", result: { content: "User accepted but provided no values." } },
-    declined: { action: "decline", result: {
-      content: "The user is not available to respond and will review your work later.",
-    } },
-    cancelled: { action: "cancel", result: { content: "User cancelled the request." } },
+    empty: { action: "accept", ...plain("User accepted but provided no values.") },
+    declined: {
+      action: "decline",
+      ...plain("The user is not available to respond and will review your work later."),
+    },
+    cancelled: { action: "cancel", ...plain("User cancelled the request.") },
     failed: { error: { code: "failure", message: "Error asking user: the request timed out" } },
   }[outcome];
   return {
