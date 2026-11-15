@@ -8098,7 +8098,7 @@ final class AppLogicTests: XCTestCase {
             nextResponse = .failure("failed", code: code)
             XCTAssertEqual(CLIMain.run(valid, environment: environment), status, code ?? "no code")
         }
-        for command in ["restart-session", "reload-session-mcp"] {
+        for command in ["restart-session", "reload-session-mcp", "park-session", "unpark-session"] {
             XCTAssertTrue(CLIMain.isCommand(command))
             nextResponse = .success(code: "requested")
             XCTAssertEqual(CLIMain.run([command, "--session", "s3"], environment: environment), 0)
@@ -8119,6 +8119,8 @@ final class AppLogicTests: XCTestCase {
             ["restart-session"],
             ["reload-session-mcp"],
             ["reload-session-mcp", "s3"],
+            ["park-session"],
+            ["unpark-session", "s3"],
             valid + ["--all"],
             valid + ["positional"],
         ]
@@ -8153,6 +8155,37 @@ final class AppLogicTests: XCTestCase {
             .send(ControlRequest(command: "ping"))
         XCTAssertTrue(response.ok)
         XCTAssertEqual(response.text, "ping")
+    }
+
+    func testControlServerAnswersAWaitingCommandWhileItServesOthers() async throws {
+        let socketPath = "/tmp/cp-\(UUID().uuidString.prefix(8)).sock"
+        let (started, markStarted) = AsyncStream<Void>.makeStream()
+        let (finish, markFinish) = AsyncStream<Void>.makeStream()
+        let server = ControlServer(socketPath: socketPath, waiting: { request in
+            guard request.command == "wait" else { return nil }
+            return {
+                markStarted.yield()
+                for await _ in finish { break }
+                return .success("waited")
+            }
+        }) { .success($0.command) }
+        XCTAssertTrue(server.start())
+        defer {
+            server.stop()
+            try? FileManager.default.removeItem(atPath: socketPath)
+        }
+
+        // A waiting command's client blocks until the answer, so it gets its own task.
+        let waited = Task.detached {
+            try ControlClient(socketPath: socketPath, timeout: 30).send(ControlRequest(command: "wait"))
+        }
+        for await _ in started { break }
+        // That command is still waiting, and the server answers another.
+        let other = try ControlClient(socketPath: socketPath).send(ControlRequest(command: "ping"))
+        XCTAssertEqual(other.text, "ping")
+        markFinish.yield()
+        let response = try await waited.value
+        XCTAssertEqual(response.text, "waited")
     }
 
     @MainActor

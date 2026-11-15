@@ -686,7 +686,10 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func startServer(socketPath: String = Paths.socketPath) -> Bool {
-        let server = ControlServer(socketPath: socketPath) { [weak self] req in
+        let server = ControlServer(socketPath: socketPath, waiting: { [weak self] req in
+            guard req.command == "park-session" || req.command == "unpark-session" else { return nil }
+            return { [weak self] in await self?.parkingCommand(req) ?? .failure("app shutting down") }
+        }) { [weak self] req in
             guard let self else { return .failure("app shutting down") }
             return self.handleControlServerRequest(req)
         }

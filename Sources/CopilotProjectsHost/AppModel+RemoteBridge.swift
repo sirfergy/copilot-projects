@@ -712,19 +712,13 @@ extension AppModel {
         projectId: String?,
         submit: (CLIOperationRequest, CLIOperationAdapter) -> RemoteUserInputResult
     ) -> ControlResponse {
-        guard !isTerminating, !didFailToLoadWorkspaceState, stateLoadFailure == nil else {
-            return Self.controlResponse(for: AutomationSessionCloseResult.unavailable)
-        }
-        guard let location = locateIndex(sessionId) else { return Self.controlResponse(for: AutomationSessionCloseResult.gone) }
-        if let projectId, projects[location.p].id != projectId {
-            return Self.controlResponse(for: AutomationSessionCloseResult.conflict)
-        }
+        if let refusal = automationRefusal(sessionId: sessionId, projectId: projectId) { return refusal }
         let adapter = CLIOperationAdapter(
             activityDirectory: agentActivityDirectory,
             resumeMarkerDirectory: resumeMarkerDirectory
         )
         // A parked session is refused here: submitting an action to one resumes it.
-        guard projects[location.p].sessions[location.s].parked == nil,
+        guard parkedState(sessionId) == nil,
               let epoch = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() })?
                   .remoteOperationProjection().conversationEpoch,
               submit(
@@ -733,6 +727,18 @@ extension AppModel {
             return .failure("the session is parked or not idle, or its tracker is not ready", code: "busy")
         }
         return .success(code: "requested")
+    }
+
+    /// What every scripted session command refuses first; nil for a session of `projectId`.
+    func automationRefusal(sessionId: String, projectId: String?) -> ControlResponse? {
+        guard !isTerminating, !didFailToLoadWorkspaceState, stateLoadFailure == nil else {
+            return Self.controlResponse(for: AutomationSessionCloseResult.unavailable)
+        }
+        guard let location = locateIndex(sessionId) else { return Self.controlResponse(for: AutomationSessionCloseResult.gone) }
+        if let projectId, projects[location.p].id != projectId {
+            return Self.controlResponse(for: AutomationSessionCloseResult.conflict)
+        }
+        return nil
     }
 
     nonisolated static func controlResponse(

@@ -22,8 +22,13 @@ final class ControlServer: @unchecked Sendable {
     static let defaultMainQueueScheduler: MainQueueScheduler = { work in
         DispatchQueue.main.async(execute: work)
     }
+    typealias Waiting = @Sendable () async -> ControlResponse
 
     private let socketPath: String
+    /// The answer to a command that waits for its result, such as a park. It is
+    /// awaited off the accept loop, so other commands are still served: a park
+    /// stops a Copilot whose `session-ended` hook arrives on this socket.
+    private let waiting: (ControlRequest) -> Waiting?
     private let handler: (ControlRequest) -> ControlResponse
     private var listenFD: Int32 = -1
     private var running = false
@@ -31,8 +36,10 @@ final class ControlServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.obvioussean.copilot-projects.control")
 
     init(socketPath: String = Paths.socketPath,
+         waiting: @escaping (ControlRequest) -> Waiting? = { _ in nil },
          handler: @escaping (ControlRequest) -> ControlResponse) {
         self.socketPath = socketPath
+        self.waiting = waiting
         self.handler = handler
     }
 
@@ -204,7 +211,8 @@ final class ControlServer: @unchecked Sendable {
     }
 
     private func handleClient(_ fd: Int32) {
-        defer { close(fd) }
+        var handedOver = false
+        defer { if !handedOver { close(fd) } }
 
         // Bound the read so a stuck or malicious same-user client that connects and
         // never sends a newline can't wedge the (serial) accept loop or grow this
@@ -232,11 +240,22 @@ final class ControlServer: @unchecked Sendable {
         let response: ControlResponse
         do {
             let req = try Wire.decode(ControlRequest.self, from: line)
+            if let answer = waiting(req) {
+                handedOver = true
+                Task {
+                    ControlServer.reply(await answer(), to: fd)
+                    close(fd)
+                }
+                return
+            }
             response = handler(req)
         } catch {
             response = .failure("bad request: \(error)")
         }
+        ControlServer.reply(response, to: fd)
+    }
 
+    private static func reply(_ response: ControlResponse, to fd: Int32) {
         guard let out = try? Wire.encodeLine(response) else { return }
         out.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }

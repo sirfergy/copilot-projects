@@ -397,7 +397,8 @@ seconds.
 Parking is off by default. Turn it on with **Copilot Projects ▸ Park Idle Sessions ▸
 Only When I Choose**. The Session menu then has **Park Session**, **Park All Idle
 Sessions…**, and **Resume Session**, and right-clicking any session offers **Park
-Session** for that session.
+Session** for that session. A script can do both with `park-session` and
+`unpark-session`, described under [Command-line access](#command-line-access).
 
 A session is parked only after Copilot confirms it is idle. Sessions that are working,
 waiting for you, scheduled, running background work, or open in the web or iOS app are
@@ -548,6 +549,29 @@ under the idle rules and with the exit codes of `restart-session`, so a running
 turn's MCP calls are never cut off. Copilot keeps running: the session's terminal
 says when the servers have restarted. The app has no menu item for it and remote
 clients are not offered it.
+
+To park a session from a script, and to start its Copilot again, use `park-session`
+and `unpark-session`:
+
+```bash
+copilot-projects park-session --session <id> --project <id>
+copilot-projects unpark-session --session <id> --project <id>
+```
+
+`park-session` parks the session as **Park All Idle Sessions…** would: under the rules
+in [Park idle sessions](#park-idle-sessions), with **Park Idle Sessions** turned on, and
+never the session on screen or one whose Copilot is running another session too. It
+waits for the result, usually a few seconds and 40 at most. It exits 0 once Copilot has
+quit, or 20 seconds after it was told to if it has not: the row then reads "Parking…"
+until it does. It exits 0 at once for a session that was already parked, and 8 when the
+session was left alone, with the reason the Mac gives on stderr.
+
+`unpark-session` does what **Resume Session** does and waits until the session can take
+a prompt, usually a few seconds and 110 at most. It exits 0 then, and at once for a
+session that is not parked. It exits 8 while the session is still being parked, or when
+Copilot is back but cannot take a prompt by then, and 1 when Copilot did not start
+again; running it again tries again. The other exit codes of both commands are those of
+`close-session`.
 
 To send a prompt to a session's Copilot from a script, use `send-session-prompt`:
 
