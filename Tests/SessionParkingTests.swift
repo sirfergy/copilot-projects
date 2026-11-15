@@ -256,7 +256,6 @@ final class SessionParkingTests: XCTestCase {
     }
 
     func testNothingInTheNeverParkTableIsParked() throws {
-        let child = Session(title: "Child", cwd: "/tmp")
         let cases: [(String, (Fixture) throws -> Void)] = [
             ("setting off", { $0.defaults.set(SessionParking.off, forKey: SessionParking.settingKey) }),
             ("no live Copilot", { $0.model.setLiveAgentSessionsForTesting([]) }),
@@ -290,16 +289,29 @@ final class SessionParkingTests: XCTestCase {
             ("nothing saved to resume", { try FileManager.default.removeItem(at: $0.copilotHome) }),
             ("unread", { $0.model.markSessionUnread(sessionId: $0.id) }),
             ("open in a remote client", { $0.model.noteRemoteClientHasOpen($0.id) }),
-            ("has a child", { fixture in
-                let loc = try XCTUnwrap(fixture.model.locateIndex(child.id))
-                fixture.model.projects[loc.p].sessions[loc.s].parentSessionId = fixture.id
-            }),
         ]
         for (name, arrange) in cases {
-            let f = try Fixture(others: [child])
+            let f = try Fixture()
             XCTAssertNil(f.model.parkBlocker(for: f.id), "the baseline must be parkable (\(name))")
             try arrange(f)
             XCTAssertNotNil(f.model.parkBlocker(for: f.id), name)
+        }
+    }
+
+    func testASessionWithAParentOrAChildIsParkedAndStaysGrouped() async throws {
+        for sessionIsChild in [true, false] {
+            let other = Session(title: "Other", cwd: "/tmp")
+            let f = try Fixture(others: [other])
+            let (child, parent) = sessionIsChild ? (f.id, other.id) : (other.id, f.id)
+            XCTAssertTrue(f.model.setParentSession(
+                projectId: f.model.projects[0].id, sessionId: child, parentSessionId: parent
+            ).ok)
+            async let refusal = f.model.parkSession(f.id)
+            try await f.answerParkCheck(.applied)
+            let result = await refusal
+            XCTAssertNil(result, sessionIsChild ? "as the child" : "as the parent")
+            XCTAssertEqual(f.model.parkedState(f.id), .parked)
+            XCTAssertEqual(f.model.projects[0].effectiveParentSessionIdsBySessionId(), [child: parent])
         }
     }
 
