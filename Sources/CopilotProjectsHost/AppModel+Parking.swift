@@ -16,6 +16,8 @@ enum SessionParking {
     static let resumeTimeoutMilliseconds: Int64 = 90_000
     /// A remote client has a session open for this long after its last refresh.
     static let remoteOpenWindow: TimeInterval = 5
+    /// How often the gateway refreshes the session a client has open.
+    static let remoteRefreshInterval: TimeInterval = 0.5
 }
 
 /// What parking reads from and does to processes, so tests can stand in for it.
@@ -391,8 +393,11 @@ extension AppModel {
     /// has the session open keeps refreshing, and the park is refused as ever.
     func parkSessionForRemoteClient(_ sessionId: String) async -> String? {
         if let last = remoteOpenSessions[sessionId]?.last {
-            // A refresh exactly `remoteOpenWindow` old still counts, so wait a little past it.
-            await parkingRuntime.sleepUntil(last.addingTimeInterval(SessionParking.remoteOpenWindow + 0.1))
+            // A refresh already on its way when the client let go lands at most one gateway
+            // refresh later, and one exactly `remoteOpenWindow` old still counts: wait past both.
+            await parkingRuntime.sleepUntil(last.addingTimeInterval(
+                SessionParking.remoteOpenWindow + SessionParking.remoteRefreshInterval + 0.1
+            ))
         }
         return await parkSession(sessionId)
     }

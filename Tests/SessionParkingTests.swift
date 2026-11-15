@@ -517,7 +517,7 @@ final class SessionParkingTests: XCTestCase {
         XCTAssertEqual(f.processes.waits.count, 1)
         XCTAssertEqual(
             try XCTUnwrap(f.processes.waits.first).timeIntervalSince(refreshed),
-            SessionParking.remoteOpenWindow + 0.1, accuracy: 0.001
+            SessionParking.remoteOpenWindow + SessionParking.remoteRefreshInterval + 0.1, accuracy: 0.001
         )
 
         // Another client still has it open and refreshes during the wait: refused as ever.
