@@ -435,8 +435,10 @@ final class SessionWorkflowTests: XCTestCase {
         // Send now makes a steer: while Copilot waits on a question the tracker is not asked.
         snapshot.pendingPermissionRequestIds = ["pending"]
         try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        // Nothing reached the tracker, so the answer is "try again", unlike a receipt's.
         let fenced = await model.queuedPromptsCommand(command("send-now"))
         XCTAssertEqual(fenced.error, "The session action was not accepted.")
+        XCTAssertEqual(fenced.code, "busy")
         XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL("session-queue-send-now").path))
 
         // A tracker that cannot see Copilot's queue publishes no list. That is not an empty queue.
@@ -456,8 +458,12 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertEqual(model.parkedState(session.id), .parked, "a refused request must not resume a parked session")
         XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL("session-queue-remove").path))
         model.projects[0].sessions[0].parked = nil
-        let unknown = await model.queuedPromptsCommand(command("edit"))
-        XCTAssertEqual(unknown.code, "bad-request")
+        var unnamed = command("remove")
+        unnamed.messageId = nil
+        for request in [command("edit"), unnamed] {
+            let refused = await model.queuedPromptsCommand(request)
+            XCTAssertEqual(refused.code, "bad-request")
+        }
         let gone = await model.queuedPromptsCommand(command(session: "missing"))
         XCTAssertEqual(gone.code, "gone")
     }

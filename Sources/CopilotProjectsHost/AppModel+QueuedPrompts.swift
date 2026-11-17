@@ -26,15 +26,18 @@ extension AppModel {
             return .success(String(decoding: json, as: UTF8.self))
         }
         let kinds: [String: RemoteSessionActionKind] = ["send-now": .queueSendNow, "remove": .queueRemove]
-        guard let kind = kinds[action] else {
-            return .failure("queued-prompts takes send-now or remove", code: "bad-request")
+        let queueAction = kinds[action].map { RemoteSessionAction(kind: $0, messageId: request.messageId) }
+        guard let queueAction, queueAction.isValid else {
+            return .failure("queued-prompts takes send-now or remove, with a queued prompt's messageId", code: "bad-request")
         }
         let result = await performLocalSessionAction(
-            sessionId: sessionId, action: RemoteSessionAction(kind: kind, messageId: request.messageId),
-            pollInterval: pollInterval
+            sessionId: sessionId, action: queueAction, pollInterval: pollInterval
         )
-        return result.state == .applied
-            ? .success(code: "applied")
-            : .failure(result.message ?? "Copilot did not apply this action.", code: result.state.rawValue)
+        if result.state == .applied { return .success(code: "applied") }
+        // With no operation nothing reached the tracker, so the caller can try again; a receipt is final.
+        return .failure(
+            result.message ?? "Copilot did not apply this action.",
+            code: result.operationId == nil ? "busy" : result.state.rawValue
+        )
     }
 }

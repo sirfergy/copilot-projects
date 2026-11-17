@@ -653,7 +653,13 @@ That starts a prompt that is queued behind a background shell. `--remove` takes 
 back before Copilot starts it. Both wait for Copilot's answer and exit 0 only when it did
 as asked. If Copilot had already started the prompt, or it was already taken back, they
 print "That prompt is no longer queued." and exit 1. `--send-now` is refused while Copilot
-waits on a question, as a send is, and a parked session exits 9: nothing is queued in it.
+waits on a question, as a send is. A refusal that never reached Copilot, such as that one
+or a tracker that is not ready, exits 8: try again. A parked session exits 9: nothing is
+queued in it.
+
+The list is what the session's tracker last read from Copilot's queue. For a moment after
+the tracker starts or the conversation changes, or while it cannot read the queue, the list
+can be empty or out of date.
 
 Three limits. `text` is cut at 8,192 characters, so a longer prompt typed in the terminal is
 listed, and comes back to the message field, without its end. A prompt's attachments are
