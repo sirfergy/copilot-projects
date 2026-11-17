@@ -2660,13 +2660,18 @@ if (validSessionId && socketPath) {
             // The rows of one batch share a queue id, and Copilot's requests act on all of them.
             if (queue.items.some((entry) => entry !== item && entry?.id === item.id)) return { state: "rejected" };
             const sendNow = action.kind === "session-queue-send-now";
+            // Sent now, the prompt can start a turn, as a new send can.
+            if (sendNow) nativeSendRevision += 1;
             try {
                 const result = await workflowRPC(
                     sendNow ? "session.queue.sendNow" : "session.queue.removeAt", { id: item.id }, context
                 );
                 const outcome = rpcReceiptOutcome({ success: sendNow ? result?.steered : result?.removed });
-                // The published queue loses the prompt before the receipt says it is gone.
-                if (outcome.state === "applied") await refreshPendingMessages();
+                if (outcome.state === "applied") {
+                    // The snapshot that says so no longer lists the prompt, whatever the next read finds.
+                    pendingMessages = pendingMessages.filter((entry) => entry.messageId !== action.messageId);
+                    refreshPendingMessages();
+                }
                 return outcome;
             } catch (error) {
                 // Copilot answers `unknown_id` when a turn took the prompt first.
