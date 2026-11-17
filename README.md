@@ -52,10 +52,11 @@ Copilot has not taken yet. In the view you can:
 - **Select and copy text** across messages, and open an image in a larger preview;
   see [Transcript images](#transcript-images).
 
-Permission prompts and other slash commands stay in the terminal, and a tool's output
-is not shown, apart from images it returned. The view holds at most 200 turns of a
-conversation. It needs the session's tracker, which requires Copilot CLI experimental
-extensions, so a plain shell or another command-line tool has no transcript.
+Permission prompts stay in the terminal. So do other slash commands: the composer
+sends anything but `/restart` to Copilot as a message. A tool's output is not shown,
+apart from images it returned. The view holds at most 200 turns of a conversation. It
+needs the session's tracker, which requires Copilot CLI experimental extensions, so a
+plain shell or another command-line tool has no transcript.
 
 ## Session restart
 
@@ -203,8 +204,8 @@ accessibility labels.
 | Jump to a session | `⌃1`–`⌃9` |
 | Show / hide Projects | `⌘0` |
 
-Hold `⌘` or `⌃` to reveal numbered navigation hints. Use the session-details
-button to open the [transcript view](#transcript-view).
+Hold `⌘` or `⌃` to reveal numbered navigation hints. Use **Show session details**
+in the session's heading to open the [transcript view](#transcript-view).
 
 ### Find a session
 
