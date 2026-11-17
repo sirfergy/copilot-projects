@@ -98,9 +98,11 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   Attention** (`⇧⌘A`) cycles across projects in urgency order (`waiting` → `failed` →
   `unread` / `finished`). When the session it went to no longer needs you, it carries
   on from there instead of starting over. The session's tracker (below) drives this automatically.
-- **Completed-turn drawer:** Copilot CLI remains the native interactive terminal, while a
-  collapsible drawer overlays its right edge with independently scrollable completed turns
-  rendered as Markdown. Live work, permissions, shortcuts, and input stay entirely in the CLI.
+- **Transcript view:** Copilot CLI remains the native interactive terminal, while a
+  collapsible drawer overlays its right edge with independently scrollable turns
+  rendered as Markdown, or fills the terminal area. Copilot's questions can be answered
+  and messages sent from it; permissions and shortcuts stay in the CLI. See
+  [Transcript view](../README.md#transcript-view).
 - **Schedules + background work:** queued scheduled prompts show a clock with cadence/next-run
   details; active scheduled turns and subagents use a separate background indicator instead of
   making the foreground session look busy.
@@ -809,7 +811,7 @@ subagents. Copilot CLI currently loads extensions only when experimental feature
 Run `/experimental on` once before starting app-managed sessions, or pass
 `--experimental` when launching Copilot manually. Without it, terminal reattach still works, but
 a session shows Idle whatever it is doing, posts no alerts, and takes no prompt from the app or a
-remote client, and the completed-turn drawer, tracker-backed session details, native session
+remote client, and the transcript view, tracker-backed session details, native session
 controls, and reboot conversation resume are unavailable. Existing CLI sessions must use
 `/restart` after enabling experimental features. When the app upgrades the tracker, a session
 already running a tracker with hot reload asks Copilot to reload its extensions once it is idle
