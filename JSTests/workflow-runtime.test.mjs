@@ -38,6 +38,8 @@ test("native workflow RPCs target the requested session", {
   let holding, release;
   const held = new Promise((resolve) => { holding = resolve; });
   const released = new Promise((resolve) => { release = resolve; });
+  // A failed assertion leaves the turn held, and the server can't close on an open response.
+  t.after(() => release());
   const server = createServer(async (request, response) => {
     let body = "";
     for await (const chunk of request) body += chunk;

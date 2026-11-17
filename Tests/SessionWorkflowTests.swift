@@ -415,7 +415,8 @@ final class SessionWorkflowTests: XCTestCase {
             ("send-now", "session-queue-send-now", .rejected, "not-queued", RemotePendingMessage.notQueuedMessage),
         ]
         for outcome in outcomes {
-            async let answer = model.queuedPromptsCommand(command(outcome.action), pollInterval: .milliseconds(5))
+            // A task made here starts on the main actor, so one yield lets it write its handoff.
+            let answer = Task { await model.queuedPromptsCommand(command(outcome.action), pollInterval: .milliseconds(5)) }
             let handoff = handoffURL(outcome.kind)
             for _ in 0..<20 where !FileManager.default.fileExists(atPath: handoff.path) { await Task.yield() }
             let handed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: handoff)) as? [String: Any])
@@ -427,7 +428,7 @@ final class SessionWorkflowTests: XCTestCase {
                 errorCode: outcome.errorCode, payloadFingerprint: handed["payloadFingerprint"] as? String
             )]
             try JSONEncoder().encode(snapshot).write(to: snapshotURL)
-            let response = await answer
+            let response = await answer.value
             XCTAssertEqual(response.code, outcome.state.rawValue, outcome.action)
             XCTAssertEqual(response.error, outcome.error, outcome.action)
         }
