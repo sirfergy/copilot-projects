@@ -18,6 +18,7 @@ public enum CLIMain {
         "new-session",
         "new-copilot-session",
         "send-session-prompt",
+        "queued-prompts",
         "set-parent-session",
         "close-session",
         "restart-session",
@@ -123,6 +124,8 @@ public enum CLIMain {
             return newCopilotSession(rest, environment: environment)
         case "send-session-prompt":
             return sendSessionPrompt(rest, environment: environment)
+        case "queued-prompts":
+            return queuedPrompts(rest, environment: environment)
         case "set-parent-session":
             return setParentSession(rest, environment: environment)
         case "close-session", "restart-session", "reload-session-mcp", "park-session", "unpark-session":
@@ -343,6 +346,36 @@ public enum CLIMain {
         req.prompt = prompt
         if parsed.flags["steer"] != nil { req.promptMode = .immediate }
         return sendAutomationRequest(req, environment: environment)
+    }
+
+    // MARK: - queued-prompts (automation)
+
+    private static func queuedPrompts(_ args: [String], environment: [String: String]) -> Int32 {
+        let usage = "usage: copilot-projects queued-prompts --session ID [--project ID] "
+            + "[--send-now MESSAGE_ID | --remove MESSAGE_ID]"
+        let parsed = parseFlags(args)
+        let allowed: Set<String> = ["session", "project", "send-now", "remove"]
+        let unknown = parsed.flags.keys.filter { !allowed.contains($0) }.sorted()
+        guard unknown.isEmpty, parsed.positionals.isEmpty else {
+            let extras = unknown.map { "--\($0)" } + parsed.positionals
+            fail("queued-prompts: unexpected \(extras.joined(separator: " "))\n\(usage)")
+            return 2
+        }
+        let sendNow = parsed.flags["send-now"], remove = parsed.flags["remove"]
+        guard let sessionId = parsed.flags["session"], !sessionId.isEmpty,
+              parsed.flags["project"].map({ !$0.isEmpty }) ?? true,
+              sendNow == nil || remove == nil, (sendNow ?? remove) != "" else {
+            fail(usage)
+            return 2
+        }
+        var req = ControlRequest(command: "queued-prompts")
+        req.sessionId = sessionId
+        req.projectId = parsed.flags["project"]
+        req.action = sendNow != nil ? "send-now" : remove != nil ? "remove" : nil
+        req.messageId = sendNow ?? remove
+        // An action answers once the tracker's receipt is known, as a park does, so its client waits longer.
+        return sendAutomationRequest(
+            req, environment: environment, timeout: req.action == nil ? ControlClient().timeout : 30)
     }
 
     private static func readPromptFile(atPath promptPath: String) -> String? {
@@ -682,6 +715,8 @@ public enum CLIMain {
               --project ID --request-id UUID --prompt-file PATH [--title T] [--host HOST] [--parent-session ID | --no-parent]
           copilot-projects send-session-prompt     Queue a prompt into an existing session, or steer its current task
               --session ID [--project ID] [--request-id UUID] [--steer] (--prompt TEXT | --prompt-file PATH)
+          copilot-projects queued-prompts          List a session's queued prompts as JSON, or send one now or take it back
+              --session ID [--project ID] [--send-now MESSAGE_ID | --remove MESSAGE_ID]
           copilot-projects set-parent-session      Group a session under a parent or ungroup it
               --session ID [--parent-session ID | --no-parent] [--project ID]
           copilot-projects set-default-host [host] Set default host for a project [--project ID]

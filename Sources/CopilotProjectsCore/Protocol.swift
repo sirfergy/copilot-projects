@@ -27,6 +27,8 @@ public struct ControlRequest: Codable, Sendable {
     public var promptMode: RemotePromptMode?
     public var hostId: String?
     public var parentSessionId: String?
+    /// The queued prompt `queued-prompts` acts on.
+    public var messageId: String?
 
     public init(command: String) {
         self.command = command

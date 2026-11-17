@@ -1471,7 +1471,9 @@ extension AppModel {
                 guard let workflow = snapshot.workflow,
                       snapshot.workflowIsFresh(at: clock()),
                       workflow.admits(action.kind) else { return false }
-                return action.kind != .send || (workflow.sendReady && !snapshot.hasPendingInput)
+                // Send now makes a steer, so it waits on a question as a send does.
+                return (action.kind != .send && action.kind != .queueSendNow)
+                    || (workflow.sendReady && !snapshot.hasPendingInput)
             },
             validate: { snapshot in
                 guard let workflow = snapshot.workflow else { return false }
@@ -1496,7 +1498,7 @@ extension AppModel {
                               ) else { return false }
                     }
                     return true
-                case .abort:
+                case .abort, .queueSendNow, .queueRemove:
                     return true
                 case .restart:
                     return self.sessionIsSettledIdle(
@@ -1664,7 +1666,8 @@ extension AppModel {
     func performLocalSessionAction(
         sessionId: String,
         action: RemoteSessionAction,
-        expectedConversationEpoch: String? = nil
+        expectedConversationEpoch: String? = nil,
+        pollInterval: Duration = .milliseconds(500)
     ) async -> RemoteWorkflowActionResult {
         let adapter = CLIOperationAdapter(
             activityDirectory: agentActivityDirectory,
@@ -1684,9 +1687,9 @@ extension AppModel {
         guard performSessionAction(sessionId: sessionId, action: action, operation: operation) == .accepted else {
             return RemoteWorkflowActionResult(state: .rejected, message: "The session action was not accepted.")
         }
-        guard let state = await terminalReceiptState(
+        guard let receipt = await terminalReceipt(
             sessionId: sessionId, operation: operation, kind: action.kind.rawValue,
-            pollInterval: .milliseconds(500), adapter: adapter
+            pollInterval: pollInterval, adapter: adapter
         ) else {
             return RemoteWorkflowActionResult(
                 state: .indeterminate,
@@ -1694,10 +1697,11 @@ extension AppModel {
                 operationId: operation.operationId
             )
         }
+        let notQueued = receipt.errorCode == "not-queued"
         return RemoteWorkflowActionResult(
-            state: state,
-            message: state == .applied ? nil : state == .rejected
-                ? "Copilot did not apply this action."
+            state: receipt.state,
+            message: receipt.state == .applied ? nil : receipt.state == .rejected
+                ? (notQueued ? RemotePendingMessage.notQueuedMessage : "Copilot did not apply this action.")
                 : "Outcome unknown. Inspect the terminal before trying again.",
             operationId: operation.operationId
         )
@@ -1727,10 +1731,10 @@ extension AppModel {
         guard setModel(sessionId: sessionId, selection: selection, operation: operation) == .accepted else {
             return RemoteWorkflowActionResult(state: .rejected, message: "Model switch was not accepted.")
         }
-        guard let state = await terminalReceiptState(
+        guard let state = await terminalReceipt(
             sessionId: sessionId, operation: operation, kind: CLISDKOperationKind.setModel.rawValue,
             pollInterval: pollInterval, adapter: adapter
-        ) else {
+        )?.state else {
             return RemoteWorkflowActionResult(
                 state: .indeterminate,
                 message: "Couldn't confirm the outcome. Inspect the terminal before trying again.",
@@ -1748,13 +1752,13 @@ extension AppModel {
 
     /// The tracker's final receipt for one submitted operation, or nil when
     /// none arrives in 20 s or the conversation changes first.
-    func terminalReceiptState(
+    func terminalReceipt(
         sessionId: String,
         operation: CLIOperationRequest,
         kind: String,
         pollInterval: Duration,
         adapter: CLIOperationAdapter
-    ) async -> RemoteOperationState? {
+    ) async -> RemoteOperationReceipt? {
         for _ in 0..<Int(Duration.seconds(20) / pollInterval) {
             do { try await ContinuousClock().sleep(until: .now.advanced(by: pollInterval)) }
             catch { break }
@@ -1763,7 +1767,7 @@ extension AppModel {
             if let receipt = fresh.remoteOperationProjection().receipts?.first(where: {
                 $0.operationId == operation.operationId && $0.kind == kind
             }), receipt.state.isTerminal {
-                return receipt.state
+                return receipt
             }
         }
         return nil

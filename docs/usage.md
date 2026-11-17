@@ -165,6 +165,16 @@ desktop CLI draft. **Stop task** requests cancellation without closing the sessi
 shell, or dtach session. Terminal controls remain available for other TUIs and
 unsupported CLI versions.
 
+In the desktop transcript, a prompt Copilot has not started yet is marked **Queued** and
+offers **Send now** and **Take back**. Send now delivers it as a steer: into the running
+turn, or as a turn at once when none is running, so a prompt queued behind a background
+shell stops waiting. It is unavailable while Copilot waits on a question. Take back removes
+the prompt from Copilot's queue and puts its text in the message field, ahead of any draft.
+If Copilot starts the prompt first, either action answers "That prompt is no longer
+queued." and the prompt runs. Text longer than 8,192 characters comes back cut, and
+attachments do not come back. `copilot-projects queued-prompts` does the same from a
+script; see [the README](../README.md#command-line-access).
+
 Native actions retain the writer lease, conversation identity, and SDK operation
 receipt checks. HTTP acceptance is not completion. A send's `applied` receipt
 means Copilot accepted the message, not that it finished the task. Unknown
@@ -461,6 +471,7 @@ copilot-projects set-default-host woodhaven --project <id>
 copilot-projects new-session --project <id> --cwd /tmp --host woodhaven
 copilot-projects focus --session <id>             # bring app forward + select
 copilot-projects send-session-prompt --session <id> --prompt "…"   # queue; add --steer to reach a running task
+copilot-projects queued-prompts --session <id>    # pending prompts as JSON; --send-now or --remove <messageId>
 copilot-projects doctor                           # diagnose state/session/runtime health
 copilot-projects version                          # print installed version
 copilot-projects install-hooks                    # install the Copilot CLI hook and the tracker

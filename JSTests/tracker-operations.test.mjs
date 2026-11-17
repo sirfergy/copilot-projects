@@ -152,6 +152,7 @@ class FakeSession {
     this.activityHandler = async () => ({ abortable: this.processing, hasActiveWork: this.processing });
     this.abortHandler = async () => this.emit("session.idle", { aborted: true });
     this.enqueueHandler = async () => ({ queued: true });
+    this.queueActionHandler = async () => ({ steered: true, removed: true });
     this.queueProcessCalls = [];
     this.queueProcessHandler = async () => null;
     this.extensionsReloadHandler = async () => null;
@@ -239,6 +240,9 @@ class FakeSession {
         if (method === "session.commands.enqueue") return this.enqueueHandler(params);
         if (method === "session.extensions.reload") return this.extensionsReloadHandler(params);
         if (method === "session.send") return this.sendHandler(params);
+        if (method === "session.queue.sendNow" || method === "session.queue.removeAt") {
+          return this.queueActionHandler(params);
+        }
         if (method === "session.abort") {
           await this.abortHandler();
           return { success: true };
@@ -1853,6 +1857,49 @@ test("native stop is independent of an unresolved send and never closes the term
   assert.deepEqual(runtime.session.closeCalls, []);
   completeSend({ messageId: "accepted-send" });
   await waitFor(() => receipt(runtime, send.operationId)?.state === "applied", "send outcome missing");
+});
+
+test("queue actions find a queued prompt by its messageId and report one that has left the queue", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  const { capabilities } = await workflowReady(runtime);
+  assert.ok(capabilities.includes("session-queue-send-now"));
+  assert.ok(capabilities.includes("session-queue-remove"));
+  const queued = (id, messageId) => ({ id, messageId, kind: "message", displayText: `prompt ${id}` });
+  runtime.session.pendingItemsHandler = async () => ({
+    items: [queued("4", "message-a"), queued("5", "message-b")], steeringMessages: [], inFlightSteeringCount: 0,
+  });
+  const act = async (kind, messageId) => {
+    const request = workflowHandoff(runtime, kind, { messageId });
+    const answered = () => ["applied", "rejected"].includes(receipt(runtime, request.operationId)?.state);
+    await waitFor(answered, `${kind} was not answered`);
+    const { state, errorCode } = receipt(runtime, request.operationId);
+    return errorCode ? `${state} ${errorCode}` : state;
+  };
+  assert.equal(await act("session-queue-send-now", "message-b"), "applied");
+  assert.equal(await act("session-queue-remove", "message-a"), "applied");
+  assert.deepEqual(runtime.session.workflowCalls, [
+    { method: "session.queue.sendNow", sessionId: runtime.copilotSessionId, id: "5" },
+    { method: "session.queue.removeAt", sessionId: runtime.copilotSessionId, id: "4" },
+  ]);
+  // Copilot's own queue id never stands in for a messageId, and a prompt that
+  // has left the queue is answered without a request.
+  assert.equal(await act("session-queue-remove", "4"), "rejected not-queued");
+  assert.equal(await act("session-queue-send-now", "message-gone"), "rejected not-queued");
+  assert.equal(runtime.session.workflowCalls.length, 2);
+  // Copilot's answer when a turn takes the prompt after the read.
+  runtime.session.queueActionHandler = async () => {
+    throw Object.assign(new Error("unknown queue item id '5'"), { code: -32602, data: { code: "unknown_id" } });
+  };
+  assert.equal(await act("session-queue-send-now", "message-b"), "rejected not-queued");
+  assert.equal(await act("session-queue-remove", "message-a"), "rejected not-queued");
+  // Send now makes a steer, so it is refused as a send is while Copilot waits
+  // on a question. Taking a prompt back is not.
+  runtime.session.queueActionHandler = async () => ({ steered: true, removed: true });
+  await runtime.session.emit("permission.requested", { requestId: "permission-1" });
+  assert.equal(await act("session-queue-send-now", "message-b"), "rejected target-unavailable");
+  assert.equal(await act("session-queue-remove", "message-b"), "applied");
 });
 
 test("native sends are fenced by permissions and budget decisions", {

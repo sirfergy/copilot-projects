@@ -397,6 +397,7 @@ struct TranscriptDrawer: View {
     let onPreview: (TranscriptImagePreviewItem) -> Void
     @AppStorage(Self.fullWidthTranscriptKey) private var isFullWidth = false
     @State private var isAtBottom = true
+    @State private var isActingOnQueue = false
 
     static func usageSummary(for workflow: RemoteSessionWorkflow, now: Date = Date()) -> String {
         if workflow.budgetRequest != nil {
@@ -565,6 +566,31 @@ struct TranscriptDrawer: View {
         )
     }
 
+    /// A queued prompt can be sent now or taken back while the tracker offers it. A steer
+    /// has no row of its own in Copilot's queue, so it offers neither. Send now makes a
+    /// steer, so it waits on a question as a send does.
+    static func queueActions(
+        for pending: RemotePendingMessage, workflow: RemoteSessionWorkflow?, isActing: Bool, now: Date = Date()
+    ) -> [(kind: RemoteSessionActionKind, title: String, enabled: Bool)] {
+        guard pending.mode == .enqueue, let workflow else { return [] }
+        let actions: [(kind: RemoteSessionActionKind, title: String, enabled: Bool)] = [
+            (.queueSendNow, RemotePendingMessage.sendNowTitle, workflow.sendReady && !isActing),
+            (.queueRemove, RemotePendingMessage.takeBackTitle, !isActing),
+        ]
+        return actions.filter { workflow.supports($0.kind, at: now) }
+    }
+
+    private func actOnQueue(_ kind: RemoteSessionActionKind, _ pending: RemotePendingMessage) {
+        isActingOnQueue = true
+        promptComposer?.showQueueAction(nil)
+        Task {
+            let result = await onAction(RemoteSessionAction(kind: kind, messageId: pending.messageId))
+            isActingOnQueue = false
+            // The row is gone once the action is applied, so its text was taken before sending.
+            promptComposer?.showQueueAction(result, takenBack: kind == .queueRemove ? pending.text : nil)
+        }
+    }
+
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
         isAtBottom = true
         proxy.scrollTo("transcript-bottom", anchor: .bottom)
@@ -625,6 +651,10 @@ struct TranscriptDrawer: View {
                                 imageCapture: nil,
                                 isPending: true,
                                 pendingMode: pending.mode,
+                                queueActions: Self.queueActions(
+                                    for: pending, workflow: currentWorkflow, isActing: isActingOnQueue
+                                ),
+                                onQueueAction: { actOnQueue($0, pending) },
                                 onPreview: onPreview
                             )
                         }

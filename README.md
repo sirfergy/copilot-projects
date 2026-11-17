@@ -630,6 +630,31 @@ with a different prompt, session or `--steer` exits 3.
 An app left running from before it learned `--steer` ignores it and queues the
 prompt, so restart the app after updating.
 
+To see the prompts a session's Copilot has not started yet, and to send one now or take
+it back, use `queued-prompts`:
+
+```bash
+copilot-projects queued-prompts --session <id>                          # the pending prompts, as JSON
+copilot-projects queued-prompts --session <id> --send-now <messageId>
+copilot-projects queued-prompts --session <id> --remove <messageId>
+```
+
+The list is `[{"messageId": …, "text": …, "mode": …}]`, and only an entry whose `mode`
+is `enqueue` can be named. `--send-now` delivers the prompt as a steer is delivered: into
+the turn that is running, where Copilot stops waiting on a shell command to take it and
+the command carries on in the background, or as a new turn at once when none is running.
+That starts a prompt that is queued behind a background shell. `--remove` takes the prompt
+back before Copilot starts it. Both wait for Copilot's answer and exit 0 only when it did
+as asked. If Copilot had already started the prompt, or it was already taken back, they
+print "That prompt is no longer queued." and exit 1. `--send-now` is refused while Copilot
+waits on a question, as a send is, and a parked session exits 9: nothing is queued in it.
+
+Two limits. `text` is cut at 8,192 characters, so a longer prompt typed in the terminal is
+listed, and comes back to the message field, without its end. A prompt's attachments are
+not listed and do not come back: attach them again. Both requests are experimental in
+Copilot's SDK and were run on Copilot CLI 1.0.113; a Copilot without them refuses the
+first attempt, and its tracker stops offering that action.
+
 Commands inside an app-managed terminal automatically target its current
 project and session. Hooks for other tools can post a notification:
 
