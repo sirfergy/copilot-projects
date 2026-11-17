@@ -9488,7 +9488,7 @@ final class AppLogicTests: XCTestCase {
         const joinSession = async () => fakeSession;
         """#
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: prelude
         )
         let epilogue = #"""

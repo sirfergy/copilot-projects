@@ -523,7 +523,7 @@ final class CoreLogicTests: XCTestCase {
                 with: abortEmitsIdle ? "true" : "false"
             )
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         ).replacingOccurrences(
             of: "const CLOSE_IDLE_TIMEOUT_MS = 5_000;",
@@ -612,7 +612,7 @@ final class CoreLogicTests: XCTestCase {
         )
 
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: #"const joinSession = async () => ({sessionId:"copilot-session"});"#
         )
         let script = root.appendingPathComponent("resolver.mjs")
@@ -835,7 +835,7 @@ final class CoreLogicTests: XCTestCase {
         };
         """#
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         )
         let epilogue = #"""
@@ -1282,7 +1282,7 @@ final class CoreLogicTests: XCTestCase {
         };
         """#
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         )
         let epilogue = #"""
@@ -1369,7 +1369,7 @@ final class CoreLogicTests: XCTestCase {
         };
         """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         )
         let epilogue = #"""
@@ -1624,7 +1624,7 @@ final class CoreLogicTests: XCTestCase {
 
         let extensionScript = CopilotExtension.script
             .replacingOccurrences(
-                of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                of: CopilotExtension.sdkImport,
                 with: Self.fakeJoinSession
             )
             .replacingOccurrences(
@@ -2113,7 +2113,7 @@ final class CoreLogicTests: XCTestCase {
             with: foregroundSessionId
         )
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         )
         let epilogue = #"""
@@ -2256,7 +2256,7 @@ final class CoreLogicTests: XCTestCase {
         """#
         let extensionScript = CopilotExtension.script
             .replacingOccurrences(
-                of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                of: CopilotExtension.sdkImport,
                 with: Self.fakeJoinSession
             )
             .replacingOccurrences(
@@ -2468,7 +2468,7 @@ final class CoreLogicTests: XCTestCase {
 
         let extensionScript = CopilotExtension.script
             .replacingOccurrences(
-                of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                of: CopilotExtension.sdkImport,
                 with: Self.fakeJoinSession
             )
             .replacingOccurrences(
@@ -2615,7 +2615,7 @@ final class CoreLogicTests: XCTestCase {
 
         let extensionScript = CopilotExtension.script
             .replacingOccurrences(
-                of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                of: CopilotExtension.sdkImport,
                 with: Self.fakeJoinSession
             )
             .replacingOccurrences(
@@ -2726,7 +2726,7 @@ final class CoreLogicTests: XCTestCase {
         };
         """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         )
         let epilogue = #"""
@@ -2830,7 +2830,7 @@ final class CoreLogicTests: XCTestCase {
         };
         """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         )
         let epilogue = #"""
@@ -2961,7 +2961,7 @@ final class CoreLogicTests: XCTestCase {
         };
         """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         )
         let epilogue = #"""
@@ -3076,7 +3076,7 @@ final class CoreLogicTests: XCTestCase {
         };
         """#
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         )
         let epilogue = #"""
@@ -3226,7 +3226,7 @@ final class CoreLogicTests: XCTestCase {
         """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
         let extensionScript = CopilotExtension.script
             .replacingOccurrences(
-                of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                of: CopilotExtension.sdkImport,
                 with: Self.fakeJoinSession
             )
             .replacingOccurrences(
@@ -3609,7 +3609,7 @@ final class CoreLogicTests: XCTestCase {
         """#.replacingOccurrences(of: "__COPILOT_SESSION_ID__", with: copilotSessionId)
         let extensionScript = CopilotExtension.script
             .replacingOccurrences(
-                of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                of: CopilotExtension.sdkImport,
                 with: Self.fakeJoinSession
             )
             .replacingOccurrences(
@@ -4054,7 +4054,7 @@ final class CoreLogicTests: XCTestCase {
         };
         """#
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         )
         let epilogue = #"""
@@ -4147,7 +4147,7 @@ final class CoreLogicTests: XCTestCase {
         globalThis.__fakeSession = fakeSession;
         """#
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         )
         let epilogue = #"""
@@ -4406,7 +4406,7 @@ final class CoreLogicTests: XCTestCase {
         globalThis.__fakeSession = fakeSession;
         """#
         let extensionScript = CopilotExtension.script.replacingOccurrences(
-            of: #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+            of: CopilotExtension.sdkImport,
             with: Self.fakeJoinSession
         )
         let epilogue = #"""
