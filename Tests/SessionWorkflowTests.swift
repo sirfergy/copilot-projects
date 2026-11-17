@@ -388,7 +388,7 @@ final class SessionWorkflowTests: XCTestCase {
             conversationEpoch: "epoch-1", operationReceiptVersion: 1, operationReceipts: [],
             workflow: RemoteSessionWorkflow(
                 observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
-                capabilities: RemoteSessionActionKind.allCases.map(\.rawValue),
+                capabilities: RemoteSessionActionKind.allCases.map(\.rawValue) + [RemotePendingMessage.capability],
                 sendReady: true, restartRequested: false, pendingMessages: pending
             )
         )
@@ -438,6 +438,15 @@ final class SessionWorkflowTests: XCTestCase {
         let fenced = await model.queuedPromptsCommand(command("send-now"))
         XCTAssertEqual(fenced.error, "The session action was not accepted.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL("session-queue-send-now").path))
+
+        // A tracker that cannot see Copilot's queue publishes no list. That is not an empty queue.
+        snapshot.workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000), capabilities: [], sendReady: false
+        )
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        let blind = await model.queuedPromptsCommand(command())
+        XCTAssertEqual(blind.code, "busy")
+        XCTAssertNil(blind.text)
 
         model.projects[0].sessions[0].parked = ParkedSession(state: .parked, sinceMilliseconds: 1)
         for action in [nil, "remove"] {

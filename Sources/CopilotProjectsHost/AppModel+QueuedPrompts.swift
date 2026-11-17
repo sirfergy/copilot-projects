@@ -17,7 +17,9 @@ extension AppModel {
         guard let action = request.action else {
             let adapter = CLIOperationAdapter(
                 activityDirectory: agentActivityDirectory, resumeMarkerDirectory: resumeMarkerDirectory)
+            // A tracker that cannot see Copilot's queue offers no list, which is not an empty queue.
             guard let workflow = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() })?.workflow,
+                  workflow.capabilities.contains(RemotePendingMessage.capability),
                   let json = try? JSONEncoder().encode(workflow.pendingMessages ?? []) else {
                 return .failure("the session's tracker is not ready", code: "busy")
             }
