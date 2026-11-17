@@ -154,7 +154,7 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 
 ## Native session workflows
 
-With Copilot CLI 1.0.84 or newer on SDK protocol 3, the tracker offers native
+With Copilot CLI 1.0.84 or newer on SDK protocol 3 or 4, the tracker offers native
 session controls to the desktop and optional integrations. This also requires Copilot CLI
 experimental features; see [Copilot CLI integration](#copilot-cli-integration-automatic-status).
 Separately built iOS and web composers

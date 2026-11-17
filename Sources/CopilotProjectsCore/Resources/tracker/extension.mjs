@@ -477,6 +477,7 @@ if (validSessionId && socketPath) {
     let conversationGeneration = 0;
     const trackerInstanceId = randomUUID();
     let conversationEpoch = `${trackerInstanceId}:${conversationGeneration}`;
+    // The runtime's SDK protocol version once it is known to be supported, or false.
     let workflowRuntime = null;
     let restartRequested = false;
     let nativeSendRevision = 0;
@@ -2279,9 +2280,10 @@ if (validSessionId && socketPath) {
             if (workflowRuntime === null) {
                 const status = await workflowRead("status.get", {}, context);
                 const version = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(status?.version || "");
-                workflowRuntime = status?.protocolVersion === 3 && version !== null
+                workflowRuntime = [3, 4].includes(status?.protocolVersion) && version !== null
                     && Number(version[1]) === 1
-                    && (Number(version[2]) > 0 || Number(version[3]) >= 84);
+                    && (Number(version[2]) > 0 || Number(version[3]) >= 84)
+                    && status.protocolVersion;
             }
             if (!workflowRuntime) throw new Error("unsupported-runtime");
             const workflowMetadataSeq = ++runtimeMetadataSeq;
@@ -2655,9 +2657,10 @@ if (validSessionId && socketPath) {
                 ? { state: "applied" } : { state: "indeterminate", errorCode: "rpc-indeterminate" };
         }
         case "set-session-budget": {
-            await workflowRPC("session.options.update", {
-                sessionLimits: action.maxAiCredits == null ? null : { maxAiCredits: action.maxAiCredits },
-            }, context);
+            const limits = action.maxAiCredits == null ? null : { maxAiCredits: action.maxAiCredits };
+            // SDK protocol 4 takes the limits under execution and rejects the flat field.
+            await workflowRPC("session.options.update",
+                workflowRuntime === 4 ? { execution: { limits } } : { sessionLimits: limits }, context);
             if (!operationAuthorityCurrent(context)) return { state: "indeterminate" };
             const metadata = await workflowRead("session.metadata.snapshot", {}, context);
             return Object.hasOwn(metadata, "sessionLimits")
