@@ -8,14 +8,28 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
+// SDK protocol 4 (Copilot CLI 1.0.113) renamed the spawned connection and grouped the options.
+const groupedOptions = ({ RuntimeConnection }) => typeof RuntimeConnection.forSpawnedStdio === "function";
+
+function runtimeClient(sdk, { baseDirectory, workingDirectory, useLoggedInUser }) {
+  const path = process.env.COPILOT_WORKFLOW_CLI || "copilot";
+  return new sdk.CopilotClient(groupedOptions(sdk) ? {
+    runtime: sdk.RuntimeConnection.forSpawnedStdio({ path, baseDirectory, workingDirectory }),
+    mode: "empty", github: { useLoggedInUser },
+  } : {
+    connection: sdk.RuntimeConnection.forStdio({ path }),
+    mode: "empty", useLoggedInUser, baseDirectory, workingDirectory,
+  });
+}
+
 // Opt-in, offline wire-contract test against an installed CLI/SDK pair.
 test("native workflow RPCs target the requested session", {
   skip: !process.env.COPILOT_WORKFLOW_SDK,
   timeout: 60_000,
 }, async (t) => {
-  const { CopilotClient, RuntimeConnection, ToolSet } = await import(
-    pathToFileURL(join(process.env.COPILOT_WORKFLOW_SDK, "index.js")).href
-  );
+  const sdk = await import(pathToFileURL(join(process.env.COPILOT_WORKFLOW_SDK, "index.js")).href);
+  const { ToolSet } = sdk;
+  const grouped = groupedOptions(sdk);
   const root = await mkdtemp(join(tmpdir(), "copilot-workflow-rpc-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   execFileSync("git", ["init", "--quiet", root]);
@@ -47,35 +61,38 @@ test("native workflow RPCs target the requested session", {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  const client = new CopilotClient({
-    connection: RuntimeConnection.forStdio({
-      path: process.env.COPILOT_WORKFLOW_CLI || "copilot",
-    }),
-    mode: "empty",
-    useLoggedInUser: false,
-    baseDirectory: join(root, "copilot-home"),
-    workingDirectory: root,
+  const client = runtimeClient(sdk, {
+    baseDirectory: join(root, "copilot-home"), workingDirectory: root, useLoggedInUser: false,
   });
   await client.start();
   t.after(() => client.stop());
-  const config = {
-    model: "fixture",
-    availableTools: new ToolSet(),
-    modelCapabilities: {
-      supports: { vision: true },
-      limits: { vision: { supported_media_types: ["image/png", "image/jpeg"],
-        max_prompt_images: 4, max_prompt_image_size: 2097152 } },
-    },
-    workingDirectory: root,
-    provider: {
-      type: "openai",
-      baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
-      apiKey: "offline-fixture",
-      wireApi: "completions",
-    },
+  const provider = {
+    type: "openai",
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+    apiKey: "offline-fixture",
+    wireApi: "completions",
   };
-  const first = await client.createSession(config);
-  const second = await client.createSession(config);
+  const config = (capabilities) => grouped ? {
+    model: "fixture/fixture",
+    workingDirectory: root,
+    tools: { availableTools: new ToolSet() },
+    inference: {
+      capabilities,
+      providers: [{ name: "fixture", ...provider }],
+      models: [{ provider: "fixture", id: "fixture" }],
+    },
+    github: { capi: { enabled: false } },
+  } : {
+    model: "fixture", workingDirectory: root, availableTools: new ToolSet(),
+    modelCapabilities: capabilities, provider,
+  };
+  const vision = {
+    supports: { vision: true },
+    limits: { vision: { supported_media_types: ["image/png", "image/jpeg"],
+      max_prompt_images: 4, max_prompt_image_size: 2097152 } },
+  };
+  const first = await client.createSession(config(vision));
+  const second = await client.createSession(config(vision));
   const connection = first.connection;
   const call = (method, params = {}) => connection.sendRequest(method, {
     sessionId: second.sessionId, ...params,
@@ -84,7 +101,9 @@ test("native workflow RPCs target the requested session", {
   assert.equal(metadata.sessionId, second.sessionId);
   assert.equal(metadata.isRemote, false);
   assert.ok(Object.hasOwn(metadata, "sessionLimits"));
-  await call("session.options.update", { sessionLimits: { maxAiCredits: 30 } });
+  const setBudget = (limits) => call("session.options.update",
+    grouped ? { execution: { limits } } : { sessionLimits: limits });
+  await setBudget({ maxAiCredits: 30 });
   assert.equal((await call("session.metadata.snapshot")).sessionLimits.maxAiCredits, 30);
   assert.equal((await first.rpc.metadata.snapshot()).sessionLimits, null);
   for (const mode of ["enqueue", "immediate"]) {
@@ -130,10 +149,7 @@ test("native workflow RPCs target the requested session", {
     assert.equal(images.length, 4, "all image bytes must reach the provider");
     assert.ok(images.every((image) => image.image_url.url.startsWith("data:image/png;base64,")));
   }
-  const textOnlySession = await client.createSession({
-    ...config,
-    modelCapabilities: { supports: { vision: false } },
-  });
+  const textOnlySession = await client.createSession(config({ supports: { vision: false } }));
   const jsonPayload = '{"feature":"file-attachments","enabled":true}\n';
   const mdPayload = "# Spec\n\nSupport JSON and Markdown attachments.\n";
   for (const mode of ["enqueue", "immediate"]) {
@@ -178,7 +194,7 @@ test("native workflow RPCs target the requested session", {
     requestId: "not-pending", response: { action: "cancel" },
   });
   assert.equal(expiredBudget.success, false);
-  await call("session.options.update", { sessionLimits: null });
+  await setBudget(null);
   assert.equal((await call("session.metadata.snapshot")).sessionLimits, null);
   console.log("Verified runtime:", await client.getStatus());
 });
@@ -187,21 +203,18 @@ test("live selected model matches its own image-capability catalog", {
   skip: !process.env.COPILOT_WORKFLOW_SDK || !process.env.COPILOT_WORKFLOW_MODEL,
   timeout: 60_000,
 }, async (t) => {
-  const { CopilotClient, RuntimeConnection, ToolSet } = await import(
-    pathToFileURL(join(process.env.COPILOT_WORKFLOW_SDK, "index.js")).href
-  );
+  const sdk = await import(pathToFileURL(join(process.env.COPILOT_WORKFLOW_SDK, "index.js")).href);
+  const { ToolSet } = sdk;
   const root = await mkdtemp(join(tmpdir(), "copilot-image-model-"));
-  const client = new CopilotClient({
-    connection: RuntimeConnection.forStdio({ path: process.env.COPILOT_WORKFLOW_CLI || "copilot" }),
-    mode: "empty", useLoggedInUser: true, baseDirectory: root, workingDirectory: root,
-  });
+  const client = runtimeClient(sdk, { baseDirectory: root, workingDirectory: root, useLoggedInUser: true });
   t.after(async () => {
     await client.stop();
     await rm(root, { recursive: true, force: true });
   });
   await client.start();
   const session = await client.createSession({
-    model: process.env.COPILOT_WORKFLOW_MODEL, availableTools: new ToolSet(), workingDirectory: root,
+    model: process.env.COPILOT_WORKFLOW_MODEL, workingDirectory: root,
+    ...(groupedOptions(sdk) ? { tools: { availableTools: new ToolSet() } } : { availableTools: new ToolSet() }),
   });
   const current = await session.connection.sendRequest("session.model.getCurrent", { sessionId: session.sessionId });
   const catalog = await session.connection.sendRequest("session.model.list", { sessionId: session.sessionId });

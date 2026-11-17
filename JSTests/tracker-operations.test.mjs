@@ -244,7 +244,10 @@ class FakeSession {
           return { success: true };
         }
         if (method === "session.options.update") {
-          this.sessionLimits = params.sessionLimits;
+          // SDK protocol 4 reads the limits under execution, protocol 3 in the flat field.
+          const { protocolVersion } = await this.statusHandler();
+          const limits = protocolVersion === 4 ? params.execution?.limits : params.sessionLimits;
+          if (limits !== undefined) this.sessionLimits = limits;
           return { success: true };
         }
         if (method === "session.ui.handlePendingSessionLimitsExhausted") {
@@ -1946,6 +1949,21 @@ test("budget changes read back the exact limit and answers use the current pendi
     entry.method === "session.ui.handlePendingSessionLimitsExhausted"
   );
   assert.deepEqual(call.response, { action: "add", additionalAiCredits: 10 });
+  const unset = workflowHandoff(runtime, "set-session-budget", { maxAiCredits: null });
+  await waitFor(() => receipt(runtime, unset.operationId)?.state === "applied", "budget removal missing");
+  assert.equal(runtime.session.sessionLimits, null);
+});
+
+test("a runtime on SDK protocol 4 offers the controls and takes a budget under execution", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, (session) => {
+    session.statusHandler = async () => ({ version: "1.0.113", protocolVersion: 4 });
+  });
+  await workflowReady(runtime);
+  const set = workflowHandoff(runtime, "set-session-budget", { maxAiCredits: 30 });
+  await waitFor(() => receipt(runtime, set.operationId)?.state === "applied", "budget change not verified");
+  assert.deepEqual(runtime.session.sessionLimits, { maxAiCredits: 30 });
   const unset = workflowHandoff(runtime, "set-session-budget", { maxAiCredits: null });
   await waitFor(() => receipt(runtime, unset.operationId)?.state === "applied", "budget removal missing");
   assert.equal(runtime.session.sessionLimits, null);
