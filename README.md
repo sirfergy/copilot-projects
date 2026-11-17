@@ -1,6 +1,7 @@
 # Copilot Projects
 
-A native macOS terminal workspace for keeping coding-agent sessions organized.
+A native macOS terminal workspace for keeping coding-agent sessions organized,
+with a [transcript view](#transcript-view) of their Copilot conversations.
 Projects and sessions occupy separate navigation columns, and status indicators tell
 you what is running, what needs input, and what finished while you were away.
 
@@ -24,6 +25,37 @@ connectivity, tunnel authentication, and remote push delivery are maintained and
 built separately; they are not included in the public desktop distribution.
 If you already use a remote-enabled installation, keep using its integrated
 distribution rather than replacing it with the standalone download.
+
+## Transcript view
+
+The transcript view shows a session's Copilot conversation as turns of rendered
+Markdown. Use it beside the terminal to read a reply with its tables and code blocks
+laid out, to scroll back while Copilot keeps working, or to answer Copilot without
+going to the terminal.
+
+Open it with **Show session details** in the session's heading. It opens as a drawer
+over the terminal's right edge; **Expand to full terminal area** puts it in the
+terminal's place. **Copilot Projects ▸ Default View ▸ Transcript** opens it for each
+session the first time you select it, and **Full-Width Transcript View** in the same
+menu sets whether it opens expanded.
+
+Each turn shows the prompt and its images, Copilot's replies, and collapsed
+**Thinking** and **Tools** sections for its reasoning steps and tool calls. The running
+turn is included, followed by a line that shows Copilot is working and any messages
+Copilot has not taken yet. In the view you can:
+
+- **Answer a question** by its choices, a text field, or a form. When Copilot's
+  `ask_user` question is answered, the answer becomes the next turn.
+- **Send a message** that steers the running task or queues after it, and attach
+  screenshots or text files to it.
+- **Restart the session** with `/restart`; see [Session restart](#session-restart).
+- **Select and copy text** across messages, and open an image in a larger preview;
+  see [Transcript images](#transcript-images).
+
+Permission prompts and other slash commands stay in the terminal, and a tool's output
+is not shown, apart from images it returned. The view holds at most 200 turns of a
+conversation. It needs the session's tracker, which requires Copilot CLI experimental
+extensions, so a plain terminal has no transcript.
 
 ## Session restart
 
@@ -75,11 +107,12 @@ Uploads are limited to four images, 2 MiB each, and 16 megapixels, further reduc
 by the selected model's limits. They live outside project repositories in the
 private state directory, expire after seven days, and are reclaimed on subsequent
 uploads. Storage is capped at 128 MiB/128 entries without evicting unexpired
-uploads. This repository does not add an upload UI to the standalone desktop app.
+uploads. The Mac's [transcript view](#transcript-view) composer can attach or paste
+screenshots too.
 
 ## Transcript images
 
-The Mac session-details drawer displays retained inline terminal images beneath
+The Mac transcript view displays retained inline terminal images beneath
 their associated turn. It also shows the PNG and JPEG images attached to a prompt,
 under that prompt, and the images a tool returned, under that tool's row in the
 turn's Tools section, whose collapsed header counts them. Both are Mac-only and are
@@ -100,7 +133,7 @@ it does not reconstruct attachment history after image data has been discarded.
 Images restored from disk without a recorded display origin remain available in
 the terminal but are not guessed into a historical transcript turn.
 An open preview pins the image being inspected, even if the terminal later
-discards it. Closing the drawer or switching sessions dismisses that preview.
+discards it. Closing the view or switching sessions dismisses that preview.
 
 ## A workspace for parallel work
 
@@ -112,9 +145,9 @@ discards it. Closing the drawer or switching sessions dismisses that preview.
   requests), unread markers, failed-request markers, and native notifications help
   you find the session that needs you. Pending
   questions keep the waiting indicator visible even while other activity continues.
-- **Session details.** Read completed turns as Markdown and see usage,
-  background agents, and schedules when the
-  connected Copilot CLI supports them.
+- **Session details.** Read each turn as Markdown in the
+  [transcript view](#transcript-view), and see usage, background agents, and
+  schedules when the connected Copilot CLI supports them.
 - **Find any session.** Press `⌘K` to search every project's sessions by name,
   project, folder, or what you worked on. Luna suggests matches by meaning.
 - **Pull requests by goal.** Press `⇧⌘P` to open Copilot Pull Requests, a companion
@@ -171,7 +204,7 @@ accessibility labels.
 | Show / hide Projects | `⌘0` |
 
 Hold `⌘` or `⌃` to reveal numbered navigation hints. Use the session-details
-button to open the completed-turn drawer.
+button to open the [transcript view](#transcript-view).
 
 ### Find a session
 
@@ -371,7 +404,7 @@ look, banner choices, and the count Copilot Projects' Window menu shows are kept
 opening another brings the first forward.
 
 VoiceOver exposes each session's selection and attention state, with separate
-select and end actions. The session-details drawer uses a fade instead of
+select and end actions. The transcript view uses a fade instead of
 sliding when Reduce Motion is enabled.
 
 The **+** side of the split button starts an interactive Copilot CLI session immediately,
