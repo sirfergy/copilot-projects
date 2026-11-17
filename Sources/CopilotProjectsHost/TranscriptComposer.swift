@@ -71,7 +71,7 @@ struct TranscriptPromptComposerView: View {
 
     private func blockedMessage(now: Date) -> String? {
         if let message = composer.statusMessage { return message }
-        if composer.slashCommand != nil { return composer.restartBlockedReason() }
+        if composer.slashCommand != nil { return composer.slashCommandNotice }
         return composer.attachmentsBlockedReason(workflow: liveWorkflow, operation: liveOperation, now: now)
     }
 
@@ -84,11 +84,11 @@ struct TranscriptPromptComposerView: View {
             HStack(spacing: 8) {
                 ForEach(suggestions) { suggestion in
                     Button {
-                        composer.prompt = suggestion.command
+                        composer.prompt = suggestion.completion
                         promptFocused = true
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(suggestion.command)
+                            Text(suggestion.title)
                                 .font(.callout.monospaced())
                             Text(suggestion.summary)
                                 .font(.caption2)

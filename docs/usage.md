@@ -269,6 +269,15 @@ idle, or the session's tracker is not offering a restart; in the last case run
 menu, and in the Session menu for the selected session, makes the same request
 and is disabled under the same conditions.
 
+`/rename <new name>` in the composer, and **Rename…** in a session's context menu,
+rename a Copilot session: the app types Copilot's own `/rename` into the session's
+terminal, as the web and iOS clients do, and the tab takes the new name when Copilot
+sets its terminal title. The command is typed after anything unsent in the terminal's
+input line, so send or clear that first. The composer refuses, and says why, while the
+session is parked, a restart is pending, Copilot is working or not ready, or the session
+has no terminal. **Rename…** is disabled under the same conditions, and says why if one
+arises while its dialog is open.
+
 An optional offline integration test exercises the installed CLI/SDK pair against
 a loopback model fixture, without real model requests:
 

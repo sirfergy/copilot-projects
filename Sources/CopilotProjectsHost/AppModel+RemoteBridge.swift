@@ -1090,6 +1090,32 @@ extension AppModel {
         )
     }
 
+    /// Why `/rename` can't be typed into this session's terminal right now, or be followed
+    /// by `name`; nil when it can. Like `restartBlockedReason`, it reads only what the model holds.
+    func renameBlockedReason(sessionId: String, name: String? = nil) -> String? {
+        if name?.isEmpty == true { return "Enter a new name after /rename" }
+        if name?.contains(where: \.isNewline) == true { return "Choose or finish a single-line slash command" }
+        guard let location = locateIndex(sessionId) else { return "This session is no longer open" }
+        let session = projects[location.p].sessions[location.s]
+        if session.parked != nil { return "This session is parked" }
+        if session.agentActivity?.workflow?.restartRequested == true {
+            return "Restart requested. Check Terminal before sending more work."
+        }
+        guard session.status == .idle, !session.hasBackgroundWork else {
+            return "Wait for Copilot to finish before running a slash command"
+        }
+        guard remotePromptable(session, now: Date()) else { return "Copilot is not ready for slash commands" }
+        return controllers[sessionId] == nil ? "This session has no terminal" : nil
+    }
+
+    /// Types Copilot's own `/rename` into the session's terminal, as a remote client's slash
+    /// command is typed; Copilot's new terminal title renames the tab. Answers why not, or nil.
+    func renameSession(_ sessionId: String, to name: String) -> String? {
+        if let reason = renameBlockedReason(sessionId: sessionId, name: name) { return reason }
+        let typed = sendRemoteCommand(sessionId: sessionId, requestId: UUID().uuidString, value: "/rename \(name)")
+        return typed == .sent ? nil : "This session's terminal did not take /rename"
+    }
+
     private func remoteSessionHasLiveAgent(_ sessionId: String) -> Bool {
         if liveAgentSessions.contains(sessionId) {
             return true
@@ -1577,6 +1603,8 @@ extension AppModel {
         composer.restart = { [weak self] in
             await self?.restartSession(sessionId) ?? RemoteWorkflowActionResult(state: .rejected)
         }
+        composer.renameBlockedReason = { [weak self] in self?.renameBlockedReason(sessionId: sessionId, name: $0) }
+        composer.rename = { [weak self] in self?.renameSession(sessionId, to: $0) }
         if locateIndex(sessionId) != nil {
             sessionPromptComposers[sessionId] = composer
         }
