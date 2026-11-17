@@ -51,6 +51,9 @@ Copilot has not taken yet. In the view you can:
   `ask_user` question is answered, the answer becomes the next turn.
 - **Send a message** that steers the running task or queues after it, and attach
   screenshots or text files to it.
+- **Send a queued message now, or take it back**, with **Send now** and **Take back**
+  on a message marked **Queued**; see [Command-line access](#command-line-access) for
+  what each does and its limits.
 - **Restart the session** with `/restart`; see [Session restart](#session-restart).
 - **Select and copy text** across messages, and open an image in a larger preview;
   see [Transcript images](#transcript-images).

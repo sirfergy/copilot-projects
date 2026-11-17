@@ -171,8 +171,9 @@ turn, or as a turn at once when none is running, so a prompt queued behind a bac
 shell stops waiting. It is unavailable while Copilot waits on a question. Take back removes
 the prompt from Copilot's queue and puts its text in the message field, ahead of any draft.
 If Copilot starts the prompt first, either action answers "That prompt is no longer
-queued." and the prompt runs. Text longer than 8,192 characters comes back cut, and
-attachments do not come back. `copilot-projects queued-prompts` does the same from a
+queued." and the prompt runs. Text longer than 8,192 characters comes back cut,
+attachments do not come back, and a prompt sent to Copilot as part of a batch is refused
+both. `copilot-projects queued-prompts` does the same from a
 script; see [the README](../README.md#command-line-access).
 
 Native actions retain the writer lease, conversation identity, and SDK operation
