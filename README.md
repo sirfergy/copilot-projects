@@ -7,9 +7,10 @@ you what is running, what needs input, and what finished while you were away.
 
 ![Two-Level Browser with separate project and session columns beside the native terminal](docs/workspace.png)
 
-Native workspace captures use isolated sample projects and illustrative terminal
-text. No live workspace content is shown. This unfocused-window capture was
-produced by the native Actions workflow; its origin is embedded in the PNG.
+Native workspace captures use isolated sample projects, illustrative terminal text,
+and an invented conversation. No live workspace content is shown. Each is an
+unfocused-window capture of the app's own views, made by a separate capture host
+that is given only that sample data; its origin is embedded in the PNG.
 
 ## Install
 
@@ -32,6 +33,8 @@ The transcript view shows a session's Copilot conversation as turns of rendered
 Markdown. Use it alongside the terminal to read a reply with its tables and code
 blocks laid out, to scroll back while Copilot keeps working, or to answer Copilot
 without going to the terminal.
+
+![Transcript view open as a drawer over the right side of the terminal, showing a prompt, a collapsed Thinking row, Copilot's reply with a table and a code block, a collapsed Tools row, quick-reply suggestions, and the message field with its Steer button](docs/transcript.png)
 
 Open it with **Show session details** in the session's heading. It opens as a drawer
 over the terminal's right edge; **Expand to full terminal area** puts it in the
