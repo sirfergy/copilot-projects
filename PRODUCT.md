@@ -63,8 +63,9 @@ The rendered finish review accepted seven native before/after captures
 unfocused windows. After states cover dark/light 1280x800 and compact 820x520,
 including compact Projects-hidden; observed terminal widths are 822pt, 420pt,
 and 539pt respectively. These are real Metal terminal screenshots, not generated
-mockups. `docs/workspace.png` matches the after-dark pixels; `docs/project-status.png`
-is its disclosed crop, and both carry provenance.
+mockups. `docs/workspace.png` showed the after-dark pixels until it was redrawn with
+the current app from the same sample workspace; `docs/project-status.png` is its
+disclosed crop, and both carry provenance.
 
 Palette checks and automated container/process/focus-collapse assertions are
 bounded evidence, not full interaction certification. Active windows, opened
