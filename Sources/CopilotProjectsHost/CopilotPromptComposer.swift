@@ -387,21 +387,33 @@ enum DesktopScreenshotAttachmentImage {
 }
 
 /// A slash command the transcript composer acts on itself instead of sending it
-/// to Copilot as a message. `/restart` is the only one: it restarts the session.
-struct ComposerSlashCommand: Identifiable {
+/// to Copilot as a message.
+struct ComposerSlashCommand: Identifiable, Equatable {
     let command: String
     let summary: String
+    /// What follows the command, as a suggestion names it; nil when nothing does.
+    var argument: String?
 
     var id: String { command }
+    /// The command as a suggestion shows it, and what choosing it puts in the draft.
+    var title: String { argument.map { "\(command) <\($0)>" } ?? command }
+    var completion: String { argument == nil ? command : command + " " }
 
+    static let rename = ComposerSlashCommand(command: "/rename", summary: "Rename this session", argument: "new name")
+    static let renameWarning = "Send or clear anything unsent in the session's terminal first: /rename is typed there."
     static let known = [
         ComposerSlashCommand(command: "/restart", summary: "Restart Copilot and preserve this session"),
+        rename,
     ]
 
-    /// The known command `draft` is on its own, whatever its case.
-    static func parse(_ draft: String) -> ComposerSlashCommand? {
-        let name = draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return known.first { $0.command == name }
+    /// The known command `draft` starts with, whatever its case, and what follows
+    /// it. A command that takes nothing is one only on its own.
+    static func parse(_ draft: String) -> (command: ComposerSlashCommand, argument: String)? {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = text.prefix { !$0.isWhitespace }
+        guard let command = known.first(where: { $0.command == name.lowercased() }) else { return nil }
+        let argument = text.dropFirst(name.count).trimmingCharacters(in: .whitespacesAndNewlines)
+        return command.argument == nil && !argument.isEmpty ? nil : (command, argument)
     }
 
     /// The known commands a draft that starts with `/` could still become.
@@ -450,11 +462,25 @@ final class DesktopSessionPromptComposer: ObservableObject {
     /// call that asks its tracker to restart it.
     var restartBlockedReason: @MainActor () -> String? = { "Copilot is not ready to restart" }
     var restart: @MainActor () async -> RemoteWorkflowActionResult = { RemoteWorkflowActionResult(state: .rejected) }
+    /// Set by the model: why `/rename` with that name can't run, and the call that runs it.
+    var renameBlockedReason: @MainActor (String) -> String? = { _ in "Copilot is not ready for slash commands" }
+    var rename: @MainActor (String) -> String? = { _ in "Copilot is not ready for slash commands" }
 
-    /// The slash command the draft is on its own. Send restarts the session
-    /// rather than sending the draft to Copilot as a message.
+    /// The slash command the draft is. Send runs it rather than sending the
+    /// draft to Copilot as a message.
     var slashCommand: ComposerSlashCommand? {
-        ComposerSlashCommand.parse(prompt)
+        ComposerSlashCommand.parse(prompt)?.command
+    }
+
+    /// Why the draft's slash command can't run right now; nil when it can.
+    var slashCommandBlockedReason: String? {
+        guard let (command, argument) = ComposerSlashCommand.parse(prompt) else { return nil }
+        return command == .rename ? renameBlockedReason(argument) : restartBlockedReason()
+    }
+
+    /// What to say under the draft's slash command: why it can't run, or what running it does.
+    var slashCommandNotice: String? {
+        slashCommandBlockedReason ?? (slashCommand == .rename ? ComposerSlashCommand.renameWarning : nil)
     }
 
     init(
@@ -579,7 +605,7 @@ final class DesktopSessionPromptComposer: ObservableObject {
         now: Date = Date()
     ) -> Bool {
         guard !isSending else { return false }
-        if slashCommand != nil { return restartBlockedReason() == nil }
+        if slashCommand != nil { return slashCommandBlockedReason == nil }
         guard !isAttaching, pendingOperationId == nil,
               operation.support == .receipts,
               let epoch = operation.conversationEpoch,
@@ -868,6 +894,12 @@ final class DesktopSessionPromptComposer: ObservableObject {
         onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult,
         now: Date = Date()
     ) async {
+        if let (command, name) = ComposerSlashCommand.parse(prompt), command == .rename {
+            // Nothing to wait for: the tab is renamed when Copilot sets its title.
+            statusMessage = rename(name)
+            if statusMessage == nil { prompt = "" }
+            return
+        }
         if slashCommand != nil {
             // The request waits for the tracker's answer: a second Run in that time
             // was refused and re-enabled Run, and the answer erased a newer draft.

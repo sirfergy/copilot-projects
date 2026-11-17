@@ -2662,6 +2662,18 @@ final class AppModel: ObservableObject {
         renameProject(pid, name: name)
     }
 
+    /// Asks for a name, as a project's Rename does, and has Copilot rename the session to it.
+    func renameSessionInteractive(_ sessionId: String) {
+        guard let name = promptForText(
+            title: "Rename Session",
+            message: "Enter a new name for this session. \(ComposerSlashCommand.renameWarning)",
+            confirmTitle: "Rename", initialText: ""
+        ) else { return }
+        if let reason = renameSession(sessionId, to: name) {
+            presentAlert(title: "Couldn't Rename Session", message: reason)
+        }
+    }
+
     func selectProject(_ id: String?) {
         let previousSessionId = globalSelectedSessionId
         selectedProjectId = id

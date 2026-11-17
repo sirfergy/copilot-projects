@@ -4,6 +4,7 @@ import XCTest
 import CopilotProjectsCore
 import CopilotProjectsProtocol
 @testable import CopilotProjectsHost
+@testable import SwiftTerm
 
 @MainActor
 final class SlashCommandTests: XCTestCase {
@@ -16,11 +17,20 @@ final class SlashCommandTests: XCTestCase {
             var live: Set<String> = []
         }
 
+        /// The row's Rename dialog: the name the user enters in it, or nil to cancel
+        /// it, what its field held when it opened, and what the app said when it refused.
+        final class RenameDialog {
+            var name: String?
+            var opened: [String] = []
+            var refused: [String] = []
+        }
+
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let session: Session
         let other: Session
         let model: AppModel
         let copilot = Copilot()
+        let renameDialog = RenameDialog()
         let operation = AgentOperationProjection(conversationEpoch: "epoch-1", support: .receipts, receipts: [])
         let workflow = RemoteSessionWorkflow(
             observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
@@ -45,12 +55,22 @@ final class SlashCommandTests: XCTestCase {
             )
             try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
             let copilot = copilot
+            let renameDialog = renameDialog
             copilot.live = [session.id, other.id]
             model = AppModel(
                 stateRepository: repository,
                 isAppActive: { false }, agentActivityDirectory: root, resumeMarkerDirectory: root,
                 remotePromptLiveSessions: { _ in copilot.live },
-                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                alertPresenter: { alert in
+                    guard let field = alert.accessoryView as? NSTextField else {
+                        renameDialog.refused.append(alert.informativeText)
+                        return .alertSecondButtonReturn
+                    }
+                    renameDialog.opened.append(field.stringValue)
+                    field.stringValue = renameDialog.name ?? ""
+                    return renameDialog.name == nil ? .alertSecondButtonReturn : .alertFirstButtonReturn
+                }
             )
             try heartbeat(session)
             try heartbeat(other)
@@ -69,7 +89,7 @@ final class SlashCommandTests: XCTestCase {
         /// Publishes a session's tracker snapshot, as its heartbeat does, and has the model read it.
         func heartbeat(
             _ session: Session, offering capabilities: [String] = ["session-send", "session-restart"],
-            receipts: [TrackedOperationReceipt] = []
+            receipts: [TrackedOperationReceipt] = [], restartRequested: Bool = false
         ) throws {
             let now = Date()
             let milliseconds = Int64(now.timeIntervalSince1970 * 1_000)
@@ -80,8 +100,8 @@ final class SlashCommandTests: XCTestCase {
                 pendingPermissionRequestIds: [], copilotSessionId: session.id,
                 conversationEpoch: "epoch-1", operationReceiptVersion: 1, operationReceipts: receipts,
                 workflow: RemoteSessionWorkflow(
-                    observedAtMilliseconds: milliseconds, capabilities: capabilities, sendReady: true,
-                    restartRequested: false
+                    observedAtMilliseconds: milliseconds, capabilities: capabilities,
+                    sendReady: !restartRequested, restartRequested: restartRequested
                 )
             )
             snapshot.runtimeActivity = RuntimeActivitySnapshot(processing: false, observedAtMilliseconds: milliseconds)
@@ -118,6 +138,37 @@ final class SlashCommandTests: XCTestCase {
                 await Task.yield()
             }
             return FileManager.default.fileExists(atPath: path)
+        }
+
+        /// Gives a session's tab a terminal that runs a shell but writes what is typed
+        /// into it to a pipe. The answer reads what has been typed since it last did:
+        /// the app's input, and any reply the terminal itself made to the shell.
+        func terminal(for session: Session) -> () -> String {
+            var ends: [Int32] = [-1, -1]
+            XCTAssertEqual(pipe(&ends), 0)
+            let (typed, input) = (FileHandle(fileDescriptor: ends[0], closeOnDealloc: true), ends[1])
+            let view = ProjectsTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+            view.replaceProcess { LocalProcess(delegate: $0, dispatchQueue: .main) { _ in input } }
+            model.controllers[session.id] = TerminalController(
+                sessionId: session.id, cwd: root.path, extraEnvironment: [:], dtachExecutable: nil, dtachSocket: nil,
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")), view: view
+            )
+            return {
+                // A terminal that isn't running writes nothing, and the read would never end.
+                guard view.process.running else {
+                    XCTFail("the terminal's shell is not running")
+                    return ""
+                }
+                // The terminal writes in order, so a marker typed now ends what came before it.
+                view.sendRemoteInput("\u{4}")
+                var read = Data()
+                while read.last != 4 {
+                    let more = typed.availableData
+                    if more.isEmpty { break }
+                    read.append(more)
+                }
+                return String(decoding: read.dropLast(), as: UTF8.self)
+            }
         }
 
         /// Presses Send, with the outcome a message gets from Copilot.
@@ -318,8 +369,108 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertFalse(requestedBusy)
     }
 
+    func testRenameTypesCopilotsOwnCommandIntoTheSessionsTerminal() async throws {
+        let f = try Fixture()
+        defer { f.close() }
+        let typed = f.terminal(for: f.session)
+        let typedInOther = f.terminal(for: f.other)
+
+        // The message field: Run types it, and nothing goes to Copilot as a message.
+        f.composer.prompt = " /Rename  New name \n"
+        XCTAssertTrue(f.composer.canSend(workflow: f.workflow, operation: f.operation))
+        await f.submit()
+        XCTAssertTrue(typed().contains("/rename New name\r"))
+        XCTAssertEqual(f.composer.prompt, "")
+        XCTAssertNil(f.composer.statusMessage)
+        XCTAssertEqual(f.sent.count, 0)
+
+        // A row's Rename asks for the name in an empty field and types it into that row's terminal.
+        f.renameDialog.name = "Row name"
+        f.model.renameSessionInteractive(f.other.id)
+        XCTAssertEqual(f.renameDialog.opened, [""])
+        XCTAssertTrue(typedInOther().contains("/rename Row name\r"))
+        f.renameDialog.name = nil
+        f.model.renameSessionInteractive(f.other.id)
+        XCTAssertFalse(typedInOther().contains("/rename"))
+        XCTAssertFalse(typed().contains("/rename"))
+    }
+
+    func testRenameSaysWhyItCannotRunAndTypesNothing() async throws {
+        let f = try Fixture()
+        defer { f.close() }
+        let typed = f.terminal(for: f.session)
+        let composer = f.composer
+        var blocked: String? { composer.slashCommandBlockedReason }
+
+        // The name is missing, or runs over a line.
+        composer.prompt = "/rename "
+        XCTAssertEqual(blocked, "Enter a new name after /rename")
+        composer.prompt = "/rename one\ntwo"
+        XCTAssertEqual(blocked, "Choose or finish a single-line slash command")
+        XCTAssertFalse(composer.canSend(workflow: f.workflow, operation: f.operation))
+        composer.prompt = "/rename New name"
+        XCTAssertNil(blocked)
+        // A command that can run says what typing it does to the terminal.
+        XCTAssertEqual(composer.slashCommandNotice, ComposerSlashCommand.renameWarning)
+
+        let working = "Wait for Copilot to finish before running a slash command"
+        f.model.setStatus(.running, sessionId: f.session.id)
+        XCTAssertEqual(blocked, working)
+        XCTAssertEqual(composer.slashCommandNotice, working)
+        XCTAssertFalse(composer.canSend(workflow: f.workflow, operation: f.operation))
+        await f.submit()
+        XCTAssertEqual(composer.statusMessage, working)
+        XCTAssertEqual(composer.prompt, "/rename New name")
+        // A row's Rename refused once its dialog is answered says why too.
+        f.renameDialog.name = "Row name"
+        f.model.renameSessionInteractive(f.session.id)
+        XCTAssertEqual(f.renameDialog.refused, [working])
+        f.model.setStatus(.idle, sessionId: f.session.id)
+        f.model.projects[0].sessions[0].backgroundAgentsActive = true
+        XCTAssertEqual(blocked, working)
+        f.model.projects[0].sessions[0].backgroundAgentsActive = false
+
+        f.model.projects[0].sessions[0].parked = ParkedSession(state: .parked, sinceMilliseconds: 1)
+        XCTAssertEqual(blocked, "This session is parked")
+        f.model.projects[0].sessions[0].parked = nil
+
+        // The tracker has queued Copilot's /restart, and Copilot has not come back from it.
+        try f.heartbeat(f.session, offering: [], restartRequested: true)
+        XCTAssertEqual(blocked, "Restart requested. Check Terminal before sending more work.")
+
+        // No tracker says Copilot is idle: it has stopped, or the tab is a plain terminal.
+        try f.stopTracker(of: f.session)
+        XCTAssertEqual(blocked, "Copilot is not ready for slash commands")
+        try f.heartbeat(f.session)
+        XCTAssertNil(blocked)
+
+        // The other row has no terminal, and none is started to type into.
+        XCTAssertEqual(f.model.renameSession(f.other.id, to: "New name"), "This session has no terminal")
+        XCTAssertNil(f.model.controllers[f.other.id])
+        XCTAssertEqual(f.model.renameBlockedReason(sessionId: "closed"), "This session is no longer open")
+
+        // None of that typed anything or went to Copilot as a message.
+        XCTAssertFalse(typed().contains("/rename"))
+        XCTAssertEqual(f.sent.count, 0)
+    }
+
+    func testRenameTakesTheRestOfItsLineAsTheNameAndIsNeverAMessage() {
+        XCTAssertEqual(ComposerSlashCommand.suggestions(for: "/ren").map(\.title), ["/rename <new name>"])
+        XCTAssertEqual(ComposerSlashCommand.rename.completion, "/rename ")
+        XCTAssertTrue(ComposerSlashCommand.suggestions(for: "/rename ").isEmpty)
+        for (draft, name) in [
+            ("/rename", ""), ("/rename ", ""), (" /Rename  New  name \n", "New  name"),
+            ("/rename one\ntwo", "one\ntwo"),
+        ] {
+            let parsed = ComposerSlashCommand.parse(draft)
+            XCTAssertEqual(parsed?.command, .rename, draft)
+            XCTAssertEqual(parsed?.argument, name, draft)
+        }
+        XCTAssertNil(ComposerSlashCommand.parse("/renamed x"))
+    }
+
     func testSuggestionsAreOfferedWhileTheDraftCouldStillBecomeTheCommand() {
-        XCTAssertEqual(ComposerSlashCommand.suggestions(for: "/").map(\.command), ["/restart"])
+        XCTAssertEqual(ComposerSlashCommand.suggestions(for: "/").map(\.command), ["/restart", "/rename"])
         XCTAssertEqual(ComposerSlashCommand.suggestions(for: " /RES").map(\.command), ["/restart"])
         XCTAssertEqual(ComposerSlashCommand.suggestions(for: "/restart").map(\.summary), [
             "Restart Copilot and preserve this session",

@@ -52,14 +52,17 @@ Copilot has not taken yet. In the view you can:
 - **Send a message** that steers the running task or queues after it, and attach
   screenshots or text files to it.
 - **Restart the session** with `/restart`; see [Session restart](#session-restart).
+- **Rename the session** with `/rename <new name>`, which types Copilot's own `/rename`
+  into the session's terminal; see
+  [Native session workflows](docs/usage.md#native-session-workflows).
 - **Select and copy text** across messages, and open an image in a larger preview;
   see [Transcript images](#transcript-images).
 
 Permission prompts stay in the terminal. So do other slash commands: the composer
-sends anything but `/restart` to Copilot as a message. A tool's output is not shown,
-apart from images it returned. The view holds at most 200 turns of a conversation. It
-needs the session's tracker, which requires Copilot CLI experimental extensions, so a
-plain shell or another command-line tool has no transcript.
+sends anything but `/restart` and `/rename` to Copilot as a message. A tool's output is
+not shown, apart from images it returned. The view holds at most 200 turns of a
+conversation. It needs the session's tracker, which requires Copilot CLI experimental
+extensions, so a plain shell or another command-line tool has no transcript.
 
 ## Session restart
 
