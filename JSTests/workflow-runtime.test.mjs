@@ -219,6 +219,21 @@ test("native workflow RPCs target the requested session", {
     .filter((event) => event.type === "user.message" && event.data.content.startsWith("Reply queue-"))
     .map((event) => event.data.content);
   assert.deepEqual(queuedPrompts, ["Reply queue-sent-now."]);
+  // With no turn running, a prompt sent now starts at once. Pausing the drain is what
+  // holds it queued here; a background shell does the same to a real session.
+  await call("session.queue.setDrainPaused", { paused: true });
+  const startedIdle = new Promise((resolve) => {
+    const unsubscribe = second.on("session.idle", () => { unsubscribe(); resolve(); });
+  });
+  const waiting = await call("session.send", { prompt: "Reply queue-started.", mode: "enqueue" });
+  const [stalled] = (await call("session.queue.pendingItems")).items;
+  assert.equal(stalled.messageId, waiting.messageId);
+  assert.equal((await call("session.metadata.isProcessing")).processing, false);
+  assert.deepEqual(await call("session.queue.sendNow", { id: stalled.id }), { steered: true });
+  await startedIdle;
+  await call("session.queue.setDrainPaused", { paused: false });
+  assert.ok((await second.getEvents()).some((event) =>
+    event.type === "user.message" && event.data.content === "Reply queue-started."));
   const metrics = await call("session.usage.getMetrics");
   assert.equal(typeof metrics.totalUserRequests, "number");
   const abort = await call("session.abort");

@@ -1867,14 +1867,25 @@ test("queue actions find a queued prompt by its messageId and report one that ha
   assert.ok(capabilities.includes("session-queue-send-now"));
   assert.ok(capabilities.includes("session-queue-remove"));
   const queued = (id, messageId) => ({ id, messageId, kind: "message", displayText: `prompt ${id}` });
-  runtime.session.pendingItemsHandler = async () => ({
-    items: [queued("4", "message-a"), queued("5", "message-b")], steeringMessages: [], inFlightSteeringCount: 0,
-  });
+  let items = [queued("4", "message-a"), queued("5", "message-b"), queued("6", "message-c")];
+  runtime.session.pendingItemsHandler = async () => ({ items, steeringMessages: [], inFlightSteeringCount: 0 });
+  const leaveQueue = async ({ id }) => {
+    items = items.filter((item) => item.id !== id);
+    return { steered: true, removed: true };
+  };
+  runtime.session.queueActionHandler = leaveQueue;
   const act = async (kind, messageId) => {
     const request = workflowHandoff(runtime, kind, { messageId });
     const answered = () => ["applied", "rejected"].includes(receipt(runtime, request.operationId)?.state);
     await waitFor(answered, `${kind} was not answered`);
     const { state, errorCode } = receipt(runtime, request.operationId);
+    if (state === "applied") {
+      // The snapshot that first says so already shows the queue as the action left it.
+      const first = runtime.activityWrites.find((snapshot) => snapshot.operationReceipts
+        .some((entry) => entry.operationId === request.operationId && entry.state === state));
+      assert.deepEqual((first.workflow.pendingMessages ?? []).map((entry) => entry.messageId),
+        items.map((item) => item.messageId), kind);
+    }
     return errorCode ? `${state} ${errorCode}` : state;
   };
   assert.equal(await act("session-queue-send-now", "message-b"), "applied");
@@ -1883,6 +1894,7 @@ test("queue actions find a queued prompt by its messageId and report one that ha
     { method: "session.queue.sendNow", sessionId: runtime.copilotSessionId, id: "5" },
     { method: "session.queue.removeAt", sessionId: runtime.copilotSessionId, id: "4" },
   ]);
+  items = [queued("4", "message-a"), queued("5", "message-b")];
   // Copilot's own queue id never stands in for a messageId, and a prompt that
   // has left the queue is answered without a request.
   assert.equal(await act("session-queue-remove", "4"), "rejected not-queued");
@@ -1896,10 +1908,28 @@ test("queue actions find a queued prompt by its messageId and report one that ha
   assert.equal(await act("session-queue-remove", "message-a"), "rejected not-queued");
   // Send now makes a steer, so it is refused as a send is while Copilot waits
   // on a question. Taking a prompt back is not.
-  runtime.session.queueActionHandler = async () => ({ steered: true, removed: true });
+  runtime.session.queueActionHandler = leaveQueue;
   await runtime.session.emit("permission.requested", { requestId: "permission-1" });
   assert.equal(await act("session-queue-send-now", "message-b"), "rejected target-unavailable");
   assert.equal(await act("session-queue-remove", "message-b"), "applied");
+});
+
+test("a prompt queued as part of a batch is neither sent now nor taken back on its own", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await workflowReady(runtime);
+  // What Copilot CLI 1.0.113 lists for two prompts sent together: two rows, one queue id.
+  runtime.session.pendingItemsHandler = async () => ({
+    items: ["batch-a", "batch-b"].map((messageId) => ({ id: "2", messageId, kind: "message", displayText: messageId })),
+    steeringMessages: [], inFlightSteeringCount: 0,
+  });
+  for (const [kind, messageId] of [["session-queue-remove", "batch-a"], ["session-queue-send-now", "batch-b"]]) {
+    const request = workflowHandoff(runtime, kind, { messageId });
+    await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", `${kind} was not refused`);
+    assert.equal(receipt(runtime, request.operationId).errorCode, undefined);
+  }
+  assert.deepEqual(runtime.session.workflowCalls, []);
 });
 
 test("native sends are fenced by permissions and budget decisions", {

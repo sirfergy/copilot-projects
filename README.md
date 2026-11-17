@@ -649,9 +649,11 @@ as asked. If Copilot had already started the prompt, or it was already taken bac
 print "That prompt is no longer queued." and exit 1. `--send-now` is refused while Copilot
 waits on a question, as a send is, and a parked session exits 9: nothing is queued in it.
 
-Two limits. `text` is cut at 8,192 characters, so a longer prompt typed in the terminal is
+Three limits. `text` is cut at 8,192 characters, so a longer prompt typed in the terminal is
 listed, and comes back to the message field, without its end. A prompt's attachments are
-not listed and do not come back: attach them again. Both requests are experimental in
+not listed and do not come back: attach them again. A prompt sent to Copilot as part of a
+batch can't be sent now or taken back on its own: Copilot would act on the whole batch, so
+the action is refused. Both requests are experimental in
 Copilot's SDK and were run on Copilot CLI 1.0.113; a Copilot without them refuses the
 first attempt, and its tracker stops offering that action.
 

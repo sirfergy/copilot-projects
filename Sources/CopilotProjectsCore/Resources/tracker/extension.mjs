@@ -2652,17 +2652,22 @@ if (validSessionId && socketPath) {
             return rpcReceiptOutcome(await workflowRPC("session.abort", {}, context));
         case "session-queue-send-now":
         case "session-queue-remove": {
-            // Copilot's own queue id is a counter from 0; the published messageId names one prompt.
+            // Copilot's requests take its own queue id, which is not published; a messageId names the prompt.
             const queue = await workflowRead("session.queue.pendingItems", {}, context);
             const item = queue?.items?.find((entry) =>
                 entry?.kind === "message" && entry.messageId === action.messageId);
             if (!item) return { state: "rejected", errorCode: "not-queued" };
+            // The rows of one batch share a queue id, and Copilot's requests act on all of them.
+            if (queue.items.some((entry) => entry !== item && entry?.id === item.id)) return { state: "rejected" };
             const sendNow = action.kind === "session-queue-send-now";
             try {
                 const result = await workflowRPC(
                     sendNow ? "session.queue.sendNow" : "session.queue.removeAt", { id: item.id }, context
                 );
-                return rpcReceiptOutcome({ success: sendNow ? result?.steered : result?.removed });
+                const outcome = rpcReceiptOutcome({ success: sendNow ? result?.steered : result?.removed });
+                // The published queue loses the prompt before the receipt says it is gone.
+                if (outcome.state === "applied") await refreshPendingMessages();
+                return outcome;
             } catch (error) {
                 // Copilot answers `unknown_id` when a turn took the prompt first.
                 if (error?.data?.code !== "unknown_id") throw error;
