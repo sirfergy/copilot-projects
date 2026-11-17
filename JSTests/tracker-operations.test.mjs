@@ -5515,6 +5515,47 @@ test("a deferred model event updates the model without guessing its receipt", {
   assert.deepEqual(receipt(runtime, fields.operationId), outcome);
 });
 
+// Model events a Copilot CLI 1.0.113 session start can log, trimmed.
+async function emitStartupModelEvents(runtime, model) {
+  await runtime.session.emit("session.start", {
+    sessionId: runtime.copilotSessionId, selectedModel: model,
+    reasoningEffort: "xhigh", contextTier: "long_context",
+  });
+  await runtime.session.emit("session.model_change", {
+    source: "startup", previousModel: model, newModel: model,
+    previousReasoningEffort: "xhigh", reasoningEffort: "xhigh", contextTier: "long_context",
+  });
+  await runtime.session.emit("session.model_change", {
+    source: "startup", previousModel: model, newModel: model, autoTier: "balance",
+  });
+}
+
+test("a change that names the same model keeps the effort and tier it leaves out", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await emitStartupModelEvents(runtime, "gpt-5.6-sol");
+  assert.deepEqual(readSnapshot(runtime).model, {
+    name: "gpt-5.6-sol", reasoningEffort: "xhigh", contextTier: "long_context",
+  });
+
+  await runtime.session.emit("session.model_change", {
+    previousModel: "gpt-5.6-sol", newModel: "gpt-5.6-sol", reasoningEffort: null, contextTier: null,
+  });
+  assert.deepEqual(readSnapshot(runtime).model, { name: "gpt-5.6-sol" });
+});
+
+test("a change to another model that leaves out effort and tier publishes neither", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await emitStartupModelEvents(runtime, "gpt-5.6-sol");
+  await runtime.session.emit("session.model_change", {
+    previousModel: "gpt-5.6-sol", newModel: "claude-opus-5.5",
+  });
+  assert.deepEqual(readSnapshot(runtime).model, { name: "claude-opus-5.5" });
+});
+
 test("rotation fences an old model callback from the new conversation handoff", {
   concurrency: false,
 }, async (t) => {

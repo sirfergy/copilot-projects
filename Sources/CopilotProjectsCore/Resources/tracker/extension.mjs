@@ -5740,7 +5740,12 @@ if (validSessionId && socketPath) {
         if (event.agentId) return;
         const data = event.data || {};
         if (event.type === "session.model_change") {
-            applyModelInfo(data.newModel, data.reasoningEffort, data.contextTier);
+            // Copilot CLI 1.0.113 follows startup with a change that names the
+            // same model and leaves out effort and tier. A default fills a field
+            // left out, never a null, so null still clears it.
+            const held = currentModel && currentModel.name === data.newModel ? currentModel : {};
+            const { reasoningEffort = held.reasoningEffort, contextTier = held.contextTier } = data;
+            applyModelInfo(data.newModel, reasoningEffort, contextTier);
         } else if (event.type === "session.start"
             || event.type === "session.resume") {
             applyModelInfo(data.selectedModel, data.reasoningEffort, data.contextTier);
