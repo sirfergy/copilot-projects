@@ -29,9 +29,9 @@ distribution rather than replacing it with the standalone download.
 ## Transcript view
 
 The transcript view shows a session's Copilot conversation as turns of rendered
-Markdown. Use it beside the terminal to read a reply with its tables and code blocks
-laid out, to scroll back while Copilot keeps working, or to answer Copilot without
-going to the terminal.
+Markdown. Use it alongside the terminal to read a reply with its tables and code
+blocks laid out, to scroll back while Copilot keeps working, or to answer Copilot
+without going to the terminal.
 
 Open it with **Show session details** in the session's heading. It opens as a drawer
 over the terminal's right edge; **Expand to full terminal area** puts it in the
@@ -55,7 +55,7 @@ Copilot has not taken yet. In the view you can:
 Permission prompts and other slash commands stay in the terminal, and a tool's output
 is not shown, apart from images it returned. The view holds at most 200 turns of a
 conversation. It needs the session's tracker, which requires Copilot CLI experimental
-extensions, so a plain terminal has no transcript.
+extensions, so a plain shell or another command-line tool has no transcript.
 
 ## Session restart
 
@@ -404,8 +404,8 @@ look, banner choices, and the count Copilot Projects' Window menu shows are kept
 opening another brings the first forward.
 
 VoiceOver exposes each session's selection and attention state, with separate
-select and end actions. The transcript view uses a fade instead of
-sliding when Reduce Motion is enabled.
+select and end actions. The transcript view opens and closes without animation
+when Reduce Motion is enabled.
 
 The **+** side of the split button starts an interactive Copilot CLI session immediately,
 inheriting the current session's working directory. Its dropdown offers
