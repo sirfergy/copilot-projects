@@ -206,7 +206,7 @@ final class ExtensionOptimizationTests: XCTestCase {
         var script = CopilotExtension.script
         for (original, replacement) in [
             (
-                #"import { joinSession } from "@github/copilot-sdk/extension";"#,
+                CopilotExtension.sdkImport,
                 "const joinSession = async () => fakeSession;"
             ),
             (

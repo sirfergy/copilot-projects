@@ -8,7 +8,8 @@ import {
     existsSync as fileExistsSync, fstatSync, lstatSync, mkdirSync, openSync,
     readFileSync, renameSync, rmSync, watch, writeFileSync
 } from "node:fs";
-import { joinSession } from "@github/copilot-sdk/extension";
+// Copilot CLI 1.0.113 renamed the SDK package; earlier versions resolve only the old name.
+const { joinSession } = await import("@microsoft/copilot-sdk/extension").catch(() => import("@github/copilot-sdk/extension"));
 
 // Digest of this tracker's file on disk, rehashed only when the file's size or
 // modification time changes. The value at load identifies the source this

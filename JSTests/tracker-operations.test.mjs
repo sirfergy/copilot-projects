@@ -91,7 +91,7 @@ const fakeSDKURL = `data:text/javascript,${encodeURIComponent(`
 `)}`;
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier === "@github/copilot-sdk/extension") {
+    if (specifier === "@microsoft/copilot-sdk/extension") {
       return { url: fakeSDKURL, shortCircuit: true };
     }
     return nextResolve(specifier, context);
@@ -5935,7 +5935,7 @@ const nestedTrackerSource = `
   const sdk = "export const joinSession = async () => globalThis.nestedCopilotSession;";
   registerHooks({
     resolve(specifier, context, nextResolve) {
-      if (specifier !== "@github/copilot-sdk/extension") return nextResolve(specifier, context);
+      if (specifier !== "@microsoft/copilot-sdk/extension") return nextResolve(specifier, context);
       return { url: "data:text/javascript," + encodeURIComponent(sdk), shortCircuit: true };
     },
   });

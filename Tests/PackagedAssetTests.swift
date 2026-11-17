@@ -2,6 +2,12 @@ import XCTest
 @testable import CopilotProjectsHost
 import CopilotProjectsCore
 
+extension CopilotExtension {
+    /// The tracker's SDK import, which tests replace with a fake session.
+    static let sdkImport =
+        #"const { joinSession } = await import("@microsoft/copilot-sdk/extension").catch(() => import("@github/copilot-sdk/extension"));"#
+}
+
 /// The standalone tracker must load from packaged resources and install
 /// byte-identical content without a developer-directory fallback.
 final class PackagedAssetTests: XCTestCase {
@@ -27,7 +33,7 @@ final class PackagedAssetTests: XCTestCase {
         XCTAssertFalse(script.contains("#\"\"\""))
         XCTAssertFalse(script.contains("\"\"\"#"))
         XCTAssertFalse(script.contains("\\#("))
-        XCTAssertTrue(script.contains(#"from "@github/copilot-sdk/extension""#))
+        XCTAssertTrue(script.contains(CopilotExtension.sdkImport))
         XCTAssertEqual(CopilotExtension.scriptURL.lastPathComponent, "extension.mjs")
     }
     // MARK: - install
