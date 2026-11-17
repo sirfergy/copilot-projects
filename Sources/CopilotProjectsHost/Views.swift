@@ -1202,6 +1202,17 @@ struct RestartSessionMenuItem: View {
     }
 }
 
+/// A row's Rename, disabled while `/rename` can't be typed into that session's terminal.
+struct RenameSessionMenuItem: View {
+    @ObservedObject var model: AppModel
+    let sessionId: String
+
+    var body: some View {
+        Button("Rename…") { model.renameSessionInteractive(sessionId) }
+            .disabled(model.renameBlockedReason(sessionId: sessionId) != nil)
+    }
+}
+
 private struct SessionList: View {
     let model: AppModel
     let project: Project
@@ -1309,6 +1320,7 @@ private struct SessionList: View {
                                 Button("Mark as Unread") { model.markSessionUnread(sessionId: session.id) }
                             }
                             Divider()
+                            RenameSessionMenuItem(model: model, sessionId: session.id)
                             // The Session menu's items, for this row rather than the selected one.
                             RestartSessionMenuItem(model: model, sessionId: session.id)
                             if parkIdleSessions != SessionParking.off {
