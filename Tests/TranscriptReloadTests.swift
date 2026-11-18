@@ -424,8 +424,8 @@ final class TranscriptReloadTests: XCTestCase {
                         harness.sessionId = "\(target.id)-step-\(step)"
                         harness.turns = asyncSnapshotArrival ? [] : target.turns
                     }
-                    // Laid out here, so the empty drawer's pager has asked for its page before the
-                    // snapshot arrives. Asked afterwards, it rendered a second page at once.
+                    // The empty drawer is laid out before its snapshot arrives. Without this layout
+                    // the first open rendered two pages at once: 8 turns instead of 4.
                     await betweenMainQueuePasses { window.contentView?.layoutSubtreeIfNeeded() }
                     if asyncSnapshotArrival {
                         harness.turns = target.turns
