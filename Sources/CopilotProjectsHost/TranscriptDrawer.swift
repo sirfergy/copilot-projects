@@ -591,20 +591,15 @@ struct TranscriptDrawer: View {
         }
     }
 
-    /// SwiftUI can report a later main-queue pass's own scroll as a move up before `scrollTo`
-    /// returns. The scroll handler takes a move up for the reader's and clears `isAtBottom`, so
-    /// each later pass sets it again, or a pager check in between loads a page nobody scrolled to.
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
         isAtBottom = true
         proxy.scrollTo("transcript-bottom", anchor: .bottom)
         DispatchQueue.main.async {
             guard isAtBottom else { return }
             proxy.scrollTo("transcript-bottom", anchor: .bottom)
-            isAtBottom = true
             DispatchQueue.main.async {
                 guard isAtBottom else { return }
                 proxy.scrollTo("transcript-bottom", anchor: .bottom)
-                isAtBottom = true
             }
         }
     }
