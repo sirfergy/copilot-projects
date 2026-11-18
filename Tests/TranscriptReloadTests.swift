@@ -1054,6 +1054,13 @@ final class TranscriptReloadTests: XCTestCase {
                 harness.copilotSessionId = "conversation-3"
                 harness.turns = (3_000..<3_003).map { makeShortTurn(index: $0, variant: 8) }
                 await settleTranscript(window)
+                // A short conversation rests at its end while the window grows, and when the window
+                // shrinks below its height. Before the transcript was padded, it then showed its top.
+                for height: CGFloat in [1000, 500, 900] {
+                    window.setContentSize(NSSize(width: 1100, height: height))
+                    await settleTranscript(window)
+                    XCTAssertEqual(sv.documentVisibleRect.maxY, doc.bounds.height, accuracy: 1, "A short conversation should rest at its end in a window \(Int(height)) pt tall")
+                }
                 // Filling in pages at the bottom put the view a page past the end. Pulled back from
                 // there, it now and then landed high enough to load one more page. So did a scroll
                 // SwiftUI applied a pass late, which moved the view 543 pt up.
