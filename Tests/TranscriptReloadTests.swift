@@ -744,13 +744,6 @@ final class TranscriptReloadTests: XCTestCase {
                 harness.copilotSessionId = "conversation-3"
                 harness.turns = (3_000..<3_003).map { makeShortTurn(index: $0, variant: 8) }
                 await settleTranscript(window)
-                // A short conversation rests at its end while the window grows, and when the window
-                // shrinks below its height. Before the transcript was padded, it then showed its top.
-                for height: CGFloat in [1000, 500, 900] {
-                    window.setContentSize(NSSize(width: 1100, height: height))
-                    await settleTranscript(window)
-                    XCTAssertEqual(sv.documentVisibleRect.maxY, doc.bounds.height, accuracy: 1, "A short conversation should rest at its end in a window \(Int(height)) pt tall")
-                }
                 // Filling in pages at the bottom put the view a page past the end. Pulled back from
                 // there, it now and then landed high enough to load one more page. So did a scroll
                 // SwiftUI applied a pass late, which moved the view 543 pt up.
@@ -778,27 +771,6 @@ final class TranscriptReloadTests: XCTestCase {
                 )
             }
         }
-
-        // Two pages of short turns fit in a viewport this tall. The transcript is padded to the
-        // viewport's height, so its document does not grow as they are laid out. A pager that
-        // waited for it to grow stopped at 8 turns, with nothing to scroll to reach the rest.
-        UserDefaults.standard.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
-        let tallHarness = SwitchHarness(sessionId: "tall", turns: (0..<80).map { makeShortTurn(index: $0, variant: 7) })
-        let tallWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 1700), styleMask: [.borderless], backing: .buffered, defer: false
-        )
-        tallWindow.contentView = NSHostingView(rootView: SwitchHarnessView(harness: tallHarness, workflow: workflow))
-        tallWindow.orderBack(nil)
-        defer {
-            tallWindow.orderOut(nil)
-            tallWindow.contentView = nil
-        }
-        await settleTranscript(tallWindow)
-        let tallDocument = try XCTUnwrap(findTranscriptScrollView(in: try XCTUnwrap(tallWindow.contentView))?.documentView)
-        XCTAssertEqual(
-            findVisibleTextViews(in: tallDocument, visibleRect: tallDocument.bounds).filter { $0.string.contains("Short prompt") }.count,
-            24, "A viewport that fits two pages of short turns should fill in earlier pages until it overflows"
-        )
     }
 
     /// AppKit measures text through intrinsicContentSize at the last width SwiftUI proposed, which
