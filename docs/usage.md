@@ -277,7 +277,8 @@ quotes or tabs. The composer refuses, and says why, while the session is parked,
 restart is pending, the session has no terminal, or its tracker is not offering a
 rename; in the last case run `/rename` in the session's terminal. **Rename…** is
 disabled under the same conditions, and says why if one arises while its dialog is
-open. The web and iOS clients still type `/rename` into the terminal.
+open. The web and iOS clients rename through the tracker too, and type nothing into
+the terminal.
 
 An optional offline integration test exercises the installed CLI/SDK pair against
 a loopback model fixture, without real model requests:
