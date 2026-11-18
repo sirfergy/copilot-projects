@@ -43,8 +43,7 @@ final class TranscriptReloadTests: XCTestCase {
     /// the run loop's display cycle. An app lays out between main-queue passes too. A layout run
     /// inside a pass, between two scrolls the drawer had queued, made SwiftUI apply a scroll one
     /// pass late: the transcript sat 543 pt above the bottom for a pass on 223 of 1,200 returns to
-    /// a conversation, and now and then rendered a page nobody scrolled to. A layout at the end of
-    /// the display cycle left the drawer 652 pt above the bottom after a session switch on macOS 26.
+    /// a conversation, and now and then rendered a page nobody scrolled to.
     @MainActor
     private func betweenMainQueuePasses(_ body: @escaping () -> Void = {}) async {
         await withCheckedContinuation { continuation in
@@ -425,7 +424,9 @@ final class TranscriptReloadTests: XCTestCase {
                         harness.sessionId = "\(target.id)-step-\(step)"
                         harness.turns = asyncSnapshotArrival ? [] : target.turns
                     }
-                    await betweenMainQueuePasses()
+                    // Laid out here, so the empty drawer's pager has asked for its page before the
+                    // snapshot arrives. Asked afterwards, it rendered a second page at once.
+                    await betweenMainQueuePasses { window.contentView?.layoutSubtreeIfNeeded() }
                     if asyncSnapshotArrival {
                         harness.turns = target.turns
                     }
@@ -770,6 +771,27 @@ final class TranscriptReloadTests: XCTestCase {
                 )
             }
         }
+
+        // Two pages of short turns fit in a viewport this tall. The transcript is padded to the
+        // viewport's height, so its document does not grow as they are laid out. A pager that
+        // waited for it to grow stopped at 8 turns, with nothing to scroll to reach the rest.
+        UserDefaults.standard.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
+        let tallHarness = SwitchHarness(sessionId: "tall", turns: (0..<80).map { makeShortTurn(index: $0, variant: 7) })
+        let tallWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 1700), styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        tallWindow.contentView = NSHostingView(rootView: SwitchHarnessView(harness: tallHarness, workflow: workflow))
+        tallWindow.orderBack(nil)
+        defer {
+            tallWindow.orderOut(nil)
+            tallWindow.contentView = nil
+        }
+        await settleTranscript(tallWindow)
+        let tallDocument = try XCTUnwrap(findTranscriptScrollView(in: try XCTUnwrap(tallWindow.contentView))?.documentView)
+        XCTAssertEqual(
+            findVisibleTextViews(in: tallDocument, visibleRect: tallDocument.bounds).filter { $0.string.contains("Short prompt") }.count,
+            24, "A viewport that fits two pages of short turns should fill in earlier pages until it overflows"
+        )
     }
 
     /// AppKit measures text through intrinsicContentSize at the last width SwiftUI proposed, which
