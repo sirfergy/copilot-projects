@@ -486,43 +486,6 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertEqual(f.sent.count, 0)
     }
 
-    func testARemoteClientsRenameAttachesTheSessionsTerminal() throws {
-        let f = try Fixture()
-        // A terminal the host starts here runs `cat` in the scratch folder: no shell, no dtach.
-        let keys = ["SHELL", "COPILOT_PROJECTS_STATE_DIR", "COPILOT_PROJECTS_DTACH"]
-        let previous = keys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
-        setenv("SHELL", "/bin/cat", 1)
-        setenv("COPILOT_PROJECTS_STATE_DIR", f.root.path, 1)
-        unsetenv("COPILOT_PROJECTS_DTACH")
-        defer {
-            f.close()
-            for (key, value) in previous {
-                if let value { setenv(key, value, 1) } else { unsetenv(key) }
-            }
-        }
-        /// As the gateway hands the host a client's action.
-        func rename(to name: String) -> RemoteUserInputResult {
-            f.model.performSessionAction(
-                sessionId: f.other.id, action: RemoteSessionAction(kind: .rename, name: name),
-                operation: CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: "epoch-1")
-            )
-        }
-
-        // A rename that is refused attaches nothing: a name Copilot would not take, a tracker that offers none.
-        XCTAssertEqual(rename(to: "say \"hi\""), .invalid)
-        try f.heartbeat(f.other, offering: ["session-send"])
-        XCTAssertEqual(rename(to: "From the phone"), .conflict)
-        XCTAssertNil(f.model.controllers[f.other.id])
-
-        // One the tracker is handed attaches the terminal whose title Copilot is about to change.
-        try f.heartbeat(f.other)
-        XCTAssertEqual(rename(to: "From the phone"), .accepted)
-        XCTAssertNotNil(f.model.controllers[f.other.id])
-        XCTAssertEqual(
-            try f.confirm(RemoteSessionActionKind.rename.rawValue, of: f.other)["name"] as? String, "From the phone"
-        )
-    }
-
     func testRenameTakesTheRestOfItsLineAsTheNameAndIsNeverAMessage() {
         XCTAssertEqual(ComposerSlashCommand.suggestions(for: "/ren").map(\.title), ["/rename <new name>"])
         XCTAssertEqual(ComposerSlashCommand.rename.completion, "/rename ")

@@ -1531,12 +1531,8 @@ extension AppModel {
                               ) else { return false }
                     }
                     return true
-                case .abort, .queueSendNow, .queueRemove:
+                case .abort, .queueSendNow, .queueRemove, .rename:
                     return true
-                case .rename:
-                    // The new name reaches the app as the terminal's title, so a remote client's
-                    // rename attaches the terminal, as its slash command does.
-                    return self.controller(for: sessionId) != nil
                 case .restart:
                     return self.sessionIsSettledIdle(
                         sessionId: sessionId, snapshot: snapshot, workflow: workflow, now: clock(),
