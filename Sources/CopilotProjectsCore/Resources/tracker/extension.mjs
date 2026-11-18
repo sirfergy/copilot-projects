@@ -313,7 +313,7 @@ if (validSessionId && socketPath) {
     // The host asks it and "session-reload-mcp" itself and offers neither to clients.
     const workflowKinds = [
         "session-send", "session-abort", "session-restart", "set-session-budget", "answer-session-budget",
-        "session-queue-send-now", "session-queue-remove",
+        "session-queue-send-now", "session-queue-remove", "session-rename",
         "session-park-check", "session-reload-mcp",
     ];
     // The kinds that queue one of Copilot's own slash commands for an idle session.
@@ -2389,7 +2389,7 @@ if (validSessionId && socketPath) {
                 metadataSeq: newerHeartbeat ? newerHeartbeat.metadataSeq : workflowMetadataSeq,
                 capabilities: [
                     "session-send", "session-abort", "answer-session-budget",
-                    "session-queue-send-now", "session-queue-remove",
+                    "session-queue-send-now", "session-queue-remove", "session-rename",
                     "image-attachments-v1", "file-attachments-v1", "pending-messages-v1",
                     "session-park-check", "session-restart", "session-reload-mcp",
                     ...(effectiveLimitsKnown ? ["set-session-budget"] : []),
@@ -2454,6 +2454,10 @@ if (validSessionId && socketPath) {
         const namesPrompt = typeof action.messageId === "string" && action.messageId.length > 0
             && Buffer.byteLength(action.messageId) <= 512;
         if (queueAction ? !namesPrompt : action.messageId != null) return false;
+        // Copilot's own rule for a name. Its answer to one it refuses reads like any other failure.
+        const name = typeof action.name === "string" ? action.name.trim() : "";
+        const namesSession = name.length > 0 && name.length <= 100 && !/[\u0000-\u001f\u007f"]/.test(name);
+        if (kind === "session-rename" ? !namesSession : action.name != null) return false;
         const absent = (...keys) => keys.every((key) => action[key] == null);
         switch (kind) {
         case "session-send":
@@ -2467,6 +2471,7 @@ if (validSessionId && socketPath) {
         case "session-reload-mcp":
         case "session-queue-send-now":
         case "session-queue-remove":
+        case "session-rename":
             return absent("prompt", "mode", "maxAiCredits", "requestId", "additionalAiCredits");
         case "set-session-budget":
             return absent("prompt", "mode", "requestId", "additionalAiCredits")
@@ -2679,6 +2684,11 @@ if (validSessionId && socketPath) {
                 return { state: "rejected", errorCode: "not-queued" };
             }
         }
+        case "session-rename":
+            // Copilot takes the name at once, during a turn too, and answers nothing. The
+            // title it then gives its terminal is what renames the tab.
+            await workflowRPC("session.name.set", { name: action.name.trim() }, context);
+            return { state: "applied" };
         case "session-restart":
         case "session-reload-mcp": {
             // The direct `session.mcp.reload` holds its request open for the whole

@@ -88,7 +88,8 @@ final class SlashCommandTests: XCTestCase {
 
         /// Publishes a session's tracker snapshot, as its heartbeat does, and has the model read it.
         func heartbeat(
-            _ session: Session, offering capabilities: [String] = ["session-send", "session-restart"],
+            _ session: Session,
+            offering capabilities: [String] = ["session-send", "session-restart", "session-rename"],
             receipts: [TrackedOperationReceipt] = [], restartRequested: Bool = false
         ) throws {
             let now = Date()
@@ -110,18 +111,24 @@ final class SlashCommandTests: XCTestCase {
             model.refreshAgentActivitySnapshots()
         }
 
-        /// Plays the tracker: takes the restart request it was handed and says it queued `/restart`.
-        func confirmRestart(of session: Session) throws {
-            let handoff = file(session, "session-restart.json")
+        /// Plays the tracker: takes the request of that kind it was handed and says Copilot
+        /// applied it. Answers the action it was asked for.
+        @discardableResult
+        func confirm(_ kind: String, of session: Session) throws -> [String: Any] {
+            let handoff = file(session, "\(kind).json")
             let asked = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: handoff)) as? [String: Any])
             try FileManager.default.removeItem(at: handoff)
             try heartbeat(session, receipts: [TrackedOperationReceipt(
                 operationId: asked["operationId"] as? String, conversationEpoch: "epoch-1",
-                kind: "session-restart", state: .applied,
+                kind: kind, state: .applied,
                 updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
                 payloadFingerprint: asked["payloadFingerprint"] as? String
             )])
+            return asked["action"] as? [String: Any] ?? [:]
         }
+
+        /// The tracker says it queued `/restart`.
+        func confirmRestart(of session: Session) throws { try confirm("session-restart", of: session) }
 
         /// A tracker that exits removes its snapshot and any request it was handed.
         func stopTracker(of session: Session) throws {
@@ -130,15 +137,17 @@ final class SlashCommandTests: XCTestCase {
             model.refreshAgentActivitySnapshots()
         }
 
-        /// Whether the model has handed a session's tracker a restart request,
+        /// Whether the model has handed a session's tracker a request of that kind,
         /// after giving a request that was just made the chance to be written.
-        func restartRequested(of session: Session) async -> Bool {
-            let path = file(session, "session-restart.json").path
+        func requested(_ kind: String, of session: Session) async -> Bool {
+            let path = file(session, "\(kind).json").path
             for _ in 0..<20 where !FileManager.default.fileExists(atPath: path) {
                 await Task.yield()
             }
             return FileManager.default.fileExists(atPath: path)
         }
+
+        func restartRequested(of session: Session) async -> Bool { await requested("session-restart", of: session) }
 
         /// Gives a session's tab a terminal that runs a shell but writes what is typed
         /// into it to a pipe. The answer reads what has been typed since it last did:
@@ -369,65 +378,74 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertFalse(requestedBusy)
     }
 
-    func testRenameTypesCopilotsOwnCommandIntoTheSessionsTerminal() async throws {
+    func testRenameAsksTheSessionsTrackerWhileCopilotWorksAndTypesNothing() async throws {
         let f = try Fixture()
         defer { f.close() }
         let typed = f.terminal(for: f.session)
         let typedInOther = f.terminal(for: f.other)
+        let rename = RemoteSessionActionKind.rename.rawValue
 
-        // The message field: Run types it, and nothing goes to Copilot as a message.
+        // The message field: Run asks the tracker, working or not, and waits for its answer.
+        f.model.setStatus(.running, sessionId: f.session.id)
         f.composer.prompt = " /Rename  New name \n"
         XCTAssertTrue(f.composer.canSend(workflow: f.workflow, operation: f.operation))
-        await f.submit()
-        XCTAssertTrue(typed().contains("/rename New name\r"))
+        let run = Task { await f.submit() }
+        let requested = await f.requested(rename, of: f.session)
+        XCTAssertTrue(requested)
+        XCTAssertEqual(f.composer.statusMessage, "Waiting for Copilot to confirm...")
+        XCTAssertEqual(try f.confirm(rename, of: f.session)["name"] as? String, "New name")
+        await run.value
         XCTAssertEqual(f.composer.prompt, "")
         XCTAssertNil(f.composer.statusMessage)
-        XCTAssertEqual(f.sent.count, 0)
 
-        // A row's Rename asks for the name in an empty field and types it into that row's terminal.
+        // A row's Rename asks for the name in an empty field and asks that row's tracker.
         f.renameDialog.name = "Row name"
-        f.model.renameSessionInteractive(f.other.id)
+        let row = Task { await f.model.renameSessionInteractive(f.other.id) }
+        let requestedInRow = await f.requested(rename, of: f.other)
+        XCTAssertTrue(requestedInRow)
         XCTAssertEqual(f.renameDialog.opened, [""])
-        XCTAssertTrue(typedInOther().contains("/rename Row name\r"))
+        XCTAssertEqual(try f.confirm(rename, of: f.other)["name"] as? String, "Row name")
+        await row.value
+        XCTAssertEqual(f.renameDialog.refused, [])
+        // A cancelled dialog asks for nothing.
         f.renameDialog.name = nil
-        f.model.renameSessionInteractive(f.other.id)
-        XCTAssertFalse(typedInOther().contains("/rename"))
+        await f.model.renameSessionInteractive(f.other.id)
+        let requestedAfterCancel = await f.requested(rename, of: f.other)
+        XCTAssertFalse(requestedAfterCancel)
+
+        // Nothing was typed into either terminal or went to Copilot as a message.
         XCTAssertFalse(typed().contains("/rename"))
+        XCTAssertFalse(typedInOther().contains("/rename"))
+        XCTAssertEqual(f.sent.count, 0)
     }
 
-    func testRenameSaysWhyItCannotRunAndTypesNothing() async throws {
+    func testRenameSaysWhyItCannotRunAndAsksNothing() async throws {
         let f = try Fixture()
         defer { f.close() }
-        let typed = f.terminal(for: f.session)
+        _ = f.terminal(for: f.session)
         let composer = f.composer
         var blocked: String? { composer.slashCommandBlockedReason }
 
-        // The name is missing, or runs over a line.
+        // The name is missing, runs over a line, or is one Copilot would refuse.
         composer.prompt = "/rename "
         XCTAssertEqual(blocked, "Enter a new name after /rename")
         composer.prompt = "/rename one\ntwo"
         XCTAssertEqual(blocked, "Choose or finish a single-line slash command")
         XCTAssertFalse(composer.canSend(workflow: f.workflow, operation: f.operation))
+        composer.prompt = "/rename say \"hi\""
+        XCTAssertEqual(blocked, RemoteSessionAction.invalidSessionNameMessage)
+        await f.submit()
+        XCTAssertEqual(composer.statusMessage, RemoteSessionAction.invalidSessionNameMessage)
+        XCTAssertEqual(composer.prompt, "/rename say \"hi\"")
         composer.prompt = "/rename New name"
         XCTAssertNil(blocked)
-        // A command that can run says what typing it does to the terminal.
-        XCTAssertEqual(composer.slashCommandNotice, ComposerSlashCommand.renameWarning)
 
-        let working = "Wait for Copilot to finish before running a slash command"
+        // Copilot working, in the foreground or the background, is no reason to wait.
         f.model.setStatus(.running, sessionId: f.session.id)
-        XCTAssertEqual(blocked, working)
-        XCTAssertEqual(composer.slashCommandNotice, working)
-        XCTAssertFalse(composer.canSend(workflow: f.workflow, operation: f.operation))
-        await f.submit()
-        XCTAssertEqual(composer.statusMessage, working)
-        XCTAssertEqual(composer.prompt, "/rename New name")
-        // A row's Rename refused once its dialog is answered says why too.
-        f.renameDialog.name = "Row name"
-        f.model.renameSessionInteractive(f.session.id)
-        XCTAssertEqual(f.renameDialog.refused, [working])
+        XCTAssertNil(blocked)
         f.model.setStatus(.idle, sessionId: f.session.id)
         f.model.projects[0].sessions[0].backgroundAgentsActive = true
-        XCTAssertEqual(blocked, working)
+        XCTAssertNil(blocked)
         f.model.projects[0].sessions[0].backgroundAgentsActive = false
 
         f.model.projects[0].sessions[0].parked = ParkedSession(state: .parked, sinceMilliseconds: 1)
@@ -438,20 +456,71 @@ final class SlashCommandTests: XCTestCase {
         try f.heartbeat(f.session, offering: [], restartRequested: true)
         XCTAssertEqual(blocked, "Restart requested. Check Terminal before sending more work.")
 
-        // No tracker says Copilot is idle: it has stopped, or the tab is a plain terminal.
+        // A tracker that offers no rename, or has stopped, leaves the terminal.
+        let useTerminal = "This session can't be renamed from here. Run /rename in its terminal."
+        try f.heartbeat(f.session, offering: ["session-send"])
+        XCTAssertEqual(blocked, useTerminal)
+        await f.submit()
+        XCTAssertEqual(composer.statusMessage, useTerminal)
+        XCTAssertEqual(composer.prompt, "/rename New name")
+        // A row's Rename refused once its dialog is answered says why too.
+        f.renameDialog.name = "Row name"
+        await f.model.renameSessionInteractive(f.session.id)
+        XCTAssertEqual(f.renameDialog.refused, [useTerminal])
         try f.stopTracker(of: f.session)
-        XCTAssertEqual(blocked, "Copilot is not ready for slash commands")
+        XCTAssertEqual(blocked, useTerminal)
         try f.heartbeat(f.session)
         XCTAssertNil(blocked)
 
-        // The other row has no terminal, and none is started to type into.
-        XCTAssertEqual(f.model.renameSession(f.other.id, to: "New name"), "This session has no terminal")
+        // The other row has no terminal to show Copilot's new title, and none is started.
+        let refused = await f.model.renameSession(f.other.id, to: "New name")
+        XCTAssertEqual(refused.message, "This session has no terminal")
         XCTAssertNil(f.model.controllers[f.other.id])
         XCTAssertEqual(f.model.renameBlockedReason(sessionId: "closed"), "This session is no longer open")
 
-        // None of that typed anything or went to Copilot as a message.
-        XCTAssertFalse(typed().contains("/rename"))
+        // None of that asked a tracker or went to Copilot as a message.
+        for session in [f.session, f.other] {
+            let requested = await f.requested(RemoteSessionActionKind.rename.rawValue, of: session)
+            XCTAssertFalse(requested)
+        }
         XCTAssertEqual(f.sent.count, 0)
+    }
+
+    func testARemoteClientsRenameAttachesTheSessionsTerminal() throws {
+        let f = try Fixture()
+        // A terminal the host starts here runs `cat` in the scratch folder: no shell, no dtach.
+        let keys = ["SHELL", "COPILOT_PROJECTS_STATE_DIR", "COPILOT_PROJECTS_DTACH"]
+        let previous = keys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
+        setenv("SHELL", "/bin/cat", 1)
+        setenv("COPILOT_PROJECTS_STATE_DIR", f.root.path, 1)
+        unsetenv("COPILOT_PROJECTS_DTACH")
+        defer {
+            f.close()
+            for (key, value) in previous {
+                if let value { setenv(key, value, 1) } else { unsetenv(key) }
+            }
+        }
+        /// As the gateway hands the host a client's action.
+        func rename(to name: String) -> RemoteUserInputResult {
+            f.model.performSessionAction(
+                sessionId: f.other.id, action: RemoteSessionAction(kind: .rename, name: name),
+                operation: CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: "epoch-1")
+            )
+        }
+
+        // A rename that is refused attaches nothing: a name Copilot would not take, a tracker that offers none.
+        XCTAssertEqual(rename(to: "say \"hi\""), .invalid)
+        try f.heartbeat(f.other, offering: ["session-send"])
+        XCTAssertEqual(rename(to: "From the phone"), .conflict)
+        XCTAssertNil(f.model.controllers[f.other.id])
+
+        // One the tracker is handed attaches the terminal whose title Copilot is about to change.
+        try f.heartbeat(f.other)
+        XCTAssertEqual(rename(to: "From the phone"), .accepted)
+        XCTAssertNotNil(f.model.controllers[f.other.id])
+        XCTAssertEqual(
+            try f.confirm(RemoteSessionActionKind.rename.rawValue, of: f.other)["name"] as? String, "From the phone"
+        )
     }
 
     func testRenameTakesTheRestOfItsLineAsTheNameAndIsNeverAMessage() {

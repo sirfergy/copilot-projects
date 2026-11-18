@@ -153,6 +153,7 @@ class FakeSession {
     this.abortHandler = async () => this.emit("session.idle", { aborted: true });
     this.enqueueHandler = async () => ({ queued: true });
     this.queueActionHandler = async () => ({ steered: true, removed: true });
+    this.nameSetHandler = async () => null;
     this.queueProcessCalls = [];
     this.queueProcessHandler = async () => null;
     this.extensionsReloadHandler = async () => null;
@@ -243,6 +244,7 @@ class FakeSession {
         if (method === "session.queue.sendNow" || method === "session.queue.removeAt") {
           return this.queueActionHandler(params);
         }
+        if (method === "session.name.set") return this.nameSetHandler(params);
         if (method === "session.abort") {
           await this.abortHandler();
           return { success: true };
@@ -1957,6 +1959,53 @@ test("a prompt queued as part of a batch is neither sent now nor taken back on i
     assert.equal(receipt(runtime, request.operationId).errorCode, undefined);
   }
   assert.deepEqual(runtime.session.workflowCalls, []);
+});
+
+test("a rename sets the session's name whatever Copilot is doing, and a bad name never reaches it", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  assert.ok((await workflowReady(runtime)).capabilities.includes("session-rename"));
+  const answer = async (kind, action) => {
+    const request = workflowHandoff(runtime, kind, action);
+    const terminal = () => ["applied", "rejected", "indeterminate"].includes(receipt(runtime, request.operationId)?.state);
+    await waitFor(terminal, `${kind} was not answered`);
+    const { state, errorCode } = receipt(runtime, request.operationId);
+    return errorCode ? `${state} ${errorCode}` : state;
+  };
+  // Copilot is sent the name that was checked: the trimmed one.
+  assert.equal(await answer("session-rename", { name: "  New name \n" }), "applied");
+  // Copilot takes a name while it waits on a permission, where a send is refused.
+  await runtime.session.emit("permission.requested", { requestId: "permission-1" });
+  await waitFor(() => readSnapshot(runtime).workflow.sendReady === false, "the permission was not published");
+  assert.equal(await answer("session-rename", { name: "a".repeat(100) }), "applied");
+  const renames = ["New name", "a".repeat(100)].map((name) => ({
+    method: "session.name.set", sessionId: runtime.copilotSessionId, name,
+  }));
+  assert.deepEqual(runtime.session.workflowCalls, renames);
+  // Copilot's answer to a name it refuses reads like any other failure, so one is never sent to it.
+  for (const name of ["", "   ", "a".repeat(101), 'say "hi"', "one\ntwo", "tab\there", "del\u007f", 42, undefined]) {
+    assert.equal(await answer("session-rename", { name }), "rejected target-unavailable", JSON.stringify(name));
+  }
+  assert.equal(await answer("session-rename", { name: "New name", prompt: "text" }), "rejected target-unavailable");
+  // No other action may carry a name.
+  assert.equal(await answer("session-abort", { name: "New name" }), "rejected target-unavailable");
+  assert.deepEqual(runtime.session.workflowCalls, renames);
+});
+
+test("a runtime without the rename request refuses a rename and stops offering it", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t, (session) => {
+    session.nameSetHandler = async () => { throw Object.assign(new Error("method not found"), { code: -32601 }); };
+  });
+  await workflowReady(runtime);
+  const request = workflowHandoff(runtime, "session-rename", { name: "New name" });
+  await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", "unsupported rename not rejected");
+  assert.equal(receipt(runtime, request.operationId).errorCode, "unsupported-runtime");
+  const { capabilities } = await workflowReady(runtime);
+  assert.equal(capabilities.includes("session-rename"), false);
+  assert.ok(capabilities.includes("session-abort"));
 });
 
 test("native sends are fenced by permissions and budget decisions", {

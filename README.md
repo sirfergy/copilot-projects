@@ -55,8 +55,7 @@ Copilot has not taken yet. In the view you can:
   on a message marked **Queued**; see [Command-line access](#command-line-access) for
   what each does and its limits.
 - **Restart the session** with `/restart`; see [Session restart](#session-restart).
-- **Rename the session** with `/rename <new name>`, which types Copilot's own `/rename`
-  into the session's terminal; see
+- **Rename the session** with `/rename <new name>`, while Copilot is working too; see
   [Native session workflows](docs/usage.md#native-session-workflows).
 - **Select and copy text** across messages, and open an image in a larger preview;
   see [Transcript images](#transcript-images).

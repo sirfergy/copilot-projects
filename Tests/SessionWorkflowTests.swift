@@ -28,6 +28,27 @@ final class SessionWorkflowTests: XCTestCase {
             XCTAssertFalse(RemoteSessionAction(kind: kind, prompt: "text", messageId: "message-q").isValid)
         }
         XCTAssertFalse(RemoteSessionAction(kind: .abort, messageId: "message-q").isValid)
+        // A rename carries a name Copilot takes; no other action may carry one.
+        let hundred = String(repeating: "😀", count: 50)
+        for name in ["New name", "  edge spaces\n", hundred, " \(hundred) ", "it's a `name`", "naïve café"] {
+            XCTAssertTrue(RemoteSessionAction(kind: .rename, name: name).isValid, name)
+        }
+        for name in ["", " \n", hundred + "a", "say \"hi\"", "one\ntwo", "tab\there", "del\u{7F}"] {
+            XCTAssertFalse(RemoteSessionAction(kind: .rename, name: name).isValid, name)
+        }
+        XCTAssertFalse(RemoteSessionAction(kind: .rename).isValid)
+        XCTAssertFalse(RemoteSessionAction(kind: .rename, prompt: "text", name: "New name").isValid)
+        XCTAssertFalse(RemoteSessionAction(kind: .abort, name: "New name").isValid)
+        XCTAssertEqual(
+            try JSONDecoder().decode(RemoteSessionAction.self, from: Data(
+                #"{"kind":"session-rename","name":"New name"}"#.utf8)),
+            RemoteSessionAction(kind: .rename, name: "New name")
+        )
+        // An action without a name encodes as it did before the field existed.
+        XCTAssertEqual(
+            String(decoding: try JSONEncoder().encode(RemoteSessionAction(kind: .abort)), as: UTF8.self),
+            #"{"kind":"session-abort"}"#
+        )
         XCTAssertEqual(
             try JSONDecoder().decode(RemoteSessionAction.self, from: Data(
                 #"{"kind":"session-queue-remove","messageId":"message-q"}"#.utf8)),
