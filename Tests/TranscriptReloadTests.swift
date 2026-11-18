@@ -6,245 +6,7 @@ import CopilotProjectsProtocol
 import CopilotProjectsUI
 @testable import CopilotProjectsHost
 
-// TEMPORARY PROBE, removed again before this branch is ready: which form of the test's display
-// cycles, and whether padding the transcript to the viewport's height, settle the drawer on this
-// system; with the drawer's own account of every write of isAtBottom.
-fileprivate enum ProbeHelper: String {
-    /// Layout and a run-loop step inside a main-queue pass, as on main.
-    case old
-    /// Layout in a run-loop block, ahead of the display cycle.
-    case block
-}
-
-@MainActor fileprivate var probeHelper = ProbeHelper.block
-/// Set while a cell is traced line by line.
-@MainActor fileprivate var probeCell: String?
-/// The cell the real test is running under; read where XCTest records a failure.
-fileprivate var probeIssueLabel = ""
-
-@MainActor
-fileprivate final class DrawerTrace {
-    static let shared = DrawerTrace()
-    private var start = Date()
-    private var cycle = 0
-    private var signatures: [String: Int] = [:]
-    private weak var window: NSWindow?
-    private var clipToken: NSObjectProtocol?
-    private var observers: [CFRunLoopObserver] = []
-    private var lastY: CGFloat?
-    private weak var lastClip: NSClipView?
-    private(set) var movedUp: CGFloat = 0
-    private(set) var pastEnd: CGFloat = 0
-    /// The moves SwiftUI's own block made since the last action: points up, negative for down.
-    private(set) var ownMoves: [Int] = []
-
-    func line(_ text: String) {
-        guard let cell = probeCell else { return }
-        print(String(format: "DRAWERPROBE %@ %8.1f c%03d %@", cell, Date().timeIntervalSince(start) * 1000, cycle, text))
-    }
-
-    /// Counts the clip's moves without printing them.
-    func beginCounting(_ window: NSWindow) {
-        self.window = window
-        lastY = nil
-        clipToken = NotificationCenter.default.addObserver(
-            forName: NSView.boundsDidChangeNotification, object: nil, queue: nil
-        ) { note in
-            let stack = Thread.callStackSymbols
-            MainActor.assumeIsolated { DrawerTrace.shared.clipMoved(note.object as? NSClipView, stack) }
-        }
-    }
-
-    func begin(_ window: NSWindow, _ what: String) {
-        beginCounting(window)
-        start = Date()
-        cycle = 0
-        let before = CFRunLoopObserverCreateWithHandler(
-            kCFAllocatorDefault, CFRunLoopActivity.beforeWaiting.rawValue, true, CFIndex.min
-        ) { _, _ in
-            MainActor.assumeIsolated {
-                DrawerTrace.shared.cycle += 1
-                DrawerTrace.shared.line("RL beforeWaiting")
-            }
-        }
-        let woke = CFRunLoopObserverCreateWithHandler(
-            kCFAllocatorDefault, CFRunLoopActivity.afterWaiting.rawValue, true, CFIndex.min
-        ) { _, _ in
-            MainActor.assumeIsolated { DrawerTrace.shared.line("RL woke") }
-        }
-        for observer in [before, woke].compactMap({ $0 }) {
-            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
-            observers.append(observer)
-        }
-        DrawerProbe.log = { text in
-            let stack = Thread.callStackSymbols
-            MainActor.assumeIsolated { DrawerTrace.shared.line("DRAWER \(text) [\(DrawerTrace.place(stack))]") }
-        }
-        let system = ProcessInfo.processInfo.operatingSystemVersionString
-        let swiftUI = Bundle(identifier: "com.apple.SwiftUI")?.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-        line("BEGIN \(what): macOS \(system) SwiftUI \(swiftUI) displayAsleep=\(CGDisplayIsAsleep(CGMainDisplayID()) != 0) occlusionVisible=\(window.occlusionState.contains(.visible)) padding=\(DrawerProbe.padding) pagerMeasuresTurns=\(DrawerProbe.pagerMeasuresTurns) noPageGuard=\(DrawerProbe.noPageGuard) no24Guard=\(DrawerProbe.no24Guard) reset398=\(DrawerProbe.reset398) helper=\(probeHelper.rawValue)")
-    }
-
-    func end() {
-        observers.forEach { CFRunLoopRemoveObserver(CFRunLoopGetMain(), $0, .commonModes) }
-        observers = []
-        if let clipToken { NotificationCenter.default.removeObserver(clipToken) }
-        clipToken = nil
-        DrawerProbe.log = nil
-    }
-
-    /// Where in the run loop a stack is, innermost first.
-    nonisolated static func place(_ stack: [String]) -> String {
-        var tags: [String] = []
-        for frame in stack {
-            guard let range = frame.range(of: "__CFRUNLOOP_IS_") else {
-                if frame.contains("updateAnimationTarget"), !tags.contains("SwiftUI's own block") {
-                    tags.append("SwiftUI's own block")
-                }
-                continue
-            }
-            let rest = frame[range.upperBound...]
-            if rest.hasPrefix("SERVICING_THE_MAIN_DISPATCH_QUEUE") {
-                tags.append("main-queue pass")
-            } else if rest.contains("OBSERVER") {
-                tags.append("run-loop observer")
-            } else if rest.contains("A_BLOCK") {
-                tags.append("run-loop block")
-            } else if rest.contains("TIMER") {
-                tags.append("timer")
-            } else {
-                tags.append("source")
-            }
-        }
-        return tags.isEmpty ? "outside the run loop's callouts" : tags.joined(separator: " < ")
-    }
-
-    /// Logs what the test does next, and starts measuring moves from here.
-    func action(_ text: String) {
-        movedUp = 0
-        pastEnd = 0
-        ownMoves = []
-        line("ACTION " + text)
-    }
-
-    private func scrollView() -> NSScrollView? {
-        var found: [NSScrollView] = []
-        func walk(_ view: NSView) {
-            if let scrollView = view as? NSScrollView, scrollView.frame.height > 200 { found.append(scrollView) }
-            view.subviews.forEach(walk)
-        }
-        window?.contentView.map(walk)
-        return found.max { $0.frame.height < $1.frame.height }
-    }
-
-    private func state(_ scrollView: NSScrollView) -> String {
-        let clip = scrollView.contentView.bounds
-        let docHeight = scrollView.documentView?.frame.height ?? 0
-        return "clipY=\(Int(clip.minY)) docH=\(Int(docHeight)) clipH=\(Int(clip.height))"
-    }
-
-    func result(_ label: String, snippet: String? = nil) {
-        guard probeCell != nil, let window, let scrollView = scrollView(), let doc = scrollView.documentView else { return }
-        var texts: [NSTextView] = []
-        func walk(_ view: NSView) {
-            if let text = view as? NSTextView, !text.string.isEmpty { texts.append(text) }
-            view.subviews.forEach(walk)
-        }
-        walk(doc)
-        let visible = scrollView.documentVisibleRect
-        let aboveEnd = Int(doc.bounds.height - visible.maxY)
-        let marks = ["User prompt for turn", "Short prompt", "Long user prompt for turn"]
-        let turns = texts.filter { text in marks.contains { text.string.contains($0) } }.count
-        let sees = snippet.map { wanted in
-            texts.contains { $0.string.contains(wanted) && doc.convert($0.bounds, from: $0).intersects(visible) }
-        }
-        // Where the first and the last text sit on screen, in points below the top of the window's content.
-        let height = window.contentView?.bounds.height ?? 0
-        let rects = texts.map { $0.convert($0.bounds, to: nil) }
-        let firstTop = rects.map { Int(height - $0.maxY) }.min()
-        let lastBottom = rects.map { Int(height - $0.minY) }.max()
-        line("RESULT \(label): rests=\(aboveEnd <= 24 ? "at the end" : "\(aboveEnd) pt above the end") \(state(scrollView)) turnsRendered=\(turns) bottomTurnVisible=\(sees.map(String.init) ?? "-") swiftUIOwnMoves=\(ownMoves) movedUp=\(Int(movedUp)) pastEnd=\(Int(pastEnd)) firstTextTop=\(firstTop.map(String.init) ?? "-") lastTextBottom=\(lastBottom.map(String.init) ?? "-")")
-    }
-
-    /// What moved the clip: where in the run loop it ran, and the SwiftUI, AppKit, drawer and test
-    /// frames on the stack, innermost first.
-    private func clipMoved(_ clip: NSClipView?, _ stack: [String]) {
-        guard let clip, let scrollView = scrollView(), clip === scrollView.contentView else { return }
-        let known: [(String, String)] = [
-            ("updateAnimationTarget", "HostingScrollView.updateAnimationTarget"),
-            ("updateResolvedContentInsets", "HostingScrollView.updateResolvedContentInsets"),
-            ("flushPendingContext", "HostingScrollView.flushPendingContext"),
-            ("HostingScrollViewC13updateContext", "HostingScrollView.updateContext"),
-            ("UpdatedHostingScrollView", "UpdatedHostingScrollView"),
-            ("NSHostingViewC6layout", "NSHostingView.layout"),
-            ("ScrollViewProxyV8scrollTo", "ScrollViewProxy.scrollTo"),
-            ("UpdateGroupC", "UpdateGroup"),
-            ("flushObservers", "SwiftUI.flushObservers"),
-            ("viewDidMoveToWindow", "viewDidMoveToWindow"),
-            ("_scrollTo:animateScroll", "NSClipView._scrollTo:animateScroll:"),
-            ("_reflectDocumentViewFrameChange", "NSClipView._reflectDocumentViewFrameChange"),
-            ("setFrameSize", "setFrameSize"),
-            ("displayIfNeeded", "displayIfNeeded"),
-            ("viewWillDraw", "viewWillDraw"),
-            ("layoutSubtreeIfNeeded", "layoutSubtreeIfNeeded"),
-            ("DisplayLink", "DisplayLink"),
-            ("Transaction", "CATransaction"),
-            ("Timer", "Timer"),
-        ]
-        var tags: [String] = []
-        for frame in stack.dropFirst(1) {
-            let parts = frame.split(separator: " ", omittingEmptySubsequences: true)
-            guard parts.count > 5 else { continue }
-            let symbol = parts[3..<(parts.count - 2)].joined(separator: " ")
-            var tag: String?
-            if symbol.hasPrefix("__CFRUNLOOP_IS_") {
-                tag = "RUNLOOP:" + symbol.replacingOccurrences(of: "__CFRUNLOOP_IS_", with: "")
-                    .replacingOccurrences(of: "CALLING_OUT_TO_", with: "").replacingOccurrences(of: "__", with: "")
-            } else if symbol.contains("scrollToBottom") {
-                tag = "DRAWER:scrollToBottom"
-            } else if symbol.contains("TranscriptHistoryPager") {
-                tag = "DRAWER:pager"
-            } else if symbol.contains("TranscriptReloadTests") {
-                let names = ["settleDisplayCycle", "stepMainRunLoopBeforeWaiting", "betweenMainQueuePasses", "probeStepAfterSwitch"]
-                tag = "TEST:" + (names.first { symbol.contains($0) } ?? "test body")
-            } else if let match = known.first(where: { symbol.contains($0.0) }) {
-                tag = match.1
-            }
-            if let tag, tags.last != tag, tags.count < 24 { tags.append(tag) }
-        }
-        let signature = tags.joined(separator: " < ")
-        let id: Int
-        if let known = signatures[signature] {
-            id = known
-        } else {
-            id = signatures.count + 1
-            signatures[signature] = id
-            line("SIG S\(id) = \(signature)")
-        }
-        let y = clip.bounds.minY
-        let docHeight = scrollView.documentView?.frame.height ?? 0
-        if lastClip !== clip { lastY = nil }
-        lastClip = clip
-        let own = tags.contains("HostingScrollView.updateAnimationTarget")
-        if let lastY {
-            movedUp = max(movedUp, lastY - y)
-            if own { ownMoves.append(Int((lastY - y).rounded())) }
-        }
-        pastEnd = max(pastEnd, y - max(0, docHeight - clip.bounds.height))
-        line("CLIP \(lastY.map { String(Int($0)) } ?? "?")->\(Int(y)) \(state(scrollView)) by S\(id)\(own ? " SWIFTUI'S OWN BLOCK" : "")")
-        lastY = y
-    }
-}
-
 final class TranscriptReloadTests: XCTestCase {
-    /// TEMPORARY PROBE: names the cell a failure of the real test belongs to.
-    override func record(_ issue: XCTIssue) {
-        if !probeIssueLabel.isEmpty {
-            print("DRAWERPROBE ISSUE cell=\(probeIssueLabel) line=\(issue.sourceCodeContext.location?.lineNumber ?? 0) \(issue.compactDescription.prefix(220))")
-        }
-        super.record(issue)
-    }
-
     private func writeSnapshot(sessionId: String, updatedAt: Date) throws {
         Paths.ensureStateDir()
         let snapshot = TranscriptSnapshot(
@@ -294,51 +56,10 @@ final class TranscriptReloadTests: XCTestCase {
         }
     }
 
-    /// TEMPORARY PROBE: the wait between a session switch and its snapshot. The block form lays
-    /// out in its block, so the empty drawer's pager has asked before the snapshot arrives.
-    @MainActor
-    private func probeStepAfterSwitch(_ window: NSWindow) async {
-        let trace = DrawerTrace.shared
-        switch probeHelper {
-        case .old:
-            trace.line("HELPER old step: nested run loop inside the test's main-queue pass >")
-            stepMainRunLoopBeforeWaiting()
-            trace.line("HELPER old step: < nested run loop")
-        case .block:
-            await betweenMainQueuePasses {
-                trace.line("HELPER block step: run-loop block; layout >")
-                window.contentView?.layoutSubtreeIfNeeded()
-                trace.line("HELPER block step: < layout")
-            }
-        }
-    }
-
     @MainActor
     private func settleDisplayCycle(_ window: NSWindow) async {
-        let trace = DrawerTrace.shared
-        switch probeHelper {
-        case .old:
-            for cycle in 0..<3 {
-                await withCheckedContinuation { continuation in
-                    DispatchQueue.main.async {
-                        continuation.resume()
-                    }
-                }
-                trace.line("HELPER old \(cycle): test resumed inside a main-queue pass; layout >")
-                window.contentView?.layoutSubtreeIfNeeded()
-                trace.line("HELPER old \(cycle): < layout; nested run loop >")
-                stepMainRunLoopBeforeWaiting()
-                trace.line("HELPER old \(cycle): < nested run loop")
-            }
-            window.contentView?.layoutSubtreeIfNeeded()
-        case .block:
-            for cycle in 0..<3 {
-                await betweenMainQueuePasses {
-                    trace.line("HELPER block \(cycle): run-loop block; layout >")
-                    window.contentView?.layoutSubtreeIfNeeded()
-                    trace.line("HELPER block \(cycle): < layout")
-                }
-            }
+        for _ in 0..<3 {
+            await betweenMainQueuePasses { window.contentView?.layoutSubtreeIfNeeded() }
         }
     }
 
@@ -613,7 +334,6 @@ final class TranscriptReloadTests: XCTestCase {
             let workflow: RemoteSessionWorkflow
 
             var body: some View {
-                let _ = DrawerTrace.shared.line("SWIFTUI update takes the change: session=\(harness.sessionId) conversation=\(harness.copilotSessionId) turns=\(harness.turns.count)")
                 ZStack(alignment: .trailing) {
                     Color.black
                     TranscriptDrawer(
@@ -678,126 +398,6 @@ final class TranscriptReloadTests: XCTestCase {
             pendingMessages: [RemotePendingMessage(messageId: "pending-1", text: "Queued follow-up for later")]
         )
 
-        // TEMPORARY PROBE. A cell is a helper form and whether the transcript is padded.
-        setlinebuf(stdout)
-        let environment = ProcessInfo.processInfo.environment
-        // helper:mode[:returns per pass of the test[:trace]]. The mode is off or on, then any of
-        // +pager, -pageguard, -24guard and +398.
-        let probeCells: [(helper: ProbeHelper, mode: String, reps: Int, trace: Bool)] = (
-            environment["DRAWER_PROBE_CELLS"]
-                ?? "block:on+pager:40,block:on+pager:40,block:on+pager:40,block:on+pager-pageguard:10,block:on+pager-24guard:10,block:off+398:10,old:off:10:trace,old:off+398:10:trace"
-        ).split(separator: ",").compactMap { cell in
-            let parts = cell.split(separator: ":").map(String.init)
-            guard parts.count >= 2, let helper = ProbeHelper(rawValue: parts[0]) else { return nil }
-            return (helper, parts[1], parts.count > 2 ? Int(parts[2]) ?? 10 : 10, parts.count > 3)
-        }
-        let probeShift = environment["DRAWER_PROBE_SHIFT"] != nil
-        var probeReps = 0
-        var probeTraceReps = false
-        func enter(_ cell: (helper: ProbeHelper, mode: String, reps: Int, trace: Bool)) -> String {
-            probeHelper = cell.helper
-            DrawerProbe.padding = cell.mode.hasPrefix("on")
-            DrawerProbe.pagerMeasuresTurns = cell.mode.contains("+pager")
-            DrawerProbe.noPageGuard = cell.mode.contains("-pageguard")
-            DrawerProbe.no24Guard = cell.mode.contains("-24guard")
-            DrawerProbe.reset398 = cell.mode.contains("+398")
-            probeReps = cell.reps
-            probeTraceReps = cell.trace
-            return "\(cell.helper.rawValue)/\(cell.mode)"
-        }
-        // Part 1: opens, a new conversation, returns and short content, traced line by line. After
-        // every settled wait it waits four more times, to tell a scroll that is applied late from
-        // one that is never applied.
-        var scenarioCells: Set<String> = []
-        for cell in probeCells where environment["DRAWER_PROBE_SKIP_SCENARIO"] == nil {
-            let label = enter(cell)
-            guard scenarioCells.insert(label).inserted else { continue }
-            probeCell = label
-            let trace = DrawerTrace.shared
-            UserDefaults.standard.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
-            let harness = SwitchHarness(sessionId: fixtures[0].id, turns: [])
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
-                styleMask: [.titled, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            window.contentView = NSHostingView(rootView: SwitchHarnessView(harness: harness, workflow: workflow))
-            window.orderBack(nil)
-            trace.begin(window, "a window 760 pt tall")
-            func settled(_ window: NSWindow, _ label: String, snippet: String? = nil) async {
-                await settleTranscript(window)
-                trace.result("\(label), settled", snippet: snippet)
-                for _ in 1...4 { await settleDisplayCycle(window) }
-                trace.result("\(label), after 4 more waits", snippet: snippet)
-            }
-            let opens: [(fixture: Int, late: Bool)] = [(0, true), (1, true), (0, false), (1, false)]
-            for (step, open) in opens.enumerated() {
-                let target = fixtures[open.fixture]
-                let name = "open \(step + 1) (\(target.id), snapshot \(open.late ? "after" : "with") the switch)"
-                trace.action("\(name): the session changes")
-                if step > 0 {
-                    harness.sessionId = "\(target.id)-step-\(step)"
-                    harness.turns = open.late ? [] : target.turns
-                }
-                await probeStepAfterSwitch(window)
-                if open.late {
-                    trace.result("\(name), the empty drawer")
-                    trace.action("\(name): the snapshot arrives, \(target.turns.count) turns")
-                    harness.turns = target.turns
-                }
-                await settled(window, name, snippet: target.expectedBottomSnippet)
-            }
-            trace.action("a new conversation of 80 short turns")
-            harness.copilotSessionId = "conversation-2"
-            harness.turns = (2_000..<2_080).map { makeShortTurn(index: $0, variant: 7) }
-            await settled(window, "new conversation", snippet: "Short reply 2079")
-            let shortTurns = harness.turns
-            for shift in [false, true] {
-                trace.action("leave for a conversation of 3 turns")
-                harness.copilotSessionId = "conversation-3"
-                harness.turns = (3_000..<3_003).map { makeShortTurn(index: $0, variant: 8) }
-                await settled(window, "leave (3 turns)")
-                trace.action("return to the conversation\(shift ? ", and the test runs one display cycle itself inside its pass" : "")")
-                harness.copilotSessionId = "conversation-2"
-                harness.turns = shortTurns
-                if shift { stepMainRunLoopBeforeWaiting() }
-                await settled(window, "return\(shift ? " with the shift" : "")", snippet: "Short reply 2079")
-            }
-            trace.action("leave for a conversation of 1 turn, then a question card arrives")
-            harness.copilotSessionId = "conversation-4"
-            harness.turns = (4_000..<4_001).map { makeShortTurn(index: $0, variant: 8) }
-            await settleTranscript(window)
-            harness.questions = [question]
-            await settled(window, "1 turn and a question card")
-            trace.end()
-            window.orderOut(nil)
-            window.contentView = nil
-
-            // Two pages of short turns fit in a viewport this tall.
-            let tallHarness = SwitchHarness(sessionId: "tall", turns: [])
-            let tall = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 1100, height: 1700),
-                styleMask: [.borderless],
-                backing: .buffered,
-                defer: false
-            )
-            tall.contentView = NSHostingView(rootView: SwitchHarnessView(harness: tallHarness, workflow: workflow))
-            tall.orderBack(nil)
-            trace.begin(tall, "a window 1700 pt tall")
-            trace.action("tall window: the session changes")
-            await probeStepAfterSwitch(tall)
-            trace.action("tall window: the snapshot arrives, 80 short turns")
-            tallHarness.turns = shortTurns
-            await settled(tall, "tall window, 80 short turns", snippet: "Short reply 2079")
-            trace.end()
-            tall.orderOut(nil)
-            tall.contentView = nil
-        }
-        probeCell = nil
-
-        // Part 2: the test itself, once under each cell.
-        func probeBody() async throws {
         let sequence = [0, 1, 2, 3, 4, 5, 1, 3, 5, 2]
         for fullWidth in [false, true] {
             UserDefaults.standard.set(fullWidth, forKey: TranscriptDrawer.fullWidthTranscriptKey)
@@ -825,7 +425,7 @@ final class TranscriptReloadTests: XCTestCase {
                         harness.sessionId = "\(target.id)-step-\(step)"
                         harness.turns = asyncSnapshotArrival ? [] : target.turns
                     }
-                    await probeStepAfterSwitch(window)
+                    await betweenMainQueuePasses()
                     if asyncSnapshotArrival {
                         harness.turns = target.turns
                     }
@@ -1140,46 +740,6 @@ final class TranscriptReloadTests: XCTestCase {
                 // Going to another conversation and back starts from the newest turns again, not
                 // from where the reader had paged to before.
                 let conversation2 = harness.turns
-                // TEMPORARY PROBE: leave and return many times, counting SwiftUI's own moves up
-                // and pages nobody scrolled to.
-                if probeReps > 0 {
-                    let counter = DrawerTrace.shared
-                    if probeTraceReps {
-                        probeCell = probeIssueLabel
-                        counter.begin(window, "returns, fullWidth=\(fullWidth) snapshotWithTheSwitch=\(!asyncSnapshotArrival)")
-                    } else {
-                        counter.beginCounting(window)
-                    }
-                    var rendered: [Int: Int] = [:]
-                    var distances: [Int: Int] = [:]
-                    var withOwnMoveUp = 0
-                    var movedUpAtAll = 0
-                    var morePages = 0
-                    var notAtEnd = 0
-                    for rep in 0..<probeReps {
-                        counter.line("ACTION leave \(rep)")
-                        harness.copilotSessionId = "conversation-3"
-                        harness.turns = (3_000..<3_003).map { makeShortTurn(index: $0, variant: 8) }
-                        await settleTranscript(window)
-                        counter.action("return \(rep)")
-                        harness.copilotSessionId = "conversation-2"
-                        harness.turns = conversation2
-                        if probeShift { stepMainRunLoopBeforeWaiting() }
-                        await settleTranscript(window)
-                        counter.result("return \(rep)")
-                        let count = renderedTurnCount()
-                        rendered[count, default: 0] += 1
-                        if count > renderedInNewConversation { morePages += 1 }
-                        let ups = counter.ownMoves.filter { $0 > 0 }
-                        if !ups.isEmpty { withOwnMoveUp += 1 }
-                        for up in ups { distances[up, default: 0] += 1 }
-                        if counter.movedUp >= 1 { movedUpAtAll += 1 }
-                        if sv.documentVisibleRect.maxY < doc.bounds.height - 24 { notAtEnd += 1 }
-                    }
-                    counter.end()
-                    probeCell = nil
-                    print("DRAWERPROBE RETURNS cell=\(probeIssueLabel) shift=\(probeShift) fullWidth=\(fullWidth) async=\(asyncSnapshotArrival) returns=\(probeReps) withSwiftUIOwnMoveUp=\(withOwnMoveUp) ownMoveUpDistances=\(distances.sorted { $0.key < $1.key }) movedUpAtAll=\(movedUpAtAll) notAtTheEnd=\(notAtEnd) morePagesThanFirstOpen=\(morePages) turnsRendered=\(rendered.sorted { $0.key < $1.key }) firstOpen=\(renderedInNewConversation)")
-                }
                 harness.copilotSessionId = "conversation-3"
                 harness.turns = (3_000..<3_003).map { makeShortTurn(index: $0, variant: 8) }
                 await settleTranscript(window)
@@ -1210,25 +770,6 @@ final class TranscriptReloadTests: XCTestCase {
                 )
             }
         }
-        }
-        for cell in probeCells where environment["DRAWER_PROBE_SKIP_REAL"] == nil {
-            probeIssueLabel = enter(cell)
-            let before = testRun?.totalFailureCount ?? 0
-            print("DRAWERPROBE REAL-TEST BEGIN cell=\(probeIssueLabel)")
-            do {
-                try await probeBody()
-            } catch {
-                XCTFail("The probe cell threw: \(error)")
-            }
-            print("DRAWERPROBE REAL-TEST END cell=\(probeIssueLabel) failures=\((testRun?.totalFailureCount ?? 0) - before)")
-        }
-        probeIssueLabel = ""
-        probeHelper = .block
-        DrawerProbe.padding = false
-        DrawerProbe.pagerMeasuresTurns = false
-        DrawerProbe.noPageGuard = false
-        DrawerProbe.no24Guard = false
-        DrawerProbe.reset398 = false
     }
 
     /// AppKit measures text through intrinsicContentSize at the last width SwiftUI proposed, which
