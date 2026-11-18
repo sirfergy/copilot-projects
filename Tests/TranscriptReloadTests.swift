@@ -632,11 +632,25 @@ final class TranscriptReloadTests: XCTestCase {
             harness.copilotSessionId = "conversation-3"
             harness.turns = (3_000..<3_003).map { makeShortTurn(index: $0, variant: 8) }
             await settled(window, "resize: 3 turns, window 760 pt")
-            for height: CGFloat in [1000, 500, 760] {
+            for height: CGFloat in [1000, 500, 760, 1000] {
                 trace.action("the window is resized to \(Int(height)) pt")
                 window.setContentSize(NSSize(width: 1100, height: height))
                 await settled(window, "resize: 3 turns, window \(Int(height)) pt")
             }
+            // The content outgrows a viewport that was resized over short content.
+            trace.action("return to the conversation in the window grown to 1000 pt")
+            harness.copilotSessionId = "conversation-2"
+            harness.turns = shortTurns
+            await settled(window, "resize: return in the grown window", snippet: "Short reply 2079")
+            trace.action("leave for a conversation of 3 turns in the grown window")
+            harness.copilotSessionId = "conversation-3"
+            harness.turns = (3_000..<3_003).map { makeShortTurn(index: $0, variant: 8) }
+            await settled(window, "resize: leave in the grown window")
+            trace.action("the window shrinks to 760 pt and the conversation returns in the same pass")
+            window.setContentSize(NSSize(width: 1100, height: 760))
+            harness.copilotSessionId = "conversation-2"
+            harness.turns = shortTurns
+            await settled(window, "resize: return while shrinking to 760 pt", snippet: "Short reply 2079")
             trace.action("leave for a conversation of 1 turn, then a question card arrives")
             harness.copilotSessionId = "conversation-4"
             harness.turns = (4_000..<4_001).map { makeShortTurn(index: $0, variant: 8) }
