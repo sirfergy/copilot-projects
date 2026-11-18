@@ -10,6 +10,9 @@ struct TranscriptTurnCard: View {
     var toolImages: [TranscriptPromptAttachments.Item] = []
     var isPending = false
     var pendingMode: RemotePromptMode? = nil
+    /// What a queued prompt's row offers, and whether each can be pressed now.
+    var queueActions: [(kind: RemoteSessionActionKind, title: String, enabled: Bool)] = []
+    var onQueueAction: (RemoteSessionActionKind) -> Void = { _ in }
     let onPreview: (TranscriptImagePreviewItem) -> Void
 
     var body: some View {
@@ -44,6 +47,12 @@ struct TranscriptTurnCard: View {
                         .background(Capsule().fill(.red.opacity(0.12)))
                 }
                 Spacer()
+                ForEach(queueActions, id: \.kind) { action in
+                    Button(action.title) { onQueueAction(action.kind) }
+                        .buttonStyle(.borderless)
+                        .font(.caption2.weight(.semibold))
+                        .disabled(!action.enabled)
+                }
                 if !isPending {
                     Text(turn.startedAt, style: .time)
                         .font(.caption2)

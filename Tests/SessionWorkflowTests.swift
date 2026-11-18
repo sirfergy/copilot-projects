@@ -19,6 +19,20 @@ final class SessionWorkflowTests: XCTestCase {
         XCTAssertTrue(RemoteSessionAction(kind: .setBudget).isValid)
         XCTAssertFalse(RemoteSessionAction(kind: .answerBudget, requestId: "id", additionalAiCredits: 0).isValid)
         XCTAssertTrue(RemoteSessionAction(kind: .answerBudget, requestId: "id").isValid)
+        // The two queue actions name a queued prompt; no other action may.
+        for kind in [RemoteSessionActionKind.queueSendNow, .queueRemove] {
+            XCTAssertTrue(RemoteSessionAction(kind: kind, messageId: "message-q").isValid)
+            XCTAssertFalse(RemoteSessionAction(kind: kind).isValid)
+            XCTAssertFalse(RemoteSessionAction(kind: kind, messageId: "").isValid)
+            XCTAssertFalse(RemoteSessionAction(kind: kind, messageId: String(repeating: "m", count: 513)).isValid)
+            XCTAssertFalse(RemoteSessionAction(kind: kind, prompt: "text", messageId: "message-q").isValid)
+        }
+        XCTAssertFalse(RemoteSessionAction(kind: .abort, messageId: "message-q").isValid)
+        XCTAssertEqual(
+            try JSONDecoder().decode(RemoteSessionAction.self, from: Data(
+                #"{"kind":"session-queue-remove","messageId":"message-q"}"#.utf8)),
+            RemoteSessionAction(kind: .queueRemove, messageId: "message-q")
+        )
         XCTAssertThrowsError(try JSONDecoder().decode(
             RemoteSessionAction.self, from: Data(#"{"kind":"arbitrary-rpc"}"#.utf8)
         ))
@@ -344,6 +358,159 @@ final class SessionWorkflowTests: XCTestCase {
     }
 
     @MainActor
+    func testQueuedPromptsCommandListsAndActsAndLeavesAParkedSessionParked() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let sessions = root.appendingPathComponent("sessions")
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = Session(title: "Queued prompts", cwd: root.path)
+        let project = Project(name: "Queue test", cwd: root.path, sessions: [session])
+        let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+        try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+        let model = AppModel(
+            stateRepository: repository,
+            isAppActive: { false }, agentActivityDirectory: sessions, resumeMarkerDirectory: sessions,
+            remotePromptLiveSessions: { _ in [session.id] },
+            kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images"))
+        )
+        let sdkID = UUID().uuidString
+        let pending = [
+            RemotePendingMessage(messageId: "steering-0", text: "A steer", mode: .immediate),
+            RemotePendingMessage(messageId: "message-q", text: "Queued", mode: .enqueue),
+        ]
+        let now = Date()
+        var snapshot = AgentActivitySnapshot(
+            schemaVersion: 1, updatedAt: now.ISO8601Format(.init(includingFractionalSeconds: true)),
+            foregroundTurnActive: true, scheduledTurnActive: false, activeSubagents: [], schedules: [],
+            idleGeneration: 0, lastIdleAborted: false, lastIdleTurnKind: nil, error: nil,
+            pendingPermissionRequestIds: [], copilotSessionId: sdkID,
+            conversationEpoch: "epoch-1", operationReceiptVersion: 1, operationReceipts: [],
+            workflow: RemoteSessionWorkflow(
+                observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+                capabilities: RemoteSessionActionKind.allCases.map(\.rawValue) + [RemotePendingMessage.capability],
+                sendReady: true, restartRequested: false, pendingMessages: pending
+            )
+        )
+        let snapshotURL = sessions.appendingPathComponent("\(session.id).agent-activity.json")
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        try Data(sdkID.utf8).write(to: sessions.appendingPathComponent("\(session.id).copilot-session"))
+        func command(_ action: String? = nil, session id: String = session.id) -> ControlRequest {
+            var request = ControlRequest(command: "queued-prompts")
+            request.sessionId = id
+            request.action = action
+            request.messageId = action == nil ? nil : "message-q"
+            return request
+        }
+        func handoffURL(_ kind: String) -> URL { sessions.appendingPathComponent("\(session.id).\(kind).json") }
+
+        let listed = await model.queuedPromptsCommand(command())
+        XCTAssertEqual(
+            try JSONDecoder().decode([RemotePendingMessage].self, from: Data((listed.text ?? "").utf8)), pending
+        )
+
+        // Each action goes to the tracker under its own kind, and the command answers with the receipt.
+        let outcomes: [(action: String, kind: String, state: RemoteOperationState, errorCode: String?, error: String?)] = [
+            ("remove", "session-queue-remove", .applied, nil, nil),
+            ("send-now", "session-queue-send-now", .rejected, "not-queued", RemotePendingMessage.notQueuedMessage),
+        ]
+        for outcome in outcomes {
+            // A task made here starts on the main actor, so one yield lets it write its handoff.
+            let answer = Task { await model.queuedPromptsCommand(command(outcome.action), pollInterval: .milliseconds(5)) }
+            let handoff = handoffURL(outcome.kind)
+            for _ in 0..<20 where !FileManager.default.fileExists(atPath: handoff.path) { await Task.yield() }
+            let handed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: handoff)) as? [String: Any])
+            XCTAssertEqual(handed["action"] as? [String: String], ["kind": outcome.kind, "messageId": "message-q"])
+            try FileManager.default.removeItem(at: handoff)
+            snapshot.operationReceipts = [TrackedOperationReceipt(
+                operationId: handed["operationId"] as? String, conversationEpoch: "epoch-1", kind: outcome.kind,
+                state: outcome.state, updatedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+                errorCode: outcome.errorCode, payloadFingerprint: handed["payloadFingerprint"] as? String
+            )]
+            try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+            let response = await answer.value
+            XCTAssertEqual(response.code, outcome.state.rawValue, outcome.action)
+            XCTAssertEqual(response.error, outcome.error, outcome.action)
+        }
+
+        // Send now makes a steer: while Copilot waits on a question the tracker is not asked.
+        snapshot.pendingPermissionRequestIds = ["pending"]
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        // Nothing reached the tracker, so the answer is "try again", unlike a receipt's.
+        let fenced = await model.queuedPromptsCommand(command("send-now"))
+        XCTAssertEqual(fenced.error, "The session action was not accepted.")
+        XCTAssertEqual(fenced.code, "busy")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL("session-queue-send-now").path))
+
+        // A tracker that cannot see Copilot's queue publishes no list. That is not an empty queue.
+        snapshot.workflow = RemoteSessionWorkflow(
+            observedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000), capabilities: [], sendReady: false
+        )
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL)
+        let blind = await model.queuedPromptsCommand(command())
+        XCTAssertEqual(blind.code, "busy")
+        XCTAssertNil(blind.text)
+
+        model.projects[0].sessions[0].parked = ParkedSession(state: .parked, sinceMilliseconds: 1)
+        for action in [nil, "remove"] {
+            let parked = await model.queuedPromptsCommand(command(action))
+            XCTAssertEqual(parked.code, "parked")
+        }
+        XCTAssertEqual(model.parkedState(session.id), .parked, "a refused request must not resume a parked session")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: handoffURL("session-queue-remove").path))
+        model.projects[0].sessions[0].parked = nil
+        var unnamed = command("remove")
+        unnamed.messageId = nil
+        for request in [command("edit"), unnamed] {
+            let refused = await model.queuedPromptsCommand(request)
+            XCTAssertEqual(refused.code, "bad-request")
+        }
+        let gone = await model.queuedPromptsCommand(command(session: "missing"))
+        XCTAssertEqual(gone.code, "gone")
+    }
+
+    @MainActor
+    func testAQueuedRowOffersSendNowAndTakeBackAndATakenBackPromptReturnsToTheField() {
+        let now = Date()
+        let kinds = [RemoteSessionActionKind.queueSendNow, .queueRemove].map(\.rawValue)
+        func workflow(_ capabilities: [String], sendReady: Bool = true) -> RemoteSessionWorkflow {
+            RemoteSessionWorkflow(
+                observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+                capabilities: capabilities, sendReady: sendReady
+            )
+        }
+        let queued = RemotePendingMessage(messageId: "message-q", text: "Queued", mode: .enqueue)
+        let (sendNow, takeBack) = (RemotePendingMessage.sendNowTitle, RemotePendingMessage.takeBackTitle)
+        func offered(
+            _ pending: RemotePendingMessage, _ workflow: RemoteSessionWorkflow?, acting: Bool = false, at date: Date = now
+        ) -> [String] {
+            TranscriptDrawer.queueActions(for: pending, workflow: workflow, isActing: acting, now: date)
+                .map { $0.enabled ? $0.title : "\($0.title), disabled" }
+        }
+        XCTAssertEqual(offered(queued, workflow(kinds)), [sendNow, takeBack])
+        XCTAssertEqual(offered(queued, workflow(kinds, sendReady: false)), ["\(sendNow), disabled", takeBack])
+        XCTAssertEqual(offered(queued, workflow(kinds), acting: true), ["\(sendNow), disabled", "\(takeBack), disabled"])
+        XCTAssertEqual(offered(queued, workflow([kinds[1]])), [takeBack])
+        XCTAssertEqual(offered(RemotePendingMessage(messageId: "steering-0", text: "A steer"), workflow(kinds)), [])
+        XCTAssertEqual(offered(queued, workflow(kinds), at: now.addingTimeInterval(16)), [], "a stale workflow")
+        XCTAssertEqual(offered(queued, nil), [])
+
+        let composer = DesktopSessionPromptComposer(sessionId: "session-q")
+        composer.prompt = "Draft"
+        composer.showQueueAction(nil)
+        XCTAssertEqual(composer.statusMessage, "Waiting for Copilot to confirm...")
+        composer.showQueueAction(
+            RemoteWorkflowActionResult(state: .rejected, message: RemotePendingMessage.notQueuedMessage),
+            takenBack: "Queued"
+        )
+        XCTAssertEqual(composer.prompt, "Draft", "a prompt Copilot already took is not put back")
+        XCTAssertEqual(composer.statusMessage, RemotePendingMessage.notQueuedMessage)
+        composer.showQueueAction(RemoteWorkflowActionResult(state: .applied), takenBack: "Queued")
+        XCTAssertEqual(composer.prompt, "Queued\nDraft")
+        XCTAssertNil(composer.statusMessage)
+    }
+
+    @MainActor
     func testGroupSessionUnderParentAndMarkAllSessionsRead() throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -489,6 +656,32 @@ final class SessionWorkflowTests: XCTestCase {
             XCTAssertEqual(CLIMain.run(args, environment: environment), 2, args.joined(separator: " "))
         }
         XCTAssertEqual(received.count, sentCount)
+
+        // queued-prompts lists, or names one queued prompt to send now or take back.
+        XCTAssertTrue(CLIMain.isCommand("queued-prompts"))
+        nextResponse = .success("[]")
+        XCTAssertEqual(CLIMain.run(["queued-prompts", "--session", "s1", "--project", "p1"], environment: environment), 0)
+        XCTAssertEqual(received.last?.command, "queued-prompts")
+        XCTAssertEqual(received.last?.projectId, "p1")
+        XCTAssertNil(received.last?.action)
+        XCTAssertNil(received.last?.messageId)
+        for (flag, action) in [("--send-now", "send-now"), ("--remove", "remove")] {
+            XCTAssertEqual(CLIMain.run(["queued-prompts", "--session", "s1", flag, "message-q"], environment: environment), 0)
+            XCTAssertEqual(received.last?.action, action)
+            XCTAssertEqual(received.last?.messageId, "message-q")
+        }
+        nextResponse = .failure(RemotePendingMessage.notQueuedMessage, code: "rejected")
+        XCTAssertEqual(CLIMain.run(["queued-prompts", "--session", "s1", "--remove", "message-q"], environment: environment), 1)
+        let queuedCount = received.count
+        for args in [
+            ["queued-prompts"],
+            ["queued-prompts", "--session", "s1", "--send-now"],
+            ["queued-prompts", "--session", "s1", "--send-now", "a", "--remove", "b"],
+            ["queued-prompts", "--session", "s1", "--edit", "a"],
+        ] {
+            XCTAssertEqual(CLIMain.run(args, environment: environment), 2, args.joined(separator: " "))
+        }
+        XCTAssertEqual(received.count, queuedCount)
     }
 
     @MainActor

@@ -34,11 +34,21 @@ test("native workflow RPCs target the requested session", {
   t.after(() => rm(root, { recursive: true, force: true }));
   execFileSync("git", ["init", "--quiet", root]);
   const requests = [];
+  // A prompt that asks to be held keeps its turn running until the test lets it go.
+  let holding, release;
+  const held = new Promise((resolve) => { holding = resolve; });
+  const released = new Promise((resolve) => { release = resolve; });
+  // A failed assertion leaves the turn held, and the server can't close on an open response.
+  t.after(() => release());
   const server = createServer(async (request, response) => {
     let body = "";
     for await (const chunk of request) body += chunk;
     const input = JSON.parse(body || "{}");
     requests.push(input);
+    if (JSON.stringify(input.messages ?? []).includes("Hold this turn")) {
+      holding();
+      await released;
+    }
     const id = "offline-workflow-fixture";
     if (input.stream) {
       response.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -186,6 +196,46 @@ test("native workflow RPCs target the requested session", {
     assert.ok(serializedUserMessages.includes("NOTES.md"), "Markdown filename must reach the provider");
     assert.ok(serializedUserMessages.includes("Support JSON and Markdown attachments."), "Markdown content must reach the provider");
   }
+  // A queued prompt is sent now or removed by the queue's own id, found by its messageId.
+  const queueIdle = new Promise((resolve) => {
+    const unsubscribe = second.on("session.idle", () => { unsubscribe(); resolve(); });
+  });
+  await call("session.send", { prompt: "Hold this turn. Do not use tools.", mode: "enqueue" });
+  await held;
+  const sentNow = await call("session.send", { prompt: "Reply queue-sent-now.", mode: "enqueue" });
+  const takenBack = await call("session.send", { prompt: "Reply queue-taken-back.", mode: "enqueue" });
+  const queue = await call("session.queue.pendingItems");
+  assert.deepEqual(queue.items.map((item) => [item.kind, item.messageId]),
+    [["message", sentNow.messageId], ["message", takenBack.messageId]]);
+  const [sentNowId, takenBackId] = queue.items.map((item) => item.id);
+  assert.deepEqual(await call("session.queue.removeAt", { id: takenBackId }), { removed: true });
+  assert.deepEqual(await call("session.queue.sendNow", { id: sentNowId }), { steered: true });
+  // What the tracker reads as "no longer queued": the id of a prompt that has left the queue.
+  for (const method of ["session.queue.sendNow", "session.queue.removeAt"]) {
+    await assert.rejects(call(method, { id: sentNowId }), (error) => error?.data?.code === "unknown_id");
+  }
+  assert.deepEqual((await call("session.queue.pendingItems")).items, []);
+  release();
+  await queueIdle;
+  const queuedPrompts = (await second.getEvents())
+    .filter((event) => event.type === "user.message" && event.data.content.startsWith("Reply queue-"))
+    .map((event) => event.data.content);
+  assert.deepEqual(queuedPrompts, ["Reply queue-sent-now."]);
+  // With no turn running, a prompt sent now starts at once. Pausing the drain is what
+  // holds it queued here; a background shell does the same to a real session.
+  await call("session.queue.setDrainPaused", { paused: true });
+  const startedIdle = new Promise((resolve) => {
+    const unsubscribe = second.on("session.idle", () => { unsubscribe(); resolve(); });
+  });
+  const waiting = await call("session.send", { prompt: "Reply queue-started.", mode: "enqueue" });
+  const [stalled] = (await call("session.queue.pendingItems")).items;
+  assert.equal(stalled.messageId, waiting.messageId);
+  assert.equal((await call("session.metadata.isProcessing")).processing, false);
+  assert.deepEqual(await call("session.queue.sendNow", { id: stalled.id }), { steered: true });
+  await startedIdle;
+  await call("session.queue.setDrainPaused", { paused: false });
+  assert.ok((await second.getEvents()).some((event) =>
+    event.type === "user.message" && event.data.content === "Reply queue-started."));
   const metrics = await call("session.usage.getMetrics");
   assert.equal(typeof metrics.totalUserRequests, "number");
   const abort = await call("session.abort");

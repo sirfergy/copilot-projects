@@ -12,6 +12,8 @@ enum CLISDKOperationKind: String, Codable {
     case sessionRestart = "session-restart"
     case setSessionBudget = "set-session-budget"
     case answerSessionBudget = "answer-session-budget"
+    case sessionQueueSendNow = "session-queue-send-now"
+    case sessionQueueRemove = "session-queue-remove"
     /// Asked by the host before parking; never offered to remote clients.
     case sessionParkCheck = "session-park-check"
     /// Asked by `reload-session-mcp`; never offered to remote clients.
@@ -89,6 +91,8 @@ struct CLIOperationAdapter {
         "session-restart.json",
         "set-session-budget.json",
         "answer-session-budget.json",
+        "session-queue-send-now.json",
+        "session-queue-remove.json",
         "session-park-check.json",
         "session-reload-mcp.json",
     ]

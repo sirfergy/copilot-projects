@@ -313,6 +313,7 @@ if (validSessionId && socketPath) {
     // The host asks it and "session-reload-mcp" itself and offers neither to clients.
     const workflowKinds = [
         "session-send", "session-abort", "session-restart", "set-session-budget", "answer-session-budget",
+        "session-queue-send-now", "session-queue-remove",
         "session-park-check", "session-reload-mcp",
     ];
     // The kinds that queue one of Copilot's own slash commands for an idle session.
@@ -2388,6 +2389,7 @@ if (validSessionId && socketPath) {
                 metadataSeq: newerHeartbeat ? newerHeartbeat.metadataSeq : workflowMetadataSeq,
                 capabilities: [
                     "session-send", "session-abort", "answer-session-budget",
+                    "session-queue-send-now", "session-queue-remove",
                     "image-attachments-v1", "file-attachments-v1", "pending-messages-v1",
                     "session-park-check", "session-restart", "session-reload-mcp",
                     ...(effectiveLimitsKnown ? ["set-session-budget"] : []),
@@ -2447,6 +2449,11 @@ if (validSessionId && socketPath) {
                     && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)))) {
             return false;
         }
+        // The two queue actions name a queued prompt; no other action may.
+        const queueAction = kind === "session-queue-send-now" || kind === "session-queue-remove";
+        const namesPrompt = typeof action.messageId === "string" && action.messageId.length > 0
+            && Buffer.byteLength(action.messageId) <= 512;
+        if (queueAction ? !namesPrompt : action.messageId != null) return false;
         const absent = (...keys) => keys.every((key) => action[key] == null);
         switch (kind) {
         case "session-send":
@@ -2458,6 +2465,8 @@ if (validSessionId && socketPath) {
         case "session-restart":
         case "session-park-check":
         case "session-reload-mcp":
+        case "session-queue-send-now":
+        case "session-queue-remove":
             return absent("prompt", "mode", "maxAiCredits", "requestId", "additionalAiCredits");
         case "set-session-budget":
             return absent("prompt", "mode", "requestId", "additionalAiCredits")
@@ -2641,6 +2650,35 @@ if (validSessionId && socketPath) {
         }
         case "session-abort":
             return rpcReceiptOutcome(await workflowRPC("session.abort", {}, context));
+        case "session-queue-send-now":
+        case "session-queue-remove": {
+            // Copilot's requests take its own queue id, which is not published; a messageId names the prompt.
+            const queue = await workflowRead("session.queue.pendingItems", {}, context);
+            const item = queue?.items?.find((entry) =>
+                entry?.kind === "message" && entry.messageId === action.messageId);
+            if (!item) return { state: "rejected", errorCode: "not-queued" };
+            // The rows of one batch share a queue id, and Copilot's requests act on all of them.
+            if (queue.items.some((entry) => entry !== item && entry?.id === item.id)) return { state: "rejected" };
+            const sendNow = action.kind === "session-queue-send-now";
+            // Sent now, the prompt can start a turn, as a new send can.
+            if (sendNow) nativeSendRevision += 1;
+            try {
+                const result = await workflowRPC(
+                    sendNow ? "session.queue.sendNow" : "session.queue.removeAt", { id: item.id }, context
+                );
+                const outcome = rpcReceiptOutcome({ success: sendNow ? result?.steered : result?.removed });
+                if (outcome.state === "applied") {
+                    // The snapshot that says so no longer lists the prompt, whatever the next read finds.
+                    pendingMessages = pendingMessages.filter((entry) => entry.messageId !== action.messageId);
+                    refreshPendingMessages();
+                }
+                return outcome;
+            } catch (error) {
+                // Copilot answers `unknown_id` when a turn took the prompt first.
+                if (error?.data?.code !== "unknown_id") throw error;
+                return { state: "rejected", errorCode: "not-queued" };
+            }
+        }
         case "session-restart":
         case "session-reload-mcp": {
             // The direct `session.mcp.reload` holds its request open for the whole
@@ -2712,7 +2750,7 @@ if (validSessionId && socketPath) {
         const needsIdle = queuedCommands.has(kind) || parkCheck;
         const valid = request.schemaVersion === 1 && validWorkflowAction(action, kind)
             && workflow.capabilities.includes(kind)
-            && (kind !== "session-send" || workflow.sendReady)
+            && ((kind !== "session-send" && kind !== "session-queue-send-now") || workflow.sendReady)
             && (!needsIdle || (stopIsIdle(parkCheck) && activeOperationKeys.size === 0))
             && (!parkCheck || pendingMessages.length === 0)
             && (kind !== "set-session-budget" || pendingBudgetRequest === null)

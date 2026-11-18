@@ -877,6 +877,14 @@ final class DesktopSessionPromptComposer: ObservableObject {
         statusMessage = nil
     }
 
+    /// Shows a queue action waiting (`nil`) and then its outcome. A taken-back prompt
+    /// returns to the field ahead of any draft, as a refused send does.
+    func showQueueAction(_ result: RemoteWorkflowActionResult?, takenBack text: String? = nil) {
+        guard let result else { return statusMessage = "Waiting for Copilot to confirm..." }
+        statusMessage = result.state == .applied ? nil : result.message
+        if result.state == .applied, let text { prompt = prompt.isEmpty ? text : "\(text)\n\(prompt)" }
+    }
+
     func previewItem(for item: StagedAttachment) -> TranscriptImagePreviewItem {
         TranscriptImagePreviewItem(
             id: TranscriptImageIdentity(

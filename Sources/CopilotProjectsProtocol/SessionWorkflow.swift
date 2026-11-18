@@ -6,6 +6,10 @@ public enum RemoteSessionActionKind: String, Codable, Sendable, CaseIterable {
     case restart = "session-restart"
     case setBudget = "set-session-budget"
     case answerBudget = "answer-session-budget"
+    /// Delivers a queued prompt now: into the running turn, or as a turn when none is running.
+    case queueSendNow = "session-queue-send-now"
+    /// Takes a queued prompt back before Copilot starts it.
+    case queueRemove = "session-queue-remove"
 }
 
 public enum RemotePromptMode: String, Codable, Sendable, CaseIterable {
@@ -45,6 +49,11 @@ public struct RemotePendingMessage: Codable, Equatable, Sendable, Identifiable {
         self.text = text
         self.mode = mode
     }
+
+    /// The words for a queued prompt's two actions, and for one that has left the queue.
+    public static let sendNowTitle = "Send now"
+    public static let takeBackTitle = "Take back"
+    public static let notQueuedMessage = "That prompt is no longer queued."
 }
 
 /// A closed set of user actions, not an arbitrary SDK RPC proxy.
@@ -56,6 +65,8 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
     public var requestId: String?
     public var additionalAiCredits: Double?
     public var attachmentIds: [String]?
+    /// The queued prompt a queue action names: its `RemotePendingMessage.messageId`.
+    public var messageId: String?
 
     public init(
         kind: RemoteSessionActionKind,
@@ -64,7 +75,8 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
         maxAiCredits: Double? = nil,
         requestId: String? = nil,
         additionalAiCredits: Double? = nil,
-        attachmentIds: [String]? = nil
+        attachmentIds: [String]? = nil,
+        messageId: String? = nil
     ) {
         self.kind = kind
         self.prompt = prompt
@@ -73,9 +85,14 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
         self.requestId = requestId
         self.additionalAiCredits = additionalAiCredits
         self.attachmentIds = attachmentIds
+        self.messageId = messageId
     }
 
     public var isValid: Bool {
+        let namesPrompt = messageId.map { !$0.isEmpty && $0.utf8.count <= 512 } ?? false
+        guard kind == .queueSendNow || kind == .queueRemove ? namesPrompt : messageId == nil else {
+            return false
+        }
         if let attachmentIds {
             guard kind == .send, !attachmentIds.isEmpty,
                   attachmentIds.count <= RemoteAttachmentContract.maxImages,
@@ -87,7 +104,7 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
             guard let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   prompt.utf8.count <= 8_192, mode != nil else { return false }
             return maxAiCredits == nil && requestId == nil && additionalAiCredits == nil
-        case .abort, .restart:
+        case .abort, .restart, .queueSendNow, .queueRemove:
             return prompt == nil && mode == nil && maxAiCredits == nil
                 && requestId == nil && additionalAiCredits == nil
         case .setBudget:

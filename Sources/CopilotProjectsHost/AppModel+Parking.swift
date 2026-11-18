@@ -249,11 +249,11 @@ extension AppModel {
         guard parkingAdapter.submitHostRequest(
             sessionId: sessionId, kind: .sessionParkCheck, operation: operation
         ) == .accepted else { return false }
-        let state = await terminalReceiptState(
+        let receipt = await terminalReceipt(
             sessionId: sessionId, operation: operation, kind: SessionParking.checkKind,
             pollInterval: .milliseconds(100), adapter: parkingAdapter
         )
-        return state == .applied
+        return receipt?.state == .applied
     }
 
     // MARK: - resume

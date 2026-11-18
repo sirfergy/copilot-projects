@@ -152,6 +152,7 @@ class FakeSession {
     this.activityHandler = async () => ({ abortable: this.processing, hasActiveWork: this.processing });
     this.abortHandler = async () => this.emit("session.idle", { aborted: true });
     this.enqueueHandler = async () => ({ queued: true });
+    this.queueActionHandler = async () => ({ steered: true, removed: true });
     this.queueProcessCalls = [];
     this.queueProcessHandler = async () => null;
     this.extensionsReloadHandler = async () => null;
@@ -239,6 +240,9 @@ class FakeSession {
         if (method === "session.commands.enqueue") return this.enqueueHandler(params);
         if (method === "session.extensions.reload") return this.extensionsReloadHandler(params);
         if (method === "session.send") return this.sendHandler(params);
+        if (method === "session.queue.sendNow" || method === "session.queue.removeAt") {
+          return this.queueActionHandler(params);
+        }
         if (method === "session.abort") {
           await this.abortHandler();
           return { success: true };
@@ -1195,24 +1199,35 @@ test("the log of a restart refused during a heartbeat's question read shows only
 test("a completed native send invalidates restart preflight before a delayed turn-start event", {
   concurrency: false,
 }, async (t) => {
-  const runtime = await createRuntime(t);
-  await workflowReady(runtime);
-  const emptyPage = { events: [], cursor: "0", hasMore: false, cursorStatus: "ok" };
-  let finishRecovery;
-  runtime.session.questionEventHandler = () => new Promise(resolve => { finishRecovery = resolve; });
-  t.after(() => finishRecovery?.(emptyPage));
-  const restart = workflowHandoff(runtime, "session-restart", {});
-  await waitFor(() => finishRecovery, "restart preflight did not wait for question recovery");
-  const send = workflowHandoff(runtime, "session-send", { prompt: "new work", mode: "enqueue" });
-  await waitFor(() => receipt(runtime, send.operationId)?.state === "applied", "native send did not complete");
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(runtime.session.processing, false, "The turn-start notification must still be delayed");
-  assert.equal(receipt(runtime, restart.operationId), undefined, "The race must finish before preflight expiry");
-  finishRecovery(emptyPage);
-  await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, restart.operationId)?.state),
-    "restart did not settle after the intervening send");
-  assert.equal(receipt(runtime, restart.operationId).state, "rejected");
-  assert.deepEqual(runtime.session.workflowCalls.map(call => call.method), ["session.send"]);
+  // A new prompt, or one queued from the terminal meanwhile and sent now: either starts work.
+  const sends = [
+    ["session-send", { prompt: "new work", mode: "enqueue" }, "session.send"],
+    ["session-queue-send-now", { messageId: "typed" }, "session.queue.sendNow"],
+  ];
+  for (const [kind, action, method] of sends) {
+    const runtime = await createRuntime(t);
+    await workflowReady(runtime);
+    const emptyPage = { events: [], cursor: "0", hasMore: false, cursorStatus: "ok" };
+    let finishRecovery;
+    runtime.session.questionEventHandler = () => new Promise(resolve => { finishRecovery = resolve; });
+    t.after(() => finishRecovery?.(emptyPage));
+    const restart = workflowHandoff(runtime, "session-restart", {});
+    await waitFor(() => finishRecovery, "restart preflight did not wait for question recovery");
+    runtime.session.pendingItemsHandler = async () => ({
+      items: [{ id: "1", messageId: "typed", kind: "message", displayText: "typed" }],
+      steeringMessages: [], inFlightSteeringCount: 0,
+    });
+    const send = workflowHandoff(runtime, kind, action);
+    await waitFor(() => receipt(runtime, send.operationId)?.state === "applied", `${kind} did not complete`);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(runtime.session.processing, false, "The turn-start notification must still be delayed");
+    assert.equal(receipt(runtime, restart.operationId), undefined, "The race must finish before preflight expiry");
+    finishRecovery(emptyPage);
+    await waitFor(() => ["applied", "rejected"].includes(receipt(runtime, restart.operationId)?.state),
+      "restart did not settle after the intervening send");
+    assert.equal(receipt(runtime, restart.operationId).state, "rejected", kind);
+    assert.deepEqual(runtime.session.workflowCalls.map(call => call.method), [method]);
+  }
 });
 
 test("a reloaded tracker rejects restart over unfinished child work reported by the runtime", {
@@ -1853,6 +1868,95 @@ test("native stop is independent of an unresolved send and never closes the term
   assert.deepEqual(runtime.session.closeCalls, []);
   completeSend({ messageId: "accepted-send" });
   await waitFor(() => receipt(runtime, send.operationId)?.state === "applied", "send outcome missing");
+});
+
+test("queue actions find a queued prompt by its messageId and report one that has left the queue", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  const { capabilities } = await workflowReady(runtime);
+  assert.ok(capabilities.includes("session-queue-send-now"));
+  assert.ok(capabilities.includes("session-queue-remove"));
+  const queued = (id, messageId) => ({ id, messageId, kind: "message", displayText: `prompt ${id}` });
+  let items = [queued("4", "message-a"), queued("5", "message-b"), queued("6", "message-c")];
+  // The read of the queue that follows an action fails once, as a slow one would.
+  let failNextRead = false;
+  runtime.session.pendingItemsHandler = async () => {
+    if (failNextRead) {
+      failNextRead = false;
+      throw new Error("queue read failed");
+    }
+    return { items, steeringMessages: [], inFlightSteeringCount: 0 };
+  };
+  const leaveQueue = async ({ id }) => {
+    items = items.filter((item) => item.id !== id);
+    failNextRead = true;
+    return { steered: true, removed: true };
+  };
+  runtime.session.queueActionHandler = leaveQueue;
+  const published = async () => {
+    await runtime.session.emit("pending_messages.modified", {});
+    const listed = () => (readSnapshot(runtime).workflow.pendingMessages ?? []).map((entry) => entry.messageId);
+    await waitFor(() => listed().join() === items.map((item) => item.messageId).join(), "queue was not published");
+  };
+  await published();
+  const act = async (kind, messageId) => {
+    const request = workflowHandoff(runtime, kind, { messageId });
+    const answered = () => ["applied", "rejected"].includes(receipt(runtime, request.operationId)?.state);
+    await waitFor(answered, `${kind} was not answered`);
+    const { state, errorCode } = receipt(runtime, request.operationId);
+    if (state === "applied") {
+      // The snapshot that first says so no longer lists the prompt, though the next read failed.
+      const first = runtime.activityWrites.find((snapshot) => snapshot.operationReceipts
+        .some((entry) => entry.operationId === request.operationId && entry.state === state));
+      assert.deepEqual((first.workflow.pendingMessages ?? []).map((entry) => entry.messageId),
+        items.map((item) => item.messageId), kind);
+    }
+    return errorCode ? `${state} ${errorCode}` : state;
+  };
+  assert.equal(await act("session-queue-send-now", "message-b"), "applied");
+  assert.equal(await act("session-queue-remove", "message-a"), "applied");
+  assert.deepEqual(runtime.session.workflowCalls, [
+    { method: "session.queue.sendNow", sessionId: runtime.copilotSessionId, id: "5" },
+    { method: "session.queue.removeAt", sessionId: runtime.copilotSessionId, id: "4" },
+  ]);
+  items = [queued("4", "message-a"), queued("5", "message-b")];
+  await published();
+  // Copilot's own queue id never stands in for a messageId, and a prompt that
+  // has left the queue is answered without a request.
+  assert.equal(await act("session-queue-remove", "4"), "rejected not-queued");
+  assert.equal(await act("session-queue-send-now", "message-gone"), "rejected not-queued");
+  assert.equal(runtime.session.workflowCalls.length, 2);
+  // Copilot's answer when a turn takes the prompt after the read.
+  runtime.session.queueActionHandler = async () => {
+    throw Object.assign(new Error("unknown queue item id '5'"), { code: -32602, data: { code: "unknown_id" } });
+  };
+  assert.equal(await act("session-queue-send-now", "message-b"), "rejected not-queued");
+  assert.equal(await act("session-queue-remove", "message-a"), "rejected not-queued");
+  // Send now makes a steer, so it is refused as a send is while Copilot waits
+  // on a question. Taking a prompt back is not.
+  runtime.session.queueActionHandler = leaveQueue;
+  await runtime.session.emit("permission.requested", { requestId: "permission-1" });
+  assert.equal(await act("session-queue-send-now", "message-b"), "rejected target-unavailable");
+  assert.equal(await act("session-queue-remove", "message-b"), "applied");
+});
+
+test("a prompt queued as part of a batch is neither sent now nor taken back on its own", {
+  concurrency: false,
+}, async (t) => {
+  const runtime = await createRuntime(t);
+  await workflowReady(runtime);
+  // What Copilot CLI 1.0.113 lists for two prompts sent together: two rows, one queue id.
+  runtime.session.pendingItemsHandler = async () => ({
+    items: ["batch-a", "batch-b"].map((messageId) => ({ id: "2", messageId, kind: "message", displayText: messageId })),
+    steeringMessages: [], inFlightSteeringCount: 0,
+  });
+  for (const [kind, messageId] of [["session-queue-remove", "batch-a"], ["session-queue-send-now", "batch-b"]]) {
+    const request = workflowHandoff(runtime, kind, { messageId });
+    await waitFor(() => receipt(runtime, request.operationId)?.state === "rejected", `${kind} was not refused`);
+    assert.equal(receipt(runtime, request.operationId).errorCode, undefined);
+  }
+  assert.deepEqual(runtime.session.workflowCalls, []);
 });
 
 test("native sends are fenced by permissions and budget decisions", {

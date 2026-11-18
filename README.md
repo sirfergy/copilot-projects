@@ -51,6 +51,9 @@ Copilot has not taken yet. In the view you can:
   `ask_user` question is answered, the answer becomes the next turn.
 - **Send a message** that steers the running task or queues after it, and attach
   screenshots or text files to it.
+- **Send a queued message now, or take it back**, with **Send now** and **Take back**
+  on a message marked **Queued**; see [Command-line access](#command-line-access) for
+  what each does and its limits.
 - **Restart the session** with `/restart`; see [Session restart](#session-restart).
 - **Rename the session** with `/rename <new name>`, which types Copilot's own `/rename`
   into the session's terminal; see
@@ -632,6 +635,39 @@ does not send twice while the app remembers the request (about a week); replayin
 with a different prompt, session or `--steer` exits 3.
 An app left running from before it learned `--steer` ignores it and queues the
 prompt, so restart the app after updating.
+
+To see the prompts a session's Copilot has not started yet, and to send one now or take
+it back, use `queued-prompts`:
+
+```bash
+copilot-projects queued-prompts --session <id>                          # the pending prompts, as JSON
+copilot-projects queued-prompts --session <id> --send-now <messageId>
+copilot-projects queued-prompts --session <id> --remove <messageId>
+```
+
+The list is `[{"messageId": …, "text": …, "mode": …}]`, and only an entry whose `mode`
+is `enqueue` can be named. `--send-now` delivers the prompt as a steer is delivered: into
+the turn that is running, where Copilot stops waiting on a shell command to take it and
+the command carries on in the background, or as a new turn at once when none is running.
+That starts a prompt that is queued behind a background shell. `--remove` takes the prompt
+back before Copilot starts it. Both wait for Copilot's answer and exit 0 only when it did
+as asked. If Copilot had already started the prompt, or it was already taken back, they
+print "That prompt is no longer queued." and exit 1. `--send-now` is refused while Copilot
+waits on a question, as a send is. A refusal that never reached Copilot, such as that one
+or a tracker that is not ready, exits 8: try again. A parked session exits 9: nothing is
+queued in it.
+
+The list is what the session's tracker last read from Copilot's queue. For a moment after
+the tracker starts or the conversation changes, or while it cannot read the queue, the list
+can be empty or out of date.
+
+Three limits. `text` is cut at 8,192 characters, so a longer prompt typed in the terminal is
+listed, and comes back to the message field, without its end. A prompt's attachments are
+not listed and do not come back: attach them again. A prompt sent to Copilot as part of a
+batch can't be sent now or taken back on its own: Copilot would act on the whole batch, so
+the action is refused. Both requests are experimental in
+Copilot's SDK and were run on Copilot CLI 1.0.113; a Copilot without them refuses the
+first attempt, and its tracker stops offering that action.
 
 Commands inside an app-managed terminal automatically target its current
 project and session. Hooks for other tools can post a notification:
