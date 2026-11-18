@@ -536,9 +536,10 @@ struct TranscriptDrawer: View {
 
     /// Renders one more page of earlier turns. Returns false, and writes nothing, when every turn
     /// is rendered: a write here re-evaluates the whole drawer. Following the bottom, the reader is
-    /// at the bottom, so a page loads only while the bottom is within a viewport of the top. SwiftUI
-    /// sometimes moves the view 543 pt up for one main-queue pass after a page fills in, which
-    /// loaded a page on 3 of about 1,800 opens.
+    /// at the bottom, so a page loads only while the bottom is within a viewport of the top. When a
+    /// display cycle runs inside a main-queue pass, SwiftUI applies a scroll a pass late and moves
+    /// the view 543 pt up after a page fills in, which loaded a page on 3 of about 1,800 opens in
+    /// a test.
     private func loadEarlierPage(bottomIsNearTop: Bool) -> Bool {
         let turns = displayedTurns
         let first = firstRenderedIndex(in: turns)
@@ -610,7 +611,7 @@ struct TranscriptDrawer: View {
             ScrollViewReader { proxy in
                 let turns = displayedTurns
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
+                    let content = VStack(alignment: .leading, spacing: 14) {
                         ForEach(turns[firstRenderedIndex(in: turns)...], content: turnCard)
                         ForEach(pendingUserInputs, id: \.requestId) { request in
                             DesktopUserInputCard(
@@ -666,6 +667,15 @@ struct TranscriptDrawer: View {
                     .padding(.horizontal, 18)
                     .padding(.top, 5)
                     .padding(.bottom, 6)
+                    // Never shorter than the viewport. On macOS 26 (SwiftUI 7.6.1) shorter
+                    // content's negative origin was carried over when it outgrew the viewport: the
+                    // view moved up 34 to 646 pt after the drawer's scroll, the drawer took it for
+                    // the reader's and stopped following (34 test failures in CI). The turns get no
+                    // height proposed, as in a scroll view; given one they were 102 pt short.
+                    ZStack(alignment: .bottom) {
+                        Color.clear.frame(width: 0).containerRelativeFrame(.vertical)
+                        content.fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(.top, 1)
                 .onScrollGeometryChange(for: ScrollMetrics.self) { geometry in
@@ -788,8 +798,8 @@ private struct TranscriptHistoryPager: NSViewRepresentable {
 
     final class PagerView: NSView {
         var loadEarlierPage: (_ bottomIsNearTop: Bool) -> Bool = { _ in false }
-        /// Set when a page is requested, until it is laid out: the content height, and a text view
-        /// on screen with its position in the content.
+        /// Set when a page is requested, until it is laid out: this view's height, the turns' (the
+        /// padded content need not grow), and a text view on screen with its place in the content.
         private var pendingPage: (height: CGFloat, anchor: NSView?, anchorY: CGFloat)?
 
         override func viewDidMoveToWindow() {
@@ -810,7 +820,7 @@ private struct TranscriptHistoryPager: NSViewRepresentable {
             super.layout()
             loadPageIfNearTop()
             guard let page = pendingPage, let scrollView = enclosingScrollView,
-                  let content = scrollView.documentView, content.frame.height != page.height else { return }
+                  let content = scrollView.documentView, frame.height != page.height else { return }
             pendingPage = nil
             let clip = scrollView.contentView
             // Within 24 pt of the end the drawer follows the bottom, and has already scrolled to the
@@ -822,7 +832,7 @@ private struct TranscriptHistoryPager: NSViewRepresentable {
             // viewport in the same pass moved the transcript 22 pt on 1 of 49 page loads in the
             // jump harness.
             let moved = page.anchor.map { $0.convert(NSPoint.zero, to: content).y - page.anchorY }
-                ?? content.frame.height - page.height
+                ?? frame.height - page.height
             clip.scroll(to: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + moved))
             scrollView.reflectScrolledClipView(clip)
         }
@@ -836,7 +846,7 @@ private struct TranscriptHistoryPager: NSViewRepresentable {
                 guard clip.minY < clip.height,
                       self.loadEarlierPage(content.frame.height - clip.height < clip.height) else { return }
                 let anchor = Self.textView(in: content, intersecting: scrollView.documentVisibleRect, of: content)
-                self.pendingPage = (content.frame.height, anchor, anchor?.convert(NSPoint.zero, to: content).y ?? 0)
+                self.pendingPage = (self.frame.height, anchor, anchor?.convert(NSPoint.zero, to: content).y ?? 0)
             }
         }
 
