@@ -45,7 +45,7 @@ final class TranscriptReloadTests: XCTestCase {
     /// pass late: the transcript sat 543 pt above the bottom for a pass on 223 of 1,200 returns to
     /// a conversation, and now and then rendered a page nobody scrolled to.
     @MainActor
-    private func betweenMainQueuePasses(_ body: @escaping () -> Void = {}) async {
+    private func betweenMainQueuePasses(_ body: @escaping () -> Void) async {
         await withCheckedContinuation { continuation in
             CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
                 body()
