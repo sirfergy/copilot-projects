@@ -542,6 +542,7 @@ struct TranscriptDrawer: View {
     private func loadEarlierPage(bottomIsNearTop: Bool) -> Bool {
         let turns = displayedTurns
         let first = firstRenderedIndex(in: turns)
+        DrawerProbe.log?("pager asks for a page: bottomIsNearTop=\(bottomIsNearTop) isAtBottom=\(isAtBottom) rendered=\(turns.count - first) of \(turns.count) -> \(first > 0 && (bottomIsNearTop || !isAtBottom) ? "PAGE LOADED" : "no page")")
         guard first > 0, bottomIsNearTop || !isAtBottom else { return false }
         render(from: turns[max(0, first - Self.turnPageSize)])
         return true
@@ -591,14 +592,25 @@ struct TranscriptDrawer: View {
         }
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+    private func scrollToBottom(_ proxy: ScrollViewProxy, _ who: String) {
+        DrawerProbe.scrolls += 1
+        let scroll = DrawerProbe.scrolls
+        DrawerProbe.log?("scroll \(scroll) asked by \(who): WRITE isAtBottom \(isAtBottom) -> true; scrollTo")
         isAtBottom = true
         proxy.scrollTo("transcript-bottom", anchor: .bottom)
         DispatchQueue.main.async {
-            guard isAtBottom else { return }
+            guard isAtBottom else {
+                DrawerProbe.log?("scroll \(scroll) later pass 1: isAtBottom=false, RETURNED AT ITS GUARD")
+                return
+            }
+            DrawerProbe.log?("scroll \(scroll) later pass 1: scrollTo")
             proxy.scrollTo("transcript-bottom", anchor: .bottom)
             DispatchQueue.main.async {
-                guard isAtBottom else { return }
+                guard isAtBottom else {
+                    DrawerProbe.log?("scroll \(scroll) later pass 2: isAtBottom=false, RETURNED AT ITS GUARD")
+                    return
+                }
+                DrawerProbe.log?("scroll \(scroll) later pass 2: scrollTo")
                 proxy.scrollTo("transcript-bottom", anchor: .bottom)
             }
         }
@@ -610,7 +622,7 @@ struct TranscriptDrawer: View {
             ScrollViewReader { proxy in
                 let turns = displayedTurns
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
+                    let content = VStack(alignment: .leading, spacing: 14) {
                         ForEach(turns[firstRenderedIndex(in: turns)...], content: turnCard)
                         ForEach(pendingUserInputs, id: \.requestId) { request in
                             DesktopUserInputCard(
@@ -666,6 +678,17 @@ struct TranscriptDrawer: View {
                     .padding(.horizontal, 18)
                     .padding(.top, 5)
                     .padding(.bottom, 6)
+                    if DrawerProbe.padding {
+                        ZStack(alignment: .bottom) {
+                            Color.clear.frame(width: 0).containerRelativeFrame(.vertical)
+                            // Measured as in the scroll view itself, with no height proposed. Given
+                            // the stack's height, the turns of one fixture came out 102 pt shorter
+                            // than they were measured, and the scroll to the bottom landed 108 pt high.
+                            content.fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else {
+                        content
+                    }
                 }
                 .padding(.top, 1)
                 .onScrollGeometryChange(for: ScrollMetrics.self) { geometry in
@@ -676,15 +699,18 @@ struct TranscriptDrawer: View {
                             || geometry.visibleRect.maxY >= geometry.contentSize.height - 24
                     )
                 } action: { oldValue, newValue in
+                    DrawerProbe.log?("report: offset \(Int(oldValue.offsetY)) -> \(Int(newValue.offsetY)) width \(Int(oldValue.containerWidth)) -> \(Int(newValue.containerWidth)) nearBottom=\(newValue.isNearBottom) isAtBottom=\(isAtBottom)")
                     if newValue.containerWidth != oldValue.containerWidth {
                         if isAtBottom {
-                            scrollToBottom(proxy)
+                            scrollToBottom(proxy, "a width change")
                         }
                     }
                     if newValue.isNearBottom {
+                        if !isAtBottom { DrawerProbe.log?("WRITE isAtBottom false -> true by a near-bottom report") }
                         isAtBottom = true
                     } else if newValue.containerWidth == oldValue.containerWidth
                         && newValue.offsetY < oldValue.offsetY {
+                        DrawerProbe.log?("WRITE isAtBottom \(isAtBottom) -> false by a move-up report, \(Int(oldValue.offsetY - newValue.offsetY)) pt up\(firstRenderedStart == nil ? "; pins the first rendered turn" : "")")
                         isAtBottom = false
                         if firstRenderedStart == nil {
                             render(from: turns.dropFirst(firstRenderedIndex(in: turns)).first)
@@ -700,47 +726,55 @@ struct TranscriptDrawer: View {
                                 || currentWorkflow?.budgetRequest != nil,
                             onVisibilityChange: {
                                 guard isAtBottom else { return }
-                                scrollToBottom(proxy)
+                                scrollToBottom(proxy, "the working row")
                             }
                         )
                     }
                 }
                 .defaultScrollAnchor(.bottom)
                 .onAppear {
+                    DrawerProbe.log?("WRITE isAtBottom \(isAtBottom) -> true by onAppear")
                     isAtBottom = true
-                    scrollToBottom(proxy)
+                    scrollToBottom(proxy, "onAppear")
                 }
                 .onChange(of: isFullWidth) { _, _ in
                     if isAtBottom {
-                        scrollToBottom(proxy)
+                        scrollToBottom(proxy, "a full-width toggle")
                     }
                 }
                 .onChange(of: turns) { _, _ in
-                    guard isAtBottom else { return }
-                    scrollToBottom(proxy)
+                    guard isAtBottom else {
+                        DrawerProbe.log?("the turns changed: isAtBottom=false, NO SCROLL")
+                        return
+                    }
+                    scrollToBottom(proxy, "the turns changing")
                 }
                 // A short newest page fills in an earlier one while still following the bottom.
                 // Without this the drawer opened 602 pt above the bottom on a session of short turns.
                 .onChange(of: firstRenderedStart) { _, _ in
-                    guard isAtBottom else { return }
-                    scrollToBottom(proxy)
+                    guard isAtBottom else {
+                        DrawerProbe.log?("the first rendered turn changed: isAtBottom=false, NO SCROLL")
+                        return
+                    }
+                    scrollToBottom(proxy, "the first rendered turn changing")
                 }
                 // Coming back to a conversation starts from its newest turns. A test that paged up,
                 // switched conversation and switched back rendered 20 turns at once instead of 12.
                 .onChange(of: copilotSessionId) { _, _ in
+                    DrawerProbe.log?("the conversation changed: first rendered turn forgotten; isAtBottom=\(isAtBottom)")
                     firstRendered = nil
                 }
                 .onChange(of: currentWorkflow?.pendingMessages) { _, _ in
                     guard isAtBottom else { return }
-                    scrollToBottom(proxy)
+                    scrollToBottom(proxy, "the pending messages changing")
                 }
                 .onChange(of: pendingUserInputs) { _, _ in
                     guard isAtBottom else { return }
-                    scrollToBottom(proxy)
+                    scrollToBottom(proxy, "a question card changing")
                 }
                 .onChange(of: pendingElicitations) { _, _ in
                     guard isAtBottom else { return }
-                    scrollToBottom(proxy)
+                    scrollToBottom(proxy, "an elicitation changing")
                 }
             }
 
@@ -767,6 +801,16 @@ struct TranscriptDrawer: View {
         }
         .shadow(color: .black.opacity(isFullWidth ? 0 : 0.2), radius: isFullWidth ? 0 : 12, x: isFullWidth ? 0 : -4)
     }
+}
+
+// TEMPORARY PROBE, removed again before this branch is ready.
+enum DrawerProbe {
+    /// Keeps the transcript's content at least as tall as the viewport, aligned to the bottom.
+    static var padding = false
+    /// The pager tells that a page was laid out by the height of the turns, not of the document.
+    static var pagerMeasuresTurns = false
+    static var log: ((String) -> Void)?
+    static var scrolls = 0
 }
 
 /// Renders an earlier page of the transcript when the reader comes within a viewport of the oldest
@@ -810,7 +854,14 @@ private struct TranscriptHistoryPager: NSViewRepresentable {
             super.layout()
             loadPageIfNearTop()
             guard let page = pendingPage, let scrollView = enclosingScrollView,
-                  let content = scrollView.documentView, content.frame.height != page.height else { return }
+                  let content = scrollView.documentView,
+                  (DrawerProbe.pagerMeasuresTurns ? frame.height : content.frame.height) != page.height else {
+                if let page = pendingPage {
+                    DrawerProbe.log?("pager layout: a page is pending and the measured height is still \(Int(page.height)) (document \(Int(enclosingScrollView?.documentView?.frame.height ?? 0)), turns \(Int(frame.height)))")
+                }
+                return
+            }
+            DrawerProbe.log?("pager layout: the page is laid out, measured height \(Int(page.height)) -> \(Int(DrawerProbe.pagerMeasuresTurns ? frame.height : content.frame.height)) (document \(Int(content.frame.height)), turns \(Int(frame.height)))")
             pendingPage = nil
             let clip = scrollView.contentView
             // Within 24 pt of the end the drawer follows the bottom, and has already scrolled to the
@@ -822,7 +873,7 @@ private struct TranscriptHistoryPager: NSViewRepresentable {
             // viewport in the same pass moved the transcript 22 pt on 1 of 49 page loads in the
             // jump harness.
             let moved = page.anchor.map { $0.convert(NSPoint.zero, to: content).y - page.anchorY }
-                ?? content.frame.height - page.height
+                ?? (DrawerProbe.pagerMeasuresTurns ? frame.height : content.frame.height) - page.height
             clip.scroll(to: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + moved))
             scrollView.reflectScrolledClipView(clip)
         }
@@ -830,13 +881,17 @@ private struct TranscriptHistoryPager: NSViewRepresentable {
         @objc private func loadPageIfNearTop() {
             // Rendering more turns isn't allowed inside a layout pass or a scroll notification.
             DispatchQueue.main.async { [weak self] in
+                if let self, self.pendingPage != nil { DrawerProbe.log?("pager check skipped: a page is still pending") }
                 guard let self, self.pendingPage == nil, let scrollView = self.enclosingScrollView,
                       let content = scrollView.documentView else { return }
                 let clip = scrollView.contentView.bounds
                 guard clip.minY < clip.height,
                       self.loadEarlierPage(content.frame.height - clip.height < clip.height) else { return }
                 let anchor = Self.textView(in: content, intersecting: scrollView.documentVisibleRect, of: content)
-                self.pendingPage = (content.frame.height, anchor, anchor?.convert(NSPoint.zero, to: content).y ?? 0)
+                self.pendingPage = (
+                    DrawerProbe.pagerMeasuresTurns ? self.frame.height : content.frame.height,
+                    anchor, anchor?.convert(NSPoint.zero, to: content).y ?? 0
+                )
             }
         }
 
