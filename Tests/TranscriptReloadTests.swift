@@ -39,28 +39,27 @@ final class TranscriptReloadTests: XCTestCase {
         CFRunLoopRemoveObserver(rl, observer, .defaultMode)
     }
 
-    /// Waits for the run loop's next display cycle and runs `body` at its end: between main-queue
-    /// passes, where an app's display cycles run. A display cycle run from inside a pass, between
-    /// two scrolls the drawer had queued, made SwiftUI apply a scroll one pass late. The transcript
-    /// then sat 543 pt above the bottom for a pass, on 223 of 1,200 returns to a conversation,
-    /// and now and then rendered a page nobody scrolled to.
+    /// Runs `body` in a run-loop block: after the main-queue pass that asks for it, and ahead of
+    /// the run loop's display cycle. An app lays out between main-queue passes too. A layout run
+    /// inside a pass, between two scrolls the drawer had queued, made SwiftUI apply a scroll one
+    /// pass late: the transcript sat 543 pt above the bottom for a pass on 223 of 1,200 returns to
+    /// a conversation, and now and then rendered a page nobody scrolled to. A layout at the end of
+    /// the display cycle left the drawer 652 pt above the bottom after a session switch on macOS 26.
     @MainActor
-    private func afterDisplayCycle(_ body: @escaping () -> Void = {}) async {
+    private func betweenMainQueuePasses(_ body: @escaping () -> Void = {}) async {
         await withCheckedContinuation { continuation in
-            let observer = CFRunLoopObserverCreateWithHandler(
-                kCFAllocatorDefault, CFRunLoopActivity.beforeWaiting.rawValue, false, CFIndex.max
-            ) { _, _ in
+            CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
                 body()
                 continuation.resume()
             }
-            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+            CFRunLoopWakeUp(CFRunLoopGetMain())
         }
     }
 
     @MainActor
     private func settleDisplayCycle(_ window: NSWindow) async {
         for _ in 0..<3 {
-            await afterDisplayCycle { window.contentView?.layoutSubtreeIfNeeded() }
+            await betweenMainQueuePasses { window.contentView?.layoutSubtreeIfNeeded() }
         }
     }
 
@@ -426,7 +425,7 @@ final class TranscriptReloadTests: XCTestCase {
                         harness.sessionId = "\(target.id)-step-\(step)"
                         harness.turns = asyncSnapshotArrival ? [] : target.turns
                     }
-                    await afterDisplayCycle()
+                    await betweenMainQueuePasses()
                     if asyncSnapshotArrival {
                         harness.turns = target.turns
                     }
