@@ -1090,30 +1090,37 @@ extension AppModel {
         )
     }
 
-    /// Why `/rename` can't be typed into this session's terminal right now, or be followed
-    /// by `name`; nil when it can. Like `restartBlockedReason`, it reads only what the model holds.
+    /// Why this session's tracker can't be asked to rename it right now, or to `name`; nil
+    /// when it can. Like `restartBlockedReason`, it reads only what the model holds.
     func renameBlockedReason(sessionId: String, name: String? = nil) -> String? {
         if name?.isEmpty == true { return "Enter a new name after /rename" }
         if name?.contains(where: \.isNewline) == true { return "Choose or finish a single-line slash command" }
+        if let name, !RemoteSessionAction.isValidSessionName(name) {
+            return RemoteSessionAction.invalidSessionNameMessage
+        }
         guard let location = locateIndex(sessionId) else { return "This session is no longer open" }
         let session = projects[location.p].sessions[location.s]
         if session.parked != nil { return "This session is parked" }
         if session.agentActivity?.workflow?.restartRequested == true {
             return "Restart requested. Check Terminal before sending more work."
         }
-        guard session.status == .idle, !session.hasBackgroundWork else {
-            return "Wait for Copilot to finish before running a slash command"
+        guard session.agentActivity?.workflow?.supports(.rename) == true else {
+            return ComposerSlashCommand.renameUnavailable
         }
-        guard remotePromptable(session, now: Date()) else { return "Copilot is not ready for slash commands" }
+        // The tab takes its name from its terminal's title, which Copilot writes once.
         return controllers[sessionId] == nil ? "This session has no terminal" : nil
     }
 
-    /// Types Copilot's own `/rename` into the session's terminal, as a remote client's slash
-    /// command is typed; Copilot's new terminal title renames the tab. Answers why not, or nil.
-    func renameSession(_ sessionId: String, to name: String) -> String? {
-        if let reason = renameBlockedReason(sessionId: sessionId, name: name) { return reason }
-        let typed = sendRemoteCommand(sessionId: sessionId, requestId: UUID().uuidString, value: "/rename \(name)")
-        return typed == .sent ? nil : "This session's terminal did not take /rename"
+    /// The app's one rename, for the composer's `/rename` and a row's Rename: asks the
+    /// session's tracker to have Copilot rename it, working or not. Copilot's new terminal
+    /// title renames the tab. Nothing is typed into the terminal.
+    func renameSession(_ sessionId: String, to name: String) async -> RemoteWorkflowActionResult {
+        if let reason = renameBlockedReason(sessionId: sessionId, name: name) {
+            return RemoteWorkflowActionResult(state: .rejected, message: reason)
+        }
+        return await performLocalSessionAction(
+            sessionId: sessionId, action: RemoteSessionAction(kind: .rename, name: name)
+        )
     }
 
     private func remoteSessionHasLiveAgent(_ sessionId: String) -> Bool {
@@ -1524,7 +1531,7 @@ extension AppModel {
                               ) else { return false }
                     }
                     return true
-                case .abort, .queueSendNow, .queueRemove:
+                case .abort, .queueSendNow, .queueRemove, .rename:
                     return true
                 case .restart:
                     return self.sessionIsSettledIdle(
@@ -1604,7 +1611,9 @@ extension AppModel {
             await self?.restartSession(sessionId) ?? RemoteWorkflowActionResult(state: .rejected)
         }
         composer.renameBlockedReason = { [weak self] in self?.renameBlockedReason(sessionId: sessionId, name: $0) }
-        composer.rename = { [weak self] in self?.renameSession(sessionId, to: $0) }
+        composer.rename = { [weak self] in
+            await self?.renameSession(sessionId, to: $0) ?? RemoteWorkflowActionResult(state: .rejected)
+        }
         if locateIndex(sessionId) != nil {
             sessionPromptComposers[sessionId] = composer
         }

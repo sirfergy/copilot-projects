@@ -2666,13 +2666,13 @@ final class AppModel: ObservableObject {
     }
 
     /// Asks for a name, as a project's Rename does, and has Copilot rename the session to it.
-    func renameSessionInteractive(_ sessionId: String) {
+    func renameSessionInteractive(_ sessionId: String) async {
         guard let name = promptForText(
-            title: "Rename Session",
-            message: "Enter a new name for this session. \(ComposerSlashCommand.renameWarning)",
+            title: "Rename Session", message: "Enter a new name for this session.",
             confirmTitle: "Rename", initialText: ""
         ) else { return }
-        if let reason = renameSession(sessionId, to: name) {
+        let result = await renameSession(sessionId, to: name)
+        if result.state != .applied, let reason = result.message {
             presentAlert(title: "Couldn't Rename Session", message: reason)
         }
     }

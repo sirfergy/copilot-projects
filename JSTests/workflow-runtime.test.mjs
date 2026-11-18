@@ -202,6 +202,10 @@ test("native workflow RPCs target the requested session", {
   });
   await call("session.send", { prompt: "Hold this turn. Do not use tools.", mode: "enqueue" });
   await held;
+  // Copilot takes a new name while that turn runs, and refuses one it cannot keep as it answers any failure.
+  await call("session.name.set", { name: "Renamed while working" });
+  assert.deepEqual(await call("session.name.get"), { name: "Renamed while working" });
+  await assert.rejects(call("session.name.set", { name: 'say "hi"' }), (error) => error?.code === -32603);
   const sentNow = await call("session.send", { prompt: "Reply queue-sent-now.", mode: "enqueue" });
   const takenBack = await call("session.send", { prompt: "Reply queue-taken-back.", mode: "enqueue" });
   const queue = await call("session.queue.pendingItems");

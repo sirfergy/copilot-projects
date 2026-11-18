@@ -400,7 +400,7 @@ struct ComposerSlashCommand: Identifiable, Equatable {
     var completion: String { argument == nil ? command : command + " " }
 
     static let rename = ComposerSlashCommand(command: "/rename", summary: "Rename this session", argument: "new name")
-    static let renameWarning = "Send or clear anything unsent in the session's terminal first: /rename is typed there."
+    static let renameUnavailable = "This session can't be renamed from here. Run /rename in its terminal."
     static let known = [
         ComposerSlashCommand(command: "/restart", summary: "Restart Copilot and preserve this session"),
         rename,
@@ -462,9 +462,12 @@ final class DesktopSessionPromptComposer: ObservableObject {
     /// call that asks its tracker to restart it.
     var restartBlockedReason: @MainActor () -> String? = { "Copilot is not ready to restart" }
     var restart: @MainActor () async -> RemoteWorkflowActionResult = { RemoteWorkflowActionResult(state: .rejected) }
-    /// Set by the model: why `/rename` with that name can't run, and the call that runs it.
-    var renameBlockedReason: @MainActor (String) -> String? = { _ in "Copilot is not ready for slash commands" }
-    var rename: @MainActor (String) -> String? = { _ in "Copilot is not ready for slash commands" }
+    /// Set by the model: why `/rename` with that name can't run, and the call that asks
+    /// the session's tracker to rename it.
+    var renameBlockedReason: @MainActor (String) -> String? = { _ in ComposerSlashCommand.renameUnavailable }
+    var rename: @MainActor (String) async -> RemoteWorkflowActionResult = { _ in
+        RemoteWorkflowActionResult(state: .rejected)
+    }
 
     /// The slash command the draft is. Send runs it rather than sending the
     /// draft to Copilot as a message.
@@ -476,11 +479,6 @@ final class DesktopSessionPromptComposer: ObservableObject {
     var slashCommandBlockedReason: String? {
         guard let (command, argument) = ComposerSlashCommand.parse(prompt) else { return nil }
         return command == .rename ? renameBlockedReason(argument) : restartBlockedReason()
-    }
-
-    /// What to say under the draft's slash command: why it can't run, or what running it does.
-    var slashCommandNotice: String? {
-        slashCommandBlockedReason ?? (slashCommand == .rename ? ComposerSlashCommand.renameWarning : nil)
     }
 
     init(
@@ -902,23 +900,18 @@ final class DesktopSessionPromptComposer: ObservableObject {
         onAction: @MainActor (RemoteSessionAction) async -> RemoteWorkflowActionResult,
         now: Date = Date()
     ) async {
-        if let (command, name) = ComposerSlashCommand.parse(prompt), command == .rename {
-            // Nothing to wait for: the tab is renamed when Copilot sets its title.
-            statusMessage = rename(name)
-            if statusMessage == nil { prompt = "" }
-            return
-        }
-        if slashCommand != nil {
+        if let (command, name) = ComposerSlashCommand.parse(prompt) {
             // The request waits for the tracker's answer: a second Run in that time
             // was refused and re-enabled Run, and the answer erased a newer draft.
             guard !isSending else { return }
-            let command = prompt
+            let draft = prompt
             isSending = true
             statusMessage = "Waiting for Copilot to confirm..."
-            let result = await restart()
+            let result = await (command == .rename ? rename(name) : restart())
             isSending = false
-            statusMessage = result.state == .applied ? nil : result.message ?? "Copilot did not restart."
-            if statusMessage == nil, prompt == command { prompt = "" }
+            let refused = command == .rename ? "Copilot did not rename this session." : "Copilot did not restart."
+            statusMessage = result.state == .applied ? nil : result.message ?? refused
+            if statusMessage == nil, prompt == draft { prompt = "" }
             return
         }
         syncConversationEpoch(operation.conversationEpoch)

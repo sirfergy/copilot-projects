@@ -1202,13 +1202,13 @@ struct RestartSessionMenuItem: View {
     }
 }
 
-/// A row's Rename, disabled while `/rename` can't be typed into that session's terminal.
+/// A row's Rename, disabled while that session's tracker can't be asked to rename it.
 struct RenameSessionMenuItem: View {
     @ObservedObject var model: AppModel
     let sessionId: String
 
     var body: some View {
-        Button("Rename…") { model.renameSessionInteractive(sessionId) }
+        Button("Rename…") { Task { await model.renameSessionInteractive(sessionId) } }
             .disabled(model.renameBlockedReason(sessionId: sessionId) != nil)
     }
 }

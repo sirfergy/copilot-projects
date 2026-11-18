@@ -270,13 +270,14 @@ menu, and in the Session menu for the selected session, makes the same request
 and is disabled under the same conditions.
 
 `/rename <new name>` in the composer, and **Rename…** in a session's context menu,
-rename a Copilot session: the app types Copilot's own `/rename` into the session's
-terminal, as the web and iOS clients do, and the tab takes the new name when Copilot
-sets its terminal title. The command is typed after anything unsent in the terminal's
-input line, so send or clear that first. The composer refuses, and says why, while the
-session is parked, a restart is pending, Copilot is working or not ready, or the session
-has no terminal. **Rename…** is disabled under the same conditions, and says why if one
-arises while its dialog is open.
+rename a Copilot session: the app asks the session's tracker, Copilot takes the name
+at once, working or not, and the tab takes it when Copilot sets its terminal title.
+Nothing is typed into the terminal. A name has at most 100 characters and no double
+quotes or tabs. The composer refuses, and says why, while the session is parked, a
+restart is pending, the session has no terminal, or its tracker is not offering a
+rename; in the last case run `/rename` in the session's terminal. **Rename…** is
+disabled under the same conditions, and says why if one arises while its dialog is
+open. The web and iOS clients still type `/rename` into the terminal.
 
 An optional offline integration test exercises the installed CLI/SDK pair against
 a loopback model fixture, without real model requests:

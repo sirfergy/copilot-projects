@@ -10,6 +10,8 @@ public enum RemoteSessionActionKind: String, Codable, Sendable, CaseIterable {
     case queueSendNow = "session-queue-send-now"
     /// Takes a queued prompt back before Copilot starts it.
     case queueRemove = "session-queue-remove"
+    /// Has Copilot rename the session, as its own `/rename <name>` does.
+    case rename = "session-rename"
 }
 
 public enum RemotePromptMode: String, Codable, Sendable, CaseIterable {
@@ -67,6 +69,8 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
     public var attachmentIds: [String]?
     /// The queued prompt a queue action names: its `RemotePendingMessage.messageId`.
     public var messageId: String?
+    /// The session's new name, for a rename.
+    public var name: String?
 
     public init(
         kind: RemoteSessionActionKind,
@@ -76,7 +80,8 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
         requestId: String? = nil,
         additionalAiCredits: Double? = nil,
         attachmentIds: [String]? = nil,
-        messageId: String? = nil
+        messageId: String? = nil,
+        name: String? = nil
     ) {
         self.kind = kind
         self.prompt = prompt
@@ -86,13 +91,24 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
         self.additionalAiCredits = additionalAiCredits
         self.attachmentIds = attachmentIds
         self.messageId = messageId
+        self.name = name
     }
+
+    /// Whether Copilot takes `name` for a session, once trimmed. Its answer to a name it
+    /// refuses reads like any other failure, so such a name is never sent to it.
+    public static func isValidSessionName(_ name: String) -> Bool {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !name.isEmpty && name.utf16.count <= 100
+            && !name.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7F || $0 == "\"" }
+    }
+    public static let invalidSessionNameMessage = "Use a name of 100 characters or fewer, with no double quotes or tabs."
 
     public var isValid: Bool {
         let namesPrompt = messageId.map { !$0.isEmpty && $0.utf8.count <= 512 } ?? false
         guard kind == .queueSendNow || kind == .queueRemove ? namesPrompt : messageId == nil else {
             return false
         }
+        guard kind == .rename ? name.map(Self.isValidSessionName) == true : name == nil else { return false }
         if let attachmentIds {
             guard kind == .send, !attachmentIds.isEmpty,
                   attachmentIds.count <= RemoteAttachmentContract.maxImages,
@@ -104,7 +120,7 @@ public struct RemoteSessionAction: Codable, Equatable, Sendable {
             guard let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   prompt.utf8.count <= 8_192, mode != nil else { return false }
             return maxAiCredits == nil && requestId == nil && additionalAiCredits == nil
-        case .abort, .restart, .queueSendNow, .queueRemove:
+        case .abort, .restart, .queueSendNow, .queueRemove, .rename:
             return prompt == nil && mode == nil && maxAiCredits == nil
                 && requestId == nil && additionalAiCredits == nil
         case .setBudget:
