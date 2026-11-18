@@ -82,7 +82,7 @@ fileprivate final class DrawerTrace {
         }
         let system = ProcessInfo.processInfo.operatingSystemVersionString
         let swiftUI = Bundle(identifier: "com.apple.SwiftUI")?.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-        line("BEGIN \(what): macOS \(system) SwiftUI \(swiftUI) displayAsleep=\(CGDisplayIsAsleep(CGMainDisplayID()) != 0) occlusionVisible=\(window.occlusionState.contains(.visible)) padding=\(DrawerProbe.padding) pagerMeasuresTurns=\(DrawerProbe.pagerMeasuresTurns) helper=\(probeHelper.rawValue)")
+        line("BEGIN \(what): macOS \(system) SwiftUI \(swiftUI) displayAsleep=\(CGDisplayIsAsleep(CGMainDisplayID()) != 0) occlusionVisible=\(window.occlusionState.contains(.visible)) padding=\(DrawerProbe.padding) pagerMeasuresTurns=\(DrawerProbe.pagerMeasuresTurns) noPageGuard=\(DrawerProbe.noPageGuard) no24Guard=\(DrawerProbe.no24Guard) reset398=\(DrawerProbe.reset398) helper=\(probeHelper.rawValue)")
     }
 
     func end() {
@@ -681,25 +681,38 @@ final class TranscriptReloadTests: XCTestCase {
         // TEMPORARY PROBE. A cell is a helper form and whether the transcript is padded.
         setlinebuf(stdout)
         let environment = ProcessInfo.processInfo.environment
-        let probeCells: [(helper: ProbeHelper, mode: String)] = (environment["DRAWER_PROBE_CELLS"] ?? "old:off,old:on,old:on+pager,block:off,block:on,block:on+pager")
-            .split(separator: ",").compactMap { cell in
-                let parts = cell.split(separator: ":").map(String.init)
-                guard parts.count == 2, let helper = ProbeHelper(rawValue: parts[0]) else { return nil }
-                return (helper, parts[1])
-            }
+        // helper:mode[:returns per pass of the test[:trace]]. The mode is off or on, then any of
+        // +pager, -pageguard, -24guard and +398.
+        let probeCells: [(helper: ProbeHelper, mode: String, reps: Int, trace: Bool)] = (
+            environment["DRAWER_PROBE_CELLS"]
+                ?? "block:on+pager:40,block:on+pager:40,block:on+pager:40,block:on+pager-pageguard:10,block:on+pager-24guard:10,block:off+398:10,old:off:10:trace,old:off+398:10:trace"
+        ).split(separator: ",").compactMap { cell in
+            let parts = cell.split(separator: ":").map(String.init)
+            guard parts.count >= 2, let helper = ProbeHelper(rawValue: parts[0]) else { return nil }
+            return (helper, parts[1], parts.count > 2 ? Int(parts[2]) ?? 10 : 10, parts.count > 3)
+        }
         let probeShift = environment["DRAWER_PROBE_SHIFT"] != nil
-        let probeReps = Int(environment["DRAWER_PROBE_REPS"] ?? "10") ?? 10
-        func enter(_ cell: (helper: ProbeHelper, mode: String)) -> String {
+        var probeReps = 0
+        var probeTraceReps = false
+        func enter(_ cell: (helper: ProbeHelper, mode: String, reps: Int, trace: Bool)) -> String {
             probeHelper = cell.helper
-            DrawerProbe.padding = cell.mode != "off"
-            DrawerProbe.pagerMeasuresTurns = cell.mode == "on+pager"
+            DrawerProbe.padding = cell.mode.hasPrefix("on")
+            DrawerProbe.pagerMeasuresTurns = cell.mode.contains("+pager")
+            DrawerProbe.noPageGuard = cell.mode.contains("-pageguard")
+            DrawerProbe.no24Guard = cell.mode.contains("-24guard")
+            DrawerProbe.reset398 = cell.mode.contains("+398")
+            probeReps = cell.reps
+            probeTraceReps = cell.trace
             return "\(cell.helper.rawValue)/\(cell.mode)"
         }
         // Part 1: opens, a new conversation, returns and short content, traced line by line. After
         // every settled wait it waits four more times, to tell a scroll that is applied late from
         // one that is never applied.
+        var scenarioCells: Set<String> = []
         for cell in probeCells where environment["DRAWER_PROBE_SKIP_SCENARIO"] == nil {
-            probeCell = enter(cell)
+            let label = enter(cell)
+            guard scenarioCells.insert(label).inserted else { continue }
+            probeCell = label
             let trace = DrawerTrace.shared
             UserDefaults.standard.set(false, forKey: TranscriptDrawer.fullWidthTranscriptKey)
             let harness = SwitchHarness(sessionId: fixtures[0].id, turns: [])
@@ -1131,22 +1144,29 @@ final class TranscriptReloadTests: XCTestCase {
                 // and pages nobody scrolled to.
                 if probeReps > 0 {
                     let counter = DrawerTrace.shared
-                    counter.beginCounting(window)
+                    if probeTraceReps {
+                        probeCell = probeIssueLabel
+                        counter.begin(window, "returns, fullWidth=\(fullWidth) snapshotWithTheSwitch=\(!asyncSnapshotArrival)")
+                    } else {
+                        counter.beginCounting(window)
+                    }
                     var rendered: [Int: Int] = [:]
                     var distances: [Int: Int] = [:]
                     var withOwnMoveUp = 0
                     var movedUpAtAll = 0
                     var morePages = 0
                     var notAtEnd = 0
-                    for _ in 0..<probeReps {
+                    for rep in 0..<probeReps {
+                        counter.line("ACTION leave \(rep)")
                         harness.copilotSessionId = "conversation-3"
                         harness.turns = (3_000..<3_003).map { makeShortTurn(index: $0, variant: 8) }
                         await settleTranscript(window)
-                        counter.action("")
+                        counter.action("return \(rep)")
                         harness.copilotSessionId = "conversation-2"
                         harness.turns = conversation2
                         if probeShift { stepMainRunLoopBeforeWaiting() }
                         await settleTranscript(window)
+                        counter.result("return \(rep)")
                         let count = renderedTurnCount()
                         rendered[count, default: 0] += 1
                         if count > renderedInNewConversation { morePages += 1 }
@@ -1157,6 +1177,7 @@ final class TranscriptReloadTests: XCTestCase {
                         if sv.documentVisibleRect.maxY < doc.bounds.height - 24 { notAtEnd += 1 }
                     }
                     counter.end()
+                    probeCell = nil
                     print("DRAWERPROBE RETURNS cell=\(probeIssueLabel) shift=\(probeShift) fullWidth=\(fullWidth) async=\(asyncSnapshotArrival) returns=\(probeReps) withSwiftUIOwnMoveUp=\(withOwnMoveUp) ownMoveUpDistances=\(distances.sorted { $0.key < $1.key }) movedUpAtAll=\(movedUpAtAll) notAtTheEnd=\(notAtEnd) morePagesThanFirstOpen=\(morePages) turnsRendered=\(rendered.sorted { $0.key < $1.key }) firstOpen=\(renderedInNewConversation)")
                 }
                 harness.copilotSessionId = "conversation-3"
@@ -1205,6 +1226,9 @@ final class TranscriptReloadTests: XCTestCase {
         probeHelper = .block
         DrawerProbe.padding = false
         DrawerProbe.pagerMeasuresTurns = false
+        DrawerProbe.noPageGuard = false
+        DrawerProbe.no24Guard = false
+        DrawerProbe.reset398 = false
     }
 
     /// AppKit measures text through intrinsicContentSize at the last width SwiftUI proposed, which

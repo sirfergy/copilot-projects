@@ -542,8 +542,9 @@ struct TranscriptDrawer: View {
     private func loadEarlierPage(bottomIsNearTop: Bool) -> Bool {
         let turns = displayedTurns
         let first = firstRenderedIndex(in: turns)
-        DrawerProbe.log?("pager asks for a page: bottomIsNearTop=\(bottomIsNearTop) isAtBottom=\(isAtBottom) rendered=\(turns.count - first) of \(turns.count) -> \(first > 0 && (bottomIsNearTop || !isAtBottom) ? "PAGE LOADED" : "no page")")
-        guard first > 0, bottomIsNearTop || !isAtBottom else { return false }
+        let allowed = DrawerProbe.noPageGuard || bottomIsNearTop || !isAtBottom
+        DrawerProbe.log?("pager asks for a page: bottomIsNearTop=\(bottomIsNearTop) isAtBottom=\(isAtBottom) rendered=\(turns.count - first) of \(turns.count) -> \(first > 0 && allowed ? "PAGE LOADED" : "no page")")
+        guard first > 0, allowed else { return false }
         render(from: turns[max(0, first - Self.turnPageSize)])
         return true
     }
@@ -605,6 +606,10 @@ struct TranscriptDrawer: View {
             }
             DrawerProbe.log?("scroll \(scroll) later pass 1: scrollTo")
             proxy.scrollTo("transcript-bottom", anchor: .bottom)
+            if DrawerProbe.reset398 {
+                if !isAtBottom { DrawerProbe.log?("WRITE isAtBottom false -> true by later pass 1, as #398 did") }
+                isAtBottom = true
+            }
             DispatchQueue.main.async {
                 guard isAtBottom else {
                     DrawerProbe.log?("scroll \(scroll) later pass 2: isAtBottom=false, RETURNED AT ITS GUARD")
@@ -612,6 +617,10 @@ struct TranscriptDrawer: View {
                 }
                 DrawerProbe.log?("scroll \(scroll) later pass 2: scrollTo")
                 proxy.scrollTo("transcript-bottom", anchor: .bottom)
+                if DrawerProbe.reset398 {
+                    if !isAtBottom { DrawerProbe.log?("WRITE isAtBottom false -> true by later pass 2, as #398 did") }
+                    isAtBottom = true
+                }
             }
         }
     }
@@ -809,6 +818,12 @@ enum DrawerProbe {
     static var padding = false
     /// The pager tells that a page was laid out by the height of the turns, not of the document.
     static var pagerMeasuresTurns = false
+    /// Without #349's page guard: a page loads whenever the viewport is within its height of the top.
+    static var noPageGuard = false
+    /// Without #349's 24 pt guard in the pager's layout.
+    static var no24Guard = false
+    /// With #398's two lines: each later pass sets isAtBottom again after its own scroll.
+    static var reset398 = false
     static var log: ((String) -> Void)?
     static var scrolls = 0
 }
@@ -867,7 +882,7 @@ private struct TranscriptHistoryPager: NSViewRepresentable {
             // Within 24 pt of the end the drawer follows the bottom, and has already scrolled to the
             // new bottom in this pass. Moving the page again put the view 606 pt past the end on
             // every page filled in at the bottom.
-            guard clip.bounds.maxY < content.frame.height - 24 else { return }
+            guard DrawerProbe.no24Guard || clip.bounds.maxY < content.frame.height - 24 else { return }
             // The turns moved down by the height of the page. Measure that on a text view that was
             // on screen rather than on the content height: a streaming turn growing below the
             // viewport in the same pass moved the transcript 22 pt on 1 of 49 page loads in the
