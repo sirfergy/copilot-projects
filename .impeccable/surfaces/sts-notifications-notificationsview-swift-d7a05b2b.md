@@ -58,7 +58,6 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 ## Unresolved
 
-- Mac only, by the user's choice.
 - Team mentions do not name the team (the API does not say which).
 
 ## Evidence and coverage boundary

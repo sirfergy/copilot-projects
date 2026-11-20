@@ -8,7 +8,7 @@ enum NotificationReplyResolver {
     static let syntheticRequestPrefix = "synthetic::durable-ask-user::"
     /// `answerUserInput`/`answerElicitation` refuse longer request ids.
     static let maxRequestIdBytes = 200
-    /// The gateway cuts push alert bodies at 1,500 bytes including its
+    /// The gateway can cut an alert body at 1,500 bytes including its
     /// "Sent at" suffix; staying under this keeps numbered choices whole.
     static let maxNotificationBodyBytes = 1_400
     /// Keys that don't constrain a string, so any typed text the host accepts

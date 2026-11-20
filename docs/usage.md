@@ -92,7 +92,9 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   (`waiting`, `failed`, `ready`, `running`, `background`, `scheduled`) jumps to the
   next session in that state across all projects, and **Session ▸ Next Session Needing
   Attention** (`⇧⌘A`) cycles across projects in urgency order (`waiting` → `failed` →
-  `unread` / `finished`). When the session it went to no longer needs you, it carries
+  `unread` / `finished`). Within one urgency it goes in workspace order (projects in
+  order, then each project's sessions in order), starting after the current session and
+  wrapping around. When the session it went to no longer needs you, it carries
   on from there instead of starting over. The session's tracker (below) drives this automatically.
 - **Transcript view:** Copilot CLI remains the native interactive terminal, while a
   collapsible drawer overlays its right edge with independently scrollable turns
@@ -185,6 +187,14 @@ recover receipts that already expired.
 
 The session drawer renders live response updates
 within its conversation turns. Final messages replace their matching streamed text.
+The transcript's working line shows the CLI's live `assistant.intent` description.
+The tracker clears old activity on new work, conversation changes, and session idle.
+While only agents remain, it shows the first available short task description (or
+agent name), plus a count of other active agents. The text follows the remaining
+agents as they finish. "Waiting for background agents" is used only when their labels
+are unknown. MCP tasks use their short display name rather than their full prompt;
+agents launched directly from a definition may report their configured description.
+Missing or stale activity shows "Copilot is working…" or "Background work active".
 Newly observed empty or whitespace-only assistant messages are omitted from live
 and completed transcripts; their tool activity remains visible.
 
@@ -235,8 +245,9 @@ typed answers (an agent's own question; an MCP server's form does not), the card
 takes any non-blank text for a choice or a yes-or-no field, and one typed entry among
 several choices. For a text field's format the app
 checks `email`, `uri`, `date` and `date-time`, and accepts any text for another. The
-app checks every answer against the agent's schema. A question whose schema is
-outside that subset is answered in the terminal.
+app checks every answer against the agent's schema. A question that asks you to open
+a link, and one the terminal is asking with a default answer, have their own controls
+on the card. A question whose schema is outside that subset is answered in the terminal.
 
 An optional offline integration test exercises the installed CLI/SDK pair against
 a loopback model fixture, without real model requests:
@@ -500,8 +511,8 @@ or a background agent restarting work) is cleared; model-catalog and other backg
 are not shown. Copilot
 Projects renders that snapshot in the drawer without changing the terminal's PTY size. For
 images only, the Mac drawer also reads the session's own `events.jsonl`: the images attached
-to a prompt and the images a tool returned. The snapshot holds at most
-200 turns and 5 MB (both files together).
+to a prompt and the images a tool returned. The transcript holds at most
+200 turns, and its two files together at most 5 MB.
 
 The app also installs a read-only Copilot extension at
 `~/.copilot/extensions/copilot-projects-tracker/extension.mjs`. It uses Copilot's session event

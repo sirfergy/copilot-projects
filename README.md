@@ -572,7 +572,7 @@ never the session on screen or one whose Copilot is running another session too.
 waits for the result, usually a few seconds and 40 at most. It exits 0 once Copilot has
 quit, or 20 seconds after it was told to if it has not: the row then reads "Parking…"
 until it does. It exits 0 at once for a session that was already parked, and 8 when the
-session was left alone, with the reason on stderr.
+session was left alone, with the reason the Mac gives on stderr.
 
 `unpark-session` does what **Resume Session** does and waits until the session can take
 a prompt, usually a few seconds and 110 at most. It exits 0 then, and at once for a

@@ -161,8 +161,7 @@ public enum PackagedResource {
     ///
     /// The trailing newline every well-formed text file ends with is dropped so
     /// the returned value matches the multi-line Swift literal these assets were
-    /// extracted from byte for byte — which also matters because script
-    /// fragments are joined into one script with explicit newline boundaries.
+    /// extracted from byte for byte.
     public static func text(
         _ name: String,
         extension fileExtension: String,
