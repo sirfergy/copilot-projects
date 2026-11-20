@@ -278,7 +278,7 @@ final class ProtocolContractTests: XCTestCase {
     }
 
     func testParkSessionContractIsNotAdvertisedByTheHostProtocol() throws {
-        // Web and iOS mirror these strings.
+        // Remote clients mirror these strings.
         XCTAssertEqual(RemoteSessionParkContract.capability, "park-session-v1")
         XCTAssertEqual(RemoteSessionParkContract.controlType, "park-session")
         // Only a gateway that routes the control advertises it.
@@ -532,7 +532,7 @@ final class ProtocolContractTests: XCTestCase {
         # copilot-projects: name="Surface WSL" cwd="/root/Repos"
         Host woodhaven.thefergies.com
           User root
-          ProxyCommand /opt/homebrew/bin/cloudflared access ssh --hostname %h
+          ProxyCommand /usr/bin/nc -X connect -x proxy.example.com:3128 %h %p
 
         Host devbox
           HostName 10.0.0.42

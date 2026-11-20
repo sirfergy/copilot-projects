@@ -231,7 +231,7 @@ final class SessionParkingTests: XCTestCase {
 
     func testABusySessionIsLeftAloneAndItsInputReopens() async throws {
         // Busy when asked, a turn that starts between the answer and the stop, and the
-        // rule no longer holding once Copilot answers: opened in the web or iOS app,
+        // rule no longer holding once Copilot answers: opened in another app,
         // parking switched off.
         let quiet: (Fixture) -> Void = { _ in }
         let answers: [(RemoteOperationState, Bool, (Fixture) -> Void)] = [

@@ -25,7 +25,7 @@ public struct RemoteTerminalImagePlacement: Codable, Equatable, Sendable {
     /// Decimal representation of `contentVersion` for clients whose native
     /// number type cannot exactly represent every UInt64 (notably JavaScript).
     /// Additive/backward-compatible: native clients continue using the numeric
-    /// field, while web clients use this exact string for cache keys and URLs.
+    /// field, while those clients use this exact string for cache keys and URLs.
     public let contentVersionText: String?
     public let line: Int
     public let column: Int

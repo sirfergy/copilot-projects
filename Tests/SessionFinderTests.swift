@@ -1252,7 +1252,7 @@ final class SessionFinderModelTests: XCTestCase {
                 sessionCwds: ["/Users/me/Repos/copilot-projects"]
             ),
             SessionFinderProjectTarget(
-                id: "p-ios", name: "copilot-projects-ios", cwd: "/Users/me/Repos/copilot-projects-ios",
+                id: "p-tools", name: "copilot-projects-tools", cwd: "/Users/me/Repos/copilot-projects-tools",
                 sessionCwds: []
             ),
             SessionFinderProjectTarget(
@@ -1274,12 +1274,12 @@ final class SessionFinderModelTests: XCTestCase {
         // Exact project cwd match.
         XCTAssertEqual(
             SessionFinderSearch.targetProject(
-                forCwd: "/Users/me/Repos/copilot-projects-ios",
+                forCwd: "/Users/me/Repos/copilot-projects-tools",
                 projects: projects,
                 selectedProjectId: "p-general",
                 defaultStartupDir: "/Users/me/Repos"
             )?.id,
-            "p-ios"
+            "p-tools"
         )
         // Project cwd folder matches worktree prefix and repository name even when project.name differs
         // and no live tabs remain at that directory.
@@ -1302,17 +1302,17 @@ final class SessionFinderModelTests: XCTestCase {
             )?.id,
             "p-work"
         )
-        // Sibling worktree prefix prefers longest match (`copilot-projects-ios` over `copilot-projects`),
+        // Sibling worktree prefix prefers longest match (`copilot-projects-tools` over `copilot-projects`),
         // even when `copilot-projects` is selected.
         XCTAssertEqual(
             SessionFinderSearch.targetProject(
-                forCwd: "/Users/me/Repos/copilot-projects-ios-fix",
-                repository: "sirfergy/copilot-projects-ios",
+                forCwd: "/Users/me/Repos/copilot-projects-tools-fix",
+                repository: "sirfergy/copilot-projects-tools",
                 projects: projects,
                 selectedProjectId: "p-cp",
                 defaultStartupDir: "/Users/me/Repos"
             )?.id,
-            "p-ios"
+            "p-tools"
         )
         // Worktree folder prefix match (`copilot-projects-fix` -> `copilot-projects`).
         XCTAssertEqual(
@@ -1339,10 +1339,10 @@ final class SessionFinderModelTests: XCTestCase {
             SessionFinderSearch.targetProject(
                 forCwd: "/Users/me/Repos",
                 projects: projects,
-                selectedProjectId: "p-ios",
+                selectedProjectId: "p-tools",
                 defaultStartupDir: "/Users/me/Repos"
             )?.id,
-            "p-ios"
+            "p-tools"
         )
     }
 

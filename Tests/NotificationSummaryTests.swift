@@ -62,8 +62,8 @@ final class NotificationSummaryTests: XCTestCase {
         ```
 
         - Mac notifications
-        - Phone notifications
-        """), "Result Fixed previews in AppModel.swift. See details. Mac notifications Phone notifications")
+        - Dock badges
+        """), "Result Fixed previews in AppModel.swift. See details. Mac notifications Dock badges")
         XCTAssertEqual(NotificationSummary.preview("Hello\t world\n\nNext sentence."), "Hello world Next sentence.")
         XCTAssertNil(NotificationSummary.preview("\n \t"))
         XCTAssertNil(NotificationSummary.preview("```\ncode only\n```"))

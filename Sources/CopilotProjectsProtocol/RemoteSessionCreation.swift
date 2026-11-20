@@ -57,7 +57,7 @@ public struct RemoteCreateSessionRequest: Codable, Equatable, Sendable {
     }
 }
 
-/// A validated GitHub pull request used by the desktop and native iOS launch
+/// A validated GitHub pull request used by the desktop and remote-client launch
 /// affordances. The normalized URL is reconstructed from bounded path
 /// components so pasted query strings, fragments, or sub-pages never reach the
 /// agent prompt.

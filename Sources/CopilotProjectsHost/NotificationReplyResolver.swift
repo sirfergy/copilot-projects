@@ -8,7 +8,7 @@ enum NotificationReplyResolver {
     static let syntheticRequestPrefix = "synthetic::durable-ask-user::"
     /// `answerUserInput`/`answerElicitation` refuse longer request ids.
     static let maxRequestIdBytes = 200
-    /// The gateway cuts APNs alert bodies at 1,500 bytes including its
+    /// The gateway cuts push alert bodies at 1,500 bytes including its
     /// "Sent at" suffix; staying under this keeps numbered choices whole.
     static let maxNotificationBodyBytes = 1_400
     /// Keys that don't constrain a string, so any typed text the host accepts
@@ -26,8 +26,8 @@ enum NotificationReplyResolver {
         /// leave the snapshot while the question is still pending.
         var requestId: String? = nil
 
-        /// The question preview followed by numbered choices. iPhone action
-        /// buttons can only say "Option N", so the body names what each means.
+        /// The question preview followed by numbered choices. A remote client's
+        /// action buttons can only say "Option N", so the body names what each means.
         /// Only the preview is shortened to fit; the choices always stay whole.
         var notificationBody: String? {
             let preview = NotificationSummary.preview(text)
@@ -117,7 +117,7 @@ enum NotificationReplyResolver {
         guard isAnswerable(requestId: input.requestId) else { return nil }
         let choices: [RemoteNotificationReplyChoice]
         if input.choices.count > RemoteNotificationReply.maxChoices {
-            // Too many buttons for a watch; typed answers still work if allowed.
+            // Too many buttons for a notification; typed answers still work if allowed.
             guard input.allowFreeform else { return nil }
             choices = []
         } else {

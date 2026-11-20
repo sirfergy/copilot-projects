@@ -1157,8 +1157,8 @@ private struct MarkdownCodeBlockView: View {
             .padding(.trailing, 54)
             .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
             // A minimum height with no maximum takes a smaller height proposal, so a code block
-            // taller than 54 pt shrank to it and was clipped: copilot-projects-ios's
-            // testMarkdownMessageResistsVerticalTruncation measured 481 pt against 494 pt.
+            // taller than 54 pt shrank to it and was clipped: a client's
+            // vertical-truncation test measured 481 pt against 494 pt.
             .fixedSize(horizontal: false, vertical: true)
             #else
             .padding(.trailing, 34)
@@ -2162,7 +2162,7 @@ extension MarkdownText {
 }
 
 #if canImport(UIKit) && !os(watchOS)
-/// A read-only `UITextView` that provides standard iOS text selection controls
+/// A read-only `UITextView` that provides the system's standard text selection controls
 /// (word/range highlighting, draggable grabber handles, and the system edit menu)
 /// without scrolling independently or clipping selection handles.
 public final class MarkdownSelectableTextView: UITextView {

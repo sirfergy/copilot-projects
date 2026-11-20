@@ -27,11 +27,11 @@ public struct RemoteNotificationReplyChoice: Codable, Equatable, Sendable {
 /// The host only attaches this when the session can accept the reply natively;
 /// clients that don't understand it ignore it and keep tap-to-open behavior.
 public struct RemoteNotificationReply: Codable, Equatable, Sendable {
-    /// Notification action buttons beyond this are unreliable on Apple Watch.
+    /// Notification action buttons beyond this are unreliable on some remote clients.
     public static let maxChoices = 4
     public static let maxQuestionBytes = 1_024
     public static let maxChoiceTitleBytes = 256
-    /// Budget for the encoded reply inside a 4 KB APNs payload that also
+    /// Budget for the encoded reply inside a 4 KB push payload that also
     /// carries the alert and routing keys.
     public static let maxEncodedBytes = 2_048
 
@@ -167,8 +167,8 @@ public struct RemoteNotificationReply: Codable, Equatable, Sendable {
     }
 }
 
-/// Category and action identifiers shared by the host, gateway, iOS app, and
-/// watch app. iOS categories are static, so each answer shape gets its own
+/// Category and action identifiers shared by the host, the gateway, and remote
+/// clients. A client's categories are static, so each answer shape gets its own
 /// category and the button count always matches the choices on offer.
 public enum NotificationReplyContract {
     public static let replyKey = "reply"
@@ -192,7 +192,7 @@ public enum NotificationReplyContract {
             + (allowFreeform ? freeformSuffix : "")
     }
 
-    /// Every replyable category, for registration and watch scene binding.
+    /// Every replyable category, for registration and scene binding.
     public static var allCategoryIdentifiers: [String] {
         var identifiers = [textCategoryIdentifier]
         for count in 1...RemoteNotificationReply.maxChoices {

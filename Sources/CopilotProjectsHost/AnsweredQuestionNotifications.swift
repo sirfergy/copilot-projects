@@ -25,7 +25,7 @@ struct PostedQuestionNotification: Equatable {
 }
 
 /// Decides which posted question alerts can be withdrawn because their
-/// questions were answered somewhere else (terminal, app, web, or watch).
+/// questions were answered somewhere else (the terminal, the app, or a remote client).
 ///
 /// Only positive evidence counts. A session can read Running while a question
 /// the tracker does not list is still pending, a snapshot can predate the alert, and a

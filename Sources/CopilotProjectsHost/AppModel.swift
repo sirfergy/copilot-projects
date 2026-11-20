@@ -3273,13 +3273,13 @@ final class AppModel: ObservableObject {
         focusSelectedSession(replacing: previousSessionId)
     }
 
-    /// Mark a session read on behalf of a remote client that is now viewing it (iOS
-    /// session screen on-screen), or from the Mac's "Mark as Read". Clears the same
+    /// Mark a session read on behalf of a remote client that is now viewing it (its
+    /// session screen is on-screen), or from the Mac's "Mark as Read". Clears the same
     /// flags local focus does — `hasUnread` and a manual `markedUnread` (mirrored to
-    /// remotes as `unread`) and the Mac-local `finishedUnseen` dot — so a read on the
-    /// phone clears the indicator everywhere via the workspace-snapshot diff.
+    /// remotes as `unread`) and the Mac-local `finishedUnseen` dot — so a read on a
+    /// remote client clears the indicator everywhere via the workspace-snapshot diff.
     /// Unlike `focus`, it does NOT change the Mac's selection or activate the app: a
-    /// phone read must not yank the desktop UI. Only `markedUnread` is persisted, so
+    /// remote read must not yank the desktop UI. Only `markedUnread` is persisted, so
     /// that's the only change that needs a `save()`.
     /// A remote client passes the `unreadMarker` of the snapshot it was showing. If
     /// something has made the session unread since, the read is for an earlier

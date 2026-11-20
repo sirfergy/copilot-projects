@@ -513,7 +513,7 @@ final class ProjectsTerminalView: ProcessTerminalView {
         return true
     }
 
-    /// Forwards a web-client wheel gesture into a TUI without attaching or
+    /// Forwards a remote client's wheel gesture into a TUI without attaching or
     /// resizing another PTY. Positive deltas mean up/older, matching the desktop
     /// `forwardScroll` convention.
     @discardableResult

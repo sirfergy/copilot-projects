@@ -45,7 +45,7 @@ final class RemoteControlProtocolTests: XCTestCase {
     func testControlDeliveryRoundTripKeepsRequestIdentityAndMetadata() throws {
         let request = RemoteClientMessage(
             type: "input",
-            clientId: "phone",
+            clientId: "client",
             sessionId: "session",
             requestId: "request",
             data: "hello",
@@ -61,7 +61,7 @@ final class RemoteControlProtocolTests: XCTestCase {
 
         let old = try JSONDecoder().decode(
             RemoteClientMessage.self,
-            from: Data(#"{"type":"input","clientId":"phone","sessionId":"session","data":"hello"}"#.utf8)
+            from: Data(#"{"type":"input","clientId":"client","sessionId":"session","data":"hello"}"#.utf8)
         )
         XCTAssertNil(old.delivery)
         let oldJSON = try XCTUnwrap(
