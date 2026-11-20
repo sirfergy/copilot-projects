@@ -231,7 +231,7 @@ final class SessionParkingTests: XCTestCase {
 
     func testABusySessionIsLeftAloneAndItsInputReopens() async throws {
         // Busy when asked, a turn that starts between the answer and the stop, and the
-        // rule no longer holding once Copilot answers: opened in the web or iOS app,
+        // rule no longer holding once Copilot answers: opened in another app,
         // parking switched off.
         let quiet: (Fixture) -> Void = { _ in }
         let answers: [(RemoteOperationState, Bool, (Fixture) -> Void)] = [
@@ -580,7 +580,7 @@ final class SessionParkingTests: XCTestCase {
         g.model.parkingRuntime.sleepUntil = { [unowned g] _ in g.model.noteRemoteClientHasOpen(g.id) }
         let other: any SessionHost = RemoteModelBridge(model: g.model)
         let refused = await other.parkSession(sessionId: g.id)
-        XCTAssertEqual(refused, .refused("It is open in the web or iOS app."))
+        XCTAssertEqual(refused, .refused("It is open in another app."))
         XCTAssertFalse(FileManager.default.fileExists(atPath: g.question.path), "Copilot was not asked")
         XCTAssertNil(g.model.parkedState(g.id))
         XCTAssertEqual(g.processes.stops, [])

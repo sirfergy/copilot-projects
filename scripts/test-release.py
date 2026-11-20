@@ -526,7 +526,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(any(cmd == "codesign" for _, cmd, _ in self.calls))
 
     def test_actual_assembler_keeps_any_explicit_version(self):
-        # copilot-projects-remote's CI assembles with VERSION=0.0.0; only release.sh requires date versions.
+        # An integration's CI assembles with VERSION=0.0.0; only release.sh requires date versions.
         for version in ("0.0.0", "2026.10.8.3"):
             with self.subTest(version=version):
                 result = self.run_assembler(version=version)
@@ -840,7 +840,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_first_date_release_accepts_the_legacy_predecessor(self):
         sha = self.git(self.project_root, "rev-parse", "HEAD")
-        # This repository's last legacy release, and the integration's (copilot-projects-remote).
+        # This repository's last legacy release, and the integration's.
         for latest, older in (
             ("v0.9.121", "v0.9.99,v0.9.120,v0.9.121-rc1,v0.9"),
             ("v0.10.55", "v0.9.121,v0.10.9,v0.10.54"),

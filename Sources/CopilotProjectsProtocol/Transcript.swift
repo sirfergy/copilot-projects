@@ -13,7 +13,7 @@ public struct TranscriptSnapshot: Codable, Equatable, Sendable {
     /// How many turns exist in the full transcript when `turns` carries only a
     /// window of it. Absent (`nil`) means `turns` *is* the whole transcript —
     /// the exact legacy response shape, which clients that never send a window
-    /// request (iOS, older web clients) keep receiving. Optional with a `nil`
+    /// request keep receiving. Optional with a `nil`
     /// default so every existing constructor and decoder keeps working, and so
     /// encoding omits the key entirely rather than emitting `null`.
     public let totalTurns: Int?

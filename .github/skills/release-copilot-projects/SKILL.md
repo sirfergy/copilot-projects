@@ -116,17 +116,6 @@ The script must fail closed for ad-hoc signing, notarization, stapling, or
 Gatekeeper failures. Never put signing credentials in the repository, a PR, or
 shell history.
 
-Integration repositories may delegate to this maintained script with
-`GITHUB_REPOSITORY=owner/integration /absolute/public-checkout/scripts/release.sh YYYY.M.D.N --project-root=/absolute/integration-checkout --publish`.
-The selected root must be a clean Git worktree with an executable
-`scripts/build-app.sh` that honors `VERSION` and `CODESIGN_IDENTITY` and emits
-`dist/Copilot Projects.app` with the existing app identity. Ignore build outputs;
-tracked source or HEAD changes during the build must abort publication. That root owns all
-build outputs, HEAD/main reachability, tags, predecessor checks, and cleanup.
-The explicit target must match every effective origin fetch/push URL; never
-change only `GITHUB_REPOSITORY` while using a different repository's root.
-Use that target for release verification and the exact-DMG installation below.
-
 ### 6. Install the exact published release
 
 Download the DMG from the new GitHub release rather than installing an unrelated

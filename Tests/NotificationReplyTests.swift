@@ -61,7 +61,7 @@ final class NotificationReplyTests: XCTestCase {
 
     func testRegistrationCapabilitiesAreOptional() throws {
         let legacy = try JSONDecoder().decode(APNsRegistration.self, from: Data(
-            #"{"token":"ab","environment":"sandbox","label":"iPhone"}"#.utf8
+            #"{"token":"ab","environment":"sandbox","label":"Device"}"#.utf8
         ))
         XCTAssertNil(legacy.capabilities)
         let capable = APNsRegistration(

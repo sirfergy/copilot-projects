@@ -33,7 +33,7 @@ public struct RemoteSessionAttention: Codable, Equatable, Sendable {
 
 /// Where Next Session Needing Attention last went. Each client keeps its own,
 /// because each has its own selection: the user can step through sessions on the
-/// Mac, a phone and a browser at once.
+/// Mac and on remote clients at once.
 public struct RemoteAttentionCursor: Equatable, Sendable {
     public let sessionId: String
     public let rank: Int

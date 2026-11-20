@@ -75,8 +75,7 @@ struct TranscriptPromptComposerView: View {
         return composer.attachmentsBlockedReason(workflow: liveWorkflow, operation: liveOperation, now: now)
     }
 
-    /// The slash commands the draft could become, as the iOS composer offers them:
-    /// choosing one puts it in the draft.
+    /// The slash commands the draft could become: choosing one puts it in the draft.
     @ViewBuilder
     private var slashCommandSuggestions: some View {
         let suggestions = ComposerSlashCommand.suggestions(for: composer.prompt)

@@ -873,9 +873,8 @@ extension AppModel {
     /// no observation time. That time moves with every heartbeat, so carrying
     /// it would make every snapshot differ and the gateway would push one to
     /// every client every few seconds per session. It is sent as 0, the
-    /// tracker's own "never observed", rather than left out: the iOS build
-    /// that reads `fresh` (sirfergy/copilot-projects-ios#243) decodes the
-    /// field as required.
+    /// tracker's own "never observed", rather than left out: a remote client
+    /// that reads `fresh` decodes the field as required.
     static func wireWorkflow(_ session: Session, at now: Date) -> RemoteSessionWorkflow? {
         guard let activity = session.agentActivity,
               var workflow = localWorkflow(session) else { return nil }
@@ -2717,7 +2716,7 @@ extension AppModel {
         }
     }
 
-    /// Resumes an ended Copilot CLI session selected in remote session search (Web / iOS)
+    /// Resumes an ended Copilot CLI session selected in remote session search
     /// without changing the Mac's selected project or tab.
     func resumeRemoteSearchSession(
         _ input: RemoteResumeSearchSessionRequest,

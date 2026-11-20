@@ -205,7 +205,7 @@ class NotesTests(unittest.TestCase):
         ]})
         self.assertIn("Shared host improvement", self.generate()["markdown"])
         self.write_initial_notes({"Highlights": [
-            ["Wrong audience.", "https://github.com/private/companion/pull/12"],
+            ["Wrong audience.", "https://github.com/another/repository/pull/12"],
         ]})
         with self.assertRaisesRegex(ValueError, "this repository or the public host"):
             self.generate()
@@ -239,7 +239,7 @@ class NotesTests(unittest.TestCase):
         self.commit("update desktop host to v1")
         self.write_host_pin("c" * 40, shared="2")
         self.commit("update desktop host to v2")
-        self.commit("fix a web issue")
+        self.commit("fix an integration issue")
         def host_dependencies(root, revision):
             return {"https://github.com/example/shared.git": {
                 "location": "https://github.com/example/shared.git",
@@ -254,7 +254,7 @@ class NotesTests(unittest.TestCase):
         compare.assert_called_once_with(self.root, "a" * 40, "c" * 40)
         self.assertIn("add screenshot paste", result["markdown"])
         self.assertIn("fix desktop search", result["plainText"])
-        self.assertIn("fix a web issue", result["plainText"])
+        self.assertIn("fix an integration issue", result["plainText"])
         self.assertNotIn("update desktop host", result["markdown"])
         self.assertNotIn("No source changes", result["markdown"])
         self.assertNotIn("View the desktop host changes", result["markdown"])
@@ -264,10 +264,10 @@ class NotesTests(unittest.TestCase):
         previous = self.commit("Old desktop")
         self.write_host_pin("b" * 40)
         (self.root / "feature.txt").write_text("New feature")
-        mixed = self.commit("add a web feature and update host")
+        mixed = self.commit("add an integration feature and update host")
         self.assertFalse(notes.pure_host_update(self.root, mixed, self.root))
         with mock.patch.object(notes, "host_changes", return_value=("ahead", [("c" * 40, "fix desktop")])):
-            self.assertIn("add a web feature", self.generate_integrated(previous)["markdown"])
+            self.assertIn("add an integration feature", self.generate_integrated(previous)["markdown"])
 
     def test_manifest_code_changes_are_not_hidden_as_pin_updates(self):
         self.write_host_pin("a" * 40)
@@ -282,11 +282,11 @@ class NotesTests(unittest.TestCase):
         self.write_host_pin("a" * 40)
         previous = self.commit("Old desktop")
         self.write_host_pin("b" * 40, shared="2")
-        self.commit("update desktop and a web-only dependency")
+        self.commit("update desktop and an integration-only dependency")
         with mock.patch.object(notes, "host_dependency_pins", return_value={}), \
                 mock.patch.object(notes, "host_changes", return_value=("ahead", [("c" * 40, "fix desktop")])):
             result = self.generate_integrated(previous)
-        self.assertIn("update desktop and a web-only dependency", result["markdown"])
+        self.assertIn("update desktop and an integration-only dependency", result["markdown"])
         self.assertIn("fix desktop", result["markdown"])
 
     def test_default_consumer_omits_desktop_host_section_and_unchanged_pin_never_calls_compare(self):
@@ -297,8 +297,8 @@ class NotesTests(unittest.TestCase):
         with mock.patch.object(notes, "host_changes", side_effect=AssertionError("Unexpected expansion")):
             legacy = self.generate(previous)
             self.assertNotIn("Desktop host changes", legacy["markdown"])
-            self.commit("fix web only")
-            self.assertIn("fix web only", self.generate_integrated(current)["markdown"])
+            self.commit("fix integration only")
+            self.assertIn("fix integration only", self.generate_integrated(current)["markdown"])
 
     def test_same_summary_combines_links_but_same_pr_number_in_different_repos_survives(self):
         self.write_host_pin("a" * 40)

@@ -1140,7 +1140,7 @@ final class AppLogicTests: XCTestCase {
         XCTAssertTrue(model.projects[0].sessions[0].hasUnread)
         XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
 
-        // A remote read (e.g. the iOS session screen appearing) clears the flags…
+        // A remote read (e.g. a remote client's session screen appearing) clears the flags…
         model.markSessionRead(sessionId: target.id)
         XCTAssertFalse(model.projects[0].sessions[0].hasUnread)
         XCTAssertFalse(model.projects[0].sessions[0].finishedUnseen)
@@ -6442,7 +6442,7 @@ final class AppLogicTests: XCTestCase {
     func testRemoteScrollMessageRoundTrips() throws {
         let message = RemoteClientMessage(
             type: "scroll",
-            clientId: "phone",
+            clientId: "client",
             sessionId: "session",
             delta: -4
         )
@@ -7279,8 +7279,8 @@ final class AppLogicTests: XCTestCase {
                 .font(.caption.weight(.semibold))
             MarkdownText(
                 text: """
-                Opened [sirfergy/copilot-projects-ios#177](https://github.com/sirfergy/copilot-projects-ios/pull/177):
-                - **Worktree**: `/Users/obvioussean/Repos/copilot-projects-ios-shared-markdown`
+                Opened [sirfergy/copilot-projects#177](https://github.com/sirfergy/copilot-projects/pull/177):
+                - **Worktree**: `/Users/obvioussean/Repos/copilot-projects-shared-markdown`
                 - **Diff**: 7 files changed
 
                 ```swift
@@ -7929,8 +7929,6 @@ final class AppLogicTests: XCTestCase {
         let hugeFallbackView = try XCTUnwrap(hugeViews.first { $0.attributedText.string.contains("Member 1\t**$125.00**") })
         XCTAssertNil(hugeFallbackView.headerDividerY())
     }
-
-    // MARK: - Remote web terminal image rendering
 
     func testCLISendsTheSessionEndHooksReportAsAControlRequest() throws {
         let root = FileManager.default.temporaryDirectory
@@ -16105,7 +16103,7 @@ final class AppLogicTests: XCTestCase {
         settingsModel.beginEditing(at: 0)
         XCTAssertEqual(settingsModel.editingIndex, 0)
 
-        let clientMigrationItems = [QuickReplyItem(label: "Phone", prompt: "From phone")]
+        let clientMigrationItems = [QuickReplyItem(label: "Client", prompt: "From client")]
         XCTAssertEqual(
             bridge.updateQuickReplies(
                 RemoteQuickRepliesUpdateRequest(items: clientMigrationItems, onlyIfUnset: true)
@@ -16132,7 +16130,7 @@ final class AppLogicTests: XCTestCase {
         //    stores its custom list and updates Desktop settings live.
         let migratedData = try JSONEncoder().encode(
             RemoteQuickRepliesUpdateRequest(
-                items: [QuickReplyItem(label: "  Phone  ", prompt: "  From phone\n")],
+                items: [QuickReplyItem(label: "  Client  ", prompt: "  From client\n")],
                 onlyIfUnset: true
             )
         )

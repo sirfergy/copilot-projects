@@ -155,7 +155,7 @@ extension AppModel {
             return "Its unsent message has attachments, which would have to be attached again."
         }
         guard !remoteClientHasOpen(sessionId, now: clock()) else {
-            return "It is open in the web or iOS app."
+            return "It is open in another app."
         }
         if unattended, sessionId == globalSelectedSessionId { return "It is the session on screen." }
         // `copilot-projects attach` types straight into the CLI, past the host.
