@@ -532,7 +532,7 @@ def validate(document, version, build):
     if not within_markdown_limits(document["markdown"]):
         raise ValueError("Release notes exceed the Markdown rendering limits")
     if len(document["plainText"].encode("utf-16-le")) // 2 > 4000:
-        raise ValueError("TestFlight notes exceed 4000 characters")
+        raise ValueError("Plain-text release notes exceed 4000 characters")
     if len(json.dumps(document, ensure_ascii=False).encode("utf-8")) > MAX_BYTES:
         raise ValueError("Release notes exceed the bundled size limit")
 
