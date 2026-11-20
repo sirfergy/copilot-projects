@@ -8,9 +8,7 @@ Native macOS.
 
 ## Stack
 
-SwiftUI and AppKit, with the existing SwiftTerm terminal renderer. The public
-desktop host and shared packages remain separate from the remote integration
-and native iOS client.
+SwiftUI and AppKit, with the existing SwiftTerm terminal renderer.
 
 ## Users
 
@@ -24,13 +22,11 @@ to the right live session.
 
 ## Operating Context
 
-The Mac workspace leads the suite. The live terminal is primary; completed
+The live terminal is primary; completed
 turns and session details live in a secondary drawer. Project navigation,
 session navigation, native window controls, and keyboard speed remain central.
 The Two-Level Browser separates project navigation from vertically listed
 sessions, with two-line names, explicit states, and a collapsible Projects rail.
-This navigation change is macOS-only; web and iOS retain their established
-conversation-first workflows rather than reproducing Mac chrome.
 
 ## Capabilities and Constraints
 
@@ -40,7 +36,7 @@ access, and session-ending safeguards. Projects can be hidden from the native
 View menu or session header without restarting the terminal or losing its
 identity; cross-project drops require Projects to be shown. This changes
 navigation and visual hierarchy, not terminal behavior, message delivery,
-control leases, queues, or shared package contracts.
+queues, or shared package contracts.
 
 ## Brand Commitments
 
@@ -78,7 +74,6 @@ it is not a new regression or an app-owned styling rule.
 - Keep the live terminal dominant and details available on demand.
 - Make selection and actionable status legible without moving the workspace.
 - Preserve expert speed and native controls.
-- Adapt companions to their platform and established workflows.
 
 ## Accessibility & Inclusion
 

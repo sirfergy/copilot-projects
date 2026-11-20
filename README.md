@@ -21,12 +21,6 @@ Download the latest `Copilot-Projects-<version>.dmg` from
 **Copilot Projects** into **Applications**. Published release builds are Developer
 ID–signed, notarized, and stapled.
 
-This repository builds the **standalone desktop app**. Web access, mobile-client
-connectivity, tunnel authentication, and remote push delivery are maintained and
-built separately; they are not included in the public desktop distribution.
-If you already use a remote-enabled installation, keep using its integrated
-distribution rather than replacing it with the standalone download.
-
 ## Transcript view
 
 The transcript view shows a session's Copilot conversation as turns of rendered
@@ -68,7 +62,7 @@ extensions, so a plain shell or another command-line tool has no transcript.
 
 ## Session restart
 
-Remote clients, the desktop transcript composer's `/restart`, **Restart Session**,
+The transcript composer's `/restart`, **Restart Session**,
 **Restart Idle Sessions** and `copilot-projects restart-session` request
 `session-restart`. The host and tracker require an idle session without
 pending questions or background agents. Waiting schedules do not block it: the
@@ -79,7 +73,7 @@ Stalled question reads reject the restart request without cancelling shared reco
 A native message submitted during preflight cancels the restart rather than being overtaken by it.
 Session-wide SDK activity must also report no active work, including child tasks;
 missing or unavailable activity status blocks a restart even after a tracker reload.
-Questions that are too large to display remotely still block a restart until they are
+Questions that are too large to display outside the terminal still block a restart until they are
 answered in Terminal.
 It rechecks readiness and question history, then queues Copilot's own `/restart` through the
 SDK for the identified session; it never types into the terminal or sends a
@@ -92,8 +86,8 @@ compatible.
 
 The correlated receipt confirms that the command was queued, not that the
 restart finished. An ambiguous dispatch blocks further native actions in that
-conversation rather than replaying the command. Check Terminal and recover on
-the Mac if it does not resume. Save unsent desktop text before restarting.
+conversation rather than replaying the command. Check Terminal and recover
+there if it does not resume. Save unsent text before restarting.
 A session whose tracker has stopped cannot be restarted this way; run `/restart`
 in its terminal.
 
@@ -102,12 +96,12 @@ When the tracker's own checks refuse a restart or MCP reload, the receipt report
 process log (`~/.copilot/logs/process-<start ms>-<tracker pid>.log`) as
 `[copilot-projects] refused <kind> <operation ID>:`.
 
-## Remote screenshot attachments
+## Screenshot attachments
 
-Remote integrations can stage PNG/JPEG screenshots privately and attach them to
-an existing Copilot conversation through the native SDK message path. This needs
-an updated integrated host/client and a restarted Copilot tracker advertising
-`image-attachments-v1`; text-only clients remain compatible. The tracker verifies
+The [transcript view](#transcript-view) composer can attach or paste PNG/JPEG
+screenshots and send them to an existing Copilot conversation through the native
+SDK message path. This needs a Copilot tracker advertising
+`image-attachments-v1`. The tracker verifies
 the selected model's image limits and resolves session/epoch-bound upload IDs to
 inline image bytes before sending. Missing or unsupported images reject the
 whole message, never fall back to terminal input.
@@ -116,15 +110,14 @@ Uploads are limited to four images, 2 MiB each, and 16 megapixels, further reduc
 by the selected model's limits. They live outside project repositories in the
 private state directory, expire after seven days, and are reclaimed on subsequent
 uploads. Storage is capped at 128 MiB/128 entries without evicting unexpired
-uploads. The Mac's [transcript view](#transcript-view) composer can attach or paste
-screenshots too.
+uploads.
 
 ## Transcript images
 
-The Mac transcript view displays retained inline terminal images beneath
+The transcript view displays retained inline terminal images beneath
 their associated turn. It also shows the PNG and JPEG images attached to a prompt,
 under that prompt, and the images a tool returned, under that tool's row in the
-turn's Tools section, whose collapsed header counts them. Both are Mac-only and are
+turn's Tools section, whose collapsed header counts them. Both are
 read from that session's own Copilot event log, so they do not depend on what the
 terminal still holds. A sub-agent's tool images are not shown. An image the terminal
 also drew, because its tool call was expanded there, appears in both places.
@@ -135,7 +128,7 @@ off the main actor. No Markdown image URLs are fetched. The only file path read 
 one a prompt attachment names, and only while it is a regular file last modified
 before its turn began.
 
-Native and remote transcript images keep their original turn when the terminal retransmits
+Transcript images keep their original turn when the terminal retransmits
 unchanged, still-advertised image data. A redraw does not move an older image to
 the newest reply. This retains the existing one-image-per-terminal-ID model;
 it does not reconstruct attachment history after image data has been discarded.
@@ -266,7 +259,8 @@ in **Review** and **Ready**.
   flagged more quietly. Goals whose sessions need you come first.
 - **Act from it.** **Go to Session** brings Copilot Projects forward on the goal's
   session. A goal with no session offers **Start Session**, which opens Copilot in
-  the current project (or one you pick) with the pull request links as its prompt,
+  the current project (or one you pick), in its selected tab's folder or else the
+  project's default, with the pull request links as its prompt,
   then shows it. When an ended Copilot session worked on the goal, it offers
   **Resume Session** instead, reopening that session in a new tab in the folder it
   worked in (its menu still has **Start New Session**). Ended sessions are found
@@ -286,27 +280,6 @@ in **Review** and **Ready**.
   requests in those owners appear. Leave it empty to include every owner, up to
   your hundred most recently updated pull requests. It's saved with Copilot
   Projects' settings.
-
-The public host also exposes this engine through `SessionHost`'s
-`pull-request-overview-v1` contract for remote clients. It uses its own caches,
-reads the helper's goals without writing them, and regroups cached GitHub facts
-against the live workspace on every request. GitHub refreshes are single-flight:
-at most once per five minutes, or once per minute for explicit Refresh, including
-failed attempts. No remote polling means no GitHub refresh timer.
-The remote `isRefreshing` flag also covers local transcript matching and active
-previous-session searches, including deferred passes, so clients keep polling
-quickly until those results settle without requesting GitHub on each poll.
-
-Remote Start/Resume requests contain only project/session identities and canonical
-PR keys. Start uses the same working directory as local Start in the chosen
-project (its selected tab's folder, then the project default); Resume uses the
-previous session's recorded directory. Neither changes Mac selection or opens a
-window. Associations are persisted on the workspace session, and request IDs bind
-the complete intent in the existing creation ledger. Both fresh Start and Resume
-wait for GitHub status and workspace matching, and refuse PRs already claimed by
-a live session. Existing live sessions remain navigable while the first refresh loads.
-Retry the same request after an uncertain outcome; clients must expire pending
-retries after 24 hours.
 
 The window reads GitHub with the accounts you signed in to with the GitHub CLI
 (`gh auth login`); every signed-in github.com account is included. Tokens stay in
@@ -422,7 +395,7 @@ inheriting the current session's working directory. Its dropdown offers
 **Review Pull Request…** (a GitHub pull request URL dialog).
 To change the review prompt, choose **Copilot Projects ▸ Pull Request Review Prompt…**.
 Put `{url}` where the pull request URL goes. **Restore Default** returns the built-in
-adversarial-review prompt. Copilot Notifications, the CLI, and a remote device use that
+adversarial-review prompt. Copilot Notifications and the CLI use that
 same prompt.
 The Session menu and project context menus also offer Copilot, starting-prompt,
 and plain-terminal creation. New projects
@@ -443,11 +416,9 @@ Session** for that session. A script can do both with `park-session` and
 `unpark-session`, described under [Command-line access](#command-line-access).
 
 A session is parked only after Copilot confirms it is idle. Sessions that are working,
-waiting for you, scheduled, running background work, or open in the web or iOS app are
+waiting for you, scheduled, or running background work are
 left alone, and so is one whose latest request failed. A session with something you
-haven't seen can be parked, and its row keeps the unread mark. **Park Session** chosen
-in the web or iOS app parks the session that app has open, and the app lets go of it. A
-session another page or device still has open is left alone. Text typed in a session's
+haven't seen can be parked, and its row keeps the unread mark. Text typed in a session's
 terminal but not sent is not kept.
 
 ### Remote SSH hosts
@@ -506,12 +477,6 @@ stops their processes; project files are not deleted.
 These are user-interface safeguards based on reported activity, not a new process
 detector. Automation and raw terminal commands retain their existing behavior.
 
-Remote clients can send **Other** text answers to Copilot's boolean questions.
-The host preserves these as strings; ordinary True/False answers remain booleans.
-MCP-provided boolean forms and synthetic terminal-default prompts remain
-boolean-only. Ship this host update before a client that offers boolean Other
-answers; older hosts reject those strings.
-
 ## Command-line access
 
 On first launch, the app installs a launcher at `~/.local/bin/copilot-projects`.
@@ -542,7 +507,8 @@ copilot-projects new-copilot-session --project <id> \
 It launches Copilot with the file's contents (UTF-8, at most 8 KiB) as the starting
 prompt, then prints the session id. Local sessions use `COPILOT_PROJECTS_DEFAULT_DIR`
 from the app's environment, or `~/Repos` when unset; the path must expand to an
-existing absolute directory. The request id
+existing absolute directory. The app must inherit the variable at launch; an rc
+export does not affect an already-running app or Finder/Dock launches. The request id
 is the session id, so retries are idempotent while the app remembers the request
 (about a week): replaying the same id and prompt prints the existing session, a
 different prompt or project exits 3 (conflict), and an id whose session has since
@@ -589,8 +555,7 @@ copilot-projects reload-session-mcp --session <id> --project <id>
 It hands the session's tracker a request to queue Copilot's own `/mcp reload`,
 under the idle rules and with the exit codes of `restart-session`, so a running
 turn's MCP calls are never cut off. Copilot keeps running: the session's terminal
-says when the servers have restarted. The app has no menu item for it and remote
-clients are not offered it.
+says when the servers have restarted. The app has no menu item for it.
 
 To park a session from a script, and to start its Copilot again, use `park-session`
 and `unpark-session`:
@@ -606,7 +571,7 @@ never the session on screen or one whose Copilot is running another session too.
 waits for the result, usually a few seconds and 40 at most. It exits 0 once Copilot has
 quit, or 20 seconds after it was told to if it has not: the row then reads "Parking…"
 until it does. It exits 0 at once for a session that was already parked, and 8 when the
-session was left alone, with the reason the Mac gives on stderr.
+session was left alone, with the reason on stderr.
 
 `unpark-session` does what **Resume Session** does and waits until the session can take
 a prompt, usually a few seconds and 110 at most. It exits 0 then, and at once for a
@@ -733,31 +698,18 @@ swift test -c release --filter SessionCloseIntegrationTests
 ```
 
 The session-close integration covers the Command-W action with real terminal
-processes and asynchronous cleanup. The remote companion also runs it with its
-production dependencies linked, since the sleep-specialization crash depends on
-the optimized binary's linked modules.
+processes and asynchronous cleanup. It runs against the optimized build, since
+the sleep-specialization crash depends on the optimized binary's linked modules.
 
 See the [usage and development guide](docs/usage.md) for hook behavior, tracker
 upgrades, troubleshooting, rendering, and release instructions.
 
-## Storage and integrations
+## Storage
 
 Workspace state and session artifacts live under
 `~/.local/state/copilot-projects/`. The local control socket is restricted to the
 current user. Review terminal contents, transcripts, notifications, and screenshots
 before sharing them; they can contain the work you are doing.
-
-The public `CopilotProjectsHost`, `CopilotProjectsProtocol`, and
-`CopilotProjectsUI` package products support separately built integrations without
-making the desktop depend on a private repository. The standalone app reports
-remote commands as unavailable and leaves existing remote settings unchanged.
-See [Supported versions](docs/usage.md#supported-versions) for host and client version support.
-
-`SessionHost.createProject` creates an empty, named group without starting a shell
-or requiring Copilot, `dtach`, or a repository folder. Integrations retain the
-same request ID and name for retries. Successful creation is acknowledged only
-after workspace and replay-ledger persistence; remembered requests cannot recreate
-a deleted project. Replay records are bounded to 512 entries and seven days.
 
 ## License
 

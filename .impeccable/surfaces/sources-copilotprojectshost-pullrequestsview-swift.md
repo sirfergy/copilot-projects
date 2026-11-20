@@ -71,8 +71,7 @@ or check status. Draft, Review, and Ready chips omit the extra cue. The label
 means only that the PR is no longer a draft, not approval or merge readiness.
 Tooltip text, keyboard announcements, and accessibility values put the action
 reason first, then readiness. Triage, attention counts, goal sorting, and stage
-assignment are unchanged. Companion views use the existing checks-stage field
-for the same cue; no protocol change is required.
+assignment are unchanged.
 
 **Whole-goal filtering.** `PullRequestsFilter` defaults to All. Needs you retains
 each goal whose `needsYouCount` is positive, including no-session/stale nudges,
@@ -190,8 +189,8 @@ surface-only boundary; neither is a new system rule or a claim of final approval
 
 This dated addendum records the narrow indicator extension, not a redesign or a
 replacement for the October 8 evidence above. Binding choices were
-`ready_for_review` (no longer a draft, regardless of approval), `checks_only`, and
-`all_clients` (Mac, iOS, and web/PWA). Operate remains the mode: expose review
+`ready_for_review` (no longer a draft, regardless of approval) and `checks_only`.
+Operate remains the mode: expose review
 availability during checks without moving PRs or giving it priority over blockers.
 
 **Artifact and preserved system.** Source HEAD
@@ -211,8 +210,7 @@ no new comp, world, or shipping raster asset was introduced.
 The helper requires both non-draft and Checks. Its native eye plus Ready for
 review uses caption and existing secondary ink after the check/blocker reason.
 Tooltip and spoken status preserve that ordering. Draft, Review, and Ready omit
-it; an unknown stage is not a new readiness category. The same Checks-only
-contract on companion clients omits unknown stages. This is informational,
+it; an unknown stage is not a new readiness category. This is informational,
 neither an approval signal nor a new action or merge-ready treatment.
 
 **Final evidence, separate from the older integration run.**
@@ -226,16 +224,15 @@ neither an approval signal nor a new action or merge-ready treatment.
   `pr-review-readiness-final-captures/{mac-dark,mac-light,mac-compact,mac-offline}.png`.
   Dark/light are 2560×1600 pixels; compact/offline are 1760×1600 pixels.
   They use synthetic native fixtures, not production GitHub or live-host facts.
-- The supplied final finish handoff reports **SHIP**, with no material fixes,
-  for the full revised three-client indicator scope. All eight required captures
-  across Mac, iOS, and web were valid and opened by the parent and reviewer.
+- The supplied final finish handoff reports **SHIP**, with no material fixes.
+  The required captures were valid and opened by the parent and reviewer.
   This is distinct from the older five-fix Mac verdict and is not whole-product
   certification, merge authorization, or release/deployment approval.
 
 No tests, detector, or captures were rerun for this documentation handoff.
 Native Swift has no detector evidence. Hardware, complete VoiceOver traversal,
-high-contrast runtime, installed-PWA behavior, and live-host/GitHub actions remain
-uncertified; the shared cross-client verdict does not expand those limits.
+high-contrast runtime, and live-host/GitHub actions remain
+uncertified; the verdict does not expand those limits.
 PRODUCT.md, DESIGN.md, and `.impeccable/design.json` remain unchanged.
 Source, README, tests, pins, cache/auth behavior, and git index/HEAD are outside
 this surface-only write; no commit, push, or merge is part of the handoff.

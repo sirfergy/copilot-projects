@@ -58,7 +58,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 ## Unresolved
 
-- Mac only for now, by the user's choice; iOS and web/PWA companions are not planned.
+- Mac only, by the user's choice.
 - Team mentions do not name the team (the API does not say which).
 
 ## Evidence and coverage boundary

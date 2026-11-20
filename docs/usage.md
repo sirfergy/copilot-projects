@@ -6,10 +6,6 @@ the working terminal. It keeps the parts of [cmux](https://github.com/manaflow-a
 matter most for working with coding agents — **status indicators** and **notifications** —
 and drops everything else.
 
-This repository builds the standalone desktop app. Web access, tunnel authentication,
-and remote push delivery are optional integrations maintained and built separately;
-they are not dependencies or resources of the public desktop distribution.
-
 See the [project overview](../README.md) for installation and a quick tour.
 
 It replaces cmux's Ghostty integration with
@@ -85,8 +81,8 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   dropdown, paste a GitHub pull request URL, and open a new Copilot CLI session in the
   current project. The session starts with the prompt from **Copilot Projects ▸ Pull
   Request Review Prompt…**. Put `{url}` where the pull request URL goes. **Restore
-  Default** returns the built-in adversarial-review prompt. Copilot Notifications, the
-  CLI, and a remote device use that same prompt.
+  Default** returns the built-in adversarial-review prompt. Copilot Notifications and the
+  CLI use that same prompt.
 - **Status:** each session reports `idle` / `running` / `waiting`. Running and waiting
   labeled symbol counts appear in the project column; a blue dot on the session row marks work that finished
   while you were away, and a red exclamation with **Request failed** marks a session whose latest
@@ -107,29 +103,26 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   details; active scheduled turns and subagents use a separate background indicator instead of
   making the foreground session look busy.
 - **Question recovery:** the tracker also reads question events on its five-second heartbeat,
-  so a missed live notification does not leave clients stuck on **Open terminal**.
+  so a missed live notification does not leave a question answerable only in the terminal.
   Text, choices, and other supported forms use the original response ID. This works with
   the existing CLI event API; no new CLI version is required for missed-event recovery.
   If completions free slots after bounded staging overflows, the tracker replays that
   window before selecting the remaining forms; staging and per-heartbeat read limits stay unchanged.
   If a question has already left the CLI's in-memory event history, it remains answerable
-  through **Open terminal** rather than a guessed response ID.
+  in the terminal rather than through a guessed response ID.
 - **Notifications:** native macOS banners identify the originating project/session and
   automatically alert when Copilot has a question, needs permission, or finishes a task.
-  Task completions include a short, plain-text preview of the completed turn's response
-  on Mac. Optional integrations receive the same event. Previews are derived locally (no extra model call),
+  Task completions include a short, plain-text preview of the completed turn's response.
+  Previews are derived locally (no extra model call),
   omit code blocks, and fall back to the generic alert when the matching transcript
-  is unavailable. Response previews can appear on your devices' lock screens.
+  is unavailable. Response previews can appear on your lock screen.
   When the session's tracker supports receipt-backed operations, question alerts show the
-  pending question as a plain-text preview, followed by its numbered choices when it can be
-  answered from the notification, and wait briefly (under four seconds) for the tracker to
-  publish a pending question. Older trackers keep the generic question alert. If a remote
-  client could answer it natively, the event carries reply metadata for that question; the
-  same applies to completion events when the session can accept a follow-up prompt. Remote
-  clients can then answer from the notification. Mac banners otherwise remain tap-to-open.
-  Clicking one focuses that session.
-  Once a question is answered anywhere (terminal, Mac, phone, watch, or web), the host
-  withdraws its alert from the Mac and from any installed integration's devices. It waits for
+  pending question as a plain-text preview, followed by its numbered choices when it has
+  at most four and its tracker can take the answer, and wait briefly (under four seconds) for the tracker to
+  publish a pending question. Older trackers keep the generic question alert. Banners are
+  tap-to-open: clicking one focuses that session.
+  Once a question is answered, in the terminal or in the app, the app
+  withdraws its alert. It waits for
   positive evidence: a newer tracker snapshot of the same conversation without that request,
   the tab moving to another Copilot conversation, the session closing, or, when no tracker
   vouches for the question, the turn ending (just leaving the wait is enough when no tracker
@@ -157,11 +150,11 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
 ## Native session workflows
 
 With Copilot CLI 1.0.84 or newer on SDK protocol 3 or 4, the tracker offers native
-session controls to the desktop and optional integrations. This also requires Copilot CLI
+session controls to the app. This also requires Copilot CLI
 experimental features; see [Copilot CLI integration](#copilot-cli-integration-automatic-status).
-Separately built iOS and web composers
+The transcript composer
 can **Run after current task** or **Steer current task** without clearing the
-desktop CLI draft. **Stop task** requests cancellation without closing the session,
+CLI's draft. **Stop task** requests cancellation without closing the session,
 shell, or dtach session. Terminal controls remain available for other TUIs and
 unsupported CLI versions.
 
@@ -176,55 +169,22 @@ attachments do not come back, and a prompt sent to Copilot as part of a batch is
 both. `copilot-projects queued-prompts` does the same from a
 script; see [the README](../README.md#command-line-access).
 
-Native actions retain the writer lease, conversation identity, and SDK operation
-receipt checks. HTTP acceptance is not completion. A send's `applied` receipt
+Native actions retain the conversation identity and SDK operation
+receipt checks. A send's `applied` receipt
 means Copilot accepted the message, not that it finished the task. Unknown
 outcomes are never automatically resubmitted as a new operation or downgraded to
 terminal input.
-The web queue removes the confirmed message when its receipt arrives, without
-another click or session switch; messages still awaiting confirmation stay visible.
 Stop has its own handoff lane, so an unresolved send cannot block cancellation.
 
 The tracker retains the latest 64 completed operation receipts for the current
-conversation, without a time limit, so a mobile client can recover a missed
-confirmation after reconnecting or restarting its app. This history ends when
+conversation, without a time limit. This history ends when
 the Copilot conversation or tracker process changes, and older receipts can be
 evicted by later operations. An unavailable receipt remains an unknown outcome,
 not permission to send it again as a new operation. Updating the tracker cannot
-recover receipts that already expired; check the conversation before discarding a
-stuck queued copy.
+recover receipts that already expired.
 
-A client whose reply was lost may resend an operation with the same operation
-identity and conversation epoch. While the operation's receipt or pending handoff
-remains, the host answers the resend as it answered the first, whatever the
-session's state is now. A tracker deletes both when Copilot exits, so until it is
-back a resend answers 409, and then 412:
-
-| Status | Meaning | Client |
-| --- | --- | --- |
-| 204 | Taken, now or by an earlier attempt | Follow its receipt |
-| 409 | Not now: another operation holds the slot, the session isn't ready to take it, or its tracker state is too old to judge | Resend the same identity |
-| 412 | The conversation it names has ended (`/new`, a tracker restart, another Copilot session) | Stop; its outcome is unknown |
-| 422 | Not taken, for example a bad payload, a question or model that's gone, or a restart while Copilot is busy | Stop |
-| 400, 403 | Malformed or without an identity; another device holds control | Stop |
-
-409 also answers an identity reused for a different payload, which a resend never
-is. A resend after its receipt has been evicted is taken as a new operation. 409 can
-last as long as Copilot is stopped, so a client bounds its resends, and if they end
-on 409 the outcome is still unknown.
-
-The session drawer and native/web conversation views render live response updates
-within their conversation turns. Final messages replace their matching streamed text.
-Remote workspace snapshots also carry the CLI's live `assistant.intent` description
-in `statusText` when `session-activity-text` is advertised. The tracker clears old
-activity on new work, conversation changes, and session idle. While only agents
-remain, it shows the first available short task description (or agent name), plus
-a count of other active agents. The text follows the remaining agents as they
-finish. "Waiting for background agents" is used only when their labels are unknown.
-MCP tasks use their short display name rather than their full prompt; agents
-launched directly from a definition may report their configured description.
-Missing or stale activity uses the clients' generic fallback. Native Mac status
-text is unchanged.
+The session drawer renders live response updates
+within its conversation turns. Final messages replace their matching streamed text.
 Newly observed empty or whitespace-only assistant messages are omitted from live
 and completed transcripts; their tool activity remains visible.
 
@@ -234,30 +194,19 @@ budget accounting window are deliberately separate. Users can opt into an AI-cre
 soft limit (minimum 30), remove it, or answer a live exhausted-budget request by
 adding credits or cancelling the blocked model request. There is no default limit.
 Limits are checked by Copilot after model calls and can be exceeded by the last
-call. A new budget request sends a Mac notification and an event to any installed integration.
+call. A new budget request sends a Mac notification.
 
 Capabilities require fresh runtime evidence; unsupported or unavailable operations
 stay disabled. Evidence is fresh for 15 seconds after the tracker observes it, and
 the tracker publishes each heartbeat's observation as soon as it is taken.
-The Mac judges this on its own clock every time it builds a snapshot for a client
-(each gateway poll, every two seconds) and publishes the answer as the workflow's
-`fresh`, which turns false within a poll of the evidence passing 15 seconds. It
-makes the same judgement before taking any session action, and clients have no age
-check of their own: offer an action when `fresh` is true, the
-session's `operationSupport` is `receipts`, and `admits(kind)` holds (the
-capability is listed, no restart is pending, and for a restart `restartRequested`
-is explicitly false). Each action's own conditions still apply, such as
-`sendReady` for a send.
-The observation time stays on the Mac. A snapshot sends each workflow's
-`observedAtMilliseconds` as 0, so a heartbeat that changes nothing else leaves the
-snapshot equal to the last one and the gateway sends clients nothing.
+The app judges this on its own clock before taking any session action. An action
+also needs its capability listed and no restart pending, and each action's own
+conditions still apply, such as the session being ready to take a send.
 A session whose workflow state is missing, stale, or unsupported offers no composer
-send: a message is never typed into the terminal on the composer's behalf, and
-clients say to use Terminal instead. Raw terminal input is independent of these checks.
-Older trackers on a newer host remain blocked even with a fresh heartbeat:
+send: a message is never typed into the terminal on the composer's behalf.
+Raw terminal input is independent of these checks.
+Older trackers on a newer app remain blocked even with a fresh heartbeat:
 restart/reload the tracker to activate the updated workflow metadata, or use Terminal.
-Deploy the Mac host before clients using the new protocol.
-See [Supported versions](#supported-versions) for the window and when a gate may be removed.
 
 In the desktop transcript composer, `/restart` on its own restarts the session
 instead of going to Copilot as a message, and is offered as a suggestion once the
@@ -277,7 +226,16 @@ quotes or tabs. The composer refuses, and says why, while the session is parked,
 restart is pending, the session has no terminal, or its tracker is not offering a
 rename; in the last case run `/rename` in the session's terminal. **Rename…** is
 disabled under the same conditions, and says why if one arises while its dialog is
-open. The web and iOS clients still type `/rename` into the terminal.
+open.
+
+The app parses a question's schema into a form, and the question card shows its
+fields in order: one choice, several choices, yes or no, a number, or text, with the
+title, description, default, and limits the schema gives. Where the question allows
+typed answers, the card also takes any non-blank text for a choice or a yes-or-no
+field, and one typed entry among several choices. For a text field's format the app
+checks `email`, `uri`, `date` and `date-time`, and accepts any text for another. The
+app checks every answer against the agent's schema. A question whose schema is
+outside that subset is answered in the terminal.
 
 An optional offline integration test exercises the installed CLI/SDK pair against
 a loopback model fixture, without real model requests:
@@ -318,7 +276,7 @@ use an available Developer ID identity, falling back to ad-hoc signing. Set
 
 The runtime assets are regular SwiftPM resources rather than embedded Swift literals. The
 tracker remains one atomic `extension.mjs` install. The session-status rules live in the headless `SessionDomain`
-package, and the Mac/iOS/PWA protocol examples share `ContractFixtures`.
+package, and the protocol examples share `ContractFixtures`.
 
 ```bash
 swift test --package-path Packages/SessionDomain
@@ -424,27 +382,10 @@ macOS accounts. Leaving `CODESIGN_KEYCHAIN` unset preserves local signing behavi
 Publishing requires a clean checkout whose HEAD is reachable from `origin/main`.
 The configured `GITHUB_REPOSITORY` (default `sirfergy/copilot-projects`) must match
 every effective `origin` fetch and push URL before building or notarizing.
-
-An integration can reuse the same pipeline without copying release logic:
-
-```bash
-GITHUB_REPOSITORY=owner/integration \
-CODESIGN_IDENTITY="Developer ID Application: …" \
-NOTARY_PROFILE="copilot-projects-notary" \
-/absolute/public-checkout/scripts/release.sh 2026.10.8.1 \
-  --project-root=/absolute/integration-checkout --publish
-```
-
-`--project-root` requires an absolute Git worktree root and an explicit
-`GITHUB_REPOSITORY`. That root owns HEAD, `origin`, release tags, predecessor
-checks, cleanup, and `dist`. Its executable `scripts/build-app.sh --release` must
-honor `VERSION` and `CODESIGN_IDENTITY` and emit `dist/Copilot Projects.app`,
-including the existing app identity and resources. Build outputs must be ignored;
-tracked source or HEAD changes during the build abort publication. HTTPS,
-`git@github.com:owner/repo`, and `ssh://git@github.com/owner/repo` origin URLs are
+HTTPS, `git@github.com:owner/repo`, and `ssh://git@github.com/owner/repo` origin URLs are
 supported (including Git URL rewrites); unknown hosts or mismatched targets fail
-closed. No override keeps the standalone public release behavior, including
-dirty/offline local builds without `--publish`.
+closed. Tracked source or HEAD changes during the build abort publication.
+Local builds without `--publish` can be dirty or offline.
 
 `--publish` refuses ad-hoc artifacts, notarizes and staples both the app and DMG, runs
 Gatekeeper checks, then uses the active `gh` account to publish. Each artifact is uploaded
@@ -498,255 +439,6 @@ replaced atomically. Conflicting regular files and directories are refused: move
 aside yourself or choose a different `--dir`. The app's automatic
 launcher setup and the first step of `install-hooks` use the same behavior.
 
-### Optional integrations
-
-The standard app is desktop-only: it includes no HTTP listener, web client,
-Cloudflare integration, APNs provider, or web-push service.
-The `remote` CLI command reports that the integration is unavailable and leaves
-previously saved remote settings unchanged.
-
-`CopilotProjectsHost` is also a Swift package product. An integrating application
-calls `CopilotProjectsApplication.run(makeIntegration:checkIntegrationAssets:)`
-to register its optional `HostIntegration` before SwiftUI creates the app delegate.
-The typed `SessionHost` boundary keeps live terminals, transcript/image capture,
-and replay-safe session mutations owned by the desktop host. CLI-only invocations
-do not construct an integration.
-
-Shared `CopilotProjectsProtocol`, `CopilotProjectsUI`, and protocol fixtures remain
-public and usable by existing clients. They do not require a private dependency.
-An integrating app can reuse `scripts/build-app.sh` with `--binary`, `--resources`,
-and `--output`; its executable must include its additional assets in `check-assets`.
-The normal build and release do not resolve or bundle optional integrations.
-
-#### Supported versions
-
-A client supports hosts released in the last 30 days, and a host supports clients
-released in the last 30 days. Clients are the separately built web and iOS apps; a
-host is the integrated Mac app that runs their gateway. That app serves the web
-client, so the two differ only in a tab left open across an update.
-
-Inside that window, a client checks `RemoteProtocolInfo.capabilities`, or handles the
-host's 404 or 501, before it relies on a newer route or request field, and tolerates a
-missing response field. A host keeps accepting the requests older clients send and
-keeps advertising a capability while a supported client checks it.
-
-Outside it the pairing is unsupported, and nothing detects that: no code compares
-release versions or `RemoteProtocolInfo.revision`. The gateway answers an unknown route
-with 404 and a control message it does not know with 400, and clients show most of
-those as the failed request's error. Neither client explains an event stream it cannot
-read: the iOS app keeps reconnecting, and the web client drops the event while still
-showing connected. Both sides ignore JSON fields they do not know, and clients ignore
-unknown stream events, so an older peer can also act on a request without the
-safeguard a newer field carried. Update the older side.
-
-A gate or fallback that exists only for an older peer may be removed once the first
-host release that advertised the feature (for a client's check), or the first release
-of every client that sends it (for a host's fallback), is more than 30 days old.
-
-The window does not cover the following, and their checks stay:
-
-- Copilot CLI versions, including the tracker's fallbacks for older CLI runtimes.
-- What a session can do now: `RemoteSessionWorkflow.capabilities` (for example
-  `set-session-budget`, present only while the session's limits are known).
-- A capability or field a current peer can still leave out, such as `workflow` for a
-  session without a tracker.
-- Records a host stored from a client, such as a push registration, until that client
-  registers again.
-- A tracker still running an earlier host's code. Reload it after an upgrade.
-
-#### Configured remote session creation
-
-An integrating gateway can expose `RemoteSessionContract.configuredCreatePath`
-(`sessions/create-configured`) and pass its decoded `RemoteCreateSessionRequest`
-to `SessionHost.createConfiguredSession`. In addition to `requestId` and
-`projectId`, the request accepts optional `kind` (`copilot` or `terminal`) and `initialPrompt`.
-Omitted kind means Copilot; omitted prompt means an unprompted session. Copilot
-launches without `--allow-all`, so tool approvals appear in the session's terminal;
-a terminal opens a plain shell without requiring Copilot.
-On the local host, both use `COPILOT_PROJECTS_DEFAULT_DIR` from the app's
-environment, or `~/Repos` when unset, without changing desktop selection.
-The path must expand to an existing absolute directory.
-The app must inherit the variable at launch; an rc export does not affect an
-already-running app or Finder/Dock launches.
-
-A supplied prompt must be nonempty after whitespace trimming, at most 8,192
-UTF-8 bytes after CRLF/CR normalization to LF, and free of terminal control
-characters other than line breaks and tabs. Terminal requests cannot carry a
-prompt. Configured creation rejects `pullRequestURL`; the separate review route
-accepts its canonical PR URL and rejects `kind` and `initialPrompt`.
-
-Gateways and `SessionHost.createSession` reject launch options on the legacy
-`sessions/create` route. Gateways
-expose the configured route whether or not the host advertises the
-`configured-session-creation` protocol capability. Clients must not
-fall back to the legacy endpoint when configured creation is unsupported: older
-hosts ignore unknown JSON fields and could otherwise silently drop the prompt
-or launch Copilot instead of a terminal. Allow enough JSON body space for an
-escaped maximum-size prompt.
-Custom `SessionHost` implementations that do not honor these options must
-publish protocol metadata without `configured-session-creation`.
-The public `RemoteProtocolInfo` initializer accepts a filtered
-`RemoteProtocolInfo.current.capabilities` array; other capabilities need not be
-copied into a hard-coded list.
-The default `createConfiguredSession` implementation returns unavailable rather
-than falling back to a conformer's legacy `createSession` implementation.
-
-Keep an immutable request body and UUID for an explicit retry after a network
-or 5xx error. Do not automatically resubmit prompts, reuse a UUID after changing
-the project or launch options, or retain pending retries indefinitely. A matching
-retry returns the original session, even if it moved projects; a changed intent
-returns 409, as does a retry for a session with no recorded intent. The ledger
-persists intent hashes, not starting-prompt text; the workspace saves both.
-An existing terminal socket without a stored intent cannot satisfy a configured
-or review create, even if its master may have exited; it returns 409 rather than assuming
-the requested intent is safe to repeat. Fresh configured and review
-launches clear stale Copilot resume markers before creating a terminal.
-
-Binding survives workspace or ledger repair while either retains the intent.
-Closed-session tombstones remain bounded to seven days and 512 records; after
-expiry or eviction a UUID can create again. Launch still precedes workspace and
-ledger persistence, so this is not an exactly-once guarantee across a crash that
-loses all creation evidence and the terminal master.
-
-#### Remote session search
-
-`SessionHost.searchSessions` answers a `RemoteSessionSearchRequest` with the Find
-Session ranking: `instant` matches names, projects, folders, and conversation text,
-`luna` asks Luna (`gpt-6-luna`), `history` runs the second-stage CLI `session-store.db`
-search after `luna` finishes, and `recent` lists every live session, most recently
-active first, as Find Session does before you type. Requests with `includeResumable`
-omitted or `false` cover live sessions only; requests with `includeResumable: true`
-also include ended resumable Copilot CLI sessions (cached for 15 seconds across rapid
-keystrokes), and `SessionHost.resumeSearchSession` (`RemoteSessionSearchContract.resumePath`)
-resumes a chosen ended session without changing Mac selection. Results carry each
-session's project and, when known, `lastActivityAt`: when its transcript last changed,
-sent as `lastActivityAtMilliseconds` since 1970. Queries are trimmed and limited to
-`RemoteSessionSearchContract.maximumQueryLength` characters; only `recent`, which
-ignores its query, accepts an empty one. At most two remote Luna or history searches
-run at once; another returns `busy`. Cancelling the calling task stops the search and
-its CLI process. The host keeps the index between searches and rereads only live
-transcripts that changed.
-
-Hosts report `supportsSessionSearch` and the `sessionSearchCapabilities` they
-implement; other conformers default to `unsupported` and none. `RemoteProtocolInfo.current`
-omits `session-search-v1`, `session-search-recent-v1`, and `session-search-history-v1`:
-a gateway advertises each only when it serves `RemoteSessionSearchContract.path` (and
-`resumePath` for `session-search-history-v1`) for a host that declares it.
-
-#### Remote mark as unread
-
-`SessionHost.markUnread` sets the same mark as the Mac's **Mark as Unread**; the
-existing `markRead` clears it. A marked session's snapshot carries `unread` and
-`markedUnread: true`; unmarked sessions omit `markedUnread`. Hosts report
-`supportsMarkUnread`, and other conformers default to unsupported. `RemoteProtocolInfo.current`
-omits `mark-unread-v1`: a gateway advertises it only when it routes the
-`mark-unread` control to a host that declares it.
-
-A `mark-read` control is answered before the Mac applies it, so it can arrive after
-something newer made the session unread. To acknowledge only what the user saw, a
-client copies the session's `unreadMarker` from the snapshot it is showing into the
-control message's `unreadMarker`, and the gateway passes it to
-`SessionHost.markRead(sessionId:unreadMarker:)`. The host gives a session a new marker
-each time a notification, a finished turn, or a manual mark makes it unread, and
-publishes it only while the session is `unread` or `ready`. A mark whose marker is no
-longer the session's changes nothing and is not an error: the session stays unread
-under the marker its snapshots already carry. An ignored mark produces no new
-snapshot, so a client that keeps a visible session read sends a mark again when a
-snapshot still shows that session `unread` or `ready` with an `unreadMarker` other
-than the one it last sent, including once an earlier mark's request finishes. A mark
-without a marker always applies, so older clients, older gateways, and the Mac's own
-**Mark as Read** behave as before.
-Markers aren't saved. After the Mac restarts, a mark sent for an earlier snapshot is
-ignored and one for a new snapshot applies. No capability is advertised: a client
-echoes the field when a snapshot has it.
-
-#### Remote attention
-
-The Mac decides once which sessions need the user, and publishes it. A session's
-snapshot carries `attention` while it does: `kind` is `waiting` (a question, a
-permission or budget request, or the terminal is waiting), `failed` (the latest
-request failed; seeing it or marking it read doesn't clear it, the next request
-does), `ready` (finished while the user was away, and idle), or `unread` (an
-unseen notification or the user's mark), and `rank` orders them. The Mac's
-sidebar and **Next Session Needing Attention** read the same decision. Older hosts
-omit the field.
-
-Clients show `attention` with their own glyphs, colours and copy, and apply no
-rule of their own; `markedUnread` says why a session is `unread`, and `lastError`
-carries a failure's message. Next goes through the sessions that have `attention`
-by `rank`, then in workspace order (projects in order, then each project's
-sessions in order), starting after the current session and wrapping around. A
-client remembers the session and rank Next last went to. When that session is
-current and no longer has `attention`, Next carries on from its place instead of
-starting from the top. `RemoteAttentionCursor.next` implements this. The cursor
-stays on each client because each has its own selection.
-
-`needsEndConfirmation` says to ask before ending a session: it is running or
-waiting, has background or scheduled work, or has something waiting for an answer.
-Hosts always send it; a client asks when it is absent.
-
-#### Remote question forms
-
-The Mac parses a question's schema into a form once, and each pending elicitation
-in a snapshot carries it as `form`. The Mac's own question card shows the same
-fields. `form` is absent when the question is answered another way: a link, a
-terminal default, or a schema outside the supported subset, which is answered in
-the terminal. Older hosts omit it. `schema` is still sent.
-
-`form.fields` are in display order. Each has `key`, `title` (the key when the
-schema gives none), `description` when there is one, `required`, the schema's
-`default` when there is one, and a `kind`:
-
-| `kind` | Answer | Also carries |
-| --- | --- | --- |
-| `choice` | one `choices` value | `choices`, each a `value` and the `title` to show |
-| `multiChoice` | an array of `choices` values | `choices`, `minItems`, `maxItems` |
-| `boolean` | `true` or `false` | |
-| `number` | a number | `integer` when it must be whole, `minimum`, `maximum` |
-| `string` | text | `minLength` and `maxLength` in code points, `format` |
-
-`form.allowsFreeformChoices` says the Mac also accepts typed text: any non-blank
-text for a `choice` or `boolean`, and one typed entry in a `multiChoice`. Clients
-render the fields with their own controls and apply no schema rule of their own.
-`format` is the schema's own value: the Mac checks `email`, `uri`, `date` and
-`date-time`, and accepts any text for another. The Mac checks every answer
-against the agent's schema, whatever the client checked.
-
-#### Remote park session
-
-`SessionHost.parkSession` parks one session as the Mac's **Park Session** does, with
-the same rules. It first waits out the 5 seconds for which the client asking still
-counts as having the session open. A session's snapshot carries `parkable: true` while
-**Park Idle Sessions** is on and the session isn't already parked; otherwise the field is
-omitted. Hosts report `supportsSessionParking`, and other conformers default to
-unsupported. `RemoteProtocolInfo.current` omits `park-session-v1`: a gateway
-advertises it only when it routes the `park-session` control to a host that declares
-it.
-
-A client offers Park Session for a session only when `park-session-v1` is advertised
-and that session is `parkable`, and applies no rule of its own. `parkSession` returns
-`.refused` with a reason written for the user, and the session is left running, or
-`.parked` once Copilot has exited or 20 seconds after it was told to stop. Before
-that, Copilot has up to 20 seconds to say whether it is idle. The session's `parked`
-state reaches snapshots sooner.
-
-A session open in the web or iOS app is not parked. A client that parks the session it
-has open lets go of it first, and the wait allows for one refresh from it that was already
-on its way. The park is still refused with that reason when the session is refreshed after
-that: by another client that has it open, or by a second late refresh from the asking
-client.
-
-#### Shared quick replies
-
-`SessionHost.quickReplies` and `SessionHost.updateQuickReplies` read and replace the
-Mac's stored quick-reply list (`UserDefaults` key `quickReplyList`), and
-`RemoteWorkspaceSnapshot.quickRepliesDigest` carries a 16-hex-character SHA-256
-prefix when a custom list is stored (`nil` when built-in defaults apply). Hosts
-report `supportsQuickReplies`, and other conformers default to unsupported.
-`RemoteProtocolInfo.current` omits `shared-quick-replies`: a gateway advertises it
-only when it serves `RemoteQuickRepliesContract.path` (`GET /quick-replies` and
-`POST /quick-replies`) for a host that declares it.
-
 ### Notification deep links
 
 External notifications can focus an existing project or session through the
@@ -791,8 +483,6 @@ For a manual shell launch with inline images, run
 must be restarted with that profile; relaunching the app only reattaches their dtach master.
 Independent of that local rendering, each terminal session bounds-checks and retains the same
 Kitty-transmitted PNGs (fail-closed on anything outside the exact subset Copilot CLI emits).
-The host API exposes exact image versions to optional integrations without exposing mutable
-terminal views.
 
 The companion Copilot extension records completed root turns through the supported Copilot SDK
 event API. It atomically writes a bounded per-tab transcript snapshot after each turn, including
@@ -809,22 +499,8 @@ or a background agent restarting work) is cleared; model-catalog and other backg
 are not shown. Copilot
 Projects renders that snapshot in the drawer without changing the terminal's PTY size. For
 images only, the Mac drawer also reads the session's own `events.jsonl`: the images attached
-to a prompt and the images a tool returned. The host API supports full or bounded transcript windows
-for optional integrations; image association always precedes windowing. A client can also send
-`after=<epoch milliseconds>&copilotSessionId=<id>` (the start of its newest completed turn) to
-receive only the turns from that point on, merging each response into what it has by turn id.
-The extension keeps the turns its 200-turn cap evicted most recently (at most 10 turns and
-256 KB, written as the snapshot's `droppedTurns`), and the host weaves them into every response
-by start time (for a cursor, only those that started at or after it), so a turn added and
-evicted between two fetches still reaches the client whatever it fetches next. A window's
-`limit` and `totalTurns` count those turns too. That buffer is never sent as its own field.
-Turns the 5 MB byte budget (both files together) drops are not buffered, and the buffer only
-uses the room the live transcript leaves under that budget, keeping its newest turns that fit.
-A response with an empty `copilotSessionId` means the host has no transcript it may show for
-the tab, and clients replace what they have with it. The host rereads (up to three reads in all)
-a transcript that came back empty only because it was being rewritten mid-read; if it is still
-changing after the last read, the request fails with an error status instead, so such a race
-never clears clients.
+to a prompt and the images a tool returned. The snapshot holds at most
+200 turns and 5 MB (both files together).
 
 The app also installs a read-only Copilot extension at
 `~/.copilot/extensions/copilot-projects-tracker/extension.mjs`. It uses Copilot's session event
@@ -832,8 +508,8 @@ stream and SDK metadata queries to report queued schedules, coordinator activity
 subagents. Copilot CLI currently loads extensions only when experimental features are enabled.
 Run `/experimental on` once before starting app-managed sessions, or pass
 `--experimental` when launching Copilot manually. Without it, terminal reattach still works, but
-a session shows Idle whatever it is doing, posts no alerts, and takes no prompt from the app or a
-remote client, and the transcript view, tracker-backed session details, native session
+a session shows Idle whatever it is doing, posts no alerts, and takes no prompt from the app,
+and the transcript view, tracker-backed session details, native session
 controls, and reboot conversation resume are unavailable. Existing CLI sessions must use
 `/restart` after enabling experimental features. When the app upgrades the tracker, a session
 already running a tracker with hot reload asks Copilot to reload its extensions once it is idle
@@ -999,7 +675,7 @@ is read from the build's Git commit, not an uncommitted working copy. Keep this
 archive file tracked: once the preceding release contains it, subsequent releases
 return to automatic notes. Each section contains `[text, GitHub-link-or-null]`
 entries; malformed content fails generation rather than silently replacing it.
-Links stay within this repository or the public host.
+Links stay within this repository.
 
 Subsequent published builds generate notes from first-parent commits since the
 previous complete release, and include up to the last ten versions in What's New
@@ -1015,30 +691,6 @@ the existing install instructions. API failures, mismatched
 versions, and changed release predecessors fail publication rather than silently
 publishing stale or empty notes. `scripts/test-release-notes.py` exercises the
 generator without network access.
-
-### App-focused notes for integrated builds
-
-The integrated desktop publisher passes its verified public checkout using
-`--host-root` to the shared generator. It combines its own changes with the public desktop changes between
-the previous release's host pin and the new pin, including skipped desktop
-versions. Git reads the first-parent history and dependency locks at those
-immutable commit IDs, not the latest release. Missing history and GitHub metadata
-errors stop generation rather than silently omitting desktop changes.
-
-Pure host updates are replaced by the changes they bring in. A commit must change
-only `Package.swift` and `Package.resolved`, with the manifest changing only the
-host revision; shared dependency lock updates may accompany it only when they
-match the exact old and new desktop lockfiles. Independent dependency upgrades
-and mixed feature commits remain visible. Identical entries are combined while retaining all source
-links, and desktop PR links name their repository to distinguish them from
-companion PRs. Rollbacks and divergent host history are named explicitly rather
-than presented as new fixes.
-
-This is opt-in: iOS and other direct generator callers retain the public-host
-compare link instead of listing Mac-only changes as their own. Bundling, version
-validation, signing, and the shared GitHub/in-app snapshot remain unchanged.
-The integrated build adopts generator updates through its existing automated
-published-host update flow.
 
 ### Writing a user-facing summary
 
