@@ -7930,8 +7930,6 @@ final class AppLogicTests: XCTestCase {
         XCTAssertNil(hugeFallbackView.headerDividerY())
     }
 
-    // MARK: - Remote terminal image rendering
-
     func testCLISendsTheSessionEndHooksReportAsAControlRequest() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

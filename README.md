@@ -504,13 +504,14 @@ copilot-projects new-copilot-session --project <id> \
   --host woodhaven
 ```
 
-It launches Copilot with the file's contents (UTF-8, at most 8 KiB) as the starting
+It launches Copilot with the file's contents (UTF-8, at most 8 KiB, not blank, and with
+no control characters other than line breaks and tabs) as the starting
 prompt, then prints the session id. Local sessions use `COPILOT_PROJECTS_DEFAULT_DIR`
 from the app's environment, or `~/Repos` when unset; the path must expand to an
 existing absolute directory. The app must inherit the variable at launch; an rc
 export does not affect an already-running app or Finder/Dock launches. The request id
 is the session id, so retries are idempotent while the app remembers the request
-(about a week): replaying the same id and prompt prints the existing session, a
+(about a week, and its 512 most recent requests): replaying the same id and prompt prints the existing session, a
 different prompt or project exits 3 (conflict), and an id whose session has since
 ended exits 4 (gone, not recreated). Exit 5 means
 Copilot or persistence is temporarily unavailable; retry with the same id. Other

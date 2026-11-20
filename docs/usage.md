@@ -117,9 +117,9 @@ with a CoreGraphics fallback. The result is a few Swift files instead of hundred
   omit code blocks, and fall back to the generic alert when the matching transcript
   is unavailable. Response previews can appear on your lock screen.
   When the session's tracker supports receipt-backed operations, question alerts show the
-  pending question as a plain-text preview, followed by its numbered choices when it has
-  at most four and its tracker can take the answer, and wait briefly (under four seconds) for the tracker to
-  publish a pending question. Older trackers keep the generic question alert. Banners are
+  pending question as a plain-text preview, followed by its numbered choices when they fit a
+  notification (at most four short choices on a question with one answer field), and wait
+  briefly (under four seconds) for the tracker to publish a pending question. Older trackers keep the generic question alert. Banners are
   tap-to-open: clicking one focuses that session.
   Once a question is answered, in the terminal or in the app, the app
   withdraws its alert. It waits for
@@ -231,8 +231,9 @@ open.
 The app parses a question's schema into a form, and the question card shows its
 fields in order: one choice, several choices, yes or no, a number, or text, with the
 title, description, default, and limits the schema gives. Where the question allows
-typed answers, the card also takes any non-blank text for a choice or a yes-or-no
-field, and one typed entry among several choices. For a text field's format the app
+typed answers (an agent's own question; an MCP server's form does not), the card also
+takes any non-blank text for a choice or a yes-or-no field, and one typed entry among
+several choices. For a text field's format the app
 checks `email`, `uri`, `date` and `date-time`, and accepts any text for another. The
 app checks every answer against the agent's schema. A question whose schema is
 outside that subset is answered in the terminal.
