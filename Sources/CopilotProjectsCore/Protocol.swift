@@ -29,6 +29,11 @@ public struct ControlRequest: Codable, Sendable {
     public var parentSessionId: String?
     /// The queued prompt `queued-prompts` acts on.
     public var messageId: String?
+    /// The model `set-session-model` switches to, or `new-copilot-session` starts
+    /// Copilot with, and the reasoning effort and context size chosen with it.
+    public var model: String?
+    public var reasoningEffort: String?
+    public var contextTier: String?
 
     public init(command: String) {
         self.command = command

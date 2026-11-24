@@ -25,6 +25,8 @@ public enum CLIMain {
         "reload-session-mcp",
         "park-session",
         "unpark-session",
+        "list-session-models",
+        "set-session-model",
         "rename-project",
         "focus",
         "attach",
@@ -128,7 +130,8 @@ public enum CLIMain {
             return queuedPrompts(rest, environment: environment)
         case "set-parent-session":
             return setParentSession(rest, environment: environment)
-        case "close-session", "restart-session", "reload-session-mcp", "park-session", "unpark-session":
+        case "close-session", "restart-session", "reload-session-mcp", "park-session", "unpark-session",
+             "list-session-models", "set-session-model":
             return explicitSessionCommand(command, rest, environment: environment)
         default:
             break
@@ -251,11 +254,12 @@ public enum CLIMain {
 
     private static func newCopilotSession(_ args: [String], environment: [String: String]) -> Int32 {
         let usage = "usage: copilot-projects new-copilot-session --project ID --request-id UUID "
-            + "--prompt-file PATH [--title TITLE] [--host HOST] [--parent-session ID | --no-parent]"
+            + "--prompt-file PATH [--title TITLE] [--host HOST] [--parent-session ID | --no-parent] "
+            + "[\(modelUsage)]"
         let parsed = parseFlags(args)
-        let allowed: Set<String> = [
+        let allowed: Set<String> = modelFlags.union([
             "project", "request-id", "prompt-file", "title", "host", "parent-session", "no-parent",
-        ]
+        ])
         let unknown = parsed.flags.keys.filter { !allowed.contains($0) }.sorted()
         guard unknown.isEmpty, parsed.positionals.isEmpty else {
             let extras = unknown.map { "--\($0)" } + parsed.positionals
@@ -276,6 +280,10 @@ public enum CLIMain {
         }
 
         var req = ControlRequest(command: "new-copilot-session")
+        guard setModelFlags(parsed.flags, on: &req) else {
+            fail(usage)
+            return 2
+        }
         req.projectId = projectId
         req.requestId = requestId.uuidString
         req.prompt = prompt
@@ -451,37 +459,58 @@ public enum CLIMain {
         return sendAutomationRequest(req, environment: environment)
     }
 
-    // MARK: - close-session, restart-session, reload-session-mcp, park-session, unpark-session (automation)
+    // MARK: - commands that name their session (automation)
+
+    private static let modelFlags: Set<String> = ["model", "reasoning-effort", "context-tier"]
+    private static let modelUsage = "--model ID [--reasoning-effort LEVEL] [--context-tier default|long_context]"
+
+    /// Reads the model flags `set-session-model` and `new-copilot-session` share. False
+    /// when one has no value, the context size is neither `default` nor `long_context`,
+    /// or an effort or a context size comes without a model.
+    private static func setModelFlags(_ flags: [String: String], on req: inout ControlRequest) -> Bool {
+        let model = flags["model"], effort = flags["reasoning-effort"], tier = flags["context-tier"]
+        guard model != "", effort != "", tier.map({ $0 == "default" || $0 == "long_context" }) ?? true,
+              model != nil || (effort == nil && tier == nil) else { return false }
+        req.model = model
+        req.reasoningEffort = effort
+        req.contextTier = tier
+        return true
+    }
 
     /// The target is always explicit: the calling terminal's session is never implied,
     /// so a script cannot end or restart the session it runs in by omitting `--session`.
     private static func explicitSessionCommand(
         _ command: String, _ args: [String], environment: [String: String]
     ) -> Int32 {
+        let switchesModel = command == "set-session-model"
         let usage = "usage: copilot-projects \(command) --session ID [--project ID]"
+            + (switchesModel ? " \(modelUsage)" : "")
         let parsed = parseFlags(args)
-        let allowed: Set<String> = ["session", "project"]
+        let allowed: Set<String> = (switchesModel ? modelFlags : []).union(["session", "project"])
         let unknown = parsed.flags.keys.filter { !allowed.contains($0) }.sorted()
         guard unknown.isEmpty, parsed.positionals.isEmpty else {
             let extras = unknown.map { "--\($0)" } + parsed.positionals
             fail("\(command): unexpected \(extras.joined(separator: " "))\n\(usage)")
             return 2
         }
+        var req = ControlRequest(command: command)
         guard let sessionId = parsed.flags["session"], !sessionId.isEmpty,
-              parsed.flags["project"].map({ !$0.isEmpty }) ?? true else {
+              parsed.flags["project"].map({ !$0.isEmpty }) ?? true,
+              setModelFlags(parsed.flags, on: &req), switchesModel == (req.model != nil) else {
             fail(usage)
             return 2
         }
 
-        var req = ControlRequest(command: command)
         req.sessionId = sessionId
         req.projectId = parsed.flags["project"]
-        // A park and an unpark answer once their result is known, and a close once the
-        // session's Copilot has said whether it is idle, so their client waits longer.
+        // A park and an unpark answer once their result is known, a close once the
+        // session's Copilot has said whether it is idle, and a model switch once the
+        // tracker's receipt is known, so their client waits longer.
         let timeout: TimeInterval
         switch command {
         case "park-session", "unpark-session": timeout = 120
         case "close-session": timeout = ControlClient.closeSessionTimeout
+        case "set-session-model": timeout = 30
         default: timeout = ControlClient().timeout
         }
         return sendAutomationRequest(req, environment: environment, timeout: timeout)
@@ -719,6 +748,7 @@ public enum CLIMain {
           copilot-projects new-session             Add a session to a project [--cwd DIR] [--project ID] [--host HOST]
           copilot-projects new-copilot-session     Start Copilot with a prompt, idempotent by request id
               --project ID --request-id UUID --prompt-file PATH [--title T] [--host HOST] [--parent-session ID | --no-parent]
+              [--model ID [--reasoning-effort LEVEL] [--context-tier default|long_context]]
           copilot-projects send-session-prompt     Queue a prompt into an existing session, or steer its current task
               --session ID [--project ID] [--request-id UUID] [--steer] (--prompt TEXT | --prompt-file PATH)
           copilot-projects queued-prompts          List a session's queued prompts as JSON, or send one now or take it back
@@ -736,6 +766,10 @@ public enum CLIMain {
               --session ID [--project ID]
           copilot-projects unpark-session          Start a parked session's Copilot again, and wait until it takes a prompt
               --session ID [--project ID]
+          copilot-projects list-session-models     List the models a session's Copilot can switch to, as JSON
+              --session ID [--project ID]
+          copilot-projects set-session-model       Switch a session's Copilot to another model, and wait for the result
+              --session ID [--project ID] --model ID [--reasoning-effort LEVEL] [--context-tier default|long_context]
           copilot-projects rename-project <name>   Rename a project [--project ID]
           copilot-projects focus                   Focus a project/session [--project ID] [--session ID]
           copilot-projects ping                    Check the app is reachable

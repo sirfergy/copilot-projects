@@ -33,7 +33,8 @@ struct SessionCreationRecord: Codable, Equatable, Sendable {
         kind: RemoteSessionKind,
         initialPrompt: String?,
         pullRequestURL: String?,
-        hostId: String? = nil
+        hostId: String? = nil,
+        model: RemoteModelSelection? = nil
     ) -> String {
         var hash = SHA256()
         var fields: [String?] = [
@@ -46,6 +47,10 @@ struct SessionCreationRecord: Codable, Equatable, Sendable {
         ]
         if let hostId, !hostId.isEmpty {
             fields.append(hostId.lowercased())
+        }
+        // A request that names no model keeps the fingerprint it had before one could.
+        if let model {
+            fields += ["model", model.modelId, model.reasoningEffort, model.contextTier]
         }
         for field in fields {
             guard let field else {
