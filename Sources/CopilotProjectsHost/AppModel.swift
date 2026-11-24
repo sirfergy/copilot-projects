@@ -86,6 +86,9 @@ final class AppModel: ObservableObject {
 
     var controllers: [String: TerminalController] = [:]
     var parkingRuntime = ParkingRuntime()
+    /// Sessions a scripted close is asking whether their Copilot is idle. Input sent
+    /// to them through the app is refused meanwhile, as it is during a park.
+    var sessionsAskedBeforeClose: Set<String> = []
     /// When the gateway last asked about each session a remote client has open.
     var remoteOpenSessions: [String: (first: Date, last: Date)] = [:]
     var sessionPromptComposers: [String: DesktopSessionPromptComposer] = [:]
@@ -689,6 +692,13 @@ final class AppModel: ObservableObject {
         let server = ControlServer(socketPath: socketPath, waiting: { [weak self] req in
             if req.command == "queued-prompts" {
                 return { [weak self] in await self?.queuedPromptsCommand(req) ?? .failure("app shutting down") }
+            }
+            if req.command == "close-session" {
+                // Taken here, so a wait for the main actor counts against it too.
+                let deadline = Date().addingTimeInterval(ControlClient.closeSessionTimeout - 5)
+                return { [weak self] in
+                    await self?.closeSessionCommand(req, before: deadline) ?? .failure("app shutting down")
+                }
             }
             guard req.command == "park-session" || req.command == "unpark-session" else { return nil }
             return { [weak self] in await self?.parkingCommand(req) ?? .failure("app shutting down") }
