@@ -1542,7 +1542,7 @@ final class AppModelTests: XCTestCase {
         }
     }
 
-    func testWorkspaceMenuSnapshotDuringTrackerActivity() throws {
+    func testMenuBarHoldsModelPublishesWhileOpenAndSyncsOnceWhenItCloses() throws {
         try withTempStateDirectory { root in
             let selected = Session(title: "Selected", cwd: root.path)
             let background = Session(title: "Background", cwd: root.path)
@@ -1551,8 +1551,9 @@ final class AppModelTests: XCTestCase {
                                   selectedSessionId: selected.id)
             let repository = StateRepository(path: root.appendingPathComponent("state.json"))
             try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+            // The app is in front, as it is whenever its menu bar is open.
             let model = AppModel(
-                stateRepository: repository, isAppActive: { false },
+                stateRepository: repository, isAppActive: { true },
                 agentActivityDirectory: root, resumeMarkerDirectory: root,
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
                 gracefulSessionDestroyer: { _, _ in Task {} }, forcedSessionDestroyer: { _ in }
@@ -1562,72 +1563,72 @@ final class AppModelTests: XCTestCase {
                 model.detachAllClients()
             }
             let now = Date()
-            func tracker(_ processing: Bool, age: TimeInterval = 1) -> AgentActivitySnapshot {
-                var snapshot = AgentActivitySnapshot.tracker(processing: processing, age: age, at: now)
+            func tracker(_ processing: Bool) -> AgentActivitySnapshot {
+                var snapshot = AgentActivitySnapshot.tracker(processing: processing, at: now)
                 snapshot.workflow = RemoteSessionWorkflow(
                     observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
                     capabilities: ["session-restart"], sendReady: !processing, restartRequested: false
                 )
                 return snapshot
             }
-            try model.publishTracker(tracker(false), sessionId: selected.id, now: now)
-            model.syncMenuState(includeRuntimeAttention: true)
-            XCTAssertTrue(model.menuState.snapshot.selectedSessionCanRestart)
-            try model.publishTracker(tracker(true), sessionId: selected.id, now: now)
-            XCTAssertTrue(model.menuState.snapshot.selectedSessionCanRestart)
-
+            // Every publication of the menu's snapshot, as the names of the fields it changed.
             var previous = model.menuState.snapshot
             var changes: [[String]] = []
             let cancellable = model.menuState.$snapshot.dropFirst().sink { snapshot in
                 let before = Array(Mirror(reflecting: previous).children)
                 let after = Array(Mirror(reflecting: snapshot).children)
-                let names = zip(before, after).compactMap { old, new in
-                    String(reflecting: old.value) == String(reflecting: new.value) ? nil : (new.label ?? "?")
-                }
-                changes.append(names)
+                changes.append(zip(before, after).compactMap { old, new in
+                    String(reflecting: old.value) == String(reflecting: new.value) ? nil : new.label
+                })
                 previous = snapshot
             }
             defer { withExtendedLifetime(cancellable) {} }
 
-            model.beginMainMenuTracking()
-            XCTAssertEqual(changes, [["selectedSessionCanRestart"]])
-            XCTAssertFalse(model.menuState.snapshot.selectedSessionCanRestart)
-            changes.removeAll()
-            try model.publishTracker(tracker(true), sessionId: background.id, now: now)
-            var toolActivity = tracker(true, age: 2)
-            toolActivity.currentIntent = "Running a tool"
-            try model.publishTracker(toolActivity, sessionId: selected.id, now: now)
-            model.refreshAgentActivitySnapshots(now: now.addingTimeInterval(30))
+            // The menu bar opens on an idle session: its values are judged then.
             try model.publishTracker(tracker(false), sessionId: selected.id, now: now)
-            model.postCompletionIfReady(sessionId: selected.id)
-            XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
-            model.markActiveSessionSeen()
-            try model.publishTracker(tracker(false), sessionId: background.id, now: now)
-            model.postCompletionIfReady(sessionId: background.id)
-            XCTAssertTrue(model.hasAttentionSessions)
-            XCTAssertNil(model.restartBlockedReason(sessionId: selected.id))
-            XCTAssertTrue(model.destroySession(projectId: project.id, sessionId: closing.id))
-            XCTAssertTrue(model.canReopenClosedSession)
-            model.setAutoDiscoverSSHHosts(false)
-            XCTAssertEqual(changes, [], "Unexpected menu snapshot fields: \(changes)")
+            XCTAssertEqual(changes, [])
+            model.mainMenuTracking(true)
+            XCTAssertEqual(changes, [["selectedSessionCanRestart"]])
+            XCTAssertTrue(model.menuState.snapshot.selectedSessionCanRestart)
+            changes.removeAll()
 
-            model.endMainMenuTracking()
-            XCTAssertEqual(changes.map(Set.init), [Set([
+            // While it is open, the selected session starts a turn, a background session
+            // finishes off screen, another session ends and an SSH setting changes. None
+            // of it reaches the menu.
+            try model.publishTracker(tracker(true), sessionId: selected.id, now: now)
+            try model.finishTurn(sessionId: background.id)
+            XCTAssertTrue(model.hasAttentionSessions)
+            XCTAssertNotNil(model.restartBlockedReason(sessionId: selected.id))
+            XCTAssertTrue(model.destroySession(projectId: project.id, sessionId: closing.id))
+            model.setAutoDiscoverSSHHosts(false)
+            XCTAssertEqual(changes, [])
+
+            // It closes: one publication, with what is true now.
+            model.mainMenuTracking(false)
+            XCTAssertEqual(changes.map(Set.init), [[
                 "selectedSessionCanRestart", "hasAttentionSessions", "recentlyClosedSessionItems",
                 "autoDiscoverSSHHosts",
-            ])])
-            XCTAssertTrue(model.menuState.snapshot.selectedSessionCanRestart)
+            ]])
+            XCTAssertFalse(model.menuState.snapshot.selectedSessionCanRestart)
             XCTAssertTrue(model.menuState.snapshot.hasAttentionSessions)
             XCTAssertEqual(model.menuState.snapshot.recentlyClosedSessionItems.map(\.id), [closing.id])
             XCTAssertFalse(model.menuState.snapshot.autoDiscoverSSHHosts)
 
+            // With the menu bar closed a change is published at once, as before.
             changes.removeAll()
             model.toggleSelectedSessionRead()
             XCTAssertEqual(changes, [["selectedSessionOffersMarkAsRead"]])
+
+            // An opening always judges, even when the last closing was never reported.
+            model.mainMenuTracking(true)
+            model.toggleSelectedSessionRead()
+            XCTAssertEqual(changes.count, 1)
+            model.mainMenuTracking(true)
+            XCTAssertEqual(changes.count, 2)
         }
     }
 
-    func testWorkspaceSheetStillPublishesWhileMainMenuTracks() throws {
+    func testWorkspaceSheetIsPublishedAtOnceWhileTheMenuBarIsOpen() throws {
         try withTempStateDirectory { root in
             let model = AppModel(
                 stateRepository: StateRepository(path: root.appendingPathComponent("state.json")),
@@ -1635,7 +1636,7 @@ final class AppModelTests: XCTestCase {
             )
             defer { model.detachAllClients() }
             let input = WorkspaceInputController(model: model, sessionRanker: OfflineRanker())
-            model.beginMainMenuTracking()
+            model.mainMenuTracking(true)
             var publications = 0
             let cancellable = model.menuState.objectWillChange.sink { publications += 1 }
             defer { withExtendedLifetime(cancellable) {} }
@@ -1645,7 +1646,6 @@ final class AppModelTests: XCTestCase {
             input.showsReleaseNotes = false
             XCTAssertFalse(model.menuState.snapshot.hasWorkspaceSheet)
             XCTAssertEqual(publications, 2)
-            model.endMainMenuTracking()
         }
     }
 
