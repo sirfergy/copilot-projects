@@ -476,9 +476,15 @@ public enum CLIMain {
         var req = ControlRequest(command: command)
         req.sessionId = sessionId
         req.projectId = parsed.flags["project"]
-        // A park and an unpark answer once their result is known, so their client waits longer.
-        let waits = command == "park-session" || command == "unpark-session"
-        return sendAutomationRequest(req, environment: environment, timeout: waits ? 120 : ControlClient().timeout)
+        // A park and an unpark answer once their result is known, and a close once the
+        // session's Copilot has said whether it is idle, so their client waits longer.
+        let timeout: TimeInterval
+        switch command {
+        case "park-session", "unpark-session": timeout = 120
+        case "close-session": timeout = ControlClient.closeSessionTimeout
+        default: timeout = ControlClient().timeout
+        }
+        return sendAutomationRequest(req, environment: environment, timeout: timeout)
     }
 
     // MARK: - aliases

@@ -530,7 +530,14 @@ dialog. The session is always named explicitly; the calling terminal's session i
 never implied. Because no one confirms the close, a session that has active or
 pending work (running, waiting for input, background agents, or scheduled turns)
 or is the selected tab of the selected project is left alone and the command
-exits 8 (busy); retry later. `--project` refuses (exit 3) a session that has since
+exits 8 (busy); retry later. A session those rules would end is first asked, as a
+park asks it, whether its Copilot is idle. A shell Copilot started in the
+background and is still waiting on counts as work; one it started detached does
+not. The command waits for the answer, usually under a second and 20 at most, and
+no answer counts as busy. Only a Copilot the app has seen running on this Mac,
+whose tracker is taking the question, is asked: a session on a remote host, a
+parked one, one without a Copilot, and one whose tracker is not offering the
+question are judged by the rules alone. `--project` refuses (exit 3) a session that has since
 been moved to another project. Exit 4 means the session no longer exists, 5 means
 the workspace state is unavailable (retry), 2 invalid arguments, and 1 anything
 else.

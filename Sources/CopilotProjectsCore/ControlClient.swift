@@ -23,6 +23,9 @@ public struct ControlClient: Sendable {
     public let socketPath: String
     /// How long a read or write may wait for the app.
     public let timeout: TimeInterval
+    /// How long `close-session` waits: the app asks the session's Copilot whether it
+    /// is idle before it ends the session, and ends nothing once this has passed.
+    public static let closeSessionTimeout: TimeInterval = 30
 
     public init(socketPath: String = Paths.socketPath, timeout: TimeInterval = 3) {
         self.socketPath = socketPath

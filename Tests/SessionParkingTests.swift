@@ -17,6 +17,8 @@ final class SessionParkingTests: XCTestCase {
         var alerts: [String] = []
         /// The time each wait before a remote client's park was to end.
         var waits: [Date] = []
+        /// The sessions each ending was to stop.
+        var ends: [[String]] = []
     }
 
     @MainActor
@@ -63,6 +65,8 @@ final class SessionParkingTests: XCTestCase {
                 remoteSessionBackendAvailable: { true },
                 sessionCreationLedger: SessionCreationLedger(url: root.appendingPathComponent("ledger.json")),
                 kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { ids, _ in processes.ends.append(ids); return Task {} },
+                forcedSessionDestroyer: { _ in },
                 alertPresenter: {
                     processes.alerts.append($0.messageText)
                     return .alertFirstButtonReturn
@@ -155,6 +159,16 @@ final class SessionParkingTests: XCTestCase {
                 PersistedState.self, from: Data(contentsOf: root.appendingPathComponent("state.json"))
             )
             return state.projects.flatMap(\.sessions).first { $0.id == id }?.parked
+        }
+
+        /// Starts the model's control server on a socket of its own and returns the
+        /// environment that points the command line at it. The caller stops the server.
+        func serve() -> [String: String] {
+            let socketPath = "/tmp/cp-\(UUID().uuidString.prefix(8)).sock"
+            XCTAssertTrue(model.startServer(socketPath: socketPath))
+            var environment = ProcessInfo.processInfo.environment
+            environment["COPILOT_PROJECTS_SOCKET"] = socketPath
+            return environment
         }
 
         var wire: RemoteSessionSnapshot {
@@ -748,14 +762,8 @@ final class SessionParkingTests: XCTestCase {
 
     func testTheCommandLineWaitsForAParkAndAnUnparkAndExitsWithTheirResult() async throws {
         let f = try Fixture()
-        let socketPath = "/tmp/cp-\(UUID().uuidString.prefix(8)).sock"
-        XCTAssertTrue(f.model.startServer(socketPath: socketPath))
-        defer {
-            f.model.stopServer()
-            try? FileManager.default.removeItem(atPath: socketPath)
-        }
-        var environment = ProcessInfo.processInfo.environment
-        environment["COPILOT_PROJECTS_SOCKET"] = socketPath
+        let environment = f.serve()
+        defer { f.model.stopServer() }
         // The client blocks on the socket while the model answers on the main actor.
         let run: ([String]) async -> Int32 = { [environment] arguments in
             await Task.detached { CLIMain.run(arguments, environment: environment) }.value
@@ -769,5 +777,129 @@ final class SessionParkingTests: XCTestCase {
         XCTAssertEqual(gone, 4)
         let moved = await run(["park-session", "--session", f.id, "--project", "elsewhere"])
         XCTAssertEqual(moved, 3)
+    }
+
+    // MARK: - close-session
+
+    func testAScriptedCloseAsksCopilotBeforeItEndsASession() async throws {
+        let other = Session(title: "Other", cwd: "/tmp")
+        let f = try Fixture(others: [other])
+        let project = f.model.projects[0].id
+        let close = command("close-session", f.id)
+
+        // The session on screen is refused by the rule, and Copilot is not asked.
+        f.model.show(projectId: project, sessionId: f.id)
+        var response = await f.model.closeSessionCommand(close, before: .distantFuture)
+        XCTAssertEqual(response.code, "busy")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.question.path), "Copilot was not asked")
+
+        // Off screen the rules would end it. Copilot says it is not idle: a shell it
+        // started is still running, which no snapshot shows.
+        f.model.show(projectId: project, sessionId: other.id)
+        async let refused = f.model.closeSessionCommand(close, before: .distantFuture)
+        try await f.answerParkCheck(.rejected)
+        response = await refused
+        XCTAssertEqual(response.code, "busy")
+
+        // Idle, but it came on screen while Copilot was being asked.
+        async let shown = f.model.closeSessionCommand(close, before: .distantFuture)
+        try await f.answerParkCheck(.applied, beforeAnswering: {
+            f.model.show(projectId: project, sessionId: f.id)
+        })
+        response = await shown
+        XCTAssertEqual(response.code, "busy")
+        f.model.show(projectId: project, sessionId: other.id)
+
+        // Idle when asked, but Copilot had started a turn by the time the answer was read.
+        async let started = f.model.closeSessionCommand(close, before: .distantFuture)
+        try await f.answerParkCheck(.applied, change: { $0.foregroundTurnActive = true })
+        response = await started
+        XCTAssertEqual(response.code, "busy")
+
+        // Idle, but the answer came after the command's client had stopped waiting.
+        async let late = f.model.closeSessionCommand(close, before: Date())
+        try await f.answerParkCheck(.applied, change: { $0.foregroundTurnActive = false })
+        response = await late
+        XCTAssertEqual(response.code, "busy")
+        XCTAssertEqual(f.model.projects[0].sessions.map(\.id), [f.id, other.id])
+        XCTAssertTrue(f.processes.ends.isEmpty)
+
+        // A close already asking about the session answers a second one without asking again.
+        f.model.sessionsAskedBeforeClose.insert(f.id)
+        response = await f.model.closeSessionCommand(close, before: .distantFuture)
+        XCTAssertEqual(response.code, "busy")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.question.path))
+        f.model.sessionsAskedBeforeClose.remove(f.id)
+
+        async let closing = f.model.closeSessionCommand(close, before: .distantFuture)
+        try await f.answerParkCheck(.applied, beforeAnswering: {
+            // Input sent through the app is refused while Copilot is asked, so no prompt is taken and then ended with it.
+            XCTAssertEqual(f.model.performSessionAction(
+                sessionId: f.id, action: self.send,
+                operation: CLIOperationRequest(operationId: "send", conversationEpoch: "epoch-1")
+            ), .conflict)
+            XCTAssertEqual(f.model.sendPullRequestsSessionPrompt(
+                requestId: UUID(), projectId: nil, sessionId: f.id, prompt: "Carry on"
+            ).code, "busy")
+        })
+        response = await closing
+        XCTAssertEqual(response.code, "closed")
+        XCTAssertEqual(f.model.projects[0].sessions.map(\.id), [other.id])
+        XCTAssertEqual(f.processes.ends, [[f.id]])
+    }
+
+    func testAScriptedCloseDoesNotAskASessionWhoseCopilotCannotAnswer() async throws {
+        func closeOffScreen(_ f: Fixture) async -> ControlResponse {
+            f.model.show(projectId: f.model.projects[0].id, sessionId: f.model.projects[0].sessions[1].id)
+            return await f.model.closeSessionCommand(command("close-session", f.id), before: .distantFuture)
+        }
+        // A tracker from before parking does not take the question.
+        let old = try Fixture(others: [Session(title: "Other", cwd: "/tmp")])
+        try old.publish {
+            $0.workflow = RemoteSessionWorkflow(
+                observedAtMilliseconds: $0.workflow!.observedAtMilliseconds,
+                capabilities: ["session-send"], sendReady: true
+            )
+        }
+        // Nor can a Copilot that has exited: its marker is gone, and its last snapshot is still fresh.
+        let exited = try Fixture(others: [Session(title: "Other", cwd: "/tmp")])
+        try FileManager.default.removeItem(at: exited.marker)
+        // Nor one a park has stopped, whatever snapshot it left.
+        let parked = try Fixture(
+            parked: ParkedSession(state: .parked, sinceMilliseconds: 1),
+            others: [Session(title: "Other", cwd: "/tmp")]
+        )
+        // Nor one whose Copilot runs on another host, where a park's question is never sent.
+        let remote = try Fixture(others: [Session(title: "Other", cwd: "/tmp")])
+        remote.model.setLiveAgentSessionsForTesting([])
+        for f in [old, exited, parked, remote] {
+            let response = await closeOffScreen(f)
+            XCTAssertEqual(response.code, "closed")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: f.question.path), "Copilot was not asked")
+            XCTAssertEqual(f.processes.ends, [[f.id]])
+        }
+    }
+
+    func testTheCommandLineWaitsForCopilotsAnswerToAClose() async throws {
+        let other = Session(title: "Other", cwd: "/tmp")
+        let f = try Fixture(others: [other])
+        f.model.show(projectId: f.model.projects[0].id, sessionId: other.id)
+        let environment = f.serve()
+        defer { f.model.stopServer() }
+        // The client blocks on the socket while the model answers on the main actor.
+        let client = Task.detached { [environment, id = f.id] in
+            CLIMain.run(["close-session", "--session", id], environment: environment)
+        }
+        // The question is asked once the request has crossed the socket.
+        for _ in 0..<500 where !FileManager.default.fileExists(atPath: f.question.path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        // Copilot takes longer to answer than a command that does not wait allows.
+        try await Task.sleep(for: .seconds(ControlClient().timeout + 0.5))
+        try await f.answerParkCheck(.rejected)
+        let exit = await client.value
+        XCTAssertEqual(exit, 8)
+        XCTAssertEqual(f.model.projects[0].sessions.map(\.id), [f.id, other.id])
+        XCTAssertTrue(f.processes.ends.isEmpty)
     }
 }

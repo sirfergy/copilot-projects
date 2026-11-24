@@ -657,14 +657,12 @@ extension AppModel {
         return .reopened(projectId: projects[loc.p].id, sessionId: reopenedSessionId)
     }
 
-    /// Scripted ending (`close-session`). Unlike the remote path, no person confirmed
-    /// the close, so it refuses a session that has reported work or is the selected
-    /// tab of the selected project (what the window shows, even while another app is
-    /// in front). `projectId` refuses a session the user has since moved elsewhere.
-    func closeAutomationSession(
-        sessionId: String,
-        projectId: String?
-    ) -> AutomationSessionCloseResult {
+    /// Why a scripted ending (`close-session`) leaves a session alone, or nil for one
+    /// it may end. Unlike the remote path, no person confirmed the close, so it refuses
+    /// a session that has reported work or is the selected tab of the selected project
+    /// (what the window shows, even while another app is in front). `projectId` refuses
+    /// a session the user has since moved elsewhere.
+    func automationCloseRefusal(sessionId: String, projectId: String?) -> AutomationSessionCloseResult? {
         // A failed startup load leaves the in-memory workspace empty, so an absent
         // session is not evidence that it ended.
         guard !isTerminating, !didFailToLoadWorkspaceState, stateLoadFailure == nil else {
@@ -677,7 +675,45 @@ extension AppModel {
             || (selectedProjectId == project.id && project.selectedSessionId == sessionId) {
             return .busy
         }
-        return destroySession(projectId: project.id, sessionId: sessionId) ? .closed : .unavailable
+        return nil
+    }
+
+    func closeAutomationSession(
+        sessionId: String,
+        projectId: String?
+    ) -> AutomationSessionCloseResult {
+        if let refusal = automationCloseRefusal(sessionId: sessionId, projectId: projectId) { return refusal }
+        return closeRemoteSession(sessionId: sessionId) == .closed ? .closed : .unavailable
+    }
+
+    /// The scripted `close-session`. A shell Copilot started and is still waiting on
+    /// shows in no snapshot, so a session those rules would end is first asked what a
+    /// park asks, and no answer counts as busy. A Copilot is asked only when the
+    /// liveness pass has seen it running on this Mac and its tracker takes the
+    /// question. Any other session is judged by the rules alone. Nothing ends after
+    /// `deadline`, when the command's client has stopped waiting and would not hear
+    /// of it.
+    func closeSessionCommand(_ request: ControlRequest, before deadline: Date) async -> ControlResponse {
+        let sessionId = request.sessionId ?? ""
+        let adapter = CLIOperationAdapter(
+            activityDirectory: agentActivityDirectory, resumeMarkerDirectory: resumeMarkerDirectory
+        )
+        let busy = Self.controlResponse(for: AutomationSessionCloseResult.busy)
+        if automationCloseRefusal(sessionId: sessionId, projectId: request.projectId) == nil,
+           parkedState(sessionId) == nil, liveCopilotSessions.contains(sessionId),
+           adapter.loadReceiptBoundSnapshot(sessionId: sessionId, now: { Date() })?
+               .workflow?.capabilities.contains(SessionParking.checkKind) == true {
+            // Refuse input sent through the app while Copilot is asked, as a park does:
+            // a prompt taken meanwhile would end with the session.
+            guard sessionsAskedBeforeClose.insert(sessionId).inserted else { return busy }
+            defer { sessionsAskedBeforeClose.remove(sessionId) }
+            // Copilot can still have started a turn of its own since it answered.
+            guard await trackerConfirmsIdle(sessionId),
+                  idleSnapshot(sessionId, clock: { Date() }) != nil else { return busy }
+        }
+        guard Date() < deadline else { return busy }
+        // The session may have changed while Copilot was being asked.
+        return handle(request)
     }
 
     /// Scripted restart (`restart-session`): hands the session's tracker a request to
@@ -2929,9 +2965,10 @@ extension AppModel {
             return .failure("The session moved to another project.", code: "conflict")
         }
         if parkingBlocksInput(sessionId) {
-            // A session still being parked can't be unparked yet either, so it stays busy.
-            if parkedState(sessionId) == .parking {
-                return .failure("The session is still being parked. Try again in a few seconds.", code: "busy")
+            // A session still being parked can't be unparked yet either, and one a close
+            // is asking about is not parked, so both stay busy.
+            guard let parked = parkedState(sessionId), parked != .parking else {
+                return .failure("The session is being parked or closed. Try again in a few seconds.", code: "busy")
             }
             return .failure("The session is parked. Open it, or run copilot-projects unpark-session "
                 + "--session \(sessionId), then send the prompt again.", code: "parked")

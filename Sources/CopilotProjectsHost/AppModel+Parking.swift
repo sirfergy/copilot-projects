@@ -57,9 +57,11 @@ extension AppModel {
         locateIndex(sessionId).flatMap { projects[$0.p].sessions[$0.s].parked?.state }
     }
 
-    /// True while a session's input is closed for parking, so the caller refuses
-    /// it. Input addressed to a parked session starts its resume.
+    /// True while a session's input is closed for parking, or while a scripted close
+    /// asks whether it is idle, so the caller refuses it. Input addressed to a parked
+    /// session starts its resume.
     func parkingBlocksInput(_ sessionId: String) -> Bool {
+        if sessionsAskedBeforeClose.contains(sessionId) { return true }
         guard let state = parkedState(sessionId) else { return false }
         if state == .parked { resumeParkedSession(sessionId) }
         return true
@@ -98,7 +100,7 @@ extension AppModel {
 
     /// The session's tracker snapshot, read now, when it shows a settled idle
     /// session bound to this tab's own resumable Copilot session.
-    private func idleSnapshot(_ sessionId: String, clock: () -> Date) -> AgentActivitySnapshot? {
+    func idleSnapshot(_ sessionId: String, clock: () -> Date) -> AgentActivitySnapshot? {
         guard let loc = locateIndex(sessionId),
               let snapshot = parkingAdapter.loadFreshSnapshot(sessionId: sessionId, now: clock),
               let workflow = snapshot.workflow, workflow.isFresh(at: clock()),
@@ -242,7 +244,7 @@ extension AppModel {
 
     /// Asks the session's tracker whether it is idle right now. The question
     /// changes nothing in the session, and no answer counts as no.
-    private func trackerConfirmsIdle(_ sessionId: String) async -> Bool {
+    func trackerConfirmsIdle(_ sessionId: String) async -> Bool {
         guard let epoch = parkingAdapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() })?
             .remoteOperationProjection().conversationEpoch else { return false }
         let operation = CLIOperationRequest(operationId: UUID().uuidString, conversationEpoch: epoch)

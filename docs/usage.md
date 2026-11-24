@@ -587,7 +587,8 @@ asked before the relaunch or while the app was closed.
 The terminal footer and the Copilot CLI hooks are not read for status or for sending. Tune the
 process names the agent-process check looks for with `COPILOT_PROJECTS_AGENT_PROCESSES`
 (comma-separated, default `copilot`) or disable the check with `COPILOT_PROJECTS_LIVENESS=0`;
-with it disabled, a missing agent process is never taken as a gone tracker.
+with it disabled, a missing agent process is never taken as a gone tracker, and
+`close-session` asks no Copilot whether it is idle.
 
 Other tools' hooks can still post a banner for the current session:
 
