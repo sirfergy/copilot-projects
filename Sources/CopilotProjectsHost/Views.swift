@@ -776,25 +776,13 @@ struct ProjectRow: View, Equatable {
 
     // Keep one compact status line so changing activity does not move projects.
     @ViewBuilder private var statusLine: some View {
-        let running = project.runningCount
-        let background = project.backgroundWorkCount
-        let scheduled = project.scheduledCount
-        let waiting = project.waitingCount
-        let failed = project.failedCount
         let parked = project.parkedCount
         let descriptions = Self.activityDescriptions(for: project)
         if !descriptions.isEmpty {
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 7) {
-                    if running > 0 { activityCount(running, "waveform", .green) }
-                    if background > 0 { activityCount(background, "sparkles", .purple) }
-                    if scheduled > 0 { activityCount(scheduled, "clock.arrow.circlepath", .indigo) }
-                    if waiting > 0 { activityCount(waiting, "questionmark.bubble.fill", .orange) }
-                    // Same symbol as the session row's failure indicator.
-                    if failed > 0 { activityCount(failed, "exclamationmark.triangle.fill", .red) }
-                    if parked > 0 { activityCount(parked, "moon.zzz.fill", StudioStyle.secondaryText.opacity(0.8)) }
-                }
-                .fixedSize()
+                activityMarks(parked: parked)
+                // Parked is the least urgent, so its mark goes first when the marks do not fit.
+                if parked > 0, descriptions.count > 1 { activityMarks(parked: 0) }
                 Text(descriptions[0]).lineLimit(1)
             }
             .help(descriptions.joined(separator: ", "))
@@ -803,6 +791,24 @@ struct ProjectRow: View, Equatable {
         } else {
             Text("idle")
         }
+    }
+
+    private func activityMarks(parked: Int) -> some View {
+        let running = project.runningCount
+        let background = project.backgroundWorkCount
+        let scheduled = project.scheduledCount
+        let waiting = project.waitingCount
+        let failed = project.failedCount
+        return HStack(spacing: 7) {
+            if running > 0 { activityCount(running, "waveform", .green) }
+            if background > 0 { activityCount(background, "sparkles", .purple) }
+            if scheduled > 0 { activityCount(scheduled, "clock.arrow.circlepath", .indigo) }
+            if waiting > 0 { activityCount(waiting, "questionmark.bubble.fill", .orange) }
+            // Same symbol as the session row's failure indicator.
+            if failed > 0 { activityCount(failed, "exclamationmark.triangle.fill", .red) }
+            if parked > 0 { activityCount(parked, "moon.zzz.fill", StudioStyle.secondaryText.opacity(0.8)) }
+        }
+        .fixedSize()
     }
 
     private func activityCount(_ count: Int, _ symbol: String, _ color: Color) -> some View {
