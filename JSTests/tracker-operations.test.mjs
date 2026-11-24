@@ -158,6 +158,7 @@ class FakeSession {
     this.queueProcessHandler = async () => null;
     this.extensionsReloadHandler = async () => null;
     this.scheduleListHandler = async () => ({ entries: [] });
+    this.taskListHandler = async () => ({ tasks: [] });
     this.userInputHandler = async () => ({ success: true });
     this.elicitationHandler = async () => ({ success: true });
     this.modelSwitchHandler = async (request) => ({
@@ -228,6 +229,7 @@ class FakeSession {
           this.queueProcessCalls.push(params);
           return this.queueProcessHandler(params);
         }
+        if (method === "session.tasks.list") return this.taskListHandler(params);
         this.runtimeCalls.push({ method, ...params });
         if (method === "session.metadata.snapshot") return this.metadataHandler(params);
         if (method === "session.metadata.isProcessing") return this.processingHandler(params);
@@ -4460,6 +4462,83 @@ test("two idle heartbeats end a foreground turn whose idle events never arrive",
   assert.equal(readSnapshot(runtime).idleGeneration, generation + 1);
 });
 
+test("an agent woken after it completed leaves the list once the runtime says it stopped", async (t) => {
+  const runtime = await createRuntime(t);
+  const emit = (...args) => runtime.session.emit(...args);
+  const listed = () => readSnapshot(runtime).activeSubagents.map((agent) => agent.id);
+  // What the CLI logged for 20 agents on Nov 20 and 23: a multi-turn agent
+  // completes, its parent's write_agent wakes it for more turns, and the last
+  // of those ends with no event after it.
+  const child = uuid();
+  let status = "running";
+  let reads = 0;
+  runtime.session.taskListHandler = async () => {
+    reads += 1;
+    return { tasks: [{ type: "agent", id: child, status }] };
+  };
+  await emit("subagent.started", { agentDisplayName: "adv-review-gpt" }, { agentId: child });
+  await emit("assistant.turn_start", { turnId: "0" }, { agentId: child });
+  await emit("assistant.turn_end", { turnId: "0" }, { agentId: child });
+  await emit("subagent.completed", {}, { agentId: child });
+  await heartbeat(runtime);
+  assert.equal(reads, 0, "an agent that completed needs no read");
+  await emit("user.message", { content: "Host follow-up" }, { agentId: child });
+  await emit("assistant.turn_start", { turnId: "0" }, { agentId: child });
+  assert.deepEqual(listed(), [child]);
+
+  // Between two turns of one run the runtime still reports it running.
+  await emit("assistant.turn_end", { turnId: "0" }, { agentId: child });
+  await heartbeat(runtime);
+  assert.equal(reads, 1);
+  assert.deepEqual(listed(), [child]);
+  await emit("assistant.turn_start", { turnId: "1" }, { agentId: child });
+  await heartbeat(runtime);
+  assert.equal(reads, 1, "nor does one inside a turn");
+  await emit("assistant.turn_end", { turnId: "1" }, { agentId: child });
+  status = "idle";
+  await heartbeat(runtime);
+  assert.deepEqual(listed(), []);
+
+  // An answer read before a message woke it again must not hide its new run.
+  let answer;
+  runtime.session.taskListHandler = () => {
+    reads += 1;
+    return new Promise((resolve) => { answer = resolve; });
+  };
+  await emit("assistant.turn_start", { turnId: "0" }, { agentId: child });
+  await emit("assistant.turn_end", { turnId: "0" }, { agentId: child });
+  runtime.intervalCallback();
+  await waitFor(() => answer, "task list read did not start");
+  await heartbeat(runtime);
+  assert.equal(reads, 3, "a read still pending is not sent again");
+  await emit("assistant.turn_start", { turnId: "1" }, { agentId: child });
+  await emit("assistant.turn_end", { turnId: "1" }, { agentId: child });
+  answer({ tasks: [{ type: "agent", id: child, status: "idle" }] });
+  await settled();
+  assert.deepEqual(listed(), [child]);
+});
+
+test("the task list is read for the tracker's own conversation, and once for an agent it leaves out", async (t) => {
+  const runtime = await createRuntime(t);
+  const emit = (...args) => runtime.session.emit(...args);
+  // After /new the SDK's session still names the conversation the tracker left.
+  const next = uuid();
+  runtime.session.foregroundSessionId = next;
+  await emit("session.start", { sessionId: next });
+  await waitFor(() => readSnapshot(runtime).copilotSessionId === next, "owner did not rotate");
+  const asked = [];
+  runtime.session.taskListHandler = async ({ sessionId }) => {
+    asked.push(sessionId);
+    return { tasks: [] };
+  };
+  await emit("assistant.turn_start", { turnId: "0" }, { agentId: "sidekick" });
+  await emit("assistant.turn_end", { turnId: "0" }, { agentId: "sidekick" });
+  await heartbeat(runtime);
+  await heartbeat(runtime);
+  assert.deepEqual(asked, [next]);
+  assert.equal(readSnapshot(runtime).activeSubagents.length, 1);
+});
+
 test("late idle query cannot overwrite a new foreground turn", {
   concurrency: false,
 }, async (t) => {
@@ -4626,7 +4705,7 @@ test("a hung runtime query leaves each heartbeat's liveness publish to its timer
   assert.ok(published.workflow.observedAtMilliseconds < secondTick);
 });
 
-test("a heartbeat armed before shutdown does not write the snapshot back", {
+test("a heartbeat or task-list read armed before shutdown does not write the snapshot back", {
   concurrency: false,
 }, async (t) => {
   let shutdown;
@@ -4640,8 +4719,14 @@ test("a heartbeat armed before shutdown does not write the snapshot back", {
   // Shutdown removes the snapshot, then waits on this RPC before it exits.
   runtime.session.rpc.eventLog.releaseInterest = () => new Promise(() => {});
   runtime.session.processingHandler = () => new Promise(() => {});
+  const child = uuid();
+  let answer;
+  runtime.session.taskListHandler = () => new Promise((resolve) => { answer = resolve; });
+  await runtime.session.emit("assistant.turn_start", { turnId: "0" }, { agentId: child });
+  await runtime.session.emit("assistant.turn_end", { turnId: "0" }, { agentId: child });
   runtime.intervalCallback();
   shutdown();
+  answer({ tasks: [{ type: "agent", id: child, status: "idle" }] });
   assert.equal(realExistsSync(runtime.snapshotPath), false);
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(realExistsSync(runtime.snapshotPath), false);

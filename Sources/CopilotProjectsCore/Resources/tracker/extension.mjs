@@ -326,6 +326,10 @@ if (validSessionId && socketPath) {
     );
     const closeSessionRequestName = `${appSessionId}.close-session-request`;
     const activeSubagents = new Map();
+    // Listed agents whose latest turn has ended, with the event that ended it;
+    // see dropStoppedSubagents.
+    const subagentsBetweenTurns = new Map();
+    let subagentTasksReadGeneration = null;
     // All outstanding structured questions (root and subagent), keyed by
     // requestId. Rebuilt from live events and the runtime's question event
     // log, never resurrected from disk.
@@ -5689,6 +5693,7 @@ if (validSessionId && socketPath) {
     session.on("assistant.turn_start", (event) => {
         if (event.agentId) {
             sessionIdleAtMilliseconds = null;
+            subagentsBetweenTurns.delete(event.agentId);
             if (!activeSubagents.has(event.agentId)) {
                 activeSubagents.set(event.agentId, {
                     id: event.agentId,
@@ -5714,6 +5719,10 @@ if (validSessionId && socketPath) {
         publish();
         if (needsRefresh) refreshRuntimeActivity(true);
         processCloseSessionRequest();
+    });
+
+    session.on("assistant.turn_end", (event) => {
+        if (activeSubagents.has(event.agentId)) subagentsBetweenTurns.set(event.agentId, event);
     });
 
     session.on("assistant.intent", (event) => {
@@ -5841,6 +5850,40 @@ if (validSessionId && socketPath) {
     };
     session.on("subagent.completed", finishSubagent);
     session.on("subagent.failed", finishSubagent);
+
+    // A multi-turn agent reports subagent.completed once, when its first run
+    // goes idle. A message can wake it for more turns, and no event reliably
+    // says when those stop: the task list does. On Nov 20 and 23 that left 20
+    // woken agents listed until the root's next session.idle, one for three days.
+    // The list carries every agent's prompt and result, so it is read only
+    // while a listed agent is between turns.
+    async function dropStoppedSubagents() {
+        for (const id of subagentsBetweenTurns.keys()) {
+            if (!activeSubagents.has(id)) subagentsBetweenTurns.delete(id);
+        }
+        const generation = conversationGeneration;
+        if (subagentsBetweenTurns.size === 0 || subagentTasksReadGeneration === generation) return;
+        subagentTasksReadGeneration = generation;
+        const asked = new Map(subagentsBetweenTurns);
+        try {
+            const { tasks } = await session.connection.sendRequest(
+                "session.tasks.list", { sessionId: copilotSessionId }
+            );
+            const status = new Map(tasks.map((task) => [task.id, task.status]));
+            let dropped = false;
+            for (const [id, turnEnd] of asked) {
+                // An answer may be older than a turn that started or ended during the read.
+                if (status.get(id) === "running" || subagentsBetweenTurns.get(id) !== turnEnd) continue;
+                subagentsBetweenTurns.delete(id);
+                // An agent outside this session's task tree is not in the list: it stays.
+                if (status.has(id) && activeSubagents.delete(id)) dropped = true;
+            }
+            if (dropped && !shuttingDown) publish();
+        } catch {
+        } finally {
+            if (subagentTasksReadGeneration === generation) subagentTasksReadGeneration = null;
+        }
+    }
 
     // Clear stale answer state before any new question can be published, and
     // establish the watcher before exposing questions so the first host answer
@@ -6040,6 +6083,7 @@ if (validSessionId && socketPath) {
         const questionRecovery = recoverQuestionsBounded();
         refreshRuntimeActivity(false, { heartbeat: true });
         refreshSchedules();
+        dropStoppedSubagents();
         refreshModels();
         refreshWorkflow();
         processUserInputResponse();
