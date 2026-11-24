@@ -507,6 +507,7 @@ extension Project {
     var backgroundWorkCount: Int { sessions.filter(\.hasBackgroundWork).count }
     var scheduledCount: Int { sessions.filter { !$0.schedules.isEmpty }.count }
     var failedCount: Int { sessions.filter { $0.failedRequest != nil }.count }
+    var parkedCount: Int { sessions.filter { $0.parked?.state == .parked }.count }
     var hasUnread: Bool { sessions.contains { $0.isUnread } }
     var hasBackgroundWork: Bool { backgroundWorkCount > 0 }
 

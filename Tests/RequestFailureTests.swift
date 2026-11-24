@@ -206,6 +206,26 @@ final class RequestFailureTests: XCTestCase {
         XCTAssertEqual(descriptions([Session(title: "idle", cwd: "/tmp")]), [])
     }
 
+    func testProjectRowCountsOnlyParkedSessionsAndRedraws() {
+        var session = Session(title: "session", cwd: "/tmp")
+        let idle = Project(name: "P", cwd: "/tmp", sessions: [session])
+        for state in [ParkedSession.State.parking, .resuming, .failed] {
+            session.parked = ParkedSession(state: state, sinceMilliseconds: 1)
+            let project = Project(name: "P", cwd: "/tmp", sessions: [session])
+            XCTAssertEqual(project.parkedCount, 0)
+            XCTAssertEqual(ProjectRow.activityDescriptions(for: project), [])
+        }
+        session.parked = ParkedSession(state: .parked, sinceMilliseconds: 1)
+        var parked = idle
+        parked.sessions = [session]
+        XCTAssertEqual(ProjectRow.activityDescriptions(for: parked), ["1 parked"])
+        XCTAssertNotEqual(ProjectRow(project: idle), ProjectRow(project: parked))
+        var running = Session(title: "running", cwd: "/tmp")
+        running.status = .running
+        parked.sessions = [session, running, session]
+        XCTAssertEqual(ProjectRow.activityDescriptions(for: parked), ["1 running", "2 parked"])
+    }
+
     @MainActor
     func testProjectRowDrawsTheRedFailureSymbol() throws {
         var failed = Session(title: "failed", cwd: "/tmp")
