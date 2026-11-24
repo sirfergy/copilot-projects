@@ -496,6 +496,19 @@ must be restarted with that profile; relaunching the app only reattaches their d
 Independent of that local rendering, each terminal session bounds-checks and retains the same
 Kitty-transmitted PNGs (fail-closed on anything outside the exact subset Copilot CLI emits).
 
+A new Copilot session, on this Mac or another host, is started with `--model` and
+`--reasoning-effort` set to the default model and effort saved in the CLI's `settings.json` on
+this Mac (`model` and `effortLevel`, which `/model --global <id>` saves). Started without them,
+a session takes an organization's default model in place of the saved one. Because they are
+given at launch, they also take the place of a repository's default model (`/model --repo` or
+`--local`). Nothing is passed when no model is saved, which includes a saved model that is the
+CLI's own default, when it is `auto`, or when `modelProviderId` names a provider other than
+`copilot`. A resumed session keeps the model it had.
+
+If the saved model is not available, or does not offer the saved effort, Copilot prints why and
+does not start. Save a model and effort that work, then start a new session: the tab that
+failed keeps the arguments it was started with.
+
 The companion Copilot extension records completed root turns through the supported Copilot SDK
 event API. It atomically writes a bounded per-tab transcript snapshot after each turn, including
 stopped turns, failed requests with the CLI's error message, and compact tool summaries but

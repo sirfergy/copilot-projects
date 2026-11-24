@@ -34,11 +34,28 @@ public struct CopilotSessionStore: Sendable {
         (copilotHome as NSString).appendingPathComponent("session-store.db")
     }
 
-    public func trackerWarningMessage() -> String {
+    private func settings() -> [String: Any]? {
         let url = URL(fileURLWithPath: (copilotHome as NSString).appendingPathComponent("settings.json"))
-        guard let data = try? Data(contentsOf: url),
-              let root = (try? JSONSerialization.jsonObject(with: data, options: [.json5Allowed])) as? [String: Any]
-        else { return RemoteSessionSnapshot.experimentalOffWarning }
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data, options: [.json5Allowed])) as? [String: Any]
+    }
+
+    /// `--model` and `--reasoning-effort` with the default model and effort saved in the
+    /// CLI's settings, to start a new session with. A session started without them takes
+    /// an organization's default model in place of the saved one. Empty when no model is
+    /// saved, when it is `auto`, or when a provider other than Copilot serves it. The
+    /// effort is passed only with a model: Copilot refuses one for `auto`.
+    public func modelArguments() -> [String] {
+        guard let root = settings(),
+              let model = root["model"] as? String, !model.isEmpty, model != "auto",
+              (root["modelProviderId"] as? String ?? "copilot") == "copilot"
+        else { return [] }
+        guard let effort = root["effortLevel"] as? String, !effort.isEmpty else { return ["--model", model] }
+        return ["--model", model, "--reasoning-effort", effort]
+    }
+
+    public func trackerWarningMessage() -> String {
+        guard let root = settings() else { return RemoteSessionSnapshot.experimentalOffWarning }
         if let ext = (root["enabledFeatureFlags"] as? [String: Any])?["EXTENSIONS"] as? Bool {
             return ext
                 ? RemoteSessionSnapshot.trackerStoppedWarning

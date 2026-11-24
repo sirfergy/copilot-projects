@@ -31,6 +31,25 @@ final class CopilotSessionStoreTests: XCTestCase {
         XCTAssertNil(store.directory(for: ""))
     }
 
+    func testANewSessionIsStartedOnTheSavedCopilotModel() throws {
+        let store = CopilotSessionStore(environment: ["COPILOT_HOME": root.path], home: "/h")
+        XCTAssertEqual(store.modelArguments(), [], "no settings file")
+        let cases: [(settings: String, arguments: [String])] = [
+            ("// saved by /model\n{\"model\": \"fixture-model\", \"effortLevel\": \"high\"}",
+             ["--model", "fixture-model", "--reasoning-effort", "high"]),
+            (#"{"model": "fixture-model", "modelProviderId": "copilot"}"#, ["--model", "fixture-model"]),
+            (#"{"model": "fixture-model", "modelProviderId": "ollama", "effortLevel": "high"}"#, []),
+            (#"{"model": "auto", "effortLevel": "high"}"#, []),
+            (#"{"model": ""}"#, []),
+            (#"{"effortLevel": "high"}"#, []),
+            ("{", []),
+        ]
+        for (settings, arguments) in cases {
+            try Data(settings.utf8).write(to: root.appendingPathComponent("settings.json"))
+            XCTAssertEqual(store.modelArguments(), arguments, settings)
+        }
+    }
+
     func testOnlyAStrictUUIDIsASessionIdToResume() {
         XCTAssertTrue(CopilotSessionStore.isValidSessionId("0f1e2d3c-4b5a-4000-8000-000000000001"))
         XCTAssertTrue(CopilotSessionStore.isValidSessionId("0F1E2D3C-4B5A-4000-8000-000000000001"))

@@ -489,6 +489,8 @@ final class AppModel: ObservableObject {
     /// unavailable/invalid outcomes without touching the real filesystem.
     let remoteCopilotExecutable: () -> String?
     let remoteWrapperExecutable: () -> String?
+    /// The model a new session's Copilot is started on; see `CopilotSessionStore.modelArguments()`.
+    let copilotModelArguments: () -> [String]
     let remoteReposDirectory: () -> String?
     let remoteSessionBackendAvailable: () -> Bool
     let availableHostsProvider: () -> [RemoteHostInfo]
@@ -553,6 +555,7 @@ final class AppModel: ObservableObject {
             ((String) -> RemoteElicitationTerminalTarget?)? = nil,
         remoteCopilotExecutable: @escaping () -> String? = { Paths.copilotExecutable },
         remoteWrapperExecutable: @escaping () -> String? = { Paths.remoteCopilotWrapperExecutable },
+        copilotModelArguments: @escaping () -> [String] = { CopilotSessionStore().modelArguments() },
         remoteReposDirectory: @escaping () -> String? = { Paths.reposDirectory },
         remoteSessionBackendAvailable: @escaping () -> Bool = {
             Paths.dtachExecutable != nil
@@ -614,6 +617,7 @@ final class AppModel: ObservableObject {
         self.remoteElicitationTarget = remoteElicitationTarget
         self.remoteCopilotExecutable = remoteCopilotExecutable
         self.remoteWrapperExecutable = remoteWrapperExecutable
+        self.copilotModelArguments = copilotModelArguments
         self.remoteReposDirectory = remoteReposDirectory
         self.remoteSessionBackendAvailable = remoteSessionBackendAvailable
         self.availableHostsProvider = availableHostsProvider ?? {
@@ -1025,6 +1029,7 @@ final class AppModel: ObservableObject {
                 ?? ((recordedCopilot?.isEmpty == false) ? recordedCopilot : nil),
             launchCopilotExecutable: copilotExecutable,
             launchCopilotInitialPrompt: launchCopilotInitialPrompt,
+            launchCopilotModelArguments: copilotExecutable == nil ? [] : copilotModelArguments(),
             remoteHost: resolvedRemoteHost(for: session),
             remoteWrapperExecutable: remoteWrapperExecutable(),
             kittyImageDiskStore: kittyImageDiskStore
