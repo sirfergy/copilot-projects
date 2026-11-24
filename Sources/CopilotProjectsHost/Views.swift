@@ -703,6 +703,7 @@ struct ProjectRow: View, Equatable {
             && lhs.project.scheduledCount == rhs.project.scheduledCount
             && lhs.project.waitingCount == rhs.project.waitingCount
             && lhs.project.failedCount == rhs.project.failedCount
+            && lhs.project.parkedCount == rhs.project.parkedCount
     }
 
     var body: some View {
@@ -769,7 +770,7 @@ struct ProjectRow: View, Equatable {
         [
             (project.waitingCount, "waiting for input"), (project.failedCount, "failed"),
             (project.runningCount, "running"), (project.backgroundWorkCount, "background"),
-            (project.scheduledCount, "scheduled"),
+            (project.scheduledCount, "scheduled"), (project.parkedCount, "parked"),
         ].filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }
     }
 
@@ -780,6 +781,7 @@ struct ProjectRow: View, Equatable {
         let scheduled = project.scheduledCount
         let waiting = project.waitingCount
         let failed = project.failedCount
+        let parked = project.parkedCount
         let descriptions = Self.activityDescriptions(for: project)
         if !descriptions.isEmpty {
             ViewThatFits(in: .horizontal) {
@@ -790,6 +792,7 @@ struct ProjectRow: View, Equatable {
                     if waiting > 0 { activityCount(waiting, "questionmark.bubble.fill", .orange) }
                     // Same symbol as the session row's failure indicator.
                     if failed > 0 { activityCount(failed, "exclamationmark.triangle.fill", .red) }
+                    if parked > 0 { activityCount(parked, "moon.zzz.fill", StudioStyle.secondaryText.opacity(0.8)) }
                 }
                 .fixedSize()
                 Text(descriptions[0]).lineLimit(1)
