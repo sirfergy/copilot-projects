@@ -1130,7 +1130,20 @@ final class AppModel: ObservableObject {
         syncMenuState(includeRuntimeAttention: true)
     }
 
+    private var isMainMenuTracking = false
+
+    func beginMainMenuTracking() {
+        syncMenuState(reloadSSHHosts: true, includeRuntimeAttention: true)
+        isMainMenuTracking = true
+    }
+
+    func endMainMenuTracking() {
+        isMainMenuTracking = false
+        syncMenuState(reloadSSHHosts: true, includeRuntimeAttention: true)
+    }
+
     func syncMenuState(reloadSSHHosts: Bool = false, includeRuntimeAttention: Bool = false) {
+        guard !isMainMenuTracking else { return }
         guard projectPublicationBatchDepth == 0 else {
             workingModelsSyncNeeded = true
             return

@@ -380,7 +380,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] note in
             MainActor.assumeIsolated {
                 guard let self, (note.object as? NSMenu) === NSApp.mainMenu else { return }
-                self.model.syncMenuState(reloadSSHHosts: true, includeRuntimeAttention: true)
+                self.model.beginMainMenuTracking()
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, (note.object as? NSMenu) === NSApp.mainMenu else { return }
+                self.model.endMainMenuTracking()
             }
         }
 

@@ -1542,6 +1542,113 @@ final class AppModelTests: XCTestCase {
         }
     }
 
+    func testWorkspaceMenuSnapshotDuringTrackerActivity() throws {
+        try withTempStateDirectory { root in
+            let selected = Session(title: "Selected", cwd: root.path)
+            let background = Session(title: "Background", cwd: root.path)
+            let closing = Session(title: "Closing", cwd: root.path)
+            let project = Project(name: "Alpha", cwd: root.path, sessions: [selected, background, closing],
+                                  selectedSessionId: selected.id)
+            let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+            try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+            let model = AppModel(
+                stateRepository: repository, isAppActive: { false },
+                agentActivityDirectory: root, resumeMarkerDirectory: root,
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} }, forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                model.forcePendingSessionDestroys()
+                model.detachAllClients()
+            }
+            let now = Date()
+            func tracker(_ processing: Bool, age: TimeInterval = 1) -> AgentActivitySnapshot {
+                var snapshot = AgentActivitySnapshot.tracker(processing: processing, age: age, at: now)
+                snapshot.workflow = RemoteSessionWorkflow(
+                    observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+                    capabilities: ["session-restart"], sendReady: !processing, restartRequested: false
+                )
+                return snapshot
+            }
+            try model.publishTracker(tracker(false), sessionId: selected.id, now: now)
+            model.syncMenuState(includeRuntimeAttention: true)
+            XCTAssertTrue(model.menuState.snapshot.selectedSessionCanRestart)
+            try model.publishTracker(tracker(true), sessionId: selected.id, now: now)
+            XCTAssertTrue(model.menuState.snapshot.selectedSessionCanRestart)
+
+            var previous = model.menuState.snapshot
+            var changes: [[String]] = []
+            let cancellable = model.menuState.$snapshot.dropFirst().sink { snapshot in
+                let before = Array(Mirror(reflecting: previous).children)
+                let after = Array(Mirror(reflecting: snapshot).children)
+                let names = zip(before, after).compactMap { old, new in
+                    String(reflecting: old.value) == String(reflecting: new.value) ? nil : (new.label ?? "?")
+                }
+                changes.append(names)
+                previous = snapshot
+            }
+            defer { withExtendedLifetime(cancellable) {} }
+
+            model.beginMainMenuTracking()
+            XCTAssertEqual(changes, [["selectedSessionCanRestart"]])
+            XCTAssertFalse(model.menuState.snapshot.selectedSessionCanRestart)
+            changes.removeAll()
+            try model.publishTracker(tracker(true), sessionId: background.id, now: now)
+            var toolActivity = tracker(true, age: 2)
+            toolActivity.currentIntent = "Running a tool"
+            try model.publishTracker(toolActivity, sessionId: selected.id, now: now)
+            model.refreshAgentActivitySnapshots(now: now.addingTimeInterval(30))
+            try model.publishTracker(tracker(false), sessionId: selected.id, now: now)
+            model.postCompletionIfReady(sessionId: selected.id)
+            XCTAssertTrue(model.projects[0].sessions[0].finishedUnseen)
+            model.markActiveSessionSeen()
+            try model.publishTracker(tracker(false), sessionId: background.id, now: now)
+            model.postCompletionIfReady(sessionId: background.id)
+            XCTAssertTrue(model.hasAttentionSessions)
+            XCTAssertNil(model.restartBlockedReason(sessionId: selected.id))
+            XCTAssertTrue(model.destroySession(projectId: project.id, sessionId: closing.id))
+            XCTAssertTrue(model.canReopenClosedSession)
+            model.setAutoDiscoverSSHHosts(false)
+            XCTAssertEqual(changes, [], "Unexpected menu snapshot fields: \(changes)")
+
+            model.endMainMenuTracking()
+            XCTAssertEqual(changes.map(Set.init), [Set([
+                "selectedSessionCanRestart", "hasAttentionSessions", "recentlyClosedSessionItems",
+                "autoDiscoverSSHHosts",
+            ])])
+            XCTAssertTrue(model.menuState.snapshot.selectedSessionCanRestart)
+            XCTAssertTrue(model.menuState.snapshot.hasAttentionSessions)
+            XCTAssertEqual(model.menuState.snapshot.recentlyClosedSessionItems.map(\.id), [closing.id])
+            XCTAssertFalse(model.menuState.snapshot.autoDiscoverSSHHosts)
+
+            changes.removeAll()
+            model.toggleSelectedSessionRead()
+            XCTAssertEqual(changes, [["selectedSessionOffersMarkAsRead"]])
+        }
+    }
+
+    func testWorkspaceSheetStillPublishesWhileMainMenuTracks() throws {
+        try withTempStateDirectory { root in
+            let model = AppModel(
+                stateRepository: StateRepository(path: root.appendingPathComponent("state.json")),
+                agentActivityDirectory: root, resumeMarkerDirectory: root
+            )
+            defer { model.detachAllClients() }
+            let input = WorkspaceInputController(model: model, sessionRanker: OfflineRanker())
+            model.beginMainMenuTracking()
+            var publications = 0
+            let cancellable = model.menuState.objectWillChange.sink { publications += 1 }
+            defer { withExtendedLifetime(cancellable) {} }
+
+            input.presentReleaseNotes()
+            XCTAssertTrue(model.menuState.snapshot.hasWorkspaceSheet)
+            input.showsReleaseNotes = false
+            XCTAssertFalse(model.menuState.snapshot.hasWorkspaceSheet)
+            XCTAssertEqual(publications, 2)
+            model.endMainMenuTracking()
+        }
+    }
+
     func testWorkspaceMenuStateIgnoresUnrelatedModelPublishesAndTracksMenuChanges() throws {
         try withTempStateDirectory { root in
             let s1 = Session(title: "Active", cwd: root.path)
