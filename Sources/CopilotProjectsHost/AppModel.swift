@@ -190,7 +190,11 @@ final class AppModel: ObservableObject {
                 title: request.title ?? "Copilot",
                 prompt: prompt,
                 hostId: request.hostId,
-                parentSessionId: request.parentSessionId
+                parentSessionId: request.parentSessionId,
+                model: request.model.map {
+                    RemoteModelSelection(
+                        modelId: $0, reasoningEffort: request.reasoningEffort, contextTier: request.contextTier)
+                }
             ))
         },
         closeSession: { [unowned self] request in
@@ -324,9 +328,11 @@ final class AppModel: ObservableObject {
         let createdAt: Date
     }
     var sentPullRequestsPrompts: [UUID: SentPullRequestsPrompt] = [:]
-    /// The Copilot session each captured launch resumes, by tab. Launches are
-    /// captured only when `remoteSessionLauncher` is set, in tests.
+    /// The Copilot session each captured launch resumes, and the model each starts
+    /// with, by tab. Launches are captured only when `remoteSessionLauncher` is set,
+    /// in tests.
     private(set) var capturedResumeLaunches: [String: String] = [:]
+    private(set) var capturedLaunchModels: [String: RemoteModelSelection] = [:]
     var stateLoadFailure: String?
     var didFailToLoadWorkspaceState = false
     /// Only a cleanly loaded state file lists every tab that may still own files;
@@ -489,8 +495,9 @@ final class AppModel: ObservableObject {
     /// unavailable/invalid outcomes without touching the real filesystem.
     let remoteCopilotExecutable: () -> String?
     let remoteWrapperExecutable: () -> String?
-    /// The model a new session's Copilot is started on; see `CopilotSessionStore.modelArguments()`.
-    let copilotModelArguments: () -> [String]
+    /// The model a new Copilot session starts on when its launch names none; see
+    /// `CopilotSessionStore.savedModel(environment:)`.
+    let savedCopilotModel: () -> RemoteModelSelection?
     let remoteReposDirectory: () -> String?
     let remoteSessionBackendAvailable: () -> Bool
     let availableHostsProvider: () -> [RemoteHostInfo]
@@ -555,7 +562,7 @@ final class AppModel: ObservableObject {
             ((String) -> RemoteElicitationTerminalTarget?)? = nil,
         remoteCopilotExecutable: @escaping () -> String? = { Paths.copilotExecutable },
         remoteWrapperExecutable: @escaping () -> String? = { Paths.remoteCopilotWrapperExecutable },
-        copilotModelArguments: @escaping () -> [String] = { CopilotSessionStore().modelArguments() },
+        savedCopilotModel: @escaping () -> RemoteModelSelection? = { CopilotSessionStore().savedModel() },
         remoteReposDirectory: @escaping () -> String? = { Paths.reposDirectory },
         remoteSessionBackendAvailable: @escaping () -> Bool = {
             Paths.dtachExecutable != nil
@@ -617,7 +624,7 @@ final class AppModel: ObservableObject {
         self.remoteElicitationTarget = remoteElicitationTarget
         self.remoteCopilotExecutable = remoteCopilotExecutable
         self.remoteWrapperExecutable = remoteWrapperExecutable
-        self.copilotModelArguments = copilotModelArguments
+        self.savedCopilotModel = savedCopilotModel
         self.remoteReposDirectory = remoteReposDirectory
         self.remoteSessionBackendAvailable = remoteSessionBackendAvailable
         self.availableHostsProvider = availableHostsProvider ?? {
@@ -703,6 +710,9 @@ final class AppModel: ObservableObject {
                 return { [weak self] in
                     await self?.closeSessionCommand(req, before: deadline) ?? .failure("app shutting down")
                 }
+            }
+            if req.command == "list-session-models" || req.command == "set-session-model" {
+                return { [weak self] in await self?.sessionModelCommand(req) ?? .failure("app shutting down") }
             }
             guard req.command == "park-session" || req.command == "unpark-session" else { return nil }
             return { [weak self] in await self?.parkingCommand(req) ?? .failure("app shutting down") }
@@ -1001,6 +1011,7 @@ final class AppModel: ObservableObject {
         resumeRecordedSession: Bool = true,
         copilotExecutable: String? = nil,
         launchCopilotInitialPrompt: String? = nil,
+        launchCopilotModel: RemoteModelSelection? = nil,
         resumeCopilotSessionId: String? = nil
     ) -> TerminalController? {
         if let c = controllers[sessionId] { return c }
@@ -1029,7 +1040,7 @@ final class AppModel: ObservableObject {
                 ?? ((recordedCopilot?.isEmpty == false) ? recordedCopilot : nil),
             launchCopilotExecutable: copilotExecutable,
             launchCopilotInitialPrompt: launchCopilotInitialPrompt,
-            launchCopilotModelArguments: copilotExecutable == nil ? [] : copilotModelArguments(),
+            launchCopilotModel: launchCopilotModel ?? (copilotExecutable == nil ? nil : savedCopilotModel()),
             remoteHost: resolvedRemoteHost(for: session),
             remoteWrapperExecutable: remoteWrapperExecutable(),
             kittyImageDiskStore: kittyImageDiskStore
@@ -1135,11 +1146,23 @@ final class AppModel: ObservableObject {
         syncMenuState(includeRuntimeAttention: true)
     }
 
+    /// True while the menu bar is open. A publish then rebuilds every menu and closes
+    /// the open submenu, so what was judged as it opened stands until it closes.
+    private var mainMenuIsOpen = false
+
+    /// The menu bar opened or closed. Either way its values are judged now.
+    func mainMenuTracking(_ tracking: Bool) {
+        mainMenuIsOpen = false
+        syncMenuState(reloadSSHHosts: true, includeRuntimeAttention: true)
+        mainMenuIsOpen = tracking
+    }
+
     func syncMenuState(reloadSSHHosts: Bool = false, includeRuntimeAttention: Bool = false) {
         guard projectPublicationBatchDepth == 0 else {
             workingModelsSyncNeeded = true
             return
         }
+        guard !mainMenuIsOpen else { return }
         var next = menuState.snapshot
         if reloadSSHHosts {
             let config = SSHHostCatalog.loadConfiguration(statePath: stateRepository.path)
@@ -1852,17 +1875,20 @@ final class AppModel: ObservableObject {
         executable: String?,
         initialPrompt: String?,
         resumeRecordedSession: Bool = true,
-        resumeCopilotSessionId: String? = nil
+        resumeCopilotSessionId: String? = nil,
+        model: RemoteModelSelection? = nil
     ) {
         if let remoteSessionLauncher {
             remoteSessionLauncher(sessionId, executable, initialPrompt)
             if let resumeCopilotSessionId { capturedResumeLaunches[sessionId] = resumeCopilotSessionId }
+            if let model { capturedLaunchModels[sessionId] = model }
         } else {
             controller(
                 for: sessionId,
                 resumeRecordedSession: resumeRecordedSession,
                 copilotExecutable: executable,
                 launchCopilotInitialPrompt: initialPrompt,
+                launchCopilotModel: model,
                 resumeCopilotSessionId: resumeCopilotSessionId
             )
         }

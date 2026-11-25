@@ -1542,6 +1542,143 @@ final class AppModelTests: XCTestCase {
         }
     }
 
+    func testMenuBarHoldsModelPublishesWhileOpenAndSyncsOnceWhenItCloses() throws {
+        try withTempStateDirectory { root in
+            let selected = Session(title: "Selected", cwd: root.path)
+            let background = Session(title: "Background", cwd: root.path)
+            let closing = Session(title: "Closing", cwd: root.path)
+            let project = Project(name: "Alpha", cwd: root.path, sessions: [selected, background, closing],
+                                  selectedSessionId: selected.id)
+            let repository = StateRepository(path: root.appendingPathComponent("state.json"))
+            try repository.save(PersistedState(projects: [project], selectedProjectId: project.id))
+            // The app is in front, as it is whenever its menu bar is open.
+            let model = AppModel(
+                stateRepository: repository, isAppActive: { true },
+                agentActivityDirectory: root, resumeMarkerDirectory: root,
+                kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("images")),
+                gracefulSessionDestroyer: { _, _ in Task {} }, forcedSessionDestroyer: { _ in }
+            )
+            defer {
+                model.forcePendingSessionDestroys()
+                model.detachAllClients()
+            }
+            let now = Date()
+            func tracker(_ processing: Bool) -> AgentActivitySnapshot {
+                var snapshot = AgentActivitySnapshot.tracker(processing: processing, at: now)
+                snapshot.workflow = RemoteSessionWorkflow(
+                    observedAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+                    capabilities: ["session-restart"], sendReady: !processing, restartRequested: false
+                )
+                return snapshot
+            }
+            // Every publication of the menu's snapshot, as the names of the fields it changed.
+            var previous = model.menuState.snapshot
+            var changes: [[String]] = []
+            let cancellable = model.menuState.$snapshot.dropFirst().sink { snapshot in
+                let before = Array(Mirror(reflecting: previous).children)
+                let after = Array(Mirror(reflecting: snapshot).children)
+                changes.append(zip(before, after).compactMap { old, new in
+                    String(reflecting: old.value) == String(reflecting: new.value) ? nil : new.label
+                })
+                previous = snapshot
+            }
+            defer { withExtendedLifetime(cancellable) {} }
+
+            // The menu bar opens on an idle session: its values are judged then.
+            try model.publishTracker(tracker(false), sessionId: selected.id, now: now)
+            XCTAssertEqual(changes, [])
+            model.mainMenuTracking(true)
+            XCTAssertEqual(changes, [["selectedSessionCanRestart"]])
+            XCTAssertTrue(model.menuState.snapshot.selectedSessionCanRestart)
+            changes.removeAll()
+
+            // While it is open, the selected session starts a turn, a background session
+            // finishes off screen, another session ends and an SSH setting changes. None
+            // of it reaches the menu.
+            try model.publishTracker(tracker(true), sessionId: selected.id, now: now)
+            try model.finishTurn(sessionId: background.id)
+            XCTAssertTrue(model.hasAttentionSessions)
+            XCTAssertNotNil(model.restartBlockedReason(sessionId: selected.id))
+            XCTAssertTrue(model.destroySession(projectId: project.id, sessionId: closing.id))
+            model.setAutoDiscoverSSHHosts(false)
+            XCTAssertEqual(changes, [])
+
+            // It closes: one publication, with what is true now.
+            model.mainMenuTracking(false)
+            XCTAssertEqual(changes.map(Set.init), [[
+                "selectedSessionCanRestart", "hasAttentionSessions", "recentlyClosedSessionItems",
+                "autoDiscoverSSHHosts",
+            ]])
+            XCTAssertFalse(model.menuState.snapshot.selectedSessionCanRestart)
+            XCTAssertTrue(model.menuState.snapshot.hasAttentionSessions)
+            XCTAssertEqual(model.menuState.snapshot.recentlyClosedSessionItems.map(\.id), [closing.id])
+            XCTAssertFalse(model.menuState.snapshot.autoDiscoverSSHHosts)
+
+            // With the menu bar closed a change is published at once, as before.
+            changes.removeAll()
+            model.toggleSelectedSessionRead()
+            XCTAssertEqual(changes, [["selectedSessionOffersMarkAsRead"]])
+
+            // An opening always judges, even when the last closing was never reported.
+            model.mainMenuTracking(true)
+            model.toggleSelectedSessionRead()
+            XCTAssertEqual(changes.count, 1)
+            model.mainMenuTracking(true)
+            XCTAssertEqual(changes.count, 2)
+        }
+    }
+
+    func testWorkspaceSheetIsPublishedAtOnceWhileTheMenuBarIsOpen() throws {
+        try withTempStateDirectory { root in
+            let model = AppModel(
+                stateRepository: StateRepository(path: root.appendingPathComponent("state.json")),
+                agentActivityDirectory: root, resumeMarkerDirectory: root
+            )
+            defer { model.detachAllClients() }
+            let input = WorkspaceInputController(model: model, sessionRanker: OfflineRanker())
+            model.mainMenuTracking(true)
+            var publications = 0
+            let cancellable = model.menuState.objectWillChange.sink { publications += 1 }
+            defer { withExtendedLifetime(cancellable) {} }
+
+            input.presentReleaseNotes()
+            XCTAssertTrue(model.menuState.snapshot.hasWorkspaceSheet)
+            input.showsReleaseNotes = false
+            XCTAssertFalse(model.menuState.snapshot.hasWorkspaceSheet)
+            XCTAssertEqual(publications, 2)
+        }
+    }
+
+    func testNotificationsCountIsNotReadWhileAMenuIsOpen() throws {
+        try withTempStateDirectory { root in
+            let url = root.appendingPathComponent("notifications-summary.json")
+            func publish(needsYou: Int) throws {
+                try NotificationsSummary(
+                    needsYou: needsYou, toYou: needsYou, viaTeams: 0, watching: 0, updatedAt: Date()
+                ).write(to: url)
+            }
+            try publish(needsYou: 1)
+            let watcher = NotificationsSummaryWatcher(url: url)
+            watcher.start(interval: 0.01)
+            XCTAssertEqual(watcher.needsYou, 1)
+            try publish(needsYou: 2)
+
+            // An open menu is tracked in the event-tracking mode: the count is not read there.
+            let menuCloses = Date().addingTimeInterval(0.1)
+            while Date() < menuCloses {
+                _ = RunLoop.main.run(mode: .eventTracking, before: menuCloses)
+            }
+            XCTAssertEqual(watcher.needsYou, 1)
+
+            // Once the menu closes the run loop is back in the default mode, and it is.
+            let giveUp = Date().addingTimeInterval(30)
+            while watcher.needsYou != 2, Date() < giveUp {
+                _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            }
+            XCTAssertEqual(watcher.needsYou, 2)
+        }
+    }
+
     func testWorkspaceMenuStateIgnoresUnrelatedModelPublishesAndTracksMenuChanges() throws {
         try withTempStateDirectory { root in
             let s1 = Session(title: "Active", cwd: root.path)

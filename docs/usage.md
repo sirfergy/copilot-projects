@@ -496,15 +496,16 @@ must be restarted with that profile; relaunching the app only reattaches their d
 Independent of that local rendering, each terminal session bounds-checks and retains the same
 Kitty-transmitted PNGs (fail-closed on anything outside the exact subset Copilot CLI emits).
 
-A new Copilot session, on this Mac or another host, is started with `--model` and
-`--reasoning-effort` set to the default model and effort saved in the CLI's `settings.json` on
-this Mac (`model` and `effortLevel`, as the `/model` picker saves them). Started without them,
-a session takes an organization's default model in place of the saved one. Because they are
-given at launch, they also take the place of a repository's default model, effort and context
-tier (`/model --repo` or `--local`). Nothing is passed when no model is saved, which includes a
-saved model that is the CLI's own default; when it is `auto`; when `modelProviderId` names a
-provider other than `copilot`; or when the app's environment sets `COPILOT_MODEL` or
-`COPILOT_PROVIDER_BASE_URL`. A resumed session keeps the model it had.
+A new Copilot session whose launch names no model, on this Mac or another host, is started
+with `--model` and `--reasoning-effort` set to the default model and effort saved in the CLI's
+`settings.json` on this Mac (`model` and `effortLevel`, as the `/model` picker saves them).
+`new-copilot-session --model` names one, and that is used instead. Started without a model, a
+session takes an organization's default model in place of the saved one. Because they are
+given at launch, the flags also take the place of a repository's default model, effort and
+context tier (`/model --repo` or `--local`). Nothing is passed when no model is saved, which
+includes a saved model that is the CLI's own default; when it is `auto`; when
+`modelProviderId` names a provider other than `copilot`; or when the app's environment sets
+`COPILOT_MODEL` or `COPILOT_PROVIDER_BASE_URL`. A resumed session keeps the model it had.
 
 If the saved model is not available, Copilot says so when it starts and does not run the
 session's prompt. An effort the saved model does not offer is refused the same way or not

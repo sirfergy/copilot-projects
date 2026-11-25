@@ -169,7 +169,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
          dtachExecutable: String?, dtachSocket: String?, copilotSessionId: String? = nil,
          launchCopilotExecutable: String? = nil,
          launchCopilotInitialPrompt: String? = nil,
-         launchCopilotModelArguments: [String] = [],
+         launchCopilotModel: RemoteModelSelection? = nil,
          remoteHost: RemoteHostInfo? = nil,
          remoteWrapperExecutable: String? = Paths.remoteCopilotWrapperExecutable,
          kittyImageDiskStore: RemoteKittyImageDiskStore = .shared,
@@ -224,7 +224,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
                        copilotSessionId: copilotSessionId,
                        launchCopilotExecutable: launchCopilotExecutable,
                        launchCopilotInitialPrompt: launchCopilotInitialPrompt,
-                       launchCopilotModelArguments: launchCopilotModelArguments,
+                       launchCopilotModel: launchCopilotModel,
                        remoteHost: remoteHost,
                        remoteWrapperExecutable: remoteWrapperExecutable)
         }
@@ -269,7 +269,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
                        copilotSessionId: String? = nil,
                        launchCopilotExecutable: String? = nil,
                        launchCopilotInitialPrompt: String? = nil,
-                       launchCopilotModelArguments: [String],
+                       launchCopilotModel: RemoteModelSelection? = nil,
                        remoteHost: RemoteHostInfo? = nil,
                        remoteWrapperExecutable: String? = Paths.remoteCopilotWrapperExecutable) {
         let processEnv = ProcessInfo.processInfo.environment
@@ -321,10 +321,10 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
             let script: String
             if let wrapper = remoteWrapper {
                 let arguments = Self.remoteWrapperArguments(
-                    copilotSessionId: validCopilotSessionId,
+                    resumeSessionId: validCopilotSessionId,
                     launchesCopilot: launchCopilotExecutable != nil,
                     initialPrompt: launchCopilotInitialPrompt,
-                    modelArguments: launchCopilotModelArguments
+                    model: launchCopilotModel
                 )
                 let command = Self.profiledCopilotCommand(wrapper, arguments: arguments)
                 let postExit = (launchCopilotExecutable != nil || validCopilotSessionId != nil)
@@ -343,7 +343,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
                 resumeCopilotExecutable: launchCopilotExecutable ?? Paths.copilotExecutable,
                 launchCopilotExecutable: launchCopilotExecutable,
                 launchCopilotInitialPrompt: launchCopilotInitialPrompt,
-                launchCopilotModelArguments: launchCopilotModelArguments
+                launchCopilotModel: launchCopilotModel
             )
         }
 
@@ -525,7 +525,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         resumeCopilotExecutable: String? = nil,
         launchCopilotExecutable: String?,
         launchCopilotInitialPrompt: String? = nil,
-        launchCopilotModelArguments: [String] = []
+        launchCopilotModel: RemoteModelSelection? = nil
     ) -> [String] {
         if let cid = copilotSessionId, isSafeSessionId(cid) {
             // Quote the shell path (spaces/apostrophes) and warn — without blocking
@@ -542,10 +542,31 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
                 executable: executable,
                 shell: shell,
                 initialPrompt: launchCopilotInitialPrompt,
-                modelArguments: launchCopilotModelArguments
+                model: launchCopilotModel
             )]
         }
         return [shell, "-l"]
+    }
+
+    /// Copilot's own launch flags for a model chosen when the session is created. Each
+    /// is one argument, so a model id is never read as an option of its own.
+    nonisolated static func modelArguments(_ model: RemoteModelSelection?) -> [String] {
+        guard let model else { return [] }
+        return ["--model=\(model.modelId)"]
+            + (model.reasoningEffort.map { ["--reasoning-effort=\($0)"] } ?? [])
+            + (model.contextTier.map { ["--context=\($0)"] } ?? [])
+    }
+
+    /// What the remote wrapper is run with: the recorded session to resume, or for a
+    /// first launch of Copilot, the model's flags and its prompt. A plain terminal's
+    /// wrapper gets nothing, and opens a shell.
+    nonisolated static func remoteWrapperArguments(
+        resumeSessionId: String?, launchesCopilot: Bool, initialPrompt: String?, model: RemoteModelSelection?
+    ) -> [String] {
+        if let resumeSessionId { return ["--resume=\(resumeSessionId)"] }
+        guard launchesCopilot else { return [] }
+        guard let initialPrompt, !initialPrompt.isEmpty else { return modelArguments(model) }
+        return modelArguments(model) + ["--interactive", initialPrompt]
     }
 
     /// One-shot launch of the absolute Copilot executable, then drop to a login
@@ -556,33 +577,15 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         executable: String,
         shell: String,
         initialPrompt: String? = nil,
-        modelArguments: [String] = []
+        model: RemoteModelSelection? = nil
     ) -> String {
-        profiledCopilotCommand(
-            executable,
-            arguments: launchArguments(modelArguments: modelArguments, initialPrompt: initialPrompt)
-        )
+        var arguments = modelArguments(model)
+        if let initialPrompt, !initialPrompt.isEmpty {
+            arguments.append(contentsOf: ["--interactive", initialPrompt])
+        }
+        return profiledCopilotCommand(executable, arguments: arguments)
             + " || printf '\\n[Copilot Projects] could not launch Copilot\\n';"
             + " exec \(shellSingleQuote(shell)) -l"
-    }
-
-    /// What a new session's Copilot is started with: the model, then the prompt.
-    nonisolated static func launchArguments(modelArguments: [String], initialPrompt: String?) -> [String] {
-        guard let initialPrompt, !initialPrompt.isEmpty else { return modelArguments }
-        return modelArguments + ["--interactive", initialPrompt]
-    }
-
-    /// What the wrapper that runs a session on another host is given: the session to
-    /// resume, else a new Copilot session's arguments, else nothing, which opens a shell.
-    nonisolated static func remoteWrapperArguments(
-        copilotSessionId: String?,
-        launchesCopilot: Bool,
-        initialPrompt: String?,
-        modelArguments: [String]
-    ) -> [String] {
-        if let copilotSessionId { return ["--resume=\(copilotSessionId)"] }
-        guard launchesCopilot else { return [] }
-        return launchArguments(modelArguments: modelArguments, initialPrompt: initialPrompt)
     }
 
     /// POSIX single-quote a string for safe interpolation into a shell command:

@@ -40,23 +40,22 @@ public struct CopilotSessionStore: Sendable {
         return (try? JSONSerialization.jsonObject(with: data, options: [.json5Allowed])) as? [String: Any]
     }
 
-    /// `--model` and `--reasoning-effort` with the default model and effort saved in the
-    /// CLI's settings, to start a new session with. A session started without them takes
-    /// an organization's default model in place of the saved one. Empty when no model is
-    /// saved, when it is `auto`, when a provider other than Copilot serves it, or when the
-    /// environment names a model or a provider, which the arguments would replace. The
-    /// effort is passed only with a model: Copilot refuses one for `auto`.
-    public func modelArguments(
+    /// The default model and effort saved in the CLI's settings, for a new session whose
+    /// launch names no model. Started without one, a session takes an organization's
+    /// default model in place of the saved one. Nil when no model is saved, when it is
+    /// `auto`, when a provider other than Copilot serves it, or when the environment
+    /// names a model or a provider, which a launch flag would replace.
+    public func savedModel(
         environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> [String] {
+    ) -> RemoteModelSelection? {
         guard (environment["COPILOT_MODEL"] ?? "").isEmpty,
               (environment["COPILOT_PROVIDER_BASE_URL"] ?? "").isEmpty,
               let root = settings(),
               let model = root["model"] as? String, !model.isEmpty, model != "auto",
               (root["modelProviderId"] as? String ?? "copilot") == "copilot"
-        else { return [] }
-        guard let effort = root["effortLevel"] as? String, !effort.isEmpty else { return ["--model", model] }
-        return ["--model", model, "--reasoning-effort", effort]
+        else { return nil }
+        let effort = (root["effortLevel"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return RemoteModelSelection(modelId: model, reasoningEffort: effort)
     }
 
     public func trackerWarningMessage() -> String {

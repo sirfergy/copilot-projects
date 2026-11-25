@@ -3292,39 +3292,6 @@ final class AppLogicTests: XCTestCase {
                 initialPrompt: initialPrompt
              )]
         )
-        // A new session names its model before the prompt, or alone when it has none.
-        let modelArguments = ["--model", "fixture-model"]
-        XCTAssertEqual(
-            TerminalController.startupProgram(
-                shell: shell,
-                copilotSessionId: nil,
-                launchCopilotExecutable: executable,
-                launchCopilotInitialPrompt: initialPrompt,
-                launchCopilotModelArguments: modelArguments
-            ),
-            [shell, "-l", "-c",
-             TerminalController.profiledCopilotCommand(
-                executable,
-                arguments: modelArguments + ["--interactive", initialPrompt]
-             )
-                + " || printf '\\n[Copilot Projects] could not launch Copilot\\n';"
-                + " exec '/bin/zsh' -l"]
-        )
-        XCTAssertEqual(
-            TerminalController.launchArguments(modelArguments: modelArguments, initialPrompt: nil),
-            modelArguments
-        )
-        // The wrapper for a session on another host gets the same, and a plain terminal nothing.
-        func remoteArguments(resuming: String? = nil, copilot: Bool = true, prompt: String? = nil) -> [String] {
-            TerminalController.remoteWrapperArguments(
-                copilotSessionId: resuming, launchesCopilot: copilot,
-                initialPrompt: prompt, modelArguments: modelArguments
-            )
-        }
-        XCTAssertEqual(remoteArguments(prompt: initialPrompt), modelArguments + ["--interactive", initialPrompt])
-        XCTAssertEqual(remoteArguments(), modelArguments)
-        XCTAssertEqual(remoteArguments(resuming: "abc", prompt: initialPrompt), ["--resume=abc"])
-        XCTAssertEqual(remoteArguments(copilot: false), [])
         // A recorded resume session ALWAYS wins over a one-shot launch executable.
         let sessionId = UUID().uuidString
         let resumeExecutable = "/opt/resume copilot/copilot"
@@ -3333,14 +3300,12 @@ final class AppLogicTests: XCTestCase {
             copilotSessionId: sessionId,
             resumeCopilotExecutable: resumeExecutable,
             launchCopilotExecutable: executable,
-            launchCopilotInitialPrompt: initialPrompt,
-            launchCopilotModelArguments: modelArguments
+            launchCopilotInitialPrompt: initialPrompt
         )
         let joined = resumeProgram.joined(separator: " ")
         XCTAssertTrue(joined.contains("resume copilot"))
         XCTAssertFalse(joined.contains("my copilot/copilot"))
         XCTAssertFalse(joined.contains(initialPrompt))
-        XCTAssertFalse(joined.contains("--model"))
         XCTAssertFalse(joined.contains("--allow-all"))
     }
 
@@ -6023,7 +5988,7 @@ final class AppLogicTests: XCTestCase {
             stateRepository: repository, isAppActive: { false },
             agentActivityDirectory: root, resumeMarkerDirectory: root,
             remoteCopilotExecutable: { copilot.path },
-            copilotModelArguments: { ["--model", "fixture-model"] },
+            savedCopilotModel: { RemoteModelSelection(modelId: "fixture-model", reasoningEffort: "high") },
             remoteReposDirectory: { root.path },
             sessionCreationLedger: SessionCreationLedger(url: root.appendingPathComponent("ledger.json")),
             kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("restored-images"))
@@ -6052,7 +6017,8 @@ final class AppLogicTests: XCTestCase {
             launchCopilotExecutable: copilot.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: legacyMarker.path))
 
-        // The resumes above kept their own model; a new Copilot session is started on the saved one.
+        // The resumes above kept their own model. A new Copilot session that names none is
+        // started on the saved one, and one that names a model on that.
         let newRequest = RemoteCreateSessionRequest(
             requestId: UUID(), projectId: "p1", kind: .copilot, initialPrompt: "Check the build")
         XCTAssertEqual(restoredModel.createRemoteConfiguredSession(newRequest), .created(RemoteCreateSessionResponse(
@@ -6062,7 +6028,16 @@ final class AppLogicTests: XCTestCase {
             shell: "/bin/sh", copilotSessionId: nil,
             launchCopilotExecutable: copilot.path,
             launchCopilotInitialPrompt: "Check the build",
-            launchCopilotModelArguments: ["--model", "fixture-model"]))
+            launchCopilotModel: RemoteModelSelection(modelId: "fixture-model", reasoningEffort: "high")))
+        let namedId = UUID().uuidString
+        restoredModel.projects[0].sessions.append(Session(id: namedId, title: "Copilot", cwd: root.path))
+        let named = RemoteModelSelection(modelId: "named-model")
+        XCTAssertNotNil(restoredModel.controller(
+            for: namedId, copilotExecutable: copilot.path, launchCopilotModel: named))
+        let namedArguments = try await launchedProgram()
+        XCTAssertEqual(namedArguments, TerminalController.startupProgram(
+            shell: "/bin/sh", copilotSessionId: nil,
+            launchCopilotExecutable: copilot.path, launchCopilotModel: named))
     }
 
     @MainActor

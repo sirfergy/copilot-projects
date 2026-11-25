@@ -100,7 +100,10 @@ final class NotificationsSummaryWatcher: ObservableObject {
     func start(interval: TimeInterval = 20) {
         guard timer == nil else { return }
         read()
-        timer = Timer.publish(every: interval, tolerance: 5, on: .main, in: .common)
+        // An open menu is tracked in the event-tracking run-loop mode, where a timer in
+        // the default mode does not fire: a new count would rebuild the menu bar and close
+        // an open submenu. The count is read again once the menu closes.
+        timer = Timer.publish(every: interval, tolerance: 5, on: .main, in: .default)
             .autoconnect()
             .sink { [weak self] _ in self?.read() }
     }

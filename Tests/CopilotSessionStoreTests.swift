@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import XCTest
 @testable import CopilotProjectsCore
+import CopilotProjectsProtocol
 
 final class CopilotSessionStoreTests: XCTestCase {
     private var root: URL!
@@ -31,28 +32,29 @@ final class CopilotSessionStoreTests: XCTestCase {
         XCTAssertNil(store.directory(for: ""))
     }
 
-    func testANewSessionIsStartedOnTheSavedCopilotModel() throws {
+    func testTheSavedModelIsACopilotModelTheEnvironmentDoesNotReplace() throws {
         let store = CopilotSessionStore(environment: ["COPILOT_HOME": root.path], home: "/h")
-        XCTAssertEqual(store.modelArguments(environment: [:]), [], "no settings file")
-        let cases: [(settings: String, arguments: [String])] = [
+        XCTAssertNil(store.savedModel(environment: [:]), "no settings file")
+        let saved = RemoteModelSelection(modelId: "fixture-model")
+        let cases: [(settings: String, model: RemoteModelSelection?)] = [
             ("// saved by /model\n{\"model\": \"fixture-model\", \"effortLevel\": \"high\"}",
-             ["--model", "fixture-model", "--reasoning-effort", "high"]),
-            (#"{"model": "fixture-model", "modelProviderId": "copilot"}"#, ["--model", "fixture-model"]),
-            (#"{"model": "fixture-model", "modelProviderId": "ollama", "effortLevel": "high"}"#, []),
-            (#"{"model": "auto", "effortLevel": "high"}"#, []),
-            (#"{"model": ""}"#, []),
-            (#"{"effortLevel": "high"}"#, []),
-            ("{", []),
+             RemoteModelSelection(modelId: "fixture-model", reasoningEffort: "high")),
+            (#"{"model": "fixture-model", "modelProviderId": "copilot"}"#, saved),
+            (#"{"model": "fixture-model", "modelProviderId": "ollama", "effortLevel": "high"}"#, nil),
+            (#"{"model": "auto", "effortLevel": "high"}"#, nil),
+            (#"{"model": ""}"#, nil),
+            (#"{"effortLevel": "high"}"#, nil),
+            ("{", nil),
         ]
-        for (settings, arguments) in cases {
+        for (settings, model) in cases {
             try Data(settings.utf8).write(to: root.appendingPathComponent("settings.json"))
-            XCTAssertEqual(store.modelArguments(environment: [:]), arguments, settings)
+            XCTAssertEqual(store.savedModel(environment: [:]), model, settings)
         }
         // A model or a provider the environment names is left to it.
         try Data(#"{"model": "fixture-model"}"#.utf8).write(to: root.appendingPathComponent("settings.json"))
-        XCTAssertEqual(store.modelArguments(environment: ["COPILOT_MODEL": "other-model"]), [])
-        XCTAssertEqual(store.modelArguments(environment: ["COPILOT_PROVIDER_BASE_URL": "http://localhost:1"]), [])
-        XCTAssertEqual(store.modelArguments(environment: ["COPILOT_MODEL": ""]), ["--model", "fixture-model"])
+        XCTAssertNil(store.savedModel(environment: ["COPILOT_MODEL": "other-model"]))
+        XCTAssertNil(store.savedModel(environment: ["COPILOT_PROVIDER_BASE_URL": "http://localhost:1"]))
+        XCTAssertEqual(store.savedModel(environment: ["COPILOT_MODEL": ""]), saved)
     }
 
     func testOnlyAStrictUUIDIsASessionIdToResume() {

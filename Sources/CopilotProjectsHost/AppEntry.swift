@@ -375,12 +375,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        NotificationCenter.default.addObserver(
-            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
-        ) { [weak self] note in
-            MainActor.assumeIsolated {
-                guard let self, (note.object as? NSMenu) === NSApp.mainMenu else { return }
-                self.model.syncMenuState(reloadSSHHosts: true, includeRuntimeAttention: true)
+        for (name, tracking) in [(NSMenu.didBeginTrackingNotification, true), (NSMenu.didEndTrackingNotification, false)] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self, (note.object as? NSMenu) === NSApp.mainMenu else { return }
+                    self.model.mainMenuTracking(tracking)
+                }
             }
         }
 
