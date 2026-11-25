@@ -1649,6 +1649,36 @@ final class AppModelTests: XCTestCase {
         }
     }
 
+    func testNotificationsCountIsNotReadWhileAMenuIsOpen() throws {
+        try withTempStateDirectory { root in
+            let url = root.appendingPathComponent("notifications-summary.json")
+            func publish(needsYou: Int) throws {
+                try NotificationsSummary(
+                    needsYou: needsYou, toYou: needsYou, viaTeams: 0, watching: 0, updatedAt: Date()
+                ).write(to: url)
+            }
+            try publish(needsYou: 1)
+            let watcher = NotificationsSummaryWatcher(url: url)
+            watcher.start(interval: 0.01)
+            XCTAssertEqual(watcher.needsYou, 1)
+            try publish(needsYou: 2)
+
+            // An open menu is tracked in the event-tracking mode: the count is not read there.
+            let menuCloses = Date().addingTimeInterval(0.1)
+            while Date() < menuCloses {
+                _ = RunLoop.main.run(mode: .eventTracking, before: menuCloses)
+            }
+            XCTAssertEqual(watcher.needsYou, 1)
+
+            // Once the menu closes the run loop is back in the default mode, and it is.
+            let giveUp = Date().addingTimeInterval(30)
+            while watcher.needsYou != 2, Date() < giveUp {
+                _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            }
+            XCTAssertEqual(watcher.needsYou, 2)
+        }
+    }
+
     func testWorkspaceMenuStateIgnoresUnrelatedModelPublishesAndTracksMenuChanges() throws {
         try withTempStateDirectory { root in
             let s1 = Session(title: "Active", cwd: root.path)
