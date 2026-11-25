@@ -496,6 +496,25 @@ must be restarted with that profile; relaunching the app only reattaches their d
 Independent of that local rendering, each terminal session bounds-checks and retains the same
 Kitty-transmitted PNGs (fail-closed on anything outside the exact subset Copilot CLI emits).
 
+A new Copilot session whose launch names no model, on this Mac or another host, is started
+with `--model` and `--reasoning-effort` set to the default model and effort saved in the CLI's
+`settings.json` on this Mac: `model`, which `/model --global <id>` saves, and `effortLevel`,
+which `/settings effortLevel <level>` saves. `new-copilot-session --model` names one, and that
+is used instead. Started without a model, a session takes an organization's default model in
+place of the saved one. Because they are given at launch, the flags also take the place of a
+repository's default model, effort and context tier (`/model --repo` or `--local`), and of an
+effort a custom agent names. Nothing is passed when no model is saved, which includes a saved
+model that is the CLI's own default; when it is `auto`; when `modelProviderId` names a
+provider other than `copilot`; or when the app's environment sets `COPILOT_MODEL`,
+`COPILOT_PROVIDER_BASE_URL` or `COPILOT_PROVIDER_GHES_HOST`. One of those set only in a shell
+profile, or on the other host, is not seen, and the flags take its place too. A resumed
+session keeps the model it had.
+
+If the saved model is not available, Copilot says so when it starts and does not run the
+session's prompt. An effort the saved model does not offer is refused the same way or not
+applied, depending on the CLI version. Save a model and effort that work, then start a new
+session: the tab that failed keeps the arguments it was started with.
+
 The companion Copilot extension records completed root turns through the supported Copilot SDK
 event API. It atomically writes a bounded per-tab transcript snapshot after each turn, including
 stopped turns, failed requests with the CLI's error message, and compact tool summaries but

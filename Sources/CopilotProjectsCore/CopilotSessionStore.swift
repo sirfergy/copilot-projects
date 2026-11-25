@@ -34,11 +34,32 @@ public struct CopilotSessionStore: Sendable {
         (copilotHome as NSString).appendingPathComponent("session-store.db")
     }
 
-    public func trackerWarningMessage() -> String {
+    private func settings() -> [String: Any]? {
         let url = URL(fileURLWithPath: (copilotHome as NSString).appendingPathComponent("settings.json"))
-        guard let data = try? Data(contentsOf: url),
-              let root = (try? JSONSerialization.jsonObject(with: data, options: [.json5Allowed])) as? [String: Any]
-        else { return RemoteSessionSnapshot.experimentalOffWarning }
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data, options: [.json5Allowed])) as? [String: Any]
+    }
+
+    /// The default model and effort saved in the CLI's settings, for a new session whose
+    /// launch names no model. Started without one, a session takes an organization's
+    /// default model in place of the saved one. Nil when no model is saved, when it is
+    /// `auto`, when a provider other than Copilot serves it, or when the environment
+    /// names a model or a provider, which a launch flag would replace.
+    public func savedModel(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> RemoteModelSelection? {
+        guard ["COPILOT_MODEL", "COPILOT_PROVIDER_BASE_URL", "COPILOT_PROVIDER_GHES_HOST"]
+                .allSatisfy({ (environment[$0] ?? "").isEmpty }),
+              let root = settings(),
+              let model = root["model"] as? String, !model.isEmpty, model != "auto",
+              (root["modelProviderId"] as? String ?? "copilot") == "copilot"
+        else { return nil }
+        let effort = (root["effortLevel"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return RemoteModelSelection(modelId: model, reasoningEffort: effort)
+    }
+
+    public func trackerWarningMessage() -> String {
+        guard let root = settings() else { return RemoteSessionSnapshot.experimentalOffWarning }
         if let ext = (root["enabledFeatureFlags"] as? [String: Any])?["EXTENSIONS"] as? Bool {
             return ext
                 ? RemoteSessionSnapshot.trackerStoppedWarning

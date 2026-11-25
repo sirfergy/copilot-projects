@@ -322,7 +322,8 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
             if let wrapper = remoteWrapper {
                 let arguments = Self.remoteWrapperArguments(
                     resumeSessionId: validCopilotSessionId,
-                    initialPrompt: launchCopilotExecutable == nil ? nil : launchCopilotInitialPrompt,
+                    launchesCopilot: launchCopilotExecutable != nil,
+                    initialPrompt: launchCopilotInitialPrompt,
                     model: launchCopilotModel
                 )
                 let command = Self.profiledCopilotCommand(wrapper, arguments: arguments)
@@ -557,12 +558,19 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
     }
 
     /// What the remote wrapper is run with: the recorded session to resume, or for a
-    /// first launch with a prompt, the model's flags and that prompt.
+    /// first launch of Copilot, the model's flags and its prompt. A plain terminal's
+    /// wrapper gets nothing, and opens a shell.
     nonisolated static func remoteWrapperArguments(
-        resumeSessionId: String?, initialPrompt: String?, model: RemoteModelSelection?
+        resumeSessionId: String?, launchesCopilot: Bool, initialPrompt: String?, model: RemoteModelSelection?
     ) -> [String] {
         if let resumeSessionId { return ["--resume=\(resumeSessionId)"] }
-        guard let initialPrompt, !initialPrompt.isEmpty else { return [] }
+        guard launchesCopilot else { return [] }
+        return launchArguments(initialPrompt: initialPrompt, model: model)
+    }
+
+    /// What Copilot is first launched with: the model's flags, then the prompt if it has one.
+    nonisolated static func launchArguments(initialPrompt: String?, model: RemoteModelSelection?) -> [String] {
+        guard let initialPrompt, !initialPrompt.isEmpty else { return modelArguments(model) }
         return modelArguments(model) + ["--interactive", initialPrompt]
     }
 
@@ -576,11 +584,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         initialPrompt: String? = nil,
         model: RemoteModelSelection? = nil
     ) -> String {
-        var arguments = modelArguments(model)
-        if let initialPrompt, !initialPrompt.isEmpty {
-            arguments.append(contentsOf: ["--interactive", initialPrompt])
-        }
-        return profiledCopilotCommand(executable, arguments: arguments)
+        profiledCopilotCommand(executable, arguments: launchArguments(initialPrompt: initialPrompt, model: model))
             + " || printf '\\n[Copilot Projects] could not launch Copilot\\n';"
             + " exec \(shellSingleQuote(shell)) -l"
     }

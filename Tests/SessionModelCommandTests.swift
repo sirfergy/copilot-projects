@@ -320,13 +320,14 @@ final class SessionModelCommandTests: XCTestCase {
         )
         // The remote wrapper is handed the same flags, and a recorded session only its resume.
         let selection = RemoteModelSelection(modelId: "gpt-5.4", reasoningEffort: "high")
-        XCTAssertEqual(
-            TerminalController.remoteWrapperArguments(resumeSessionId: nil, initialPrompt: prompt, model: selection),
-            ["--model=gpt-5.4", "--reasoning-effort=high", "--interactive", prompt]
-        )
-        XCTAssertEqual(
-            TerminalController.remoteWrapperArguments(resumeSessionId: "sdk-1", initialPrompt: prompt, model: selection),
-            ["--resume=sdk-1"]
-        )
+        func remoteArguments(resuming: String? = nil, copilot: Bool = true, prompt: String? = prompt) -> [String] {
+            TerminalController.remoteWrapperArguments(
+                resumeSessionId: resuming, launchesCopilot: copilot, initialPrompt: prompt, model: selection)
+        }
+        XCTAssertEqual(remoteArguments(), ["--model=gpt-5.4", "--reasoning-effort=high", "--interactive", prompt])
+        XCTAssertEqual(remoteArguments(resuming: "sdk-1"), ["--resume=sdk-1"])
+        // Copilot started with no prompt still gets its model, and a plain terminal nothing.
+        XCTAssertEqual(remoteArguments(prompt: nil), ["--model=gpt-5.4", "--reasoning-effort=high"])
+        XCTAssertEqual(remoteArguments(copilot: false), [])
     }
 }

@@ -5923,6 +5923,17 @@ final class AppLogicTests: XCTestCase {
         for file in [backend, copilot] {
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
         }
+        // The backend's redirection makes the file before writing it, so wait for its contents.
+        func launchedProgram() async throws -> [String] {
+            for _ in 0 ..< 200 {
+                if let data = try? Data(contentsOf: capturedArguments), !data.isEmpty {
+                    try FileManager.default.removeItem(at: capturedArguments)
+                    return data.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+                }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            return []
+        }
         let overrides = [
             "SHELL": "/bin/sh",
             "COPILOT_PROJECTS_STATE_DIR": root.path,
@@ -5961,16 +5972,10 @@ final class AppLogicTests: XCTestCase {
         XCTAssertEqual(model.createRemoteConfiguredSession(request), .created(RemoteCreateSessionResponse(
             requestId: request.requestId, projectId: "p1", sessionId: request.requestId.uuidString)))
         XCTAssertFalse(FileManager.default.fileExists(atPath: staleMarker.path))
-        for _ in 0 ..< 200 {
-            if FileManager.default.fileExists(atPath: capturedArguments.path) { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        let arguments = try Data(contentsOf: capturedArguments).split(separator: 0)
-            .map { String(decoding: $0, as: UTF8.self) }
+        let arguments = try await launchedProgram()
         XCTAssertEqual(arguments, ["/bin/sh", "-l"])
         XCTAssertNil(model.startingPrompt(for: request.requestId.uuidString))
 
-        try FileManager.default.removeItem(at: capturedArguments)
         let restoredId = UUID().uuidString
         let recordedCopilot = UUID().uuidString
         try recordedCopilot.write(
@@ -5982,50 +5987,57 @@ final class AppLogicTests: XCTestCase {
         let restoredModel = AppModel(
             stateRepository: repository, isAppActive: { false },
             agentActivityDirectory: root, resumeMarkerDirectory: root,
-            remoteCopilotExecutable: { copilot.path }, remoteReposDirectory: { root.path },
+            remoteCopilotExecutable: { copilot.path },
+            savedCopilotModel: { RemoteModelSelection(modelId: "fixture-model", reasoningEffort: "high") },
+            remoteReposDirectory: { root.path },
             sessionCreationLedger: SessionCreationLedger(url: root.appendingPathComponent("ledger.json")),
             kittyImageDiskStore: RemoteKittyImageDiskStore(root: root.appendingPathComponent("restored-images"))
         )
         defer { restoredModel.detachAllClients() }
         XCTAssertNotNil(restoredModel.controller(for: request.requestId.uuidString))
-        for _ in 0 ..< 200 {
-            if FileManager.default.fileExists(atPath: capturedArguments.path) { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        let terminalAfterRestart = try Data(contentsOf: capturedArguments).split(separator: 0)
-            .map { String(decoding: $0, as: UTF8.self) }
+        let terminalAfterRestart = try await launchedProgram()
         XCTAssertEqual(terminalAfterRestart, ["/bin/sh", "-l"])
-        try FileManager.default.removeItem(at: capturedArguments)
         XCTAssertNotNil(restoredModel.controller(for: restoredId))
-        for _ in 0 ..< 200 {
-            if FileManager.default.fileExists(atPath: capturedArguments.path) { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        let restoredArguments = try Data(contentsOf: capturedArguments).split(separator: 0)
-            .map { String(decoding: $0, as: UTF8.self) }
+        let restoredArguments = try await launchedProgram()
         XCTAssertEqual(restoredArguments, TerminalController.startupProgram(
             shell: "/bin/sh", copilotSessionId: recordedCopilot,
             resumeCopilotExecutable: copilot.path,
             launchCopilotExecutable: nil))
 
-        try FileManager.default.removeItem(at: capturedArguments)
         let legacyRequest = RemoteCreateSessionRequest(requestId: UUID(), projectId: "p1")
         let legacyCopilot = UUID().uuidString
         let legacyMarker = root.appendingPathComponent("\(legacyRequest.requestId.uuidString).copilot-session")
         try legacyCopilot.write(to: legacyMarker, atomically: true, encoding: .utf8)
         XCTAssertEqual(restoredModel.createRemoteSession(legacyRequest), .created(RemoteCreateSessionResponse(
             requestId: legacyRequest.requestId, projectId: "p1", sessionId: legacyRequest.requestId.uuidString)))
-        for _ in 0 ..< 200 {
-            if FileManager.default.fileExists(atPath: capturedArguments.path) { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        let legacyArguments = try Data(contentsOf: capturedArguments).split(separator: 0)
-            .map { String(decoding: $0, as: UTF8.self) }
+        let legacyArguments = try await launchedProgram()
         XCTAssertEqual(legacyArguments, TerminalController.startupProgram(
             shell: "/bin/sh", copilotSessionId: legacyCopilot,
             resumeCopilotExecutable: copilot.path,
             launchCopilotExecutable: copilot.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: legacyMarker.path))
+
+        // The resumes above kept their own model. A new Copilot session that names none is
+        // started on the saved one, and one that names a model on that.
+        let newRequest = RemoteCreateSessionRequest(
+            requestId: UUID(), projectId: "p1", kind: .copilot, initialPrompt: "Check the build")
+        XCTAssertEqual(restoredModel.createRemoteConfiguredSession(newRequest), .created(RemoteCreateSessionResponse(
+            requestId: newRequest.requestId, projectId: "p1", sessionId: newRequest.requestId.uuidString)))
+        let newArguments = try await launchedProgram()
+        XCTAssertEqual(newArguments, TerminalController.startupProgram(
+            shell: "/bin/sh", copilotSessionId: nil,
+            launchCopilotExecutable: copilot.path,
+            launchCopilotInitialPrompt: "Check the build",
+            launchCopilotModel: RemoteModelSelection(modelId: "fixture-model", reasoningEffort: "high")))
+        let namedId = UUID().uuidString
+        restoredModel.projects[0].sessions.append(Session(id: namedId, title: "Copilot", cwd: root.path))
+        let named = RemoteModelSelection(modelId: "named-model")
+        XCTAssertNotNil(restoredModel.controller(
+            for: namedId, copilotExecutable: copilot.path, launchCopilotModel: named))
+        let namedArguments = try await launchedProgram()
+        XCTAssertEqual(namedArguments, TerminalController.startupProgram(
+            shell: "/bin/sh", copilotSessionId: nil,
+            launchCopilotExecutable: copilot.path, launchCopilotModel: named))
     }
 
     @MainActor

@@ -495,6 +495,9 @@ final class AppModel: ObservableObject {
     /// unavailable/invalid outcomes without touching the real filesystem.
     let remoteCopilotExecutable: () -> String?
     let remoteWrapperExecutable: () -> String?
+    /// The model a new Copilot session starts on when its launch names none; see
+    /// `CopilotSessionStore.savedModel(environment:)`.
+    let savedCopilotModel: () -> RemoteModelSelection?
     let remoteReposDirectory: () -> String?
     let remoteSessionBackendAvailable: () -> Bool
     let availableHostsProvider: () -> [RemoteHostInfo]
@@ -559,6 +562,7 @@ final class AppModel: ObservableObject {
             ((String) -> RemoteElicitationTerminalTarget?)? = nil,
         remoteCopilotExecutable: @escaping () -> String? = { Paths.copilotExecutable },
         remoteWrapperExecutable: @escaping () -> String? = { Paths.remoteCopilotWrapperExecutable },
+        savedCopilotModel: @escaping () -> RemoteModelSelection? = { CopilotSessionStore().savedModel() },
         remoteReposDirectory: @escaping () -> String? = { Paths.reposDirectory },
         remoteSessionBackendAvailable: @escaping () -> Bool = {
             Paths.dtachExecutable != nil
@@ -620,6 +624,7 @@ final class AppModel: ObservableObject {
         self.remoteElicitationTarget = remoteElicitationTarget
         self.remoteCopilotExecutable = remoteCopilotExecutable
         self.remoteWrapperExecutable = remoteWrapperExecutable
+        self.savedCopilotModel = savedCopilotModel
         self.remoteReposDirectory = remoteReposDirectory
         self.remoteSessionBackendAvailable = remoteSessionBackendAvailable
         self.availableHostsProvider = availableHostsProvider ?? {
@@ -1035,7 +1040,7 @@ final class AppModel: ObservableObject {
                 ?? ((recordedCopilot?.isEmpty == false) ? recordedCopilot : nil),
             launchCopilotExecutable: copilotExecutable,
             launchCopilotInitialPrompt: launchCopilotInitialPrompt,
-            launchCopilotModel: launchCopilotModel,
+            launchCopilotModel: launchCopilotModel ?? (copilotExecutable == nil ? nil : savedCopilotModel()),
             remoteHost: resolvedRemoteHost(for: session),
             remoteWrapperExecutable: remoteWrapperExecutable(),
             kittyImageDiskStore: kittyImageDiskStore

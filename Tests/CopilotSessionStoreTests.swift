@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import XCTest
 @testable import CopilotProjectsCore
+import CopilotProjectsProtocol
 
 final class CopilotSessionStoreTests: XCTestCase {
     private var root: URL!
@@ -29,6 +30,32 @@ final class CopilotSessionStoreTests: XCTestCase {
                        "/c/session-state/0f1e2d3c-4b5a-4000-8000-000000000001/events.jsonl")
         XCTAssertNil(store.directory(for: "../../etc"))
         XCTAssertNil(store.directory(for: ""))
+    }
+
+    func testTheSavedModelIsACopilotModelTheEnvironmentDoesNotReplace() throws {
+        let store = CopilotSessionStore(environment: ["COPILOT_HOME": root.path], home: "/h")
+        XCTAssertNil(store.savedModel(environment: [:]), "no settings file")
+        let saved = RemoteModelSelection(modelId: "fixture-model")
+        let cases: [(settings: String, model: RemoteModelSelection?)] = [
+            ("// saved by /model\n{\"model\": \"fixture-model\", \"effortLevel\": \"high\"}",
+             RemoteModelSelection(modelId: "fixture-model", reasoningEffort: "high")),
+            (#"{"model": "fixture-model", "modelProviderId": "copilot"}"#, saved),
+            (#"{"model": "fixture-model", "modelProviderId": "ollama", "effortLevel": "high"}"#, nil),
+            (#"{"model": "auto", "effortLevel": "high"}"#, nil),
+            (#"{"model": ""}"#, nil),
+            (#"{"effortLevel": "high"}"#, nil),
+            ("{", nil),
+        ]
+        for (settings, model) in cases {
+            try Data(settings.utf8).write(to: root.appendingPathComponent("settings.json"))
+            XCTAssertEqual(store.savedModel(environment: [:]), model, settings)
+        }
+        // A model or a provider the environment names is left to it.
+        try Data(#"{"model": "fixture-model"}"#.utf8).write(to: root.appendingPathComponent("settings.json"))
+        XCTAssertNil(store.savedModel(environment: ["COPILOT_MODEL": "other-model"]))
+        XCTAssertNil(store.savedModel(environment: ["COPILOT_PROVIDER_BASE_URL": "http://localhost:1"]))
+        XCTAssertNil(store.savedModel(environment: ["COPILOT_PROVIDER_GHES_HOST": "ghes.example.com"]))
+        XCTAssertEqual(store.savedModel(environment: ["COPILOT_MODEL": ""]), saved)
     }
 
     func testOnlyAStrictUUIDIsASessionIdToResume() {

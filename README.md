@@ -519,8 +519,11 @@ exits: 2 invalid arguments, 6 unknown project, 7 missing or invalid working dire
 (including an older app that does not support the command). Unknown flags are
 rejected before anything is sent.
 
-To start the session on a model you choose, add `--model <id>`, and with it
-`--reasoning-effort <level>` and `--context-tier default|long_context` if you want them:
+Without `--model`, the session starts on the default model and effort saved in the Copilot
+CLI's settings, as every new Copilot session does; see
+[Copilot CLI integration](docs/usage.md#copilot-cli-integration-automatic-status). To start
+it on a model you choose, add `--model <id>`, and with it `--reasoning-effort <level>` and
+`--context-tier default|long_context` if you want them:
 
 ```bash
 copilot-projects new-copilot-session --project <id> --request-id <uuid> \
@@ -533,8 +536,9 @@ them too: replaying it with another model, effort or context size exits 3. The s
 id is printed once the session is saved and its terminal has been asked to start Copilot
 with those flags, not once Copilot has accepted them. Copilot checks them itself as it
 starts. An effort or a context size it does not know stops it from starting (seen on
-Copilot CLI 1.0.115): on this Mac the session's terminal shows its error and a shell. What it does
-with a model it does not offer has not been tried. To check, run `list-session-models`
+Copilot CLI 1.0.115): on this Mac the session's terminal shows its error and a shell. With a
+model it does not offer, Copilot says so when it starts and does not run the session's prompt
+(also seen on 1.0.115). To check, run `list-session-models`
 (below) once the session has started: it prints the model Copilot is on, and keeps
 exiting 8 for a session whose Copilot never started. A wrapper set through
 `COPILOT_PROJECTS_REMOTE_WRAPPER` must pass its arguments on to Copilot. An app left
