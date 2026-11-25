@@ -1130,11 +1130,23 @@ final class AppModel: ObservableObject {
         syncMenuState(includeRuntimeAttention: true)
     }
 
+    /// True while the menu bar is open. A publish then rebuilds every menu and closes
+    /// the open submenu, so what was judged as it opened stands until it closes.
+    private var mainMenuIsOpen = false
+
+    /// The menu bar opened or closed. Either way its values are judged now.
+    func mainMenuTracking(_ tracking: Bool) {
+        mainMenuIsOpen = false
+        syncMenuState(reloadSSHHosts: true, includeRuntimeAttention: true)
+        mainMenuIsOpen = tracking
+    }
+
     func syncMenuState(reloadSSHHosts: Bool = false, includeRuntimeAttention: Bool = false) {
         guard projectPublicationBatchDepth == 0 else {
             workingModelsSyncNeeded = true
             return
         }
+        guard !mainMenuIsOpen else { return }
         var next = menuState.snapshot
         if reloadSSHHosts {
             let config = SSHHostCatalog.loadConfiguration(statePath: stateRepository.path)
