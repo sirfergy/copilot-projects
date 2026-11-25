@@ -565,6 +565,11 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
     ) -> [String] {
         if let resumeSessionId { return ["--resume=\(resumeSessionId)"] }
         guard launchesCopilot else { return [] }
+        return launchArguments(initialPrompt: initialPrompt, model: model)
+    }
+
+    /// What Copilot is first launched with: the model's flags, then the prompt if it has one.
+    nonisolated static func launchArguments(initialPrompt: String?, model: RemoteModelSelection?) -> [String] {
         guard let initialPrompt, !initialPrompt.isEmpty else { return modelArguments(model) }
         return modelArguments(model) + ["--interactive", initialPrompt]
     }
@@ -579,11 +584,7 @@ final class TerminalController: NSObject, ProcessTerminalViewDelegate {
         initialPrompt: String? = nil,
         model: RemoteModelSelection? = nil
     ) -> String {
-        var arguments = modelArguments(model)
-        if let initialPrompt, !initialPrompt.isEmpty {
-            arguments.append(contentsOf: ["--interactive", initialPrompt])
-        }
-        return profiledCopilotCommand(executable, arguments: arguments)
+        profiledCopilotCommand(executable, arguments: launchArguments(initialPrompt: initialPrompt, model: model))
             + " || printf '\\n[Copilot Projects] could not launch Copilot\\n';"
             + " exec \(shellSingleQuote(shell)) -l"
     }
