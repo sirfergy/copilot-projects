@@ -43,10 +43,15 @@ public struct CopilotSessionStore: Sendable {
     /// `--model` and `--reasoning-effort` with the default model and effort saved in the
     /// CLI's settings, to start a new session with. A session started without them takes
     /// an organization's default model in place of the saved one. Empty when no model is
-    /// saved, when it is `auto`, or when a provider other than Copilot serves it. The
+    /// saved, when it is `auto`, when a provider other than Copilot serves it, or when the
+    /// environment names a model or a provider, which the arguments would replace. The
     /// effort is passed only with a model: Copilot refuses one for `auto`.
-    public func modelArguments() -> [String] {
-        guard let root = settings(),
+    public func modelArguments(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String] {
+        guard (environment["COPILOT_MODEL"] ?? "").isEmpty,
+              (environment["COPILOT_PROVIDER_BASE_URL"] ?? "").isEmpty,
+              let root = settings(),
               let model = root["model"] as? String, !model.isEmpty, model != "auto",
               (root["modelProviderId"] as? String ?? "copilot") == "copilot"
         else { return [] }

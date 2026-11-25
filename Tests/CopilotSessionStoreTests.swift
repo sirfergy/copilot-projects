@@ -33,7 +33,7 @@ final class CopilotSessionStoreTests: XCTestCase {
 
     func testANewSessionIsStartedOnTheSavedCopilotModel() throws {
         let store = CopilotSessionStore(environment: ["COPILOT_HOME": root.path], home: "/h")
-        XCTAssertEqual(store.modelArguments(), [], "no settings file")
+        XCTAssertEqual(store.modelArguments(environment: [:]), [], "no settings file")
         let cases: [(settings: String, arguments: [String])] = [
             ("// saved by /model\n{\"model\": \"fixture-model\", \"effortLevel\": \"high\"}",
              ["--model", "fixture-model", "--reasoning-effort", "high"]),
@@ -46,8 +46,13 @@ final class CopilotSessionStoreTests: XCTestCase {
         ]
         for (settings, arguments) in cases {
             try Data(settings.utf8).write(to: root.appendingPathComponent("settings.json"))
-            XCTAssertEqual(store.modelArguments(), arguments, settings)
+            XCTAssertEqual(store.modelArguments(environment: [:]), arguments, settings)
         }
+        // A model or a provider the environment names is left to it.
+        try Data(#"{"model": "fixture-model"}"#.utf8).write(to: root.appendingPathComponent("settings.json"))
+        XCTAssertEqual(store.modelArguments(environment: ["COPILOT_MODEL": "other-model"]), [])
+        XCTAssertEqual(store.modelArguments(environment: ["COPILOT_PROVIDER_BASE_URL": "http://localhost:1"]), [])
+        XCTAssertEqual(store.modelArguments(environment: ["COPILOT_MODEL": ""]), ["--model", "fixture-model"])
     }
 
     func testOnlyAStrictUUIDIsASessionIdToResume() {

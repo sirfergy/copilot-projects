@@ -498,16 +498,18 @@ Kitty-transmitted PNGs (fail-closed on anything outside the exact subset Copilot
 
 A new Copilot session, on this Mac or another host, is started with `--model` and
 `--reasoning-effort` set to the default model and effort saved in the CLI's `settings.json` on
-this Mac (`model` and `effortLevel`, which `/model --global <id>` saves). Started without them,
+this Mac (`model` and `effortLevel`, as the `/model` picker saves them). Started without them,
 a session takes an organization's default model in place of the saved one. Because they are
 given at launch, they also take the place of a repository's default model (`/model --repo` or
 `--local`). Nothing is passed when no model is saved, which includes a saved model that is the
-CLI's own default, when it is `auto`, or when `modelProviderId` names a provider other than
-`copilot`. A resumed session keeps the model it had.
+CLI's own default; when it is `auto`; when `modelProviderId` names a provider other than
+`copilot`; or when the app's environment sets `COPILOT_MODEL` or `COPILOT_PROVIDER_BASE_URL`.
+A resumed session keeps the model it had.
 
-If the saved model is not available, or does not offer the saved effort, Copilot prints why and
-does not start. Save a model and effort that work, then start a new session: the tab that
-failed keeps the arguments it was started with.
+If the saved model is not available, Copilot says so when it starts and does not run the
+session's prompt. An effort the saved model does not offer is refused the same way or not
+applied, depending on the CLI version. Save a model and effort that work, then start a new
+session: the tab that failed keeps the arguments it was started with.
 
 The companion Copilot extension records completed root turns through the supported Copilot SDK
 event API. It atomically writes a bounded per-tab transcript snapshot after each turn, including
