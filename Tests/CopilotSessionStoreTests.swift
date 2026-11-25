@@ -54,6 +54,7 @@ final class CopilotSessionStoreTests: XCTestCase {
         try Data(#"{"model": "fixture-model"}"#.utf8).write(to: root.appendingPathComponent("settings.json"))
         XCTAssertNil(store.savedModel(environment: ["COPILOT_MODEL": "other-model"]))
         XCTAssertNil(store.savedModel(environment: ["COPILOT_PROVIDER_BASE_URL": "http://localhost:1"]))
+        XCTAssertNil(store.savedModel(environment: ["COPILOT_PROVIDER_GHES_HOST": "ghes.example.com"]))
         XCTAssertEqual(store.savedModel(environment: ["COPILOT_MODEL": ""]), saved)
     }
 

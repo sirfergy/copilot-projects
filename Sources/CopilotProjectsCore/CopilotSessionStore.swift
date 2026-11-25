@@ -48,8 +48,8 @@ public struct CopilotSessionStore: Sendable {
     public func savedModel(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> RemoteModelSelection? {
-        guard (environment["COPILOT_MODEL"] ?? "").isEmpty,
-              (environment["COPILOT_PROVIDER_BASE_URL"] ?? "").isEmpty,
+        guard ["COPILOT_MODEL", "COPILOT_PROVIDER_BASE_URL", "COPILOT_PROVIDER_GHES_HOST"]
+                .allSatisfy({ (environment[$0] ?? "").isEmpty }),
               let root = settings(),
               let model = root["model"] as? String, !model.isEmpty, model != "auto",
               (root["modelProviderId"] as? String ?? "copilot") == "copilot"

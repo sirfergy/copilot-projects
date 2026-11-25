@@ -505,7 +505,8 @@ given at launch, the flags also take the place of a repository's default model, 
 context tier (`/model --repo` or `--local`). Nothing is passed when no model is saved, which
 includes a saved model that is the CLI's own default; when it is `auto`; when
 `modelProviderId` names a provider other than `copilot`; or when the app's environment sets
-`COPILOT_MODEL` or `COPILOT_PROVIDER_BASE_URL`. A resumed session keeps the model it had.
+`COPILOT_MODEL`, `COPILOT_PROVIDER_BASE_URL` or `COPILOT_PROVIDER_GHES_HOST`. A resumed session
+keeps the model it had.
 
 If the saved model is not available, Copilot says so when it starts and does not run the
 session's prompt. An effort the saved model does not offer is refused the same way or not
