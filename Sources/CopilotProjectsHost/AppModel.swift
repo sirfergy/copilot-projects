@@ -190,7 +190,11 @@ final class AppModel: ObservableObject {
                 title: request.title ?? "Copilot",
                 prompt: prompt,
                 hostId: request.hostId,
-                parentSessionId: request.parentSessionId
+                parentSessionId: request.parentSessionId,
+                model: request.model.map {
+                    RemoteModelSelection(
+                        modelId: $0, reasoningEffort: request.reasoningEffort, contextTier: request.contextTier)
+                }
             ))
         },
         closeSession: { [unowned self] request in
@@ -324,9 +328,11 @@ final class AppModel: ObservableObject {
         let createdAt: Date
     }
     var sentPullRequestsPrompts: [UUID: SentPullRequestsPrompt] = [:]
-    /// The Copilot session each captured launch resumes, by tab. Launches are
-    /// captured only when `remoteSessionLauncher` is set, in tests.
+    /// The Copilot session each captured launch resumes, and the model each starts
+    /// with, by tab. Launches are captured only when `remoteSessionLauncher` is set,
+    /// in tests.
     private(set) var capturedResumeLaunches: [String: String] = [:]
+    private(set) var capturedLaunchModels: [String: RemoteModelSelection] = [:]
     var stateLoadFailure: String?
     var didFailToLoadWorkspaceState = false
     /// Only a cleanly loaded state file lists every tab that may still own files;
@@ -700,6 +706,9 @@ final class AppModel: ObservableObject {
                     await self?.closeSessionCommand(req, before: deadline) ?? .failure("app shutting down")
                 }
             }
+            if req.command == "list-session-models" || req.command == "set-session-model" {
+                return { [weak self] in await self?.sessionModelCommand(req) ?? .failure("app shutting down") }
+            }
             guard req.command == "park-session" || req.command == "unpark-session" else { return nil }
             return { [weak self] in await self?.parkingCommand(req) ?? .failure("app shutting down") }
         }) { [weak self] req in
@@ -997,6 +1006,7 @@ final class AppModel: ObservableObject {
         resumeRecordedSession: Bool = true,
         copilotExecutable: String? = nil,
         launchCopilotInitialPrompt: String? = nil,
+        launchCopilotModel: RemoteModelSelection? = nil,
         resumeCopilotSessionId: String? = nil
     ) -> TerminalController? {
         if let c = controllers[sessionId] { return c }
@@ -1025,6 +1035,7 @@ final class AppModel: ObservableObject {
                 ?? ((recordedCopilot?.isEmpty == false) ? recordedCopilot : nil),
             launchCopilotExecutable: copilotExecutable,
             launchCopilotInitialPrompt: launchCopilotInitialPrompt,
+            launchCopilotModel: launchCopilotModel,
             remoteHost: resolvedRemoteHost(for: session),
             remoteWrapperExecutable: remoteWrapperExecutable(),
             kittyImageDiskStore: kittyImageDiskStore
@@ -1859,17 +1870,20 @@ final class AppModel: ObservableObject {
         executable: String?,
         initialPrompt: String?,
         resumeRecordedSession: Bool = true,
-        resumeCopilotSessionId: String? = nil
+        resumeCopilotSessionId: String? = nil,
+        model: RemoteModelSelection? = nil
     ) {
         if let remoteSessionLauncher {
             remoteSessionLauncher(sessionId, executable, initialPrompt)
             if let resumeCopilotSessionId { capturedResumeLaunches[sessionId] = resumeCopilotSessionId }
+            if let model { capturedLaunchModels[sessionId] = model }
         } else {
             controller(
                 for: sessionId,
                 resumeRecordedSession: resumeRecordedSession,
                 copilotExecutable: executable,
                 launchCopilotInitialPrompt: initialPrompt,
+                launchCopilotModel: model,
                 resumeCopilotSessionId: resumeCopilotSessionId
             )
         }

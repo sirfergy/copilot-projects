@@ -519,6 +519,28 @@ exits: 2 invalid arguments, 6 unknown project, 7 missing or invalid working dire
 (including an older app that does not support the command). Unknown flags are
 rejected before anything is sent.
 
+To start the session on a model you choose, add `--model <id>`, and with it
+`--reasoning-effort <level>` and `--context-tier default|long_context` if you want them:
+
+```bash
+copilot-projects new-copilot-session --project <id> --request-id <uuid> \
+  --prompt-file prompt.md --model gpt-5.4 --reasoning-effort high --context-tier long_context
+```
+
+The app passes them to Copilot as its own `--model`, `--reasoning-effort` and `--context`
+launch flags, on this Mac and on a remote host alike, and the request id is bound to
+them too: replaying it with another model, effort or context size exits 3. The session
+id is printed once the session is saved and its terminal has been asked to start Copilot
+with those flags, not once Copilot has accepted them. Copilot checks them itself as it
+starts. An effort or a context size it does not know stops it from starting (seen on
+Copilot CLI 1.0.115): on this Mac the session's terminal shows its error and a shell. What it does
+with a model it does not offer has not been tried. To check, run `list-session-models`
+(below) once the session has started: it prints the model Copilot is on, and keeps
+exiting 8 for a session whose Copilot never started. A wrapper set through
+`COPILOT_PROJECTS_REMOTE_WRAPPER` must pass its arguments on to Copilot. An app left
+running from before it learned these flags ignores them and starts Copilot on its
+default model, so restart the app after updating.
+
 To end a session from a script, use `close-session`:
 
 ```bash
@@ -640,6 +662,53 @@ batch can't be sent now or taken back on its own: Copilot would act on the whole
 the action is refused. Both requests are experimental in
 Copilot's SDK and were run on Copilot CLI 1.0.113; a Copilot without them refuses the
 first attempt, and its tracker stops offering that action.
+
+To see the models a session's Copilot can use, and to switch it to one, use
+`list-session-models` and `set-session-model`:
+
+```bash
+copilot-projects list-session-models --session <id>
+copilot-projects set-session-model --session <id> --model gpt-5.4 \
+  --reasoning-effort high --context-tier long_context
+```
+
+`list-session-models` prints what the Mac's model picker shows for the session, as one
+JSON object on one line (wrapped here):
+
+```json
+{"availableModels":[{"category":"powerful","defaultReasoningEffort":"medium","id":"gpt-5.4",
+                     "longContextAvailable":true,"name":"GPT-5.4",
+                     "supportedReasoningEfforts":["low","medium","high"]}],
+ "currentModel":{"contextTier":"default","name":"gpt-5.4","reasoningEffort":"medium"}}
+```
+
+`currentModel` is the model Copilot is on, under the id Copilot reports, with its
+reasoning effort and context size when Copilot reports them. It is left out until Copilot
+has reported a model. Each entry of `availableModels` is a model the session can switch
+to: `id` is what `--model` takes, `supportedReasoningEfforts` are the values
+`--reasoning-effort` takes for that model (left out for a model that has none),
+`longContextAvailable` says whether `--context-tier long_context` is offered, and a model
+with `"disabled": true` cannot be chosen. The list is what the session's tracker last
+read from Copilot.
+
+`set-session-model` makes the switch the model picker makes and waits for Copilot's
+answer, 20 seconds at most. Without `--reasoning-effort` Copilot keeps the session's
+effort, and without `--context-tier` it uses the model's normal context size. The session
+is always named; the calling terminal's session is never implied. It exits 0 once Copilot
+has switched, 7 for a model, effort or context size the session does not offer, and 8
+when the session's tracker is not ready or did not take the request: try again.
+
+It exits 1 when Copilot refused the switch and when the outcome is unknown, and says
+which on stderr. While a turn is running (a session that is working, one waiting on a
+question, a session switching its own model) Copilot puts the switch off until the turn
+ends, and a switch that was put off cannot be confirmed, so the command reports the
+outcome as unknown although the model normally changes when the turn ends. After an exit 1, run
+`list-session-models` to see the session's model before trying again; do not repeat the
+switch blindly.
+
+`list-session-models` exits 8 until the session's Copilot has reported its models. Both
+commands exit 9 for a parked session and leave it parked: run `unpark-session` first.
+Their other exit codes are those of `close-session`.
 
 Commands inside an app-managed terminal automatically target its current
 project and session. Hooks for other tools can post a notification:

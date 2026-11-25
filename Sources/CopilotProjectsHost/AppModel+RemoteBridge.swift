@@ -96,6 +96,18 @@ private struct SetModelRequestFile: Codable {
     let contextTier: String?
 }
 
+private extension AgentActivitySnapshot {
+    /// Whether the session's own catalog lets `selection` be switched to: a model it
+    /// lists and has not disabled, with an effort and a context size that model offers.
+    func offers(_ selection: RemoteModelSelection) -> Bool {
+        guard let target = availableModels?.first(where: { $0.id == selection.modelId }),
+              target.disabled != true,
+              selection.reasoningEffort.map({ target.supportedReasoningEfforts?.contains($0) == true }) ?? true
+        else { return false }
+        return selection.contextTier != "long_context" || target.longContextAvailable != false
+    }
+}
+
 struct RemoteElicitationTerminalTarget {
     let isAtLiveBottom: Bool
     let screen: RemoteTerminalScreen?
@@ -253,9 +265,9 @@ extension AppModel {
     }
 
     /// Local automation (control socket): a Copilot session with a starting prompt
-    /// and caller-chosen title. Shares the remote creation ledger, so a retried
-    /// request id returns `.existing`, `.conflict`, or `.gone` instead of launching
-    /// a second session.
+    /// and caller-chosen title, started with `model` when one is named. Shares the
+    /// remote creation ledger, so a retried request id returns `.existing`,
+    /// `.conflict`, or `.gone` instead of launching a second session.
     func createLocalCopilotSession(
         requestId: UUID,
         projectId: String,
@@ -263,6 +275,7 @@ extension AppModel {
         prompt: String,
         hostId: String? = nil,
         parentSessionId: String? = nil,
+        model: RemoteModelSelection? = nil,
         now: Date = Date()
     ) -> RemoteSessionCreationOutcome {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -286,6 +299,7 @@ extension AppModel {
             title: title,
             initialPrompt: prompt,
             parentSessionId: parentSessionId,
+            model: model,
             now: now
         )
     }
@@ -369,6 +383,7 @@ extension AppModel {
         fingerprintOverride: String? = nil,
         pullRequestKeys: [String]? = nil,
         parentSessionId: String? = nil,
+        model: RemoteModelSelection? = nil,
         now: Date
     ) -> RemoteSessionCreationOutcome {
         // A failed startup load leaves the in-memory workspace empty, so neither
@@ -388,7 +403,8 @@ extension AppModel {
             // is a user setting and can change between a client's retries.
             initialPrompt: request.pullRequestURL == nil ? initialPrompt : nil,
             pullRequestURL: request.pullRequestURL,
-            hostId: normalizedRequestedHostId
+            hostId: normalizedRequestedHostId,
+            model: model
         )
         let creationRecord: SessionCreationRecord?
         do {
@@ -563,7 +579,8 @@ extension AppModel {
             sessionId,
             executable: copilotExecutable,
             initialPrompt: initialPrompt,
-            resumeRecordedSession: isPlainCreate
+            resumeRecordedSession: isPlainCreate,
+            model: model
         )
         // Like Start Session in the app, never keep a tab whose terminal didn't
         // start; nothing is recorded, so nothing was created.
@@ -1477,25 +1494,7 @@ extension AppModel {
             handoffSuffix: "set-model-request.json",
             now: clock,
             blocksInput: { parkingBlocksInput(sessionId) },
-            validate: { snapshot in
-                guard snapshot.workflow?.restartRequested != true,
-                      let target = snapshot.availableModels?
-                    .first(where: { $0.id == selection.modelId }),
-                      target.disabled != true else {
-                    return false
-                }
-                if let effort = selection.reasoningEffort {
-                    guard let supported = target.supportedReasoningEfforts,
-                          supported.contains(effort) else {
-                        return false
-                    }
-                }
-                if selection.contextTier == "long_context",
-                   target.longContextAvailable == false {
-                    return false
-                }
-                return true
-            },
+            validate: { $0.workflow?.restartRequested != true && $0.offers(selection) },
             makeHandoff: { metadata in
                 SetModelRequestFile(
                     schemaVersion: 1,
@@ -1843,6 +1842,65 @@ extension AppModel {
             }
         }
         return nil
+    }
+
+    /// The scripted `list-session-models` and `set-session-model`. The list is the one the
+    /// model picker shows, and a switch is the picker's: it answers once its receipt is known.
+    func sessionModelCommand(
+        _ request: ControlRequest, pollInterval: Duration = .milliseconds(500)
+    ) async -> ControlResponse {
+        let sessionId = request.sessionId ?? ""
+        if let refusal = automationRefusal(sessionId: sessionId, projectId: request.projectId) { return refusal }
+        // A parked session is refused here: submitting a switch to one resumes it.
+        guard parkedState(sessionId) == nil else {
+            return .failure("The session is parked, so its Copilot has no model to list or switch. Run "
+                + "copilot-projects unpark-session --session \(sessionId), then try again.", code: "parked")
+        }
+        let adapter = CLIOperationAdapter(
+            activityDirectory: agentActivityDirectory, resumeMarkerDirectory: resumeMarkerDirectory)
+        // A tracker that has not read Copilot's models offers no list, which is not an empty one.
+        guard let snapshot = adapter.loadFreshSnapshot(sessionId: sessionId, now: { Date() }),
+              !snapshot.reportsTerminalDisconnect,
+              let models = snapshot.remoteAvailableModels() else {
+            return .failure("the session's tracker is not ready, or has not read Copilot's models yet", code: "busy")
+        }
+        guard request.command == "set-session-model" else {
+            struct Listing: Encodable {
+                let currentModel: RemoteModelInfo?
+                let availableModels: [RemoteAvailableModel]
+            }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            guard let json = try? encoder.encode(
+                Listing(currentModel: snapshot.remoteModelInfo(), availableModels: models)
+            ) else { return .failure("could not encode the session's models") }
+            return .success(String(decoding: json, as: UTF8.self))
+        }
+        guard let modelId = request.model else {
+            return .failure("set-session-model requires a model", code: "bad-request")
+        }
+        let selection = RemoteModelSelection(
+            modelId: modelId, reasoningEffort: request.reasoningEffort, contextTier: request.contextTier)
+        let list = "copilot-projects list-session-models --session \(sessionId)"
+        guard snapshot.offers(selection) else {
+            return .failure("The session does not offer that model, or that reasoning effort or context size "
+                + "for it. Run \(list) to see what it offers.", code: "invalid")
+        }
+        let result = await performLocalModelSwitch(
+            sessionId: sessionId, selection: selection, pollInterval: pollInterval)
+        if result.state == .applied { return .success(code: "applied") }
+        // With no operation nothing reached the tracker, so the caller can try again; a receipt is final.
+        guard result.operationId != nil else {
+            return .failure("The session's tracker did not take the model switch: it is not ready, or is "
+                + "busy with another request. Try again.", code: "busy")
+        }
+        return .failure(
+            result.state == .rejected
+                ? "Copilot refused the model switch. Run \(list) to see the session's model."
+                : "Outcome unknown. Copilot puts a switch off until a running turn ends, and that cannot be "
+                    + "confirmed here. Run \(list) to see the session's model before trying again.",
+            code: result.state.rawValue
+        )
     }
 
     func performLocalUserInputAnswer(
