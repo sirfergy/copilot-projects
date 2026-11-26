@@ -536,9 +536,10 @@ struct TranscriptDrawer: View {
 
     /// Renders one more page of earlier turns. Returns false, and writes nothing, when every turn
     /// is rendered: a write here re-evaluates the whole drawer. Following the bottom, the reader is
-    /// at the bottom, so a page loads only while the bottom is within a viewport of the top. SwiftUI
-    /// sometimes moves the view 543 pt up for one main-queue pass after a page fills in, which
-    /// loaded a page on 3 of about 1,800 opens.
+    /// at the bottom, so a page loads only while the bottom is within a viewport of the top. When a
+    /// display cycle runs inside a main-queue pass, SwiftUI applies a scroll a pass late and moves
+    /// the view 543 pt up after a page fills in, which loaded a page on 3 of about 1,800 opens in
+    /// a test.
     private func loadEarlierPage(bottomIsNearTop: Bool) -> Bool {
         let turns = displayedTurns
         let first = firstRenderedIndex(in: turns)
@@ -591,20 +592,15 @@ struct TranscriptDrawer: View {
         }
     }
 
-    /// SwiftUI can report a later main-queue pass's own scroll as a move up before `scrollTo`
-    /// returns. The scroll handler takes a move up for the reader's and clears `isAtBottom`, so
-    /// each later pass sets it again, or a pager check in between loads a page nobody scrolled to.
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
         isAtBottom = true
         proxy.scrollTo("transcript-bottom", anchor: .bottom)
         DispatchQueue.main.async {
             guard isAtBottom else { return }
             proxy.scrollTo("transcript-bottom", anchor: .bottom)
-            isAtBottom = true
             DispatchQueue.main.async {
                 guard isAtBottom else { return }
                 proxy.scrollTo("transcript-bottom", anchor: .bottom)
-                isAtBottom = true
             }
         }
     }

@@ -39,18 +39,27 @@ final class TranscriptReloadTests: XCTestCase {
         CFRunLoopRemoveObserver(rl, observer, .defaultMode)
     }
 
+    /// Runs `body` in a run-loop block: after the main-queue pass that asks for it, and ahead of
+    /// the run loop's display cycle. An app lays out between main-queue passes too. A layout run
+    /// inside a pass, between two scrolls the drawer had queued, made SwiftUI apply a scroll one
+    /// pass late: the transcript sat 543 pt above the bottom for a pass on 223 of 1,200 returns to
+    /// a conversation, and now and then rendered a page nobody scrolled to.
+    @MainActor
+    private func betweenMainQueuePasses(_ body: @escaping () -> Void) async {
+        await withCheckedContinuation { continuation in
+            CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+                body()
+                continuation.resume()
+            }
+            CFRunLoopWakeUp(CFRunLoopGetMain())
+        }
+    }
+
     @MainActor
     private func settleDisplayCycle(_ window: NSWindow) async {
         for _ in 0..<3 {
-            await withCheckedContinuation { continuation in
-                DispatchQueue.main.async {
-                    continuation.resume()
-                }
-            }
-            window.contentView?.layoutSubtreeIfNeeded()
-            stepMainRunLoopBeforeWaiting()
+            await betweenMainQueuePasses { window.contentView?.layoutSubtreeIfNeeded() }
         }
-        window.contentView?.layoutSubtreeIfNeeded()
     }
 
     @MainActor
@@ -415,7 +424,9 @@ final class TranscriptReloadTests: XCTestCase {
                         harness.sessionId = "\(target.id)-step-\(step)"
                         harness.turns = asyncSnapshotArrival ? [] : target.turns
                     }
-                    stepMainRunLoopBeforeWaiting()
+                    // The empty drawer is laid out before its snapshot arrives. Without this layout
+                    // the first open rendered two pages at once: 8 turns instead of 4.
+                    await betweenMainQueuePasses { window.contentView?.layoutSubtreeIfNeeded() }
                     if asyncSnapshotArrival {
                         harness.turns = target.turns
                     }
@@ -734,19 +745,25 @@ final class TranscriptReloadTests: XCTestCase {
                 harness.turns = (3_000..<3_003).map { makeShortTurn(index: $0, variant: 8) }
                 await settleTranscript(window)
                 // Filling in pages at the bottom put the view a page past the end. Pulled back from
-                // there, it now and then landed high enough to load one more page.
+                // there, it now and then landed high enough to load one more page. So did a scroll
+                // SwiftUI applied a pass late, which moved the view 543 pt up.
                 var pastEnd: CGFloat = 0
+                var movedUp: CGFloat = 0
+                var lastY = sv.contentView.bounds.minY
                 let watchEnd = NotificationCenter.default
                     .publisher(for: NSView.boundsDidChangeNotification, object: sv.contentView)
                     .sink { _ in
                         let clip = sv.contentView.bounds
                         pastEnd = max(pastEnd, clip.minY - max(0, doc.frame.height - clip.height))
+                        movedUp = max(movedUp, lastY - clip.minY)
+                        lastY = clip.minY
                     }
                 harness.copilotSessionId = "conversation-2"
                 harness.turns = conversation2
                 await settleTranscript(window)
                 watchEnd.cancel()
                 XCTAssertLessThan(pastEnd, 1, "Filling in pages at the bottom should not scroll past the end")
+                XCTAssertLessThan(movedUp, 1, "Filling in pages at the bottom should not move the view up")
                 XCTAssertLessThanOrEqual(
                     renderedTurnCount(),
                     renderedInNewConversation,
