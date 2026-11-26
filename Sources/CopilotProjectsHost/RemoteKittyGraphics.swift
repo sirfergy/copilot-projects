@@ -935,7 +935,9 @@ final class RemoteKittyImageCapture: ObservableObject {
     /// iff `version` is `imageId`'s newest still-retained version *and* the
     /// id has *any* active placement at all — wildcard or exact, and taking
     /// `deletedPlacements` exceptions into account — regardless of which
-    /// specific placement id that happens to be.
+    /// specific placement id that happens to be. For an image uploaded
+    /// without `U=1` the placements do not decide it: that version counts
+    /// from its upload until the CLI frees the image, and not after.
     ///
     /// Exists because `currentVersion(for:placementId:)` only ever answers
     /// "is this current *for the Kitty spec's implicit default placement
