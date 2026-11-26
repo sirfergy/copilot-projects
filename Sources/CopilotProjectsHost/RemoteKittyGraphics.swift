@@ -647,6 +647,7 @@ final class RemoteKittyImageCapture: ObservableObject {
     // activation semantics regardless of how many continuation chunks
     // (which never repeat `a=`/`p=`) came in between.
     private var pendingActivates = false
+    private var pendingIsDirect = false
     private var pendingPlacementId: UInt32?
     /// Combined first-frame metadata a real Copilot transmission carries
     /// alongside `a=T` (e.g. `c=48,r=24`, and optionally `X=`/`Y=`/`z=`) —
@@ -722,8 +723,9 @@ final class RemoteKittyImageCapture: ObservableObject {
         var z: Int?
         /// Where a direct placement was drawn; never persisted.
         var anchor: RemoteKittyDirectAnchor?
-        /// On an image's wildcard entry: the image was drawn directly.
-        var isDirect = false
+        /// On the wildcard entry of an image uploaded without `U=1`: whether
+        /// the CLI has freed it since that upload.
+        var directFreed: Bool?
     }
     private struct PlacementGeometryKey: Hashable {
         let imageId: UInt32
@@ -948,16 +950,11 @@ final class RemoteKittyImageCapture: ObservableObject {
     /// entries" victim selection use this instead.
     func isCurrentlyAdvertised(imageId: UInt32, version: UInt64) -> Bool {
         guard latestVersion[imageId] == version else { return false }
-        // A directly drawn image stays displayed after the CLI frees it, so
-        // only one still on screen is spared: a freed one is evicted first.
-        if isDirectImage(imageId) {
-            return placementDimensions.contains { $0.key.imageId == imageId && $0.value.anchor != nil }
-        }
+        // An image uploaded without `U=1` is drawn a step later and stays displayed after
+        // the CLI frees it: it is spared from its upload until then, and evicted first after.
+        let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
+        if let freed = placementDimensions[imageKey]?.directFreed { return !freed }
         return isAnyPlacementActive(imageId: imageId)
-    }
-
-    private func isDirectImage(_ imageId: UInt32) -> Bool {
-        placementDimensions[PlacementGeometryKey(imageId: imageId, placementId: nil)]?.isDirect == true
     }
 
     /// Activates a placement for `imageId`: either the wildcard (every
@@ -1340,6 +1337,7 @@ final class RemoteKittyImageCapture: ObservableObject {
         // activity already existed for `imageId` regardless of which action
         // this is, so a plain `t` on an already-active id keeps showing it.
         pendingActivates = (keys["a"] == "T")
+        pendingIsDirect = keys["U"] != "1"
         pendingPlacementId = keys["p"].flatMap { UInt32($0) }.flatMap {
             $0 > 0 ? $0 : nil
         }
@@ -1437,12 +1435,12 @@ final class RemoteKittyImageCapture: ObservableObject {
               let anchor = directAnchor?()
         else { return }
 
-        if !isDirectImage(imageId) {
+        if !wildcardActiveImageIds.contains(imageId) {
             let wasAdvertised = isAnyPlacementAdvertised(imageId: imageId)
             activatePlacement(imageId: imageId, explicitPlacementId: nil)
             let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
             makeRoomForPlacementGeometry(imageKey)
-            placementDimensions[imageKey] = PlacementDimensions(rows: rows, columns: columns, isDirect: true)
+            placementDimensions[imageKey] = .init(rows: rows, columns: columns, directFreed: false)
             noteDisplayed(imageId: imageId, wasAdvertised: wasAdvertised)
         }
         let key = PlacementGeometryKey(imageId: imageId, placementId: placementId)
@@ -1514,6 +1512,7 @@ final class RemoteKittyImageCapture: ObservableObject {
     private func resetPendingTransmission() {
         pendingImageId = nil
         pendingActivates = false
+        pendingIsDirect = false
         pendingPlacementId = nil
         pendingRows = nil
         pendingColumns = nil
@@ -1536,6 +1535,7 @@ final class RemoteKittyImageCapture: ObservableObject {
     func abortPendingForBudget() {
         pendingImageId = nil
         pendingActivates = false
+        pendingIsDirect = false
         pendingPlacementId = nil
         pendingRows = nil
         pendingColumns = nil
@@ -1600,6 +1600,11 @@ final class RemoteKittyImageCapture: ObservableObject {
             )
         }
         latestVersion[imageId] = version
+        if pendingIsDirect {
+            let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
+            makeRoomForPlacementGeometry(imageKey)
+            placementDimensions[imageKey, default: PlacementDimensions(rows: 0, columns: 0)].directFreed = false
+        }
         // `a=T` (transmit + display) always (re)activates a placement —
         // whether `imageId` was previously active, had its placement
         // deleted but was still retained, or is being seen for the first
@@ -1737,6 +1742,7 @@ final class RemoteKittyImageCapture: ObservableObject {
             clearAll()
         case "I":
             guard let idString = keys["i"], let imageId = UInt32(idString) else { return }
+            let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
             if let placementId = explicitPlacementId {
                 // `d=I,i=<id>,p=<placement>`: mirrors SwiftTerm's own
                 // uppercase scoping — remove only *this* placement's
@@ -1753,9 +1759,10 @@ final class RemoteKittyImageCapture: ObservableObject {
                 if !isAnyPlacementActive(imageId: imageId) {
                     removeAllVersions(imageId: imageId)
                 }
-            } else if isDirectImage(imageId) {
+            } else if placementDimensions[imageKey]?.directFreed != nil {
                 // The CLI frees a directly drawn image when it scrolls out of its view. Only the
                 // placements go: a transcript keeps the image until the retention bounds evict it.
+                placementDimensions[imageKey]?.directFreed = true
                 placementDimensions = placementDimensions.filter {
                     $0.key.imageId != imageId || $0.value.anchor == nil
                 }

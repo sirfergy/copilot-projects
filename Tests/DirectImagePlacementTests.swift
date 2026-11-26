@@ -140,17 +140,39 @@ final class DirectImagePlacementTests: XCTestCase {
         XCTAssertEqual(capture.retainedImageMetadata().first?.displayedAt, shownAt)
     }
 
-    func testRetentionBoundEvictsTheOldestFreedDirectImageAndStillShowsTheNewOne() {
+    func testRetentionBoundEvictsTheOldestFreedDirectImageNotOneBeingRedrawn() {
         let capture = makeCapture()
-        send(upload(1) + draw(1, placement: 2), to: capture) // stays on screen
-        // Sixteen more, each drawn and then freed: one entry past the per-session cap.
+        send(upload(1) + draw(1, placement: 2), to: capture)
+        // Sixteen more, each drawn and then freed: one entry past the per-session cap. Image 1
+        // stays in view, so each frame deletes its placement before the upload and draws it after.
         for id in 2 ... 17 {
-            send(upload(id) + draw(id, placement: 2) + erase(id, placement: 2) + free(id), to: capture)
+            send(
+                erase(1, placement: id) + upload(id) + draw(1, placement: id + 1) + draw(id, placement: 2),
+                to: capture
+            )
+            send(erase(id, placement: 2) + free(id), to: capture)
         }
 
         XCTAssertNil(capture.imageData(imageId: 2, version: 2))
         XCTAssertEqual(capture.retainedImageMetadata().map(\.imageId), [1] + Array(3 ... 17))
         XCTAssertEqual(placements(capture).map(\.imageId), [1])
+    }
+
+    func testNewImageIsKeptWhenRestoredImagesFillTheSession() {
+        let capture = makeCapture()
+        capture.beginRestoring()
+        for id: UInt32 in 1 ... 16 {
+            capture.restoreEntry(imageId: id, version: UInt64(100 + id), data: png, displayedAt: clock.value)
+            capture.restoreCurrentSelection(
+                imageId: id, version: UInt64(100 + id), placementId: nil, rows: 2, columns: 6
+            )
+        }
+        capture.finishRestoring()
+
+        send(upload(17) + draw(17, placement: 2), to: capture)
+        XCTAssertNil(capture.imageData(imageId: 1, version: 101))
+        XCTAssertEqual(capture.retainedImageMetadata().map(\.imageId), Array(2 ... 17))
+        XCTAssertEqual(placements(capture).map(\.imageId), [17])
     }
 
     func testDrawsOutsideTheSubsetAreIgnoredAndNeverSplitTheFeed() {
