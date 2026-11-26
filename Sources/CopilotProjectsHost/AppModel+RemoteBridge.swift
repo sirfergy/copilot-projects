@@ -1019,10 +1019,13 @@ extension AppModel {
             terminalScroll: terminalScroll, afterLine: afterLine)
         // Scan the entire copied window, not just the afterLine-narrowed text.
         // Images crossing the incremental boundary retain their full geometry.
+        let relativeTo = terminalScroll ? snapshot.capturedRange.lowerBound : 0
         let placements = RemoteKittyPlacementScanner.scan(
             cells: RemoteKittyPlacementScanner.gridCells(
-                from: snapshot.rows,
-                relativeTo: terminalScroll ? snapshot.capturedRange.lowerBound : 0),
+                from: snapshot.rows, relativeTo: relativeTo),
+            direct: view.kittyImageCapture.directPlacements(
+                isAlternateBuffer: snapshot.bufferKind == .alt,
+                rows: snapshot.capturedRange, relativeTo: relativeTo),
             firstLine: screen.firstLine,
             priorityLineRange: screen.firstLine ..< (screen.firstLine + screen.lines.count),
             currentVersion: { imageId, placementId in

@@ -119,9 +119,18 @@ final class ProjectsTerminalView: ProcessTerminalView {
             bufferDuringImageRestore(slice)
             return
         }
-        kittyImageCapture.ingest(slice)
-        feed(byteArray: slice)
+        ingestAndFeed(slice)
         scheduleRestoredPlacementReplayIfNeeded()
+    }
+
+    /// The one path PTY bytes take into the image capture and the terminal. The
+    /// feed is split only around a direct image placement, to read its cursor.
+    private func ingestAndFeed(_ bytes: ArraySlice<UInt8>) {
+        kittyImageCapture.ingest(bytes, feedingTerminal: { feed(byteArray: $0) }) {
+            terminalContentSnapshot(region: .rows(0 ..< 0)).map {
+                .init(row: $0.cursorRow, column: $0.cursorColumn, isAlternateBuffer: $0.bufferKind == .alt)
+            }
+        }
     }
 
     /// Wires this view up to durable Kitty-image persistence for `sessionId`
@@ -189,11 +198,9 @@ final class ProjectsTerminalView: ProcessTerminalView {
         pendingImageRestoreBuffer = []
         restoreBufferBudget.release(buffered.count)
         if !buffered.isEmpty {
-            kittyImageCapture.ingest(buffered[...])
-            feed(byteArray: buffered[...])
+            ingestAndFeed(buffered[...])
         }
-        kittyImageCapture.ingest(slice)
-        feed(byteArray: slice)
+        ingestAndFeed(slice)
     }
 
     private func completeImageRestore(_ result: RemoteKittyRestoredSessionImages) {
@@ -203,8 +210,7 @@ final class ProjectsTerminalView: ProcessTerminalView {
         pendingImageRestoreBuffer = []
         restoreBufferBudget.release(buffered.count)
         if !buffered.isEmpty {
-            kittyImageCapture.ingest(buffered[...])
-            feed(byteArray: buffered[...])
+            ingestAndFeed(buffered[...])
             scheduleRestoredPlacementReplayIfNeeded()
         }
     }
@@ -395,8 +401,7 @@ final class ProjectsTerminalView: ProcessTerminalView {
         pendingImageRestoreBuffer.removeAll(keepingCapacity: false)
         restoreBufferBudget.release(buffered.count)
         guard !buffered.isEmpty else { return }
-        kittyImageCapture.ingest(buffered[...])
-        feed(byteArray: buffered[...])
+        ingestAndFeed(buffered[...])
     }
 
     /// Awaits this session's disk-restore `Task` directly (not a sleep), so
