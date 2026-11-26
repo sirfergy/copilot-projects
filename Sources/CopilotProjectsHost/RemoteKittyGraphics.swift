@@ -247,6 +247,14 @@ enum RemoteKittyReplayEncoding {
 
 // MARK: - Grid scanning -> placements (pure, SwiftTerm-independent)
 
+/// The cell a direct (non-placeholder) placement was drawn at: the cursor when
+/// its `a=p` arrived. `row` is scroll-invariant, like `TerminalContentSnapshot.cursorRow`.
+struct RemoteKittyDirectAnchor: Equatable {
+    let row: Int
+    let column: Int
+    let isAlternateBuffer: Bool
+}
+
 /// One decoded placeholder grid cell, in the coordinate space the caller used
 /// (viewport row ids for a live screen, scroll-invariant absolute row ids for a
 /// history screen).
@@ -333,13 +341,17 @@ enum RemoteKittyPlacementScanner {
     /// cap only ever drops entire components, never truncates one — and the
     /// final returned order is always the same (line, column, imageId) sort
     /// regardless of which tier a placement was selected from.
+    ///
+    /// A `direct` placement has no cells to find: it is given whole, with `line`
+    /// in the cells' line-id space, and joins the tiers, the cap and the order.
     static func scan(
         cells: [RemoteKittyGridCell],
+        direct: [RemoteTerminalImagePlacement] = [],
         firstLine: Int,
         priorityLineRange: Range<Int>,
         currentVersion: (UInt32, UInt32) -> UInt64?
     ) -> [RemoteTerminalImagePlacement] {
-        guard !cells.isEmpty else { return [] }
+        guard !cells.isEmpty || !direct.isEmpty else { return [] }
 
         var byGroup: [GroupKey: Set<Coordinate>] = [:]
         for cell in cells {
@@ -349,6 +361,19 @@ enum RemoteKittyPlacementScanner {
 
         var priorityComponents: [Component] = []
         var otherComponents: [Component] = []
+        for placement in direct {
+            let lines = placement.line ..< placement.line + placement.rows
+            let entry = Component(
+                imageId: placement.imageId, placementId: 0, version: placement.contentVersion,
+                minLine: lines.lowerBound, maxLine: lines.upperBound - 1,
+                minCol: placement.column, maxCol: placement.column + placement.columns - 1
+            )
+            if priorityLineRange.overlaps(lines) {
+                priorityComponents.append(entry)
+            } else {
+                otherComponents.append(entry)
+            }
+        }
 
         let sortedGroups = byGroup.keys.sorted {
             if $0.imageId != $1.imageId { return $0.imageId < $1.imageId }
@@ -481,7 +506,7 @@ enum RemoteKittyPlacementScanner {
 // MARK: - Kitty graphics APC capture (bounded, fail-closed)
 
 /// Captures the exact Copilot Kitty graphics subset (7-bit APC
-/// `ESC _ G ... ESC \`, direct transmission, `f=100` PNG, `U=1`, explicit
+/// `ESC _ G ... ESC \`, direct transmission, `f=100` PNG, `U=1` or an upload drawn by a direct `a=p`, explicit
 /// 1-in-0xFFFFFF image ids, `m=1` continuation chunks) from raw terminal output
 /// bytes, independent of SwiftTerm's own (private, display-only) Kitty state.
 ///
@@ -539,6 +564,10 @@ final class RemoteKittyImageCapture: ObservableObject {
 
     private var state: ScanState = .ground
     private var rawFrame: [UInt8] = []
+    /// For one `ingest(_:feedingTerminal:cursor:)`: the terminal's cursor, and
+    /// where in the chunk the frame being handled ended.
+    private var directAnchor: (() -> RemoteKittyDirectAnchor?)?
+    private var frameEndIndex = 0
 
     private var pendingImageId: UInt32?
     private var pendingBase64: [UInt8] = []
@@ -618,6 +647,7 @@ final class RemoteKittyImageCapture: ObservableObject {
     // activation semantics regardless of how many continuation chunks
     // (which never repeat `a=`/`p=`) came in between.
     private var pendingActivates = false
+    private var pendingIsDirect = false
     private var pendingPlacementId: UInt32?
     /// Combined first-frame metadata a real Copilot transmission carries
     /// alongside `a=T` (e.g. `c=48,r=24`, and optionally `X=`/`Y=`/`z=`) —
@@ -691,6 +721,11 @@ final class RemoteKittyImageCapture: ObservableObject {
         var x: Int?
         var y: Int?
         var z: Int?
+        /// Where a direct placement was drawn; never persisted.
+        var anchor: RemoteKittyDirectAnchor?
+        /// On the wildcard entry of an image uploaded without `U=1`: whether
+        /// the CLI has freed it since that upload.
+        var directFreed: Bool?
     }
     private struct PlacementGeometryKey: Hashable {
         let imageId: UInt32
@@ -765,9 +800,29 @@ final class RemoteKittyImageCapture: ObservableObject {
     /// underlying byte stream — the scanner carries state across calls, so a
     /// frame split across arbitrary `ingest` boundaries still parses.
     func ingest(_ bytes: ArraySlice<UInt8>) {
-        for byte in bytes {
-            process(byte)
+        for index in bytes.indices {
+            process(bytes[index], at: index)
         }
+    }
+
+    /// Scans `bytes` and hands them to `feed`, the terminal, in order: whole,
+    /// in one call, unless they hold a direct placement. That is drawn at the
+    /// cursor, so the bytes before the one ending it are fed first for `cursor`.
+    func ingest(
+        _ bytes: ArraySlice<UInt8>, feedingTerminal feed: (ArraySlice<UInt8>) -> Void,
+        cursor: () -> RemoteKittyDirectAnchor?
+    ) {
+        var fed = bytes.startIndex
+        withoutActuallyEscaping({ () -> RemoteKittyDirectAnchor? in
+            feed(bytes[fed ..< self.frameEndIndex])
+            fed = self.frameEndIndex
+            return cursor()
+        }) {
+            directAnchor = $0
+            ingest(bytes)
+            directAnchor = nil
+        }
+        feed(bytes[fed...])
     }
 
     /// The newest version currently retained for `(imageId, placementId)`, or
@@ -880,7 +935,9 @@ final class RemoteKittyImageCapture: ObservableObject {
     /// iff `version` is `imageId`'s newest still-retained version *and* the
     /// id has *any* active placement at all — wildcard or exact, and taking
     /// `deletedPlacements` exceptions into account — regardless of which
-    /// specific placement id that happens to be.
+    /// specific placement id that happens to be. For an image uploaded
+    /// without `U=1` the placements do not decide it: that version counts
+    /// from its upload until the CLI frees the image, and not after.
     ///
     /// Exists because `currentVersion(for:placementId:)` only ever answers
     /// "is this current *for the Kitty spec's implicit default placement
@@ -895,6 +952,10 @@ final class RemoteKittyImageCapture: ObservableObject {
     /// entries" victim selection use this instead.
     func isCurrentlyAdvertised(imageId: UInt32, version: UInt64) -> Bool {
         guard latestVersion[imageId] == version else { return false }
+        // An image uploaded without `U=1` is drawn a step later and stays displayed after
+        // the CLI frees it: it is spared from its upload until then, and evicted first after.
+        let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
+        if let freed = placementDimensions[imageKey]?.directFreed { return !freed }
         return isAnyPlacementActive(imageId: imageId)
     }
 
@@ -1046,7 +1107,7 @@ final class RemoteKittyImageCapture: ObservableObject {
 
     // MARK: Byte-level APC scanning
 
-    private func process(_ byte: UInt8) {
+    private func process(_ byte: UInt8, at index: Int) {
         // CAN (0x18) / SUB (0x1A) are wired as an "anywhere" rule in
         // SwiftTerm's own VT500 transition table — they fire from every
         // parser state and always cancel back to ground, never completing
@@ -1081,7 +1142,7 @@ final class RemoteKittyImageCapture: ObservableObject {
             if byte == 0x47 { // 'G' — Kitty graphics APC
                 state = .apcAccumulating
             } else if byte == 0x1B {
-                abortAPC(reprocessing: byte)
+                abortAPC(reprocessing: byte, at: index)
             } else if byte == 0x9C || byte == 0x07 {
                 // C1 ST or BEL arriving before the command marker: no command
                 // byte was ever accumulated, so — mirroring SwiftTerm, whose
@@ -1100,7 +1161,7 @@ final class RemoteKittyImageCapture: ObservableObject {
                 // both, alongside the 7-bit `ESC \` handled below, as valid
                 // terminators for an APC string, so a frame ending on either
                 // completes successfully exactly like a full ST would.
-                completeFrame()
+                completeFrame(at: index)
                 state = .ground
             } else if rawFrame.count >= remoteKittyMaxRawFrameBytes {
                 // Overflow: drop the frame and resynchronize on the next
@@ -1112,10 +1173,10 @@ final class RemoteKittyImageCapture: ObservableObject {
             }
         case .apcAccumulatingEsc:
             if byte == 0x5C { // '\' — ST, frame complete
-                completeFrame()
+                completeFrame(at: index)
                 state = .ground
             } else {
-                abortAPC(reprocessing: byte)
+                abortAPC(reprocessing: byte, at: index)
             }
         case .apcSkipping:
             if byte == 0x1B {
@@ -1174,14 +1235,14 @@ final class RemoteKittyImageCapture: ObservableObject {
     /// and reprocessing `_` there would lose the "ESC _" prefix entirely
     /// (`.ground` only reacts to a *subsequent* ESC) — so a fresh APC starts
     /// directly instead, exactly as `.apcSkippingEsc` does for the same byte.
-    private func abortAPC(reprocessing byte: UInt8) {
+    private func abortAPC(reprocessing byte: UInt8, at index: Int) {
         clearRawFrame()
         if byte == 0x5F {
             state = .apcAwaitingMarker
             return
         }
         state = .ground
-        process(byte)
+        process(byte, at: index)
     }
 
     /// CAN/SUB "anywhere" cancellation (see `process(_:)`): unconditionally
@@ -1205,7 +1266,8 @@ final class RemoteKittyImageCapture: ObservableObject {
         }
     }
 
-    private func completeFrame() {
+    private func completeFrame(at index: Int) {
+        frameEndIndex = index
         let frame = rawFrame
         clearRawFrame()
         let controlBytes: ArraySlice<UInt8>
@@ -1259,9 +1321,10 @@ final class RemoteKittyImageCapture: ObservableObject {
         resetPendingTransmission()
 
         let transmissionMedium = keys["t"] ?? "d"
+        // Without `U=1`, keep only an upload: the CLI draws it with a direct `a=p`.
         guard transmissionMedium == "d",
               keys["f"] == "100",
-              keys["U"] == "1",
+              keys["U"] == "1" || keys["a"] == "t",
               let idString = keys["i"],
               let imageId = UInt32(idString),
               imageId >= 1, imageId <= 0xFFFFFF
@@ -1276,6 +1339,7 @@ final class RemoteKittyImageCapture: ObservableObject {
         // activity already existed for `imageId` regardless of which action
         // this is, so a plain `t` on an already-active id keeps showing it.
         pendingActivates = (keys["a"] == "T")
+        pendingIsDirect = keys["U"] != "1"
         pendingPlacementId = keys["p"].flatMap { UInt32($0) }.flatMap {
             $0 > 0 ? $0 : nil
         }
@@ -1306,8 +1370,11 @@ final class RemoteKittyImageCapture: ObservableObject {
         // still pending.
         resetPendingTransmission()
 
-        guard keys["U"] == "1",
-              let idString = keys["i"], let imageId = UInt32(idString),
+        guard keys["U"] == "1" else {
+            handleDirectPlacement(keys: keys)
+            return
+        }
+        guard let idString = keys["i"], let imageId = UInt32(idString),
               imageId >= 1, imageId <= 0xFFFFFF,
               latestVersion[imageId] != nil
         else { return }
@@ -1335,6 +1402,11 @@ final class RemoteKittyImageCapture: ObservableObject {
             )
         }
         activatePlacement(imageId: imageId, explicitPlacementId: explicitPlacementId)
+        noteDisplayed(imageId: imageId, wasAdvertised: wasAdvertised)
+    }
+
+    /// Stamps the current version's first display, then reports and persists it.
+    private func noteDisplayed(imageId: UInt32, wasAdvertised: Bool, savingBytes: Bool = false) {
         if let currentVersion = latestVersion[imageId] {
             let currentKey = StoredKey(imageId: imageId, version: currentVersion)
             if displayedAt[currentKey] == nil, !restoredWithoutOrigin.contains(currentKey) {
@@ -1349,7 +1421,60 @@ final class RemoteKittyImageCapture: ObservableObject {
         if !wasAdvertised {
             imageAvailabilityGeneration &+= 1
         }
-        syncPersistedSelections(imageId: imageId)
+        // A direct upload waited for this draw to be saved: bytes and selection in one write.
+        let key = latestVersion[imageId].map { StoredKey(imageId: imageId, version: $0) }
+        guard savingBytes, let key, let data = dataByKey[key] else {
+            syncPersistedSelections(imageId: imageId)
+            return
+        }
+        persistRetainToDisk(
+            imageId: imageId, version: key.version, data: data, displayedAt: displayedAt[key],
+            awaitingFirstDisplay: false, selections: persistedSelections(imageId: imageId)
+        )
+    }
+
+    /// `a=p` without `U=1`: the CLI draws an uploaded image at the cursor, with no
+    /// placeholder cells, so this records where. Every scroll deletes the placement and
+    /// draws it under a new `p=`, so only an image's first draw marks it displayed.
+    private func handleDirectPlacement(keys: [String: String]) {
+        let span = 1 ... remoteKittyMaxImageDimension
+        guard let imageId = keys["i"].flatMap({ UInt32($0) }), (1 ... 0xFFFFFF).contains(imageId),
+              latestVersion[imageId] != nil,
+              let placementId = keys["p"].flatMap({ UInt32($0) }), placementId > 0,
+              let rows = keys["r"].flatMap({ Int($0) }), span.contains(rows),
+              let columns = keys["c"].flatMap({ Int($0) }), span.contains(columns),
+              let anchor = directAnchor?()
+        else { return }
+
+        let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
+        // Also an image kept from before a restart: its first draw here marks it.
+        if placementDimensions[imageKey]?.directFreed == nil || !wildcardActiveImageIds.contains(imageId) {
+            let wasAdvertised = isAnyPlacementAdvertised(imageId: imageId)
+            activatePlacement(imageId: imageId, explicitPlacementId: nil)
+            makeRoomForPlacementGeometry(imageKey)
+            placementDimensions[imageKey] = .init(rows: rows, columns: columns, directFreed: false)
+            noteDisplayed(imageId: imageId, wasAdvertised: wasAdvertised, savingBytes: !wasAdvertised)
+        }
+        let key = PlacementGeometryKey(imageId: imageId, placementId: placementId)
+        makeRoomForPlacementGeometry(key)
+        placementDimensions[key] = PlacementDimensions(rows: rows, columns: columns, anchor: anchor)
+    }
+
+    /// The direct placements drawn in one buffer that touch the absolute rows
+    /// `rows`, for `RemoteKittyPlacementScanner.scan`: `line` is relative to `relativeTo`.
+    func directPlacements(
+        isAlternateBuffer: Bool, rows: Range<Int>, relativeTo: Int
+    ) -> [RemoteTerminalImagePlacement] {
+        placementDimensions.compactMap { key, dimensions in
+            guard let anchor = dimensions.anchor, anchor.isAlternateBuffer == isAlternateBuffer,
+                  rows.overlaps(anchor.row ..< anchor.row + dimensions.rows),
+                  let version = latestVersion[key.imageId]
+            else { return nil }
+            return RemoteTerminalImagePlacement(
+                imageId: key.imageId, contentVersion: version, line: anchor.row - relativeTo,
+                column: anchor.column, rows: dimensions.rows, columns: dimensions.columns
+            )
+        }
     }
 
     private func appendContinuation(payload: ArraySlice<UInt8>, more: Bool) {
@@ -1399,6 +1524,7 @@ final class RemoteKittyImageCapture: ObservableObject {
     private func resetPendingTransmission() {
         pendingImageId = nil
         pendingActivates = false
+        pendingIsDirect = false
         pendingPlacementId = nil
         pendingRows = nil
         pendingColumns = nil
@@ -1421,6 +1547,7 @@ final class RemoteKittyImageCapture: ObservableObject {
     func abortPendingForBudget() {
         pendingImageId = nil
         pendingActivates = false
+        pendingIsDirect = false
         pendingPlacementId = nil
         pendingRows = nil
         pendingColumns = nil
@@ -1485,6 +1612,11 @@ final class RemoteKittyImageCapture: ObservableObject {
             )
         }
         latestVersion[imageId] = version
+        if pendingIsDirect {
+            let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
+            makeRoomForPlacementGeometry(imageKey)
+            placementDimensions[imageKey, default: PlacementDimensions(rows: 0, columns: 0)].directFreed = false
+        }
         // `a=T` (transmit + display) always (re)activates a placement —
         // whether `imageId` was previously active, had its placement
         // deleted but was still retained, or is being seen for the first
@@ -1622,6 +1754,7 @@ final class RemoteKittyImageCapture: ObservableObject {
             clearAll()
         case "I":
             guard let idString = keys["i"], let imageId = UInt32(idString) else { return }
+            let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
             if let placementId = explicitPlacementId {
                 // `d=I,i=<id>,p=<placement>`: mirrors SwiftTerm's own
                 // uppercase scoping — remove only *this* placement's
@@ -1637,6 +1770,13 @@ final class RemoteKittyImageCapture: ObservableObject {
                 clearSpecificPlacement(imageId: imageId, placementId: placementId)
                 if !isAnyPlacementActive(imageId: imageId) {
                     removeAllVersions(imageId: imageId)
+                }
+            } else if placementDimensions[imageKey]?.directFreed != nil {
+                // The CLI frees a directly drawn image when it scrolls out of its view. Only the
+                // placements go: a transcript keeps the image until the retention bounds evict it.
+                placementDimensions[imageKey]?.directFreed = true
+                placementDimensions = placementDimensions.filter {
+                    $0.key.imageId != imageId || $0.value.anchor == nil
                 }
             } else {
                 // `d=I,i=<id>` with no `p=`: removes every placement *and*
@@ -1723,6 +1863,12 @@ final class RemoteKittyImageCapture: ObservableObject {
     /// wasn't), so membership is rechecked fresh afterward rather than
     /// trusting the value read before pruning.
     private func clearSpecificPlacement(imageId: UInt32, placementId: UInt32) {
+        let geometryKey = PlacementGeometryKey(imageId: imageId, placementId: placementId)
+        if placementDimensions[geometryKey]?.anchor != nil {
+            // A direct placement left the screen; its image stays displayed.
+            placementDimensions.removeValue(forKey: geometryKey)
+            return
+        }
         let key = PlacementKey(imageId: imageId, placementId: placementId)
         let wasAdvertised = isPlacementAdvertised(imageId: imageId, placementId: placementId)
         exactActivePlacements.remove(key)
@@ -1854,6 +2000,9 @@ final class RemoteKittyImageCapture: ObservableObject {
         selections: [RemoteKittyPersistedPlacementSelection]
     ) {
         guard !suppressPersistToDisk, let diskStore else { return }
+        // An upload without `U=1` that is not displayed yet is saved by its first draw, with
+        // its selection: a full store makes room only for an entry that has one.
+        guard !pendingIsDirect || isAnyPlacementActive(imageId: imageId) else { return }
         diskStore.persistRetain(
             sessionId: sessionId,
             imageId: imageId,
@@ -1927,6 +2076,7 @@ final class RemoteKittyImageCapture: ObservableObject {
             for (key, dims) in placementDimensions
                 where key.imageId == imageId {
                 guard let placementId = key.placementId,
+                      dims.anchor == nil,
                       !deletedPlacements.contains(PlacementKey(
                           imageId: imageId,
                           placementId: placementId
