@@ -175,6 +175,22 @@ final class DirectImagePlacementTests: XCTestCase {
         XCTAssertEqual(placements(capture).map(\.imageId), [17])
     }
 
+    func testRestoredImageDrawnAgainIsKeptWhenFreed() {
+        let capture = makeCapture()
+        capture.beginRestoring()
+        capture.restoreEntry(imageId: 7, version: 107, data: png, displayedAt: clock.value)
+        capture.restoreCurrentSelection(imageId: 7, version: 107, placementId: nil, rows: 2, columns: 6)
+        capture.finishRestoring()
+
+        // A scroll after the restart: the CLI draws the image again without uploading it.
+        send(draw(7, placement: 5), to: capture)
+        XCTAssertEqual(placements(capture), [placement(7, 107, line: 0, column: 0)])
+
+        send(erase(7, placement: 5) + free(7), to: capture)
+        XCTAssertEqual(capture.retainedImageMetadata().map(\.imageId), [7])
+        XCTAssertEqual(capture.imageData(imageId: 7, version: 107), png)
+    }
+
     func testDrawsOutsideTheSubsetAreIgnoredAndNeverSplitTheFeed() {
         let capture = makeCapture()
         send(draw(7, placement: 2), to: capture) // nothing uploaded

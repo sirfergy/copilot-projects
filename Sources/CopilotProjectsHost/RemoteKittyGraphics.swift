@@ -1435,10 +1435,11 @@ final class RemoteKittyImageCapture: ObservableObject {
               let anchor = directAnchor?()
         else { return }
 
-        if !wildcardActiveImageIds.contains(imageId) {
+        let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
+        // Also an image kept from before a restart: its first draw here marks it.
+        if placementDimensions[imageKey]?.directFreed == nil || !wildcardActiveImageIds.contains(imageId) {
             let wasAdvertised = isAnyPlacementAdvertised(imageId: imageId)
             activatePlacement(imageId: imageId, explicitPlacementId: nil)
-            let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
             makeRoomForPlacementGeometry(imageKey)
             placementDimensions[imageKey] = .init(rows: rows, columns: columns, directFreed: false)
             noteDisplayed(imageId: imageId, wasAdvertised: wasAdvertised)
