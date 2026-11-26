@@ -564,9 +564,9 @@ final class RemoteKittyImageCapture: ObservableObject {
 
     private var state: ScanState = .ground
     private var rawFrame: [UInt8] = []
-    /// Set for the length of one `ingest(_:feedingTerminal:cursor:)`.
+    /// For one `ingest(_:feedingTerminal:cursor:)`: the terminal's cursor, and
+    /// where in the chunk the frame being handled ended.
     private var directAnchor: (() -> RemoteKittyDirectAnchor?)?
-    /// Where, in the chunk being ingested, the frame being handled ended.
     private var frameEndIndex = 0
 
     private var pendingImageId: UInt32?
@@ -948,7 +948,16 @@ final class RemoteKittyImageCapture: ObservableObject {
     /// entries" victim selection use this instead.
     func isCurrentlyAdvertised(imageId: UInt32, version: UInt64) -> Bool {
         guard latestVersion[imageId] == version else { return false }
+        // A directly drawn image stays displayed after the CLI frees it, so
+        // only one still on screen is spared: a freed one is evicted first.
+        if isDirectImage(imageId) {
+            return placementDimensions.contains { $0.key.imageId == imageId && $0.value.anchor != nil }
+        }
         return isAnyPlacementActive(imageId: imageId)
+    }
+
+    private func isDirectImage(_ imageId: UInt32) -> Bool {
+        placementDimensions[PlacementGeometryKey(imageId: imageId, placementId: nil)]?.isDirect == true
     }
 
     /// Activates a placement for `imageId`: either the wildcard (every
@@ -1393,6 +1402,11 @@ final class RemoteKittyImageCapture: ObservableObject {
             )
         }
         activatePlacement(imageId: imageId, explicitPlacementId: explicitPlacementId)
+        noteDisplayed(imageId: imageId, wasAdvertised: wasAdvertised)
+    }
+
+    /// Stamps the current version's first display, then reports and persists it.
+    private func noteDisplayed(imageId: UInt32, wasAdvertised: Bool) {
         if let currentVersion = latestVersion[imageId] {
             let currentKey = StoredKey(imageId: imageId, version: currentVersion)
             if displayedAt[currentKey] == nil, !restoredWithoutOrigin.contains(currentKey) {
@@ -1410,32 +1424,26 @@ final class RemoteKittyImageCapture: ObservableObject {
         syncPersistedSelections(imageId: imageId)
     }
 
-    /// `a=p` without `U=1`: the CLI draws an uploaded image at the cursor, with
-    /// no placeholder cells, so this records where. Every scroll deletes the
-    /// placement and draws it again under a new `p=`, so only an image's first
-    /// draw marks it displayed and changes availability or the disk.
+    /// `a=p` without `U=1`: the CLI draws an uploaded image at the cursor, with no
+    /// placeholder cells, so this records where. Every scroll deletes the placement and
+    /// draws it under a new `p=`, so only an image's first draw marks it displayed.
     private func handleDirectPlacement(keys: [String: String]) {
         let span = 1 ... remoteKittyMaxImageDimension
         guard let imageId = keys["i"].flatMap({ UInt32($0) }), (1 ... 0xFFFFFF).contains(imageId),
-              let version = latestVersion[imageId],
+              latestVersion[imageId] != nil,
               let placementId = keys["p"].flatMap({ UInt32($0) }), placementId > 0,
               let rows = keys["r"].flatMap({ Int($0) }), span.contains(rows),
               let columns = keys["c"].flatMap({ Int($0) }), span.contains(columns),
               let anchor = directAnchor?()
         else { return }
 
-        let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
-        if placementDimensions[imageKey]?.isDirect != true {
+        if !isDirectImage(imageId) {
             let wasAdvertised = isAnyPlacementAdvertised(imageId: imageId)
             activatePlacement(imageId: imageId, explicitPlacementId: nil)
+            let imageKey = PlacementGeometryKey(imageId: imageId, placementId: nil)
             makeRoomForPlacementGeometry(imageKey)
             placementDimensions[imageKey] = PlacementDimensions(rows: rows, columns: columns, isDirect: true)
-            let currentKey = StoredKey(imageId: imageId, version: version)
-            if displayedAt[currentKey] == nil, !restoredWithoutOrigin.contains(currentKey) {
-                displayedAt[currentKey] = now()
-            }
-            if !wasAdvertised { imageAvailabilityGeneration &+= 1 }
-            syncPersistedSelections(imageId: imageId)
+            noteDisplayed(imageId: imageId, wasAdvertised: wasAdvertised)
         }
         let key = PlacementGeometryKey(imageId: imageId, placementId: placementId)
         makeRoomForPlacementGeometry(key)
@@ -1745,11 +1753,9 @@ final class RemoteKittyImageCapture: ObservableObject {
                 if !isAnyPlacementActive(imageId: imageId) {
                     removeAllVersions(imageId: imageId)
                 }
-            } else if placementDimensions[PlacementGeometryKey(imageId: imageId, placementId: nil)]?
-                .isDirect == true {
-                // The CLI frees a directly drawn image when it scrolls out of
-                // the CLI's view. Only its placements go: a transcript keeps
-                // the image, as before, until the retention bounds evict it.
+            } else if isDirectImage(imageId) {
+                // The CLI frees a directly drawn image when it scrolls out of its view. Only the
+                // placements go: a transcript keeps the image until the retention bounds evict it.
                 placementDimensions = placementDimensions.filter {
                     $0.key.imageId != imageId || $0.value.anchor == nil
                 }

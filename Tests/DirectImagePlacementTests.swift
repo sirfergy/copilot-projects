@@ -140,15 +140,17 @@ final class DirectImagePlacementTests: XCTestCase {
         XCTAssertEqual(capture.retainedImageMetadata().first?.displayedAt, shownAt)
     }
 
-    func testRetentionBoundStillEvictsAFreedDirectImage() {
+    func testRetentionBoundEvictsTheOldestFreedDirectImageAndStillShowsTheNewOne() {
         let capture = makeCapture()
-        send(upload(1) + draw(1, placement: 2) + erase(1, placement: 2) + free(1), to: capture)
-        XCTAssertEqual(capture.imageData(imageId: 1, version: 1), png)
+        send(upload(1) + draw(1, placement: 2), to: capture) // stays on screen
+        // Sixteen more, each drawn and then freed: one entry past the per-session cap.
+        for id in 2 ... 17 {
+            send(upload(id) + draw(id, placement: 2) + erase(id, placement: 2) + free(id), to: capture)
+        }
 
-        // Sixteen more images pass the per-session entry cap; the oldest goes first.
-        for id in 2 ... 17 { send(placeholderImage(id), to: capture) }
-        XCTAssertNil(capture.imageData(imageId: 1, version: 1))
-        XCTAssertEqual(capture.retainedImageMetadata().map(\.imageId), Array(2 ... 17))
+        XCTAssertNil(capture.imageData(imageId: 2, version: 2))
+        XCTAssertEqual(capture.retainedImageMetadata().map(\.imageId), [1] + Array(3 ... 17))
+        XCTAssertEqual(placements(capture).map(\.imageId), [1])
     }
 
     func testDrawsOutsideTheSubsetAreIgnoredAndNeverSplitTheFeed() {
@@ -274,11 +276,12 @@ final class DirectImagePlacementTests: XCTestCase {
 
     func testViewPlacesDirectImagesAtTheCursorInBothBuffers() throws {
         let view = ProjectsTerminalView(frame: .zero, options: TerminalOptions(cols: 20, rows: 8, scrollback: 50))
-        view.consumeProcessOutput((upload(7) + upload(8))[...])
 
         // Normal buffer, after the screen has scrolled, with output after the draw.
         let scrolled = (1 ... 12).map { "line \($0)\r\n" }.joined() + "\u{1B}[4;3H"
-        view.consumeProcessOutput((Array(scrolled.utf8) + draw(7, placement: 2) + Array("after".utf8))[...])
+        view.consumeProcessOutput(
+            (upload(7) + Array(scrolled.utf8) + draw(7, placement: 2) + Array("after".utf8))[...]
+        )
         let capture = view.kittyImageCapture
         let version7 = try XCTUnwrap(capture.currentVersion(for: 7))
         let history = try XCTUnwrap(view.terminalContentSnapshot(region: .history(maximumScrollbackRows: 500)))
@@ -289,20 +292,23 @@ final class DirectImagePlacementTests: XCTestCase {
         )
         XCTAssertTrue(history.rows[history.liveTopRow + 3 - history.capturedRange.lowerBound].text.contains("after"))
 
-        // Alternate buffer: two draws with output between them, the second ending in the next chunk.
-        let chunk = Array("\u{1B}[?1049h\u{1B}[3;5H".utf8) + draw(7, placement: 3)
-            + Array("\u{1B}[1;1Hhello\u{1B}[6;2H".utf8) + draw(8, placement: 4, rows: 1, columns: 4)
+        // Alternate buffer: two images uploaded there, drawn with output between them, the second
+        // draw ending in the next chunk.
+        let chunk = Array("\u{1B}[?1049h".utf8) + upload(8) + upload(9)
+            + Array("\u{1B}[3;5H".utf8) + draw(8, placement: 3)
+            + Array("\u{1B}[1;1Hhello\u{1B}[6;2H".utf8) + draw(9, placement: 4, rows: 1, columns: 4)
         view.consumeProcessOutput(chunk.dropLast())
         view.consumeProcessOutput(([0x5C] + Array("\u{1B}[8;1Hbye".utf8))[...])
         let version8 = try XCTUnwrap(capture.currentVersion(for: 8))
+        let version9 = try XCTUnwrap(capture.currentVersion(for: 9))
         let viewport = try XCTUnwrap(view.terminalContentSnapshot(region: .viewport))
         XCTAssertEqual(viewport.bufferKind, .alt)
         let placed = capture.directPlacements(
             isAlternateBuffer: true, rows: viewport.capturedRange, relativeTo: viewport.capturedRange.lowerBound
         ).sorted { $0.line < $1.line }
         XCTAssertEqual(placed, [
-            placement(7, version7, line: 2, column: 4),
-            placement(8, version8, line: 5, column: 1, rows: 1, columns: 4),
+            placement(8, version8, line: 2, column: 4),
+            placement(9, version9, line: 5, column: 1, rows: 1, columns: 4),
         ])
         XCTAssertTrue(viewport.rows[0].text.hasPrefix("hello"))
         XCTAssertTrue(viewport.rows[7].text.hasPrefix("bye"))
@@ -331,7 +337,7 @@ final class DirectImagePlacementTests: XCTestCase {
         let view = try XCTUnwrap(model.controller(for: sessionId)).terminalView
 
         view.consumeProcessOutput(
-            (upload(7) + Array("\u{1B}[?1049h\u{1B}[3;5H".utf8) + draw(7, placement: 2))[...]
+            (Array("\u{1B}[?1049h".utf8) + upload(7) + Array("\u{1B}[3;5H".utf8) + draw(7, placement: 2))[...]
         )
         let version = try XCTUnwrap(view.kittyImageCapture.currentVersion(for: 7))
         let screen = try XCTUnwrap(model.remoteScreen(sessionId: sessionId, afterLine: nil))
