@@ -280,6 +280,36 @@ final class DirectImagePlacementTests: XCTestCase {
         )])
     }
 
+    func testNewImagesAreSavedOnceWhenTheStoreIsFullOfOtherSessionsImages() async {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("direct-image-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = RemoteKittyImageDiskStore(root: root)
+        for index in 0 ..< RemoteKittyImageDiskStore.maxTotalEntries {
+            store.persistRetain(
+                sessionId: "other-\(index)", imageId: 1, version: 1, data: png,
+                currentSelections: [RemoteKittyPersistedPlacementSelection(
+                    version: 1, placementId: nil, rows: 1, columns: 1, x: nil, y: nil, z: nil
+                )]
+            )
+        }
+        await store.flush()
+        let writesBefore = await store.manifestPersistCountForTesting()
+        let capture = RemoteKittyImageCapture(
+            sessionId: "direct", epoch: 0, budget: RemoteKittyImageCaptureBudget(), diskStore: store
+        )
+
+        // One frame: the CLI writes both uploads before both draws.
+        send(upload(7) + upload(8) + draw(7, placement: 2) + draw(8, placement: 3), to: capture)
+        await store.flush()
+
+        let writes = await store.manifestPersistCountForTesting()
+        XCTAssertEqual(writes - writesBefore, 2)
+        let restored = await RemoteKittyImageDiskStore(root: root).restore(sessionId: "direct")
+        XCTAssertEqual(restored.entries.map(\.imageId).sorted(), [7, 8])
+        XCTAssertEqual(restored.currentSelections.map(\.imageId).sorted(), [7, 8])
+    }
+
     // MARK: Scanner
 
     func testScannerOrdersDirectPlacementsWithPlaceholderCells() {

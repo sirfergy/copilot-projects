@@ -1406,7 +1406,7 @@ final class RemoteKittyImageCapture: ObservableObject {
     }
 
     /// Stamps the current version's first display, then reports and persists it.
-    private func noteDisplayed(imageId: UInt32, wasAdvertised: Bool) {
+    private func noteDisplayed(imageId: UInt32, wasAdvertised: Bool, savingBytes: Bool = false) {
         if let currentVersion = latestVersion[imageId] {
             let currentKey = StoredKey(imageId: imageId, version: currentVersion)
             if displayedAt[currentKey] == nil, !restoredWithoutOrigin.contains(currentKey) {
@@ -1421,7 +1421,16 @@ final class RemoteKittyImageCapture: ObservableObject {
         if !wasAdvertised {
             imageAvailabilityGeneration &+= 1
         }
-        syncPersistedSelections(imageId: imageId)
+        // A direct upload waited for this draw to be saved: bytes and selection in one write.
+        let key = latestVersion[imageId].map { StoredKey(imageId: imageId, version: $0) }
+        guard savingBytes, let key, let data = dataByKey[key] else {
+            syncPersistedSelections(imageId: imageId)
+            return
+        }
+        persistRetainToDisk(
+            imageId: imageId, version: key.version, data: data, displayedAt: displayedAt[key],
+            awaitingFirstDisplay: false, selections: persistedSelections(imageId: imageId)
+        )
     }
 
     /// `a=p` without `U=1`: the CLI draws an uploaded image at the cursor, with no
@@ -1444,7 +1453,7 @@ final class RemoteKittyImageCapture: ObservableObject {
             activatePlacement(imageId: imageId, explicitPlacementId: nil)
             makeRoomForPlacementGeometry(imageKey)
             placementDimensions[imageKey] = .init(rows: rows, columns: columns, directFreed: false)
-            noteDisplayed(imageId: imageId, wasAdvertised: wasAdvertised)
+            noteDisplayed(imageId: imageId, wasAdvertised: wasAdvertised, savingBytes: !wasAdvertised)
         }
         let key = PlacementGeometryKey(imageId: imageId, placementId: placementId)
         makeRoomForPlacementGeometry(key)
@@ -1991,6 +2000,9 @@ final class RemoteKittyImageCapture: ObservableObject {
         selections: [RemoteKittyPersistedPlacementSelection]
     ) {
         guard !suppressPersistToDisk, let diskStore else { return }
+        // An upload without `U=1` that is not displayed yet is saved by its first draw, with
+        // its selection: a full store makes room only for an entry that has one.
+        guard !pendingIsDirect || isAnyPlacementActive(imageId: imageId) else { return }
         diskStore.persistRetain(
             sessionId: sessionId,
             imageId: imageId,
