@@ -28,8 +28,8 @@ final class DirectImagePlacementTests: XCTestCase {
         RemoteKittyImageCapture(epoch: 0, budget: RemoteKittyImageCaptureBudget(), now: { [clock] in clock.value })
     }
 
-    private func upload(_ id: Int, chunk: Int = 4_096) -> [UInt8] {
-        let base64 = Array(png.base64EncodedString().utf8)
+    private func upload(_ id: Int, _ data: Data? = nil, chunk: Int = 4_096) -> [UInt8] {
+        let base64 = Array((data ?? png).base64EncodedString().utf8)
         var bytes: [UInt8] = []
         var offset = 0
         while offset < base64.count {
@@ -308,6 +308,28 @@ final class DirectImagePlacementTests: XCTestCase {
         let restored = await RemoteKittyImageDiskStore(root: root).restore(sessionId: "direct")
         XCTAssertEqual(restored.entries.map(\.imageId).sorted(), [7, 8])
         XCTAssertEqual(restored.currentSelections.map(\.imageId).sorted(), [7, 8])
+    }
+
+    func testUploadOfADisplayedImageIsSavedWhenItArrives() async {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("direct-image-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = RemoteKittyImageDiskStore(root: root)
+        let capture = RemoteKittyImageCapture(
+            sessionId: "direct", epoch: 0, budget: RemoteKittyImageCaptureBudget(), diskStore: store
+        )
+        send(upload(7) + draw(7, placement: 2, rows: 3, columns: 4), to: capture)
+
+        // New bytes arrive for the image while it stays displayed, and it is drawn again.
+        let changed = remoteKittyTestPNGBytes(width: 3, height: 3)
+        send(erase(7, placement: 2) + upload(7, changed) + draw(7, placement: 3, rows: 3, columns: 4), to: capture)
+        await store.flush()
+
+        let restored = await RemoteKittyImageDiskStore(root: root).restore(sessionId: "direct")
+        XCTAssertEqual(restored.entries.first { $0.version == 2 }?.data, changed)
+        XCTAssertEqual(restored.currentSelections, [RemoteKittyRestoredSelection(
+            imageId: 7, version: 2, placementId: nil, rows: 3, columns: 4, x: nil, y: nil, z: nil
+        )])
     }
 
     // MARK: Scanner
